@@ -104,7 +104,14 @@ export class DataPlane {
     let msg: ClientMessage;
     try { msg = JSON.parse(raw); } catch { return this.reject(ws, 'malformed', 'Message is not JSON.'); }
 
-    if (msg.t === 'hello') return this.onHello(ws, conn, msg.token);
+    if (msg.t === 'hello') {
+      // One socket, one session. A second hello would re-enter beginSession and reset the metering
+      // clock — the customer stops being billed for the seconds already elapsed — and would let a
+      // client swap to a different device mid-connection without the fence ever being re-checked
+      // against the first one. Neither is a shape a real client produces.
+      if (conn.claims) return this.reject(ws, 'already_authenticated', 'This connection already has a session.');
+      return this.onHello(ws, conn, msg.token);
+    }
     // Nothing but hello is accepted before authentication — not even a no-op.
     if (!conn.claims || !conn.backend) return this.reject(ws, 'unauthenticated', 'Send hello first.');
 

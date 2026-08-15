@@ -35,11 +35,11 @@ premise was wrong, at which point sunk cost argues against changing course.
 
 ## What is built and verified
 
-**60 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**102 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
-apps/api/         control plane   39 tests
-workers/agent/    worker agent    21 tests
+apps/api/         control plane   80 tests
+workers/agent/    worker agent    22 tests
 packages/protocol shared contract
 spikes/           week-0 harnesses (unrun — see the gate)
 ```
@@ -48,18 +48,38 @@ Run everything:
 ```bash
 cd apps/api && npm run db:up && npm run migrate    # Docker required
 cd ../.. && npm test
+npm run typecheck                                  # tsc --noEmit; nothing else checks types
 cd apps/api && npm run db:down                     # tear down when finished
 ```
 
-Node ≥ 22.6 (native TypeScript stripping, no build step).
+Node ≥ 22.6 (native TypeScript stripping, no build step). Stripping means types are **erased, never
+checked**, so `npm run typecheck` is the only thing standing between the repo and a wrong field name
+that runs fine until the branch that touches it. `tsconfig.json` also sets `erasableSyntaxOnly`, so
+syntax Node cannot strip (enums, parameter properties) fails the check rather than the runtime.
 
 ### Control plane — `apps/api`
 
 `org_id` + row-level security on every tenant table. Postgres allocates devices
 (`FOR UPDATE SKIP LOCKED`) atomically with session creation, plus monotonic fencing tokens. Reset
 means snapshot restore, enforced: a released device is not allocatable until a worker confirms.
-Metering is append-only and idempotent. Eight HTTP routes, two principal types (tenant / worker) that
-are never interchangeable, Ed25519 session tokens, `Idempotency-Key` on session creation.
+Metering is append-only and idempotent. Two principal types (tenant / worker) that are never
+interchangeable, Ed25519 session tokens, `Idempotency-Key` on session creation.
+
+### WebDriver hub — `apps/api/src/http/routes/webdriver.ts`
+
+The adoption path (v2 decision 10). An existing Appium suite migrates by changing one URL —
+`https://mfk_key@hub.mfarm.dev/wd/hub` — and adding `mfarm:region`. W3C and legacy JSONWP dialects
+both work, served at `/wd/hub` and at `/` because clients disagree about the base path. Credentials
+travel as HTTP Basic (tenant keys only) since a URL is the only thing a WebDriver client is given.
+
+Commands are proxied to an Appium server on the worker. That is a deliberate exception to "never
+proxy the data plane": a WebDriver client pins one base URL for the session's life, so one-hub-URL
+and connect-straight-to-the-worker cannot both hold — and an internet-facing Appium port is
+unauthenticated device control, so the hub being the sole ingress is the safer half anyway. The hop
+costs a few ms on commands already taking tens to hundreds inside the device.
+
+Every failure path releases the device. Allocation demands the `webdriver` capability, and the
+constraints are recorded on the session so `promote_queued()` re-applies them.
 
 ### Worker agent — `workers/agent`
 
@@ -69,19 +89,24 @@ and AVD (fallback, runs on macOS, cannot meet the latency target and says so).
 
 ## What is NOT built
 
-- **WebDriver-compatible endpoint** — this is the actual adoption path. A team must migrate by
-  changing one hub URL. Arguably the highest-value remaining item.
+- **The Appium server on the worker.** The hub is finished and tested end to end against a real
+  upstream, but nothing supervises an actual Appium 2 process next to a device — the agent only
+  advertises `AUTOMATION_ENDPOINT`. This needs a real Android device, so it lands with the hardware.
 - CLI (`npx mfarm run`) and GitHub Action
-- App install / launch, logcat streaming, video recording, artifacts
+- App install / launch outside Appium, logcat streaming, video recording, artifacts
 - Web UI (deliberately last — it is the demo surface, not the product)
-- Nothing schedules `reap()` yet; it exists and is tested but no timer calls it
+- **No service entrypoint.** `apps/api` has no `main` — the server is only ever built by tests.
+  `buildServer({ reaperIntervalMs })` now schedules `reap()`, but it defaults to off and nothing
+  turns it on. A deployment must, or expired sessions are never collected and a queued WebDriver
+  session can only time out.
 - Rate limiting is in-memory, so per-instance. Redis required before running more than one API process
 
 ## Known issues and constraints
 
-1. **Nothing is committed.** `git init` has run; there are no commits. Do this first.
-2. `devices/cuttlefish.ts` `cvd` flags are **unverified against a real install** — upstream moves.
+1. `devices/cuttlefish.ts` `cvd` flags are **unverified against a real install** — upstream moves.
    Check them against whatever `bootstrap_cuttlefish.sh` installs.
+2. The WebDriver hub has never spoken to a real Appium server. Its upstream in the tests is a stub
+   that answers correctly; a real driver will disagree about something.
 3. `apps/api/docker-compose.yml` mounts Postgres data on tmpfs — fast, non-durable, local only.
 4. `mfarm_app` has a local-dev password in `001_init.sql`. Rotate before any deployment.
 5. Allocator functions are `SECURITY DEFINER` owned by the superuser. Give them a dedicated owner
@@ -89,7 +114,7 @@ and AVD (fallback, runs on macOS, cannot meet the latency target and says so).
 6. Tests run `--test-concurrency=1`: the reaper is fleet-wide by design, so suites cannot share one
    database concurrently.
 
-## Three rules earned the hard way
+## Rules earned the hard way
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.
@@ -107,7 +132,20 @@ data must go through `withTenant`.**
 **Coalesce positional input, queue discrete input.** Dropping a tap that the user has moved past is
 correct. Dropping a keypress means typing "hello" yields "hlo". `dataplane.ts` splits the two.
 
+**Claim an idempotency key before doing the work, not after.** The retry that matters arrives while
+the first request is still running, so check-then-do-then-record allocates twice and bills twice.
+
+**Hook order decides whether a defence runs at all.** `@fastify/rate-limit` attaches per route, and
+route hooks run after every instance-level `onRequest` hook — so rejecting bad credentials in
+`onRequest` left every unauthenticated request unlimited. And the limiter *throws* whatever
+`errorResponseBuilder` returns, so returning a response body instead of an `Error` turned every 429
+into a 500. Both were invisible because nothing tested the limiter.
+
 ## Suggested next step
 
-Book the bare-metal box and clear the gate. If you want parallel work while waiting, the WebDriver
-endpoint is the highest-value item and does not depend on the spike results.
+Book the bare-metal box and clear the gate. The hub is written but has only ever talked to a stub;
+the same box that runs spikes 1 and 2a can run a real Appium 2 server against a Cuttlefish instance
+and prove the migration claim end to end with somebody's actual suite.
+
+Parallel work that does not depend on the spikes: the CLI (`npx mfarm run`) and the GitHub Action,
+and a service entrypoint for `apps/api` — there is still no `main`, so nothing runs the reaper.

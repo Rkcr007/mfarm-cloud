@@ -43,21 +43,23 @@ export async function workerRoutes(app: FastifyInstance) {
     const host = await withSystem(async (c) => {
       const { rows } = await c.query(
         `INSERT INTO hosts (region, hostname, state, protocol_version, capabilities,
-                            cores, memory_mb, endpoint, token_prefix, token_hash, last_heartbeat_at)
-         VALUES ($1,$2,'UP',$3,$4::jsonb,$5,$6,$7,$8,$9, now())
+                            cores, memory_mb, endpoint, automation_endpoint,
+                            token_prefix, token_hash, last_heartbeat_at)
+         VALUES ($1,$2,'UP',$3,$4::jsonb,$5,$6,$7,$8,$9,$10, now())
          ON CONFLICT (hostname) DO UPDATE SET
            region = EXCLUDED.region, state = 'UP',
            protocol_version = EXCLUDED.protocol_version,
            capabilities = EXCLUDED.capabilities,
            cores = EXCLUDED.cores, memory_mb = EXCLUDED.memory_mb,
            endpoint = EXCLUDED.endpoint,
+           automation_endpoint = EXCLUDED.automation_endpoint,
            token_prefix = EXCLUDED.token_prefix, token_hash = EXCLUDED.token_hash,
            last_heartbeat_at = now(),
            quarantined_at = NULL, quarantine_reason = NULL
          RETURNING id`,
         [reg.region, reg.hostname, result.version, JSON.stringify(reg.capabilities),
          reg.cores ?? null, reg.memoryMb ?? null, reg.endpoint ?? null,
-         token.prefix, token.hash],
+         reg.automationEndpoint ?? null, token.prefix, token.hash],
       );
       const hostId = rows[0].id;
 

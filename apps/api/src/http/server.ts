@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import { authenticate, type Principal } from '../auth.ts';
@@ -7,6 +7,8 @@ import { ApiError, unauthorized, forbidden } from './errors.ts';
 import { sessionRoutes } from './routes/sessions.ts';
 import { deviceRoutes } from './routes/devices.ts';
 import { workerRoutes } from './routes/workers.ts';
+import { webdriverRoutes } from './routes/webdriver.ts';
+import { reap } from '../allocator.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -18,8 +20,22 @@ declare module 'fastify' {
 }
 
 /** Routes reachable without credentials. Everything else is authenticated by default — the safe
- *  direction for the failure mode where someone forgets to add a guard. */
-const PUBLIC_PATHS = new Set(['/health', '/v1/workers/register']);
+ *  direction for the failure mode where someone forgets to add a guard.
+ *
+ *  The two WebDriver status paths are here because a client probes them before it has done anything
+ *  at all, and they disclose nothing tenant-specific. Both spellings exist because Appium 2 serves
+ *  at `/` and Selenium Grid and Appium 1 at `/wd/hub`. */
+const PUBLIC_PATHS = new Set(['/health', '/v1/workers/register', '/status', '/wd/hub/status']);
+
+/** Stable `code` values for the client errors the framework raises on our behalf. */
+const CLIENT_ERROR_CODES: Record<number, string> = {
+  405: 'method_not_allowed',
+  408: 'request_timeout',
+  413: 'payload_too_large',
+  414: 'uri_too_long',
+  415: 'unsupported_media_type',
+  429: 'rate_limited',
+};
 
 export function requireTenant(req: FastifyRequest): { orgId: string } {
   if (!req.principal) throw unauthorized();
@@ -37,7 +53,21 @@ export function requireWorker(req: FastifyRequest): { hostId: string; region: st
   return { hostId: req.principal.hostId, region: req.principal.region };
 }
 
-export async function buildServer(opts: { logger?: boolean } = {}): Promise<FastifyInstance> {
+export interface ServerOptions {
+  logger?: boolean;
+  /**
+   * Run `reap()` on this interval. 0 (the default) leaves it off, which is right for tests — the
+   * reaper is fleet-wide, so a suite that shares a database with another one would collect its
+   * sessions.
+   *
+   * A deployment must set this. Without it `expire_sessions()` never runs (a crashed client holds
+   * its device until someone notices) and `promote_queued()` never runs, so a QUEUED session stays
+   * queued forever and the WebDriver hub's capacity wait can only time out.
+   */
+  reaperIntervalMs?: number;
+}
+
+export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
     logger: opts.logger === false ? false : {
       level: process.env.LOG_LEVEL ?? 'info',
@@ -69,12 +99,27 @@ export async function buildServer(opts: { logger?: boolean } = {}): Promise<Fast
   });
 
   // --- auth ------------------------------------------------------------------------------------
-  // Registered before the rate limiter so the limiter can key on the resolved principal.
+  //
+  // Split in two, either side of the rate limiter, because the obvious single hook leaves the most
+  // attackable traffic on the API unlimited.
+  //
+  // Rejecting an unknown credential in `onRequest` aborts the request before the limiter ever
+  // counts it — @fastify/rate-limit attaches per route, and route hooks run after every
+  // instance-level onRequest hook. Unauthenticated requests are exactly the ones worth limiting:
+  // key guessing against /v1/*, and registration-token guessing against the one route that hands
+  // out fleet credentials. Each attempt also costs a database round trip, so an unlimited stream of
+  // them is a cheap way to saturate the pool.
+  //
+  // So: resolve without judging in `onRequest`, let the limiter count, then fail closed in
+  // `preParsing` — the first phase that runs after route hooks, and still before a body is read, so
+  // an anonymous caller cannot make us parse a megabyte. The rejection stays GLOBAL rather than a
+  // per-route guard, which keeps the property that a route added without an explicit check is not
+  // reachable anonymously.
+  const isPublic = (req: FastifyRequest) => PUBLIC_PATHS.has(req.url.split('?')[0]);
+
   app.addHook('onRequest', async (req) => {
-    if (PUBLIC_PATHS.has(req.url.split('?')[0])) return;
-    const principal = await authenticate(req.headers.authorization);
-    if (!principal) throw unauthorized();
-    req.principal = principal;
+    if (isPublic(req)) return;
+    req.principal = (await authenticate(req.headers.authorization)) ?? undefined;
   });
 
   // --- rate limiting ---------------------------------------------------------------------------
@@ -93,16 +138,27 @@ export async function buildServer(opts: { logger?: boolean } = {}): Promise<Fast
       if (p?.kind === 'worker') return `host:${p.hostId}`;
       return `ip:${req.ip}`;
     },
-    errorResponseBuilder: (_req, ctx) => ({
-      error: {
-        code: 'rate_limited',
-        message: `Rate limit exceeded. Retry after ${Math.ceil(ctx.ttl / 1000)}s.`,
-      },
-    }),
+    // Must return an ERROR, not a response body: the plugin `throw`s whatever this returns, so a
+    // plain object arrives at the error handler as an unrecognised throwable and comes back as a
+    // 500. That is not theoretical — it is what this endpoint did until a test asked for a 429 and
+    // got "Internal error" instead, on the one path that is supposed to protect the service.
+    errorResponseBuilder: (_req, ctx) =>
+      new ApiError(
+        ctx.statusCode,
+        ctx.ban ? 'banned' : 'rate_limited',
+        `Rate limit exceeded. Retry after ${Math.ceil(ctx.ttl / 1000)}s.`,
+      ),
+  });
+
+  // The second half of auth: everything non-public needs a principal, and by now the limiter has
+  // already counted the attempt.
+  app.addHook('preParsing', async (req, _reply, payload) => {
+    if (!isPublic(req) && !req.principal) throw unauthorized();
+    return payload;
   });
 
   // --- errors ----------------------------------------------------------------------------------
-  app.setErrorHandler((err, req, reply) => {
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err instanceof ApiError) {
       return reply.code(err.statusCode).send({
         error: { code: err.code, message: err.message, requestId: req.id, ...(err.details ?? {}) },
@@ -111,6 +167,16 @@ export async function buildServer(opts: { logger?: boolean } = {}): Promise<Fast
     if ((err as { validation?: unknown }).validation) {
       return reply.code(400).send({
         error: { code: 'bad_request', message: err.message, requestId: req.id },
+      });
+    }
+    // Fastify and its plugins report client errors by throwing something that carries a status:
+    // 413 when a body exceeds bodyLimit, 415 for an unknown content-type, 429 from the limiter.
+    // Without this they are all indistinguishable from a crash — the caller is told to report an
+    // internal error for a mistake only they can fix, and the log fills with false alarms.
+    const status = (err as { statusCode?: number }).statusCode;
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      return reply.code(status).send({
+        error: { code: CLIENT_ERROR_CODES[status] ?? 'bad_request', message: err.message, requestId: req.id },
       });
     }
     // Unexpected: log the detail, return none. Stack traces are a disclosure vector.
@@ -132,6 +198,21 @@ export async function buildServer(opts: { logger?: boolean } = {}): Promise<Fast
   await app.register(sessionRoutes, { prefix: '/v1' });
   await app.register(deviceRoutes, { prefix: '/v1' });
   await app.register(workerRoutes, { prefix: '/v1' });
+
+  // The WebDriver hub, mounted at both spellings the world uses: Appium 2 clients default to `/`,
+  // Selenium Grid and Appium 1.x clients to `/wd/hub`. Serving both means the migration is one URL
+  // change whichever client the team is on, which is the entire promise of the endpoint.
+  await app.register(webdriverRoutes, { prefix: '/wd/hub' });
+  await app.register(webdriverRoutes);
+
+  // --- reaper ------------------------------------------------------------------------------------
+  if (opts.reaperIntervalMs && opts.reaperIntervalMs > 0) {
+    const timer = setInterval(() => {
+      void reap().catch((err: Error) => app.log.error({ err }, 'reaper failed'));
+    }, opts.reaperIntervalMs);
+    timer.unref?.();
+    app.addHook('onClose', async () => clearInterval(timer));
+  }
 
   return app;
 }

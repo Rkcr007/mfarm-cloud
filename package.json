@@ -3,6 +3,13 @@
   "private": true,
   "workspaces": ["packages/*", "apps/*", "workers/*"],
   "scripts": {
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.7.0"
   }
 }

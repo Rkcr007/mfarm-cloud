@@ -4,7 +4,7 @@ Runs on a device host. Registers with the control plane, serves the data plane t
 to, meters usage, and returns devices to the pool after a snapshot reset.
 
 ```bash
-npm test          # 21 tests, against a real control plane on a real port
+npm test          # 22 tests, against a real control plane on a real port
 npm start         # requires the env below
 ```
 
@@ -111,11 +111,30 @@ longer claims a content-type it isn't sending, and the control plane now treats 
 
 **Parameter properties break the no-build-step setup.** `constructor(private readonly x: T)` emits
 runtime code, so Node's strip-only type removal rejects it. All fields are declared and assigned
-explicitly. Worth knowing before adding a class here.
+explicitly. Worth knowing before adding a class here — `npm run typecheck` at the repo root now
+enforces it with `erasableSyntaxOnly`, so this fails the check instead of the runtime.
+
+**A second `hello` on one socket restarted the billing clock.** `onHello` re-entered `beginSession`,
+which resets `startedAt`, so the seconds already elapsed stopped being billed — and the socket would
+rebind to whatever device the new token named, without the first one's fence being consulted again.
+One socket, one session; a repeat handshake is now refused.
+
+## WebDriver
+
+The control plane's hub proxies WebDriver commands to an automation server on this host. Set
+`AUTOMATION_ENDPOINT` to it (e.g. `http://10.0.3.14:4723`) and the agent advertises the `webdriver`
+capability on the host and its devices; leave it unset and the host simply never receives WebDriver
+traffic. The capability is tied to the endpoint rather than to the device tier because the same
+Cuttlefish instance serves WebDriver on one deployment and not on another.
+
+**The endpoint must not be publicly routable.** An open Appium port is unauthenticated device
+control — anyone who finds it owns every session on the host. The hub is the only ingress, because it
+is the only thing that knows about orgs. Running the Appium server itself is deployment work: the
+agent advertises it, it does not supervise it.
 
 ## Not yet built
 
-App install/launch, logcat streaming, video recording, and the WebDriver endpoint. `resolveDeviceIds`
+App install/launch, logcat streaming, and video recording. `resolveDeviceIds`
 returns an empty map — the agent currently learns a device's control-plane uuid from the signed token
 that arrives for it, which is authenticated and therefore trustworthy, but a future protocol revision
 should return the mapping at registration.

@@ -50,6 +50,10 @@ async function main(): Promise<void> {
     hostname: env('WORKER_HOSTNAME', osHostname()),
     region: env('REGION'),
     endpoint: env('PUBLIC_ENDPOINT'),
+    // Optional. Set it to the host-local Appium server (e.g. http://10.0.3.14:4723) to serve the
+    // WebDriver hub. It must NOT be publicly routable — an open Appium port is unauthenticated
+    // device control, and the hub is the only thing that knows about tenants.
+    automationEndpoint: process.env.AUTOMATION_ENDPOINT,
     devices: backends,
     cores: cpus().length,
     memoryMb: Math.round(totalmem() / 1_048_576),

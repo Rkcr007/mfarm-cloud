@@ -1,10 +1,10 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, release } from '../../allocator.ts';
 import { mintSessionToken, DEFAULT_TTL_SECONDS } from '../../tokens.ts';
 import { requireTenant } from '../server.ts';
 import { notFound, badRequest } from '../errors.ts';
-import { checkReplay, record } from '../idempotency.ts';
+import { idempotencyKey, claim, complete, abandon } from '../idempotency.ts';
 
 const createSchema = {
   body: {
@@ -39,15 +39,31 @@ export async function sessionRoutes(app: FastifyInstance) {
    */
   app.post<{ Body: CreateBody }>('/sessions', { schema: createSchema }, async (req, reply) => {
     const { orgId } = requireTenant(req);
-    const idemKey = req.headers['idempotency-key'];
+    const idemKey = idempotencyKey(req.headers['idempotency-key']);
 
-    if (typeof idemKey === 'string' && idemKey.length > 0) {
-      const replayed = await checkReplay(orgId, idemKey, 'POST', '/v1/sessions', req.body);
-      if (replayed) {
-        return reply.code(replayed.statusCode).header('idempotent-replay', 'true').send(replayed.body);
+    if (idemKey) {
+      const outcome = await claim(orgId, idemKey, 'POST', '/v1/sessions', req.body);
+      if (outcome.kind === 'replay') {
+        return reply.code(outcome.statusCode).header('idempotent-replay', 'true').send(outcome.body);
       }
     }
 
+    // The claim is held from here on, so every failure path has to release it — otherwise one
+    // transient error makes the client's own retry collide with its abandoned claim.
+    try {
+      return await createSession(req, reply, orgId, idemKey);
+    } catch (err) {
+      if (idemKey) await abandon(orgId, idemKey).catch(() => {});
+      throw err;
+    }
+  });
+
+  async function createSession(
+    req: { body: CreateBody },
+    reply: FastifyReply,
+    orgId: string,
+    idemKey: string | null,
+  ) {
     const alloc = await allocate({
       orgId,
       userId: null,
@@ -109,11 +125,9 @@ export async function sessionRoutes(app: FastifyInstance) {
       };
     }
 
-    if (typeof idemKey === 'string' && idemKey.length > 0) {
-      await record(orgId, idemKey, 'POST', '/v1/sessions', req.body, status, payload);
-    }
+    if (idemKey) await complete(orgId, idemKey, status, payload);
     return reply.code(status).send(payload);
-  });
+  }
 
   app.get<{ Params: { id: string } }>('/sessions/:id', async (req) => {
     const { orgId } = requireTenant(req);

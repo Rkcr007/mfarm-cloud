@@ -238,6 +238,40 @@ describe('reaper', () => {
     const { promoted } = await reap();
     assert.equal(promoted, 1, 'queued session should now get the freed device');
   });
+
+  test('expiry counts sessions, not the devices that happen to still exist', async () => {
+    await resetFleet();
+    const [dev] = await seedDevices(1);
+    const a = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+
+    // The device leaves the fleet while the session is live. `sessions.device_id` is
+    // ON DELETE SET NULL, so the session now expires while updating zero device rows — and the
+    // reaper used to report that as "nothing expired".
+    await withSystem((c) => c.query('DELETE FROM devices WHERE id = $1', [dev]));
+    await withSystem((c) =>
+      c.query(`UPDATE sessions SET expires_at = now() - interval '1 minute' WHERE id = $1`, [a.sessionId]));
+
+    const { expired } = await reap();
+    assert.ok(expired >= 1, 'the session expired, so the count must say so');
+    const st = await withSystem(async (c) =>
+      (await c.query('SELECT state FROM sessions WHERE id = $1', [a.sessionId])).rows[0].state);
+    assert.equal(st, 'ENDED');
+  });
+
+  test('the reaper purges idempotency keys past their retention window', async () => {
+    // Nothing else deletes them, and the table sits on the hot path of every session creation.
+    await withSystem((c) => c.query(
+      `INSERT INTO idempotency_keys (org_id, key, request_hash, status_code, response, created_at)
+       VALUES ($1, 'stale-key', 'x', 201, '{}'::jsonb, now() - interval '2 days')
+       ON CONFLICT (org_id, key) DO NOTHING`, [orgA]));
+
+    await reap();
+
+    const left = await withSystem(async (c) =>
+      (await c.query('SELECT count(*)::int AS n FROM idempotency_keys WHERE org_id = $1 AND key = $2',
+                     [orgA, 'stale-key'])).rows[0].n);
+    assert.equal(left, 0);
+  });
 });
 
 describe('metering', () => {
@@ -288,6 +322,21 @@ describe('worker protocol negotiation', () => {
   test('a retired protocol version is refused', () => {
     const r = negotiate({ ...base, protocolVersion: 0 });
     assert.equal(r.ok, false);
+  });
+
+  test('a malformed registration is refused, not crashed on', () => {
+    // Registration bodies come from machines we do not control and have no schema on the route.
+    // Reading through a missing array throws, and a TypeError here reaches the worker as a 500 —
+    // "the control plane is broken" — for a request it could have fixed itself.
+    for (const bad of [
+      { ...base, capabilities: undefined },
+      { ...base, devices: undefined },
+      { ...base, devices: [{ ...base.devices[0], capabilities: undefined }] },
+    ] as unknown as WorkerRegistration[]) {
+      const r = negotiate(bad);
+      assert.equal(r.ok, false);
+      assert.match(r.ok === false ? r.reason : '', /array/);
+    }
   });
 
   test('fence high-water mark rejects stale commands', () => {

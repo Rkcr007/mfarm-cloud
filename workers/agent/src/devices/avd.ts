@@ -121,7 +121,16 @@ export class AvdDevice implements DeviceControl {
   /** One long-lived shell. See the class comment for why this matters more than it looks. */
   private async openShell(): Promise<void> {
     await this.closeShell();
-    this.shell = spawn(ADB, ['-s', this.serial, 'shell'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const sh = spawn(ADB, ['-s', this.serial, 'shell'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    // Writing to a shell whose adb has died emits 'error' on the pipe, and an unhandled 'error' on a
+    // stream is an uncaught exception — which would take down the whole agent, and with it every
+    // other device on the host, because one emulator went away. Handled here so the failure stays
+    // local: the in-flight send() times out and health() reports the device offline.
+    const note = (e: Error) => console.error(`[avd:${this.serial}] shell pipe failed: ${e.message}`);
+    sh.on('error', note);
+    sh.stdin?.on('error', note);
+    sh.stdout?.on('error', note);
+    this.shell = sh;
   }
 
   private async closeShell(): Promise<void> {

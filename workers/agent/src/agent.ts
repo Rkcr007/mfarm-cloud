@@ -19,6 +19,13 @@ export interface AgentOptions {
   region: string;
   /** Public data-plane address the browser connects to. Without it the host cannot take sessions. */
   endpoint: string;
+  /**
+   * Base URL of the automation (Appium) server fronting this host's devices, e.g.
+   * `http://10.0.3.14:4723`. INTERNAL address: the control plane's WebDriver hub reaches it, the
+   * internet must not. Set it and the host advertises `webdriver`; leave it unset and the host
+   * simply does not take WebDriver traffic.
+   */
+  automationEndpoint?: string;
   devices: DeviceBackend[];
   statePath?: string;
   cores?: number;
@@ -109,21 +116,28 @@ export class Agent {
   }
 
   private async register(): Promise<AgentState> {
+    // `webdriver` is declared by the host having an automation server, not by the device tier:
+    // the same Cuttlefish instance can serve WebDriver on one deployment and not on another, and
+    // claiming the capability without the server behind it means the scheduler sends sessions to a
+    // device that cannot run them.
+    const automation: Capability[] = this.opts.automationEndpoint ? ['webdriver'] : [];
+
     const registration: WorkerRegistration = {
       protocolVersion: PROTOCOL_VERSION,
       hostname: this.opts.hostname,
       region: this.opts.region,
       endpoint: this.opts.endpoint,
+      automationEndpoint: this.opts.automationEndpoint,
       cores: this.opts.cores ?? 0,
       memoryMb: this.opts.memoryMb ?? 0,
-      capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset'] as Capability[],
+      capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset', ...automation] as Capability[],
       devices: this.opts.devices.map((d) => ({
         localId: d.control.info.localId,
         platform: d.control.info.platform,
         tier: d.control.info.tier,
         model: d.control.info.model,
         osVersion: d.control.info.osVersion,
-        capabilities: d.control.info.capabilities,
+        capabilities: [...d.control.info.capabilities, ...automation],
       })),
     };
 

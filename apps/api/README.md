@@ -13,21 +13,27 @@ Requires Node ≥ 22.6 (native TypeScript stripping — no build step) and Docke
 
 ## Status
 
-All 39 tests pass against a live PostgreSQL 16.
+All 80 tests pass against a live PostgreSQL 16.
 
 | Suite | Tests | Covers |
 |---|---:|---|
 | allocator under concurrency | 6 | v2 decisions 3 and 5 |
 | tenant isolation (SQL) | 3 | v2 decision 1 |
-| reaper | 1 | "never leave a device permanently locked" |
+| reaper | 3 | "never leave a device permanently locked" |
 | metering | 1 | v2 decision 6 |
-| worker protocol | 4 | v2 decisions 4 and 7 |
+| worker protocol | 5 | v2 decisions 4 and 7 |
 | auth boundary | 6 | credential handling |
 | principal separation | 4 | tenant vs worker |
 | session creation | 6 | v2 decision 2 |
-| idempotency | 3 | retry safety |
+| idempotency | 6 | retry safety |
 | tenant isolation (HTTP) | 2 | v2 decision 1 |
+| rate limiting | 4 | abuse and error shape |
 | worker events | 3 | metering + reset reporting |
+| capability negotiation | 7 | v2 decision 10 |
+| WebDriver hub | 24 | v2 decision 10 |
+
+`npm run typecheck` runs `tsc --noEmit` over the workspace. Node strips types at runtime and never
+checks them, so without it nothing here is type-checked at all.
 
 Test files run with `--test-concurrency=1`: `expire_sessions()` and `promote_queued()` operate
 fleet-wide by design, which is correct for production and means two suites cannot share one database
@@ -58,10 +64,10 @@ downgraded rather than rejected, because workers upgrade first during a rollout.
 `snapshot-reset` registers and is monitorable but is never schedulable — it would leak the previous
 tenant's state.
 
-## Three bugs the tests caught
+## Bugs the tests caught
 
-Worth recording, because all three are the kind that ship silently — each one looked correct in
-review and only failed under a test that specifically went looking for it.
+Worth recording, because these are the kind that ship silently — each one looked correct in review
+and only failed under a test that specifically went looking for it.
 
 **1. `RETURNS TABLE` column names shadow table columns in plpgsql.** `allocate_device` originally
 returned columns named `state` and `fence`, which plpgsql resolved to the OUT parameters instead of
@@ -88,6 +94,34 @@ request handling, and `systemPool` (owner) for migrations and fleet operations o
 code path that touches tenant data, it must use `withTenant`.** A tenant query on `systemPool` is
 unprotected and will look fine in every test that does not specifically check isolation.
 
+**4. The rate limiter never returned a 429.** `@fastify/rate-limit` *throws* whatever
+`errorResponseBuilder` returns, and ours returned a plain response body. An unrecognised throwable
+falls through to the generic branch of the error handler, so every rate-limited request came back as
+`500 Internal error` and was logged as an unhandled crash — on the one path whose job is to protect
+the service under abuse. The builder now returns an `ApiError`, and any client error the framework
+raises with a status attached (413 from `bodyLimit`, 415, 429) is rendered with that status instead
+of being flattened into a 500.
+
+**5. Unauthenticated requests were never rate limited.** The auth hook rejected an unknown credential
+in `onRequest`, and `@fastify/rate-limit` attaches per route — route hooks run *after* every
+instance-level `onRequest` hook — so the request was dead before the limiter counted it. Key guessing
+against `/v1/*` and registration-token guessing against `/v1/workers/register` were unlimited, at one
+database round trip each. Auth is now split: resolve the principal in `onRequest`, let the limiter
+count, then fail closed in `preParsing` (after route hooks, still before any body is read).
+
+**6. Concurrent retries of one `Idempotency-Key` allocated two devices.** Check-then-do-then-record
+only protects a retry that arrives *after* the first request finished, and the retry that matters is
+the one sent because the first is taking too long. Both missed the check, both allocated, and the
+customer was billed twice for one session. The key is now claimed before the work starts; the loser
+gets a 409 `idempotency_in_flight`, and a failed request releases its claim so the next retry is not
+locked out.
+
+**7. `expire_sessions()` counted devices, not sessions.** `GET DIAGNOSTICS ROW_COUNT` reports the last
+statement, which was the device update. `sessions.device_id` is `ON DELETE SET NULL`, so a session
+whose device left the fleet expired while updating zero device rows — and the reaper reported that it
+had done nothing, during exactly the fleet churn that makes expiry interesting
+(`007_expire_count.sql`).
+
 ## HTTP layer
 
 `buildServer()` returns a Fastify instance; tests drive it with `inject()` so no port is bound.
@@ -102,6 +136,15 @@ unprotected and will look fine in every test that does not specifically check is
 | `POST /v1/workers/register` | registration token | issues the worker credential |
 | `POST /v1/workers/heartbeat` | worker | |
 | `POST /v1/workers/events` | worker | batched metering + reset reports |
+| `GET /wd/hub/status` | none | WebDriver readiness probe |
+| `POST /wd/hub/session` | tenant | W3C or JSONWP new session |
+| `GET /wd/hub/sessions` | tenant | this org's live WebDriver sessions |
+| `DELETE /wd/hub/session/:id` | tenant | quit |
+| `ANY /wd/hub/session/:id/*` | tenant | proxied to the device's automation server |
+
+Every `/wd/hub/...` route is also served at the root (`POST /session`, …): Appium 2 clients default
+to `/`, Selenium Grid and Appium 1.x to `/wd/hub`, and the migration has to be one URL change either
+way.
 
 **Two principals, never interchangeable.** A worker token cannot read tenant data; a tenant key
 cannot post worker events. Authentication is default-on — only paths in `PUBLIC_PATHS` skip it, so
@@ -112,15 +155,68 @@ forgetting a guard fails closed.
 (v2 decision 2). Workers hold only the public key, so a compromised host can verify but never mint.
 The token is audience-bound to one host id, so it is not replayable elsewhere.
 
-**Idempotency.** `Idempotency-Key` on session creation replays the stored response. Reusing a key
-with a different body is a 409 rather than a silent replay of the wrong thing. Keys are scoped per
-org, so two tenants using the same key value do not collide.
+**Idempotency.** `Idempotency-Key` on session creation replays the stored response. The key is
+claimed *before* the allocation runs, so a retry sent while the first request is still in flight gets
+a 409 `idempotency_in_flight` instead of a second device; a failed request releases its claim.
+Reusing a key with a different body is a 409 rather than a silent replay of the wrong thing. Keys are
+scoped per org, so two tenants using the same key value do not collide, and the reaper drops them
+after 24 hours.
+
+## The WebDriver hub
+
+v2 decision 10, and the adoption path: a team migrates by changing one URL and adding two
+capabilities. Their suite, their client library and their CI config are untouched.
+
+```python
+driver = webdriver.Remote(
+    "https://mfk_your_key@hub.mfarm.dev/wd/hub",
+    options=UiAutomator2Options().load_capabilities({
+        "platformName": "android",
+        "mfarm:region": "eu-central",
+        "appium:app": "https://builds.example.com/app.apk",
+    }),
+)
+```
+
+The key rides in the URL because that is the only thing a WebDriver client is given. It arrives as
+HTTP Basic, in either field, and only tenant keys are accepted that way — a worker credential has no
+business in a URL. `Authorization: Bearer` works too for clients that can set headers.
+
+**Vendor capabilities.** `mfarm:region` (required unless `MFARM_DEFAULT_REGION` is set),
+`mfarm:tier`, `mfarm:ttlMinutes`, `mfarm:queueTimeoutSeconds` (0 = fail immediately when the fleet is
+full; anything higher holds the request open until a device frees up). Non-standard capabilities
+without a vendor prefix are rejected with a message naming the key, which is exactly what Appium 2
+does — a suite that works there works here.
+
+**The session id is the mfarm session id.** Not Appium's. One id in the test log, the API, the
+artifact index and the invoice, instead of a correlation exercise during an incident.
+
+**This endpoint proxies, which is a deliberate exception to "never proxy the data plane."** A
+WebDriver client resolves one base URL and uses it for the session's whole life — there is no
+redirect in the protocol — so "one hub URL" and "connect straight to the worker" cannot both be true,
+and the hub URL is the thing customers are buying. It is also the safer half: an exposed Appium port
+is unauthenticated device control, so the automation server stays on the internal network with the
+hub as its only ingress. The cost is one hop of a few milliseconds on commands that already take tens
+to hundreds inside the device, and it never touches the glass-to-glass number.
+
+**Failure paths give the device back.** Appium refusing the session, the host being unreachable, the
+client quitting: each releases the allocation. A device stuck in `RESERVED` against a session that
+never existed is capacity billed to nobody and usable by nobody, and it is the way this endpoint
+would quietly eat a fleet.
+
+**Allocation is capability-aware.** A WebDriver session demands a device declaring `webdriver`, which
+a host advertises by registering an `automationEndpoint`. The constraints are recorded on the session
+(`sessions.constraints`) so `promote_queued()` re-applies the same ones — previously it matched on
+region alone, so a queued Android session could be promoted onto an iOS device.
 
 ## Not yet built
 
-The WebDriver-compatible endpoint, artifacts, and the worker agent itself. The reaper exists as
-`reap()` but nothing schedules it. Rate limiting is in-memory, so limits are per API instance —
-moving to Redis is required before running more than one.
+Artifacts, app install/launch outside Appium, and logcat streaming. Rate limiting is in-memory, so
+limits are per API instance — moving to Redis is required before running more than one.
+
+`reap()` is now schedulable — `buildServer({ reaperIntervalMs })` — but defaults to off, and there is
+no service entrypoint yet to turn it on. A deployment must, or expired sessions are never collected
+and `mfarm:queueTimeoutSeconds` can only ever time out.
 
 ## Production notes
 

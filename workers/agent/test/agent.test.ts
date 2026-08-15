@@ -470,6 +470,22 @@ describe('data plane', () => {
     ws.close();
   });
 
+  test('a second hello on one socket is refused', async () => {
+    // Re-entering the handshake would restart the metering clock for this session — the customer
+    // stops being billed for the seconds already elapsed — and would rebind the socket to whatever
+    // device the new token names, without the first one's fence being consulted again.
+    const created = await realSessionToken();
+    const ws = await connect();
+    ws.send(JSON.stringify({ t: 'hello', token: created.dataPlane.token }));
+    assert.equal((await nextMessage(ws)).t, 'ready');
+
+    ws.send(JSON.stringify({ t: 'hello', token: created.dataPlane.token }));
+    const msg = await nextMessage(ws);
+    assert.equal(msg.t, 'error');
+    assert.equal(msg.code, 'already_authenticated');
+    ws.close();
+  });
+
   test('a superseded session is rejected on reconnect', async () => {
     const created = await realSessionToken();
     const ws1 = await connect();

@@ -24,6 +24,8 @@ export const CAPABILITIES = [
   'logcat',
   'network-capture',     // per-session proxy: isolation + record/replay + waterfall (v2 decision 9)
   'gpu',                 // hardware rendering available; absent means software rendering only
+  'webdriver',           // an automation (Appium) server fronts this device, so it can serve the
+                         // WebDriver hub (v2 decision 10). Not required for interactive use.
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -39,6 +41,10 @@ export interface WorkerRegistration {
   /** Public data-plane address the browser connects to directly. Without it the host cannot take
    *  sessions at all, because there is nowhere to point the client (v2 decision 2). */
   endpoint?: string;
+  /** Base URL of this host's automation (Appium) server, e.g. `http://10.0.3.14:4723`. Reached by
+   *  the control plane over the internal network only — the WebDriver hub is the sole public ingress
+   *  to it, because an exposed Appium port is unauthenticated device control. */
+  automationEndpoint?: string;
   cores: number;
   memoryMb: number;
   capabilities: Capability[];
@@ -67,6 +73,19 @@ export type NegotiationResult =
 export function negotiate(reg: WorkerRegistration): NegotiationResult {
   if (!Number.isInteger(reg.protocolVersion)) {
     return { ok: false, reason: 'protocolVersion must be an integer' };
+  }
+  // A registration is JSON from a machine we do not control, so the arrays may simply not be there.
+  // Reading through a missing one throws, and a TypeError inside negotiation surfaces to the worker
+  // as a 500 — "the control plane is broken" — for what is a malformed request it could fix itself.
+  if (!Array.isArray(reg.capabilities)) {
+    return { ok: false, reason: 'capabilities must be an array' };
+  }
+  if (!Array.isArray(reg.devices)) {
+    return { ok: false, reason: 'devices must be an array' };
+  }
+  const badDevice = reg.devices.find((d) => !d || !Array.isArray(d.capabilities));
+  if (badDevice) {
+    return { ok: false, reason: `device ${badDevice?.localId ?? '<unnamed>'} must declare a capabilities array` };
   }
   if (reg.protocolVersion < MIN_SUPPORTED_VERSION) {
     return {

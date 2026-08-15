@@ -48,7 +48,31 @@ function safeEqualHex(a: string, b: string): boolean {
 }
 
 /**
- * Resolve a bearer token to a principal, or null.
+ * Pull a tenant key out of HTTP Basic credentials.
+ *
+ * This exists for the WebDriver hub. A WebDriver client is given exactly one thing — a URL — and
+ * every incumbent solves it the same way: `https://<key>@hub.example.com/wd/hub`. Every HTTP client
+ * turns that into a Basic header, which is why "migration is one URL change" is achievable at all.
+ * Over TLS it is a bearer token in a different envelope.
+ *
+ * Either field may carry the key, because clients disagree about which half of `user:pass` a
+ * credential belongs in. WORKER tokens are deliberately not accepted here: workers never live in a
+ * URL, so allowing it would only widen where a fleet credential can appear.
+ */
+function tenantKeyFromBasic(header: string): string | null {
+  let decoded: string;
+  try {
+    decoded = Buffer.from(header.slice(6).trim(), 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+  const sep = decoded.indexOf(':');
+  const parts = sep === -1 ? [decoded] : [decoded.slice(0, sep), decoded.slice(sep + 1)];
+  return parts.find((p) => p.startsWith('mfk_')) ?? null;
+}
+
+/**
+ * Resolve a credential to a principal, or null.
  *
  * Runs on the SYSTEM pool deliberately: api_keys is RLS-protected by org_id, and we do not know the
  * org until after the lookup succeeds. Authentication is the one place that legitimately precedes
@@ -56,7 +80,9 @@ function safeEqualHex(a: string, b: string): boolean {
  */
 export async function authenticate(bearer: string | undefined): Promise<Principal | null> {
   if (!bearer) return null;
-  const token = bearer.startsWith('Bearer ') ? bearer.slice(7).trim() : bearer.trim();
+  const token = bearer.startsWith('Basic ')
+    ? tenantKeyFromBasic(bearer) ?? ''
+    : bearer.startsWith('Bearer ') ? bearer.slice(7).trim() : bearer.trim();
   if (token.length < KEY_PREFIX_LEN + 8) return null;
 
   const prefix = token.slice(0, KEY_PREFIX_LEN);

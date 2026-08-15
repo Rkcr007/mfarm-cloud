@@ -1,0 +1,31 @@
+{
+  // Type CHECKING only — `noEmit` is the point. Node ≥ 22.6 strips types at runtime and never looks
+  // at them, so without this nothing in the repo is ever checked: a wrong field name, a missing
+  // await, a null that cannot be null all run happily until the branch that touches them does.
+  //
+  // `npm run typecheck`. No build step is added by this file and none should be.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    // Imports carry the `.ts` extension because that is what Node's type stripping resolves.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Matches what strip-only type removal can actually handle: anything that would need code
+    // GENERATED for it (enums, namespaces, `import x =`, parameter properties) is rejected here
+    // rather than at 3am by a Node parser error on a machine with no build step to fix it.
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+
+    "types": ["node"]
+  },
+  "include": ["apps/**/*.ts", "workers/**/*.ts", "packages/**/*.ts"],
+  "exclude": ["**/node_modules"]
+}

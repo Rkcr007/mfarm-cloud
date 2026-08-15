@@ -55,12 +55,10 @@ before(async () => {
                            VALUES ('http-a','A',50) RETURNING id`)).rows[0].id;
     orgB = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent)
                            VALUES ('http-b','B',50) RETURNING id`)).rows[0].id;
-    const tok = { prefix: 'mwk_testpre', hash: '' };
     hostId = (await c.query(
       `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint)
        VALUES ($1,'http-test-host','UP',1,64,262144,'wss://worker-1.example:8443') RETURNING id`,
       [REGION])).rows[0].id;
-    void tok;
   });
   keyA = (await createApiKey(orgA)).plaintext;
   keyB = (await createApiKey(orgB)).plaintext;
@@ -274,6 +272,78 @@ describe('idempotency', () => {
     assert.equal(live, 1, 'a retry must not consume a second device or a second bill');
   });
 
+  test('two concurrent retries of one key do not allocate two devices', async () => {
+    // The retry that matters is the one sent because the first request is taking too long, so it
+    // arrives while the first is still running. "Check, then allocate, then record" misses that
+    // window entirely and bills the customer twice for one session.
+    await clearDevices();
+    await seedDevices(2);
+    const key = randomUUID();
+    const payload = { region: REGION, platform: 'android' };
+    const headers = { ...auth(keyA), 'idempotency-key': key };
+
+    const [a, b] = await Promise.all([
+      app.inject({ method: 'POST', url: '/v1/sessions', headers, payload }),
+      app.inject({ method: 'POST', url: '/v1/sessions', headers, payload }),
+    ]);
+
+    const live = await withSystem(async (c) =>
+      (await c.query(`SELECT count(*)::int AS n FROM sessions
+                       WHERE org_id = $1 AND state IN ('ALLOCATING','ACTIVE')`, [orgA])).rows[0].n);
+    assert.equal(live, 1, 'one key, one session, one bill');
+
+    const busy = [a, b].filter((r) => r.statusCode === 409);
+    const created = [a, b].filter((r) => r.statusCode === 201);
+    assert.equal(busy.length + created.length, 2, `unexpected statuses: ${a.statusCode}/${b.statusCode}`);
+    // Whichever loses the race is told to retry rather than being handed a second device.
+    if (busy.length > 0) assert.equal(busy[0].json().error.code, 'idempotency_in_flight');
+    if (created.length === 2) {
+      assert.equal(created[0].json().session.id, created[1].json().session.id, 'same session replayed');
+    }
+  });
+
+  test('a failed request releases its key so the retry is not locked out', async () => {
+    // Claiming the key before doing the work means a transient failure could otherwise burn it: the
+    // client's own retry would collide with its abandoned claim and 409 until the TTL expired.
+    await clearDevices();
+    const brokenHost = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb)
+         VALUES ($1,'no-endpoint-host','UP',1,4,4096) RETURNING id`, [REGION]);
+      await c.query(
+        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities, local_id)
+         VALUES ($1,$2,'android','cuttlefish','cf','15','READY','[]'::jsonb,$3)`,
+        [rows[0].id, REGION, `broken-${randomUUID()}`]);
+      return rows[0].id;
+    });
+
+    const key = randomUUID();
+    const headers = { ...auth(keyA), 'idempotency-key': key };
+    const payload = { region: REGION, platform: 'android' };
+
+    const failed = await app.inject({ method: 'POST', url: '/v1/sessions', headers, payload });
+    assert.equal(failed.statusCode, 400, 'a host with no data-plane endpoint cannot serve a session');
+
+    await withSystem(async (c) => {
+      await c.query('DELETE FROM sessions WHERE org_id = $1', [orgA]);
+      await c.query('DELETE FROM devices WHERE host_id = $1', [brokenHost]);
+      await c.query('DELETE FROM hosts WHERE id = $1', [brokenHost]);
+    });
+    await seedDevices(1);
+
+    const retry = await app.inject({ method: 'POST', url: '/v1/sessions', headers, payload });
+    assert.equal(retry.statusCode, 201, 'the same key must work once the cause is fixed');
+  });
+
+  test('an oversized Idempotency-Key is rejected rather than indexed', async () => {
+    const r = await app.inject({
+      method: 'POST', url: '/v1/sessions',
+      headers: { ...auth(keyA), 'idempotency-key': 'x'.repeat(300) },
+      payload: { region: REGION, platform: 'android' },
+    });
+    assert.equal(r.statusCode, 400);
+  });
+
   test('reusing a key with a different body is a 409', async () => {
     await clearDevices();
     await seedDevices(2);
@@ -325,6 +395,68 @@ describe('tenant isolation over HTTP', () => {
     const id = created.json().session.id;
     assert.equal((await app.inject({ method: 'DELETE', url: `/v1/sessions/${id}`, headers: auth(keyB) })).statusCode, 404);
     assert.equal((await app.inject({ method: 'DELETE', url: `/v1/sessions/${id}`, headers: auth(keyA) })).statusCode, 204);
+  });
+});
+
+describe('rate limiting', () => {
+  /** A second server with a tiny limit, so the shared one stays usable for every other test. */
+  async function strictServer(max: number) {
+    const previous = process.env.RATE_LIMIT_MAX;
+    process.env.RATE_LIMIT_MAX = String(max);
+    const strict = await buildServer({ logger: false });
+    process.env.RATE_LIMIT_MAX = previous;
+    return strict;
+  }
+
+  test('an authenticated caller is limited per org, not per IP', async () => {
+    const strict = await strictServer(3);
+    const codes: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      codes.push((await strict.inject({ method: 'GET', url: '/v1/devices', headers: auth(keyA) })).statusCode);
+    }
+    assert.deepEqual(codes, [200, 200, 200, 429, 429]);
+
+    // A different org shares the IP (one CI fleet behind one NAT is not everyone's problem).
+    const other = await strict.inject({ method: 'GET', url: '/v1/devices', headers: auth(keyB) });
+    assert.equal(other.statusCode, 200, 'org B must not be throttled by org A');
+    await strict.close();
+  });
+
+  test('unauthenticated attempts are limited too', async () => {
+    // The gap this closes: rejecting a bad credential before the limiter's hook runs leaves key
+    // guessing — and registration-token guessing — completely unlimited, at one database round trip
+    // per attempt.
+    const strict = await strictServer(3);
+    const codes: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const r = await strict.inject({
+        method: 'GET', url: '/v1/devices', headers: auth(generateApiKey().plaintext),
+      });
+      codes.push(r.statusCode);
+    }
+    assert.deepEqual(codes, [401, 401, 401, 429, 429], 'guessing must hit a wall, not a database');
+    await strict.close();
+  });
+
+  test('an oversized body is a 413, not a crash report', async () => {
+    // Fastify throws this with a status attached rather than as our own ApiError. Rendering it as a
+    // 500 tells the caller to file a bug for a mistake only they can fix, and buries real crashes
+    // among false alarms in the log.
+    const tooBig = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+      payload: { region: REGION, platform: 'android', requested: { pad: 'x'.repeat(1_100_000) } },
+    });
+    assert.equal(tooBig.statusCode, 413);
+    assert.equal(tooBig.json().error.code, 'payload_too_large');
+  });
+
+  test('a 429 stays in the error shape clients already parse', async () => {
+    const strict = await strictServer(1);
+    await strict.inject({ method: 'GET', url: '/v1/devices', headers: auth(keyA) });
+    const limited = await strict.inject({ method: 'GET', url: '/v1/devices', headers: auth(keyA) });
+    assert.equal(limited.statusCode, 429);
+    assert.equal(limited.json().error.code, 'rate_limited');
+    await strict.close();
   });
 });
 

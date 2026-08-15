@@ -9,6 +9,8 @@ export interface AllocationRequest {
   tier?: string | null;
   ttlMinutes?: number;
   requested?: Record<string, unknown>;
+  /** Capabilities the device must declare. The WebDriver hub uses this to demand `webdriver`. */
+  requireCapabilities?: string[];
 }
 
 export interface Allocation {
@@ -30,7 +32,7 @@ export async function allocate(req: AllocationRequest): Promise<Allocation> {
     const { rows } = await c.query(
       `SELECT o_session_id AS session_id, o_device_id AS device_id,
               o_fence AS fence, o_state AS state
-         FROM allocate_device($1, $2, $3, $4, $5, make_interval(mins => $6), $7)`,
+         FROM allocate_device($1, $2, $3, $4, $5, make_interval(mins => $6), $7, $8)`,
       [
         req.orgId,
         req.userId,
@@ -39,6 +41,7 @@ export async function allocate(req: AllocationRequest): Promise<Allocation> {
         req.tier ?? null,
         req.ttlMinutes ?? 30,
         JSON.stringify(req.requested ?? {}),
+        JSON.stringify(req.requireCapabilities ?? []),
       ],
     );
     const r = rows[0];
@@ -74,11 +77,27 @@ export async function resetComplete(deviceId: string, fence: number): Promise<bo
   });
 }
 
+/**
+ * How long a stored idempotent response stays replayable. Well past any client's retry window, and
+ * short enough that the table does not grow for the lifetime of the deployment.
+ */
+const IDEMPOTENCY_RETENTION_HOURS = 24;
+
 /** Run on a schedule. Implements "never leave a device permanently locked" as a mechanism. */
-export async function reap(): Promise<{ expired: number; promoted: number }> {
+export async function reap(): Promise<{ expired: number; promoted: number; keysPurged: number }> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
     const p = await c.query('SELECT promote_queued($1) AS n', [20]);
-    return { expired: Number(e.rows[0].n), promoted: Number(p.rows[0].n) };
+    // Nothing else ever deletes an idempotency key. Left alone the table grows by one row per
+    // session created, forever, and it is on the hot path of every session creation.
+    const g = await c.query(
+      'DELETE FROM idempotency_keys WHERE created_at < now() - make_interval(hours => $1)',
+      [IDEMPOTENCY_RETENTION_HOURS],
+    );
+    return {
+      expired: Number(e.rows[0].n),
+      promoted: Number(p.rows[0].n),
+      keysPurged: g.rowCount ?? 0,
+    };
   });
 }
