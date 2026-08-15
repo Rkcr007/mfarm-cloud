@@ -1,0 +1,1402 @@
+<title>The Device-Second Thesis</title>
+<style>
+  :root {
+    --paper:      #EDF0EE;
+    --surface:    #FBFCFB;
+    --surface-2:  #E3E8E5;
+    --line:       #CFD8D4;
+    --line-soft:  #DEE5E2;
+    --ink:        #0F1D1A;
+    --ink-2:      #4C605B;
+    --ink-3:      #74857F;
+    --accent:     #0D6E62;
+    --accent-soft:#D6E7E3;
+    --heat:       #B8460F;
+    --heat-soft:  #F3DFD4;
+    --gold:       #7E6310;
+    --gold-soft:  #EAE4CE;
+
+    --sans: ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    --serif: ui-serif, "Iowan Old Style", Charter, "Palatino Linotype", Palatino, Georgia, serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono", Consolas, monospace;
+
+    --step: clamp(1.6rem, 1.1rem + 2.2vw, 2.9rem);
+    --rule: 1px solid var(--line);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #0B1211;
+      --surface:    #121C1A;
+      --surface-2:  #182422;
+      --line:       #27342F;
+      --line-soft:  #1E2B28;
+      --ink:        #E6EDEA;
+      --ink-2:      #9AAAA5;
+      --ink-3:      #6F817B;
+      --accent:     #45C4B0;
+      --accent-soft:#10312D;
+      --heat:       #F0723C;
+      --heat-soft:  #31170D;
+      --gold:       #C9A33A;
+      --gold-soft:  #2C2410;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:      #0B1211;
+    --surface:    #121C1A;
+    --surface-2:  #182422;
+    --line:       #27342F;
+    --line-soft:  #1E2B28;
+    --ink:        #E6EDEA;
+    --ink-2:      #9AAAA5;
+    --ink-3:      #6F817B;
+    --accent:     #45C4B0;
+    --accent-soft:#10312D;
+    --heat:       #F0723C;
+    --heat-soft:  #31170D;
+    --gold:       #C9A33A;
+    --gold-soft:  #2C2410;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 1.0625rem;
+    line-height: 1.66;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .wrap {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 0 clamp(1.25rem, 4vw, 3rem);
+  }
+
+  .prose { max-width: 68ch; }
+
+  h1, h2, h3, h4 {
+    font-family: var(--sans);
+    font-weight: 640;
+    letter-spacing: -0.021em;
+    line-height: 1.13;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  p { margin: 0; }
+  strong { font-weight: 660; color: var(--ink); }
+
+  a {
+    color: var(--accent);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+  }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  code, .mono { font-family: var(--mono); }
+  code {
+    font-size: 0.86em;
+    background: var(--surface-2);
+    padding: 0.1em 0.36em;
+    border-radius: 3px;
+  }
+
+  .label {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    border-bottom: var(--rule);
+    padding: clamp(2.5rem, 7vw, 5rem) 0 0;
+  }
+  .masthead-inner {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    padding-bottom: 2.75rem;
+  }
+  .kicker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    align-items: baseline;
+  }
+  .kicker .tick { color: var(--accent); }
+
+  h1 {
+    font-size: clamp(2.4rem, 1.3rem + 4.4vw, 4.2rem);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    max-width: 16ch;
+  }
+  .standfirst {
+    max-width: 62ch;
+    font-size: clamp(1.1rem, 1.02rem + 0.3vw, 1.28rem);
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .readout {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    border-top: var(--rule);
+  }
+  .readout div {
+    padding: 1.15rem 1.25rem 1.35rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .readout div + div {
+    border-left: var(--rule);
+    padding-left: 1.25rem;
+  }
+  .readout b {
+    font-family: var(--sans);
+    font-size: 1.5rem;
+    font-weight: 660;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+  .readout .hot { color: var(--heat); }
+  .readout span {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    line-height: 1.45;
+  }
+
+  /* ---------- sections ---------- */
+
+  main {
+    display: flex;
+    flex-direction: column;
+  }
+
+  section {
+    padding: clamp(3rem, 6vw, 5rem) 0;
+    border-bottom: var(--rule);
+  }
+  section:last-of-type { border-bottom: 0; }
+
+  .sec-head {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+    margin-bottom: 2.25rem;
+  }
+  .sec-head h2 {
+    font-size: var(--step);
+    max-width: 22ch;
+  }
+  .sec-head .dek {
+    max-width: 60ch;
+    color: var(--ink-2);
+    font-size: 1.03rem;
+  }
+
+  .stack { display: flex; flex-direction: column; gap: 1.15rem; }
+  .stack-lg { display: flex; flex-direction: column; gap: 2.25rem; }
+
+  /* ---------- ranked gap list ---------- */
+
+  .gaps {
+    display: flex;
+    flex-direction: column;
+    border-top: var(--rule);
+  }
+  .gap {
+    display: grid;
+    grid-template-columns: 3.25rem 1fr;
+    gap: 0 1.25rem;
+    padding: 1.5rem 0;
+    border-bottom: var(--rule);
+    align-items: start;
+  }
+  .gap .rank {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    padding-top: 0.32rem;
+    letter-spacing: 0.04em;
+  }
+  .gap h3 {
+    font-size: 1.12rem;
+    letter-spacing: -0.012em;
+    margin-bottom: 0.45rem;
+  }
+  .gap p { max-width: 74ch; color: var(--ink-2); font-size: 1rem; }
+  .gap p + p { margin-top: 0.6rem; }
+  .gap .fix {
+    color: var(--ink);
+    border-left: 2px solid var(--accent);
+    padding-left: 0.85rem;
+  }
+  .gap .fix::before {
+    content: "Fix";
+    font-family: var(--mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 0.15rem;
+  }
+
+  @media (max-width: 600px) {
+    .gap { grid-template-columns: 1fr; gap: 0.45rem; }
+    .gap .rank { padding-top: 0; }
+  }
+
+  /* ---------- tables ---------- */
+
+  .scroller {
+    overflow-x: auto;
+    border: var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--sans);
+    font-size: 0.9rem;
+    min-width: 640px;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.72rem 1rem;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+    line-height: 1.45;
+  }
+  thead th {
+    font-family: var(--mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+    background: var(--surface-2);
+    border-bottom: var(--rule);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num, th.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.name { font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .caption {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    line-height: 1.6;
+    color: var(--ink-3);
+    max-width: 78ch;
+  }
+
+  /* ---------- thesis pull ---------- */
+
+  .thesis {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: clamp(1.75rem, 4vw, 2.75rem);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .thesis q {
+    font-family: var(--sans);
+    font-size: clamp(1.3rem, 1.05rem + 1.1vw, 1.9rem);
+    font-weight: 640;
+    letter-spacing: -0.026em;
+    line-height: 1.25;
+    quotes: none;
+    text-wrap: balance;
+  }
+  .thesis p { color: var(--ink-2); max-width: 64ch; }
+
+  /* ---------- wedge cards ---------- */
+
+  .wedges {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .wedge {
+    background: var(--surface);
+    padding: 1.5rem 1.4rem 1.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .wedge .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .wedge h3 { font-size: 1.06rem; letter-spacing: -0.012em; }
+  .wedge p { font-size: 0.97rem; color: var(--ink-2); }
+  .wedge .moat {
+    margin-top: auto;
+    padding-top: 0.9rem;
+    border-top: 1px dashed var(--line);
+    font-family: var(--sans);
+    font-size: 0.86rem;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  .wedge .moat b {
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--heat);
+    margin-bottom: 0.25rem;
+    font-weight: 500;
+  }
+
+  /* ---------- diagram ---------- */
+
+  figure { margin: 0; display: flex; flex-direction: column; gap: 0.85rem; }
+  .figbox {
+    border: var(--rule);
+    border-radius: 4px;
+    background: var(--surface);
+    padding: 1.5rem 1.25rem;
+    overflow-x: auto;
+  }
+  .figbox svg { display: block; margin: 0 auto; min-width: 620px; max-width: 100%; height: auto; }
+  .svg-plane { fill: none; stroke: var(--line); stroke-width: 1; }
+  .svg-node { fill: var(--surface-2); stroke: var(--line); stroke-width: 1; }
+  .svg-node-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.25; }
+  .svg-t { font-family: var(--sans); font-size: 12px; font-weight: 600; fill: var(--ink); }
+  .svg-s { font-family: var(--mono); font-size: 9px; letter-spacing: 0.09em; fill: var(--ink-3); text-transform: uppercase; }
+  .svg-flow { stroke: var(--ink-3); stroke-width: 1.25; fill: none; }
+  .svg-flow-hot { stroke: var(--heat); stroke-width: 2.25; fill: none; }
+  .svg-hotlabel { font-family: var(--mono); font-size: 9px; fill: var(--heat); letter-spacing: 0.06em; }
+
+  /* ---------- roadmap ---------- */
+
+  .phases { display: flex; flex-direction: column; border-top: var(--rule); }
+  .phase {
+    display: grid;
+    grid-template-columns: 8.5rem 1fr;
+    gap: 0 1.25rem;
+    padding: 1.35rem 0;
+    border-bottom: var(--rule);
+  }
+  .phase .when {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    padding-top: 0.28rem;
+  }
+  .phase .when b { display: block; color: var(--accent); font-weight: 500; }
+  .phase h3 { font-size: 1.05rem; margin-bottom: 0.4rem; }
+  .phase p { font-size: 0.99rem; color: var(--ink-2); max-width: 72ch; }
+  @media (max-width: 640px) {
+    .phase { grid-template-columns: 1fr; gap: 0.4rem; }
+    .phase .when { padding-top: 0; }
+  }
+
+  /* ---------- cut / risk lists ---------- */
+
+  .split {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
+    gap: 2.5rem;
+  }
+  .listbox { display: flex; flex-direction: column; gap: 1rem; }
+  .listbox h3 { font-size: 1.12rem; }
+  ul.ticks { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.85rem; }
+  ul.ticks li {
+    display: grid;
+    grid-template-columns: 1.1rem 1fr;
+    gap: 0.7rem;
+    font-size: 0.99rem;
+    color: var(--ink-2);
+  }
+  ul.ticks li::before {
+    content: "—";
+    font-family: var(--mono);
+    color: var(--heat);
+    line-height: 1.66;
+  }
+  ul.ticks.keep li::before { content: "+"; color: var(--accent); }
+  ul.ticks li b { color: var(--ink); font-family: var(--sans); font-weight: 620; }
+
+  /* ---------- footer ---------- */
+
+  footer {
+    border-top: var(--rule);
+    padding: 2.5rem 0 4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  footer p { font-size: 0.92rem; color: var(--ink-3); max-width: 70ch; font-family: var(--sans); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<header class="masthead">
+  <div class="wrap masthead-inner">
+    <div class="kicker label">
+      <span class="tick">MFARM_CLOUD</span>
+      <span>Architecture &amp; market review</span>
+      <span>Pre-build · 15 Aug 2026</span>
+    </div>
+    <h1>The Device-Second Thesis</h1>
+    <p class="standfirst">
+      Your guide describes a system that will work. It does not yet describe a business that can win.
+      This review separates the two: nine things to change before the first commit, and seven openings
+      the incumbents are structurally unable to take.
+    </p>
+  </div>
+  <div class="wrap">
+    <div class="readout">
+      <div>
+        <b>A&#8209;</b>
+        <span>Grade as an MVP build spec</span>
+      </div>
+      <div>
+        <b class="hot">C</b>
+        <span>Grade as a platform blueprint</span>
+      </div>
+      <div>
+        <b>9</b>
+        <span>Gaps that get expensive later</span>
+      </div>
+      <div>
+        <b>7</b>
+        <span>Wedges nobody is holding</span>
+      </div>
+      <div>
+        <b>~20&#215;</b>
+        <span>Cost gap available on virtual Android</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ VERDICT ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Verdict</p>
+        <h2>A strong build spec wearing a product spec's clothes</h2>
+      </div>
+      <div class="prose stack">
+        <p>
+          The guide is unusually disciplined for a document of its kind. The insistence on a real worker
+          process instead of a frontend puppeteering ADB, the refusal to fake iOS, the explicit ban on
+          simulated screenshots and invented test results, the instruction not to reach for Kubernetes —
+          these are the calls that separate a system that survives its first ten customers from a demo
+          that dies the week someone reboots a laptop. Most people writing this document get those wrong.
+        </p>
+        <p>
+          What it is missing is everything that decides whether the thing is worth building. There is no
+          tenant model, no scheduler, no metering, no cost structure, no adoption path, and no answer to
+          the only question that matters commercially: <em>why would a team leave BrowserStack for this?</em>
+          "It is cheaper" is not an answer until you can show why you are cheaper in a way they cannot copy
+          in a quarter.
+        </p>
+        <p>
+          Both halves of that are fixable now and painful later. The nine gaps below are ordered by what it
+          costs to retrofit them — the first three are effectively rewrites if deferred, the last three are
+          a sprint each.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ GAPS ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Section 01 · Engineering</p>
+        <h2>Nine gaps, ranked by cost to fix later</h2>
+        <p class="dek">
+          None of these are bugs in the plan. They are absences — decisions the document leaves to be made
+          accidentally by whoever writes the code first.
+        </p>
+      </div>
+
+      <div class="gaps">
+
+        <article class="gap">
+          <div class="rank">01</div>
+          <div>
+            <h3>There is no tenant</h3>
+            <p>
+              The schema lists <code>users</code>. It does not list organisations, and nothing in the domain
+              model carries ownership. Retrofitting multi-tenancy into a system with live data is the single
+              most expensive migration in SaaS, because it touches every query, every artifact URL, every
+              cache key and every log line simultaneously — and you cannot ship it incrementally without
+              risking cross-tenant leakage in the window.
+            </p>
+            <p class="fix">
+              <code>org_id</code> on every table from row zero, Postgres row-level security enabled as the
+              default deny, and a request context that carries the tenant rather than a service layer that
+              remembers to filter. Storage keys namespaced by org. Do it on day one; it costs a day.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">02</div>
+          <div>
+            <h3>The control plane and the data plane are fused</h3>
+            <p>
+              Your architecture diagram routes everything through the Farm API — including, by implication,
+              screen frames and input events. That makes your p99 tap latency a function of your API server's
+              garbage collector, and it means one tenant streaming 1080p60 competes for sockets with every
+              other tenant's session creation. It also means you can never put a worker in a customer's own
+              datacentre without proxying their pixels through yours.
+            </p>
+            <p class="fix">
+              The API mints a short-lived signed token and returns a worker endpoint. The browser then talks
+              <em>directly</em> to the worker for media and input. The control plane never sees a frame.
+              This is one paragraph of design that determines whether the product feels instant or laggy,
+              and it is nearly impossible to unpick once clients depend on the shape of the API.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">03</div>
+          <div>
+            <h3><code>DeviceAdapter</code> is the wrong abstraction</h3>
+            <p>
+              It is a single fat interface that returns <code>Buffer</code> and <code>AsyncIterable</code>
+              across what will become a network boundary, and it assumes every device can do every operation.
+              It will hold for two emulators and shatter at the first physical device: iOS needs WebDriverAgent,
+              a USB tunnel and provisioning profiles; Android needs hub topology, per-device ADB ports and
+              thermal backoff. You will end up with adapters full of <code>throw new NotSupported()</code>,
+              which is how uniform interfaces die.
+            </p>
+            <p class="fix">
+              Split it in three. <strong>DeviceControl</strong>: narrow, typed, idempotent request/response
+              commands only. <strong>MediaSource</strong>: entirely out of band, never in the same interface
+              as <code>tap()</code>. <strong>Capabilities</strong>: devices <em>declare</em> what they support
+              and the platform degrades gracefully, rather than every device pretending to be every other one.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">04</div>
+          <div>
+            <h3>Redis is not allowed to be the lock authority</h3>
+            <p>
+              Device locks in Redis, with sessions that outlive a lease and workers that reconnect after a
+              partition, gives you the classic failure: two users, one device, both convinced they own it.
+              The guide's own rule — "never leave a device permanently locked" — pushes you toward short
+              expiries, which makes this <em>more</em> likely, not less.
+            </p>
+            <p class="fix">
+              Postgres is the allocator. <code>SELECT … FOR UPDATE SKIP LOCKED</code> against the device row
+              in the same transaction that inserts the session row, so allocation and session creation are
+              atomic by construction. Issue a monotonically increasing fencing token that the worker checks
+              on every command and rejects if stale. Redis keeps pub/sub, hot state and heartbeats — things
+              where losing a write is survivable.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">05</div>
+          <div>
+            <h3>There is no scheduler, only an assumption</h3>
+            <p>
+              "Only one active session for the MVP device" quietly skips the hardest problem in this business.
+              Allocation — queueing, warm pools, fairness across tenants, bin-packing devices onto hosts,
+              preemption of idle sessions, honouring concurrency limits — is what a device cloud actually
+              <em>is</em>. Everything else is plumbing around it.
+            </p>
+            <p class="fix">
+              Model it now even if the implementation is forty lines: <code>QUEUED → ALLOCATING → ACTIVE</code>,
+              a per-org concurrency limit, and a queue with a visible position. The API shape that admits a
+              queue is very different from the one that returns 409 Conflict, and clients bake in whichever
+              they meet first.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">06</div>
+          <div>
+            <h3><code>CLEANING</code> is not cleaning</h3>
+            <p>
+              Uninstalling the app does not remove signed-in accounts, keychain items, clipboard contents,
+              WebView caches, granted permissions, or anything a hostile APK deliberately left behind. You are
+              running untrusted third-party binaries and handing the same device to the next tenant. That is
+              not a hygiene problem, it is a security boundary, and "we ran a cleanup script" will not survive
+              the first enterprise security questionnaire.
+            </p>
+            <p class="fix">
+              Reset means <strong>snapshot restore</strong> — an AVD/QEMU snapshot for Android, a data-container
+              swap for the simulator — never a cleanup script. Publish it as a guarantee. And note the
+              second-order effect: snapshot restore is also what makes sub-second device boot possible, which
+              is what makes per-second billing possible. The security fix and the pricing wedge are the same
+              engineering.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">07</div>
+          <div>
+            <h3>Nothing is metered</h3>
+            <p>
+              There is no <code>device_seconds</code> anywhere in the domain model. Reconstructing usage later
+              from session timestamps sounds fine until you meet crashed sessions, sessions that outlive their
+              worker, queued time, and the difference between "reserved" and "actually running". You will not
+              be able to bill accurately, forecast capacity, or find out which customer is destroying your margin.
+            </p>
+            <p class="fix">
+              The worker emits metering events as a first-class stream — device-seconds, and the artifact bytes
+              each session wrote. Append-only, idempotent by event id. This is a two-day feature now and a
+              quarter-long forensic project after you have customers.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">08</div>
+          <div>
+            <h3>The worker protocol has no version</h3>
+            <p>
+              Workers live on physical machines — Mac minis in a rack, a bare-metal Ampere box — that you cannot
+              redeploy in lockstep with the API. From the second host onward, you will permanently be running
+              mixed versions.
+            </p>
+            <p class="fix">
+              Version the protocol explicitly, negotiate capabilities at registration, and commit to supporting
+              N&#8722;1 forever. Workers advertise what they can do; the control plane never assumes.
+            </p>
+          </div>
+        </article>
+
+        <article class="gap">
+          <div class="rank">09</div>
+          <div>
+            <h3>There is no adoption surface</h3>
+            <p>
+              The guide treats the web UI as the product. Nobody adopts a device cloud through a web UI — they
+              adopt it through a CI config change. The document never mentions a CLI, a GitHub Action, or
+              WebDriver wire compatibility, which means the entire migration path from an incumbent is missing.
+            </p>
+            <p class="fix">
+              A W3C WebDriver / Appium-compatible endpoint, so an existing suite migrates by changing one hub
+              URL and two capabilities. Plus <code>npx mfarm run</code> and a GitHub Action. The UI is your
+              debugging surface and your demo; the CLI and the wire protocol are your product.
+            </p>
+          </div>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MARKET ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Section 02 · Market</p>
+        <h2>Where the money currently sits, and why it is dislodgeable</h2>
+        <p class="dek">
+          The device cloud market is mature, profitable, and priced on a model that is about to stop matching
+          how tests get run.
+        </p>
+      </div>
+
+      <div class="stack-lg">
+        <div class="scroller">
+          <table>
+            <thead>
+              <tr>
+                <th>Player</th>
+                <th>Sells</th>
+                <th class="num">Effective cost</th>
+                <th>Where it is soft</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="name">BrowserStack / Sauce / LambdaTest</td>
+                <td>Parallel slots, annual contracts</td>
+                <td class="num">~$2–8 / device-hr used</td>
+                <td>You buy capacity, not usage. Idle parallels are pure waste, and burst workloads are punished.</td>
+              </tr>
+              <tr>
+                <td class="name">AWS Device Farm</td>
+                <td>Per-device-minute real hardware</td>
+                <td class="num">~$0.17 / device-min</td>
+                <td>Priced per minute but the developer experience has barely moved in years; interactive streaming is poor.</td>
+              </tr>
+              <tr>
+                <td class="name">Firebase Test Lab</td>
+                <td>Free-tier gravity, Android-first</td>
+                <td class="num">low / free</td>
+                <td>Narrow scope, weak iOS story, no interactive session model. It anchors expectations on price, not capability.</td>
+              </tr>
+              <tr>
+                <td class="name">Perfecto / Kobiton / HeadSpin</td>
+                <td>Enterprise real-device labs</td>
+                <td class="num">contract</td>
+                <td>Sold to QA departments, not to developers. Long procurement, heavy UI, no self-serve.</td>
+              </tr>
+              <tr>
+                <td class="name">Corellium</td>
+                <td>ARM-virtualised iOS</td>
+                <td class="num">research pricing</td>
+                <td>The only genuine iOS cost breakthrough — but aimed at security research, not CI. The one player who could compress iOS the way you want to.</td>
+              </tr>
+              <tr>
+                <td class="name">DeviceFarmer / STF</td>
+                <td>Open-source control plane</td>
+                <td class="num">self-hosted</td>
+                <td>Effectively unmaintained. There is currently <em>no</em> credible open control plane. That vacancy is a distribution channel sitting empty.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="caption">
+          Cost figures are order-of-magnitude planning numbers derived from list pricing and typical
+          utilisation, not quotes. Treat the ratios as the signal, not the digits.
+        </p>
+
+        <div class="prose stack">
+          <p>
+            Here is the structural change. Test <em>authoring</em> used to be the bottleneck: a human wrote each
+            test, so execution volume grew roughly with headcount, and pricing per parallel slot tracked that
+            reasonably well. AI coding agents remove that bottleneck. An agent writing and verifying a feature
+            will run a device session dozens of times in an afternoon, in bursts of thirty to ninety seconds,
+            at unpredictable concurrency.
+          </p>
+          <p>
+            Per-parallel pricing does not survive that workload — the customer needs fifty slots for four minutes
+            and zero slots for the next hour. And the incumbents cannot reprice to per-second without cannibalising
+            a book of business built on annual committed parallels, and without rebuilding fleets that were designed
+            around long-lived devices rather than disposable ones. That is the textbook opening: the right answer is
+            visible to them and expensive for them to take.
+          </p>
+        </div>
+
+        <div class="thesis">
+          <p class="label">The thesis</p>
+          <q>AI does not sell a device cloud. AI eats a device cloud's capacity.</q>
+          <p>
+            Whoever holds the lowest marginal cost per device-second, and an API an agent can actually drive,
+            wins the next cycle. The infrastructure is the moat; AI is the demand curve that makes the moat
+            worth having. Build the cost structure first — the AI features are the easy half and everyone will
+            have them.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ WEDGES ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Section 03 · Openings</p>
+        <h2>Seven wedges, and why they are still open</h2>
+        <p class="dek">
+          For each: what it is, and the specific structural reason an incumbent has not taken it. A gap that
+          exists only because nobody thought of it will close in a quarter. These close slowly or not at all.
+        </p>
+      </div>
+
+      <div class="wedges">
+
+        <article class="wedge">
+          <p class="tag">W1 · Pricing</p>
+          <h3>Per-second billing on snapshot-boot devices</h3>
+          <p>
+            Warm snapshot restore puts an Android device at an interactive home screen in one to three seconds.
+            That makes a forty-second test cost forty seconds. No minimums, no slots, no idle.
+          </p>
+          <p class="moat">
+            <b>Why it's open</b>
+            Their devices are pets — long-lived, hand-tended, slow to reset. Matching this means rebuilding both
+            the fleet and the price list at the same time.
+          </p>
+        </article>
+
+        <article class="wedge">
+          <p class="tag">W2 · Reliability</p>
+          <h3>Determinism sold as a product</h3>
+          <p>
+            Flake is the loudest complaint in mobile QA and the entire industry treats it as weather. Sell a
+            contract instead: identical snapshot start state, injected clock, pinned locale, timezone and font
+            scale, animations off, seeded data, and network recorded once then replayed at the device level.
+            Ship a per-test flake score.
+          </p>
+          <p class="moat">
+            <b>Why it's open</b>
+            It is unglamorous, deeply technical, and demos badly. It cannot be bolted onto a fleet that does
+            not already reset by snapshot.
+          </p>
+        </article>
+
+        <article class="wedge">
+          <p class="tag">W3 · Cost</p>
+          <h3>Simulator-first, and honest about it</h3>
+          <p>
+            The overwhelming majority of pre-merge functional testing does not need real iOS hardware. Pack six
+            to ten simulators onto one Apple-silicon Mac mini, price iOS parallelism where no real-device fleet
+            can follow, and promote to physical hardware only for what genuinely needs it — camera, biometrics,
+            cellular, GPU, thermals.
+          </p>
+          <p class="moat">
+            <b>Why it's open</b>
+            Real devices are the inventory they own and the premium they charge for. Telling customers they
+            mostly do not need them is an attack on their own margin.
+          </p>
+        </article>
+
+        <article class="wedge">
+          <p class="tag">W4 · Distribution</p>
+          <h3>Agent-native access</h3>
+          <p>
+            Expose the device as a tool surface a coding agent can drive: a semantic screen description from the
+            accessibility tree rather than pixels, intent-level actions, resumable session handles, streamed logs,
+            and a hard spend ceiling per agent run. An MCP server shipped on day one puts you inside every
+            Claude Code and Cursor session as a one-line install.
+          </p>
+          <p class="moat">
+            <b>Why it's open</b>
+            It is new enough that the incumbents are still shipping AI <em>test recorders</em> for humans. It is
+            also nearly free to build, so speed matters more than depth here.
+          </p>
+        </article>
+
+        <article class="wedge">
+          <p class="tag">W5 · AI, aimed correctly</p>
+          <h3>Triage, not authoring</h3>
+          <p>
+            Everyone points their model at writing tests, which is the lowest-trust, highest-scrutiny place to
+            put one. The value is at the other end: collapse four hundred red runs into six root causes, attach
+            the video segment and the exact log window, and rank new failures above known ones. Locator healing
+            proposes a pull request — it never heals silently.
+          </p>
+          <p class="moat">
+            <b>Why it's open</b>
+            Authoring demos beautifully and triage does not. Saying out loud that silent self-healing hides real
+            regressions is a positioning others have already priced against.
+          </p>
+        </article>
+
+        <article class="wedge">
+          <p class="tag">W6 · Default artifacts</p>
+          <h3>Non-functional data on every session</h3>
+          <p>
+            Cold start, jank frames, memory high-water, network waterfall and a full accessibility audit attached
+            automatically to every single session — not a separate product with a separate line item. The
+            accessibility half carries a regulatory tailwind that most mobile teams are currently servicing by hand.
+          </p>
+          <p class="moat">
+            <b>Why it's open</b>
+            These are separately monetised SKUs elsewhere. Giving them away free with every run is a revenue
+            decision they cannot make.
+          </p>
+        </article>
+
+        <article class="wedge">
+          <p class="tag">W7 · Deployment</p>
+          <h3>An open, self-hostable control plane</h3>
+          <p>
+            Banks, telcos, OEMs, health and defence cannot ship builds to a foreign SaaS. Many already own device
+            labs and have no software worth running on them. Open-core control plane on their racks, optional
+            managed plane, same API either way — and the open-source flywheel that DeviceFarmer vacated.
+          </p>
+          <p class="moat">
+            <b>Why it's open</b>
+            It directly cannibalises cloud revenue. This is the wedge incumbents will refuse longest, which makes
+            it the most durable one on this list.
+          </p>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ECONOMICS ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Section 04 · Unit economics</p>
+        <h2>The cost structure that makes the thesis real</h2>
+        <p class="dek">
+          W1 through W3 are only credible if the numbers underneath them work. They do, on virtual devices,
+          and only if you own the metal.
+        </p>
+      </div>
+
+      <div class="stack-lg">
+        <div class="scroller">
+          <table>
+            <thead>
+              <tr>
+                <th>Line</th>
+                <th>Assumption</th>
+                <th class="num">Cost</th>
+                <th class="num">Per device-hour</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="name">Android host</td>
+                <td>Bare-metal ARM, 128 vCPU / 256 GB, KVM, ARM system images — no x86 translation layer</td>
+                <td class="num">$1.50–2.50 / hr</td>
+                <td class="num">—</td>
+              </tr>
+              <tr>
+                <td class="name">Android density</td>
+                <td>4 vCPU / 4 GB per emulator, modest overcommit, functional workloads</td>
+                <td class="num">40–60 concurrent</td>
+                <td class="num">$0.03–0.06</td>
+              </tr>
+              <tr>
+                <td class="name">iOS host</td>
+                <td>Owned M-series Mac mini, 24 GB, colocated, 3-year amortisation plus power and space</td>
+                <td class="num">~$0.05–0.09 / hr</td>
+                <td class="num">—</td>
+              </tr>
+              <tr>
+                <td class="name">iOS density</td>
+                <td>6–10 concurrent simulators per host for functional tests</td>
+                <td class="num">6–10 concurrent</td>
+                <td class="num">$0.01–0.02</td>
+              </tr>
+              <tr>
+                <td class="name">Cloud Mac (rejected)</td>
+                <td>Dedicated-host model with a 24-hour minimum allocation destroys elasticity</td>
+                <td class="num">~$0.65–1.30 / hr</td>
+                <td class="num">10–20&#215; worse</td>
+              </tr>
+              <tr>
+                <td class="name">Artifact storage</td>
+                <td>Video dominates. The sleeper cost that has killed more than one testing startup.</td>
+                <td class="num">see below</td>
+                <td class="num">—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="prose stack">
+          <p>
+            Sell virtual Android in the region of <strong>$0.12–0.25 per device-hour</strong> and you hold a
+            70–85% gross margin while sitting roughly an order of magnitude — often two — under the incumbent's
+            effective rate. That is the whole argument. It requires three commitments the guide does not currently
+            make: ARM emulators on ARM silicon so there is no translation tax, snapshot-based reset so devices are
+            disposable, and owned hardware for anything Apple.
+          </p>
+          <p>
+            <strong>Do not build iOS capacity on rented cloud Macs.</strong> The dedicated-host model with a
+            24-hour minimum allocation is fundamentally incompatible with per-second billing — you would be paying
+            by the day and selling by the second. Own the minis, or colocate them.
+          </p>
+          <p>
+            Control artifact retention from the first commit, because it is the cost line that grows without anyone
+            deciding it should. Segment video to fMP4/HLS rather than storing monolithic files, keep seven days hot,
+            transcode on demand instead of eagerly, tier to cold storage at thirty days, and <strong>delete video
+            for passing runs by default</strong> — nobody watches a green test's recording, and it is the majority
+            of your bytes.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ARCHITECTURE ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Section 05 · Architecture</p>
+        <h2>Three planes, not one pipeline</h2>
+        <p class="dek">
+          The single most consequential structural change to your diagram: pixels and taps must never traverse
+          the control plane.
+        </p>
+      </div>
+
+      <div class="stack-lg">
+        <figure>
+          <div class="figbox">
+            <svg viewBox="0 0 720 400" role="img" aria-labelledby="planes-title planes-desc">
+              <title id="planes-title">Three-plane architecture</title>
+              <desc id="planes-desc">The browser calls the control plane over HTTPS to obtain a signed session token, then connects directly to the worker over WebRTC for media and input. The worker reports heartbeat and metering back to the control plane. Media never passes through the control plane.</desc>
+
+              <!-- Control plane band -->
+              <rect class="svg-plane" x="8" y="8" width="704" height="104" rx="4"/>
+              <text class="svg-s" x="22" y="30">Control plane · stateless · Postgres is truth</text>
+              <rect class="svg-node" x="22" y="44" width="120" height="50" rx="3"/>
+              <text class="svg-t" x="82" y="66" text-anchor="middle">Auth / Orgs</text>
+              <text class="svg-s" x="82" y="82" text-anchor="middle">RLS</text>
+              <rect class="svg-node" x="154" y="44" width="120" height="50" rx="3"/>
+              <text class="svg-t" x="214" y="66" text-anchor="middle">Scheduler</text>
+              <text class="svg-s" x="214" y="82" text-anchor="middle">SKIP LOCKED</text>
+              <rect class="svg-node" x="286" y="44" width="120" height="50" rx="3"/>
+              <text class="svg-t" x="346" y="66" text-anchor="middle">Metering</text>
+              <text class="svg-s" x="346" y="82" text-anchor="middle">device-seconds</text>
+              <rect class="svg-node" x="418" y="44" width="120" height="50" rx="3"/>
+              <text class="svg-t" x="478" y="66" text-anchor="middle">Artifacts index</text>
+              <text class="svg-s" x="478" y="82" text-anchor="middle">signed urls</text>
+              <rect class="svg-node" x="550" y="44" width="140" height="50" rx="3"/>
+              <text class="svg-t" x="620" y="66" text-anchor="middle">WebDriver hub</text>
+              <text class="svg-s" x="620" y="82" text-anchor="middle">w3c compatible</text>
+
+              <!-- Client -->
+              <rect class="svg-node-accent" x="22" y="176" width="150" height="62" rx="3"/>
+              <text class="svg-t" x="97" y="202" text-anchor="middle">Browser / CLI</text>
+              <text class="svg-t" x="97" y="218" text-anchor="middle">/ Agent</text>
+
+              <!-- token flow -->
+              <path class="svg-flow" d="M97 176 L97 130 L97 112" marker-end="url(#ar)"/>
+              <text class="svg-s" x="106" y="146">1 · mint signed token</text>
+
+              <!-- Data plane band -->
+              <rect class="svg-plane" x="200" y="140" width="512" height="134" rx="4" stroke-dasharray="3 3"/>
+              <text class="svg-s" x="214" y="162">Data plane · latency critical · never proxied</text>
+
+              <rect class="svg-node-accent" x="392" y="176" width="150" height="62" rx="3"/>
+              <text class="svg-t" x="467" y="202" text-anchor="middle">Worker agent</text>
+              <text class="svg-s" x="467" y="220" text-anchor="middle">one per host</text>
+
+              <!-- direct link -->
+              <path class="svg-flow-hot" d="M172 199 L386 199" marker-end="url(#arh)"/>
+              <path class="svg-flow-hot" d="M386 217 L178 217" marker-end="url(#arh)"/>
+              <text class="svg-hotlabel" x="200" y="193">2 · WebRTC media  ·  H.264 passthrough</text>
+              <text class="svg-hotlabel" x="200" y="236">3 · DataChannel input  ·  seq-numbered</text>
+
+              <!-- heartbeat back up -->
+              <path class="svg-flow" d="M467 176 L467 112" marker-end="url(#ar)"/>
+              <text class="svg-s" x="476" y="146">4 · heartbeat + metering</text>
+
+              <!-- Fleet plane -->
+              <rect class="svg-plane" x="8" y="296" width="704" height="92" rx="4"/>
+              <text class="svg-s" x="22" y="318">Fleet plane · hosts are the unit of scheduling</text>
+              <rect class="svg-node" x="392" y="330" width="72" height="44" rx="3"/>
+              <text class="svg-t" x="428" y="352" text-anchor="middle">Android</text>
+              <text class="svg-s" x="428" y="366" text-anchor="middle">×40–60</text>
+              <rect class="svg-node" x="476" y="330" width="72" height="44" rx="3"/>
+              <text class="svg-t" x="512" y="352" text-anchor="middle">iOS sim</text>
+              <text class="svg-s" x="512" y="366" text-anchor="middle">×6–10</text>
+              <rect class="svg-node" x="560" y="330" width="130" height="44" rx="3"/>
+              <text class="svg-t" x="625" y="349" text-anchor="middle">Snapshot store</text>
+              <text class="svg-s" x="625" y="366" text-anchor="middle">reset = restore</text>
+              <path class="svg-flow" d="M467 274 L467 330" marker-end="url(#ar)"/>
+
+              <defs>
+                <marker id="ar" viewBox="0 0 8 8" refX="4" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+                  <path d="M0 0 L8 4 L0 8 z" fill="currentColor" style="color: var(--ink-3)"/>
+                </marker>
+                <marker id="arh" viewBox="0 0 8 8" refX="4" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+                  <path d="M0 0 L8 4 L0 8 z" fill="currentColor" style="color: var(--heat)"/>
+                </marker>
+              </defs>
+            </svg>
+          </div>
+          <figcaption class="caption">
+            The control plane authorises and accounts. The data plane carries frames and taps, browser to worker,
+            with nothing in between. The fleet plane owns hardware lifecycle — and note that the unit of
+            scheduling is the host, not the device.
+          </figcaption>
+        </figure>
+
+        <div class="prose stack">
+          <h3>The media path decides how the product feels</h3>
+          <p>
+            This is the one component where a wrong early choice is felt by every user in every session, so
+            specify it rather than leaving it to "use WebRTC".
+          </p>
+          <p>
+            <strong>Android:</strong> run scrcpy's on-device server, which hardware-encodes H.264 via MediaCodec,
+            pull the stream over ADB, repackage it into RTP and hand it to WebRTC. <strong>Never re-encode.</strong>
+            Transcoding on the host is what turns a 60 ms pipeline into a 300 ms one and costs you the CPU you
+            wanted to spend on device density. Target 60–90 ms glass-to-glass.
+          </p>
+          <p>
+            <strong>iOS Simulator:</strong> take the H.264 video stream from <code>idb</code> / FBSimulatorControl
+            and use the same repackaging path. Note explicitly that <code>simctl io recordVideo</code> is a file
+            writer, not a stream — do not build the live path on it, which is a mistake this codebase would
+            otherwise make on day one.
+          </p>
+          <p>
+            <strong>Input</strong> goes over a WebRTC DataChannel with a monotonic sequence number and coalesced
+            move events, never over HTTP. <strong>Physical iOS</strong>, when it arrives, comes from CoreMediaIO
+            screen capture over USB, which already hands you H.264 at 60 fps — the same pipeline again.
+          </p>
+
+          <h3>Two states your lifecycle is missing</h3>
+          <p>
+            Add <code>QUARANTINED</code> and <code>EVICTED</code> to the device state machine. Quarantine is the
+            state that saves you at three in the morning: a host failing health checks twice is pulled from
+            scheduling, drained, snapshot-restored and alerted on — never silently retried into some customer's
+            session. A device cloud without quarantine degrades by handing broken devices to users one at a time.
+          </p>
+
+          <h3>One mechanism, three products</h3>
+          <p>
+            Give every session its own network namespace with default-deny egress and route it through a
+            per-session proxy. That single mechanism gives you tenant isolation for untrusted APKs, the
+            record-and-replay engine that makes W2's determinism claim possible, and the network waterfall
+            artifact from W6. Build it once, sell it three times.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ROADMAP ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Section 06 · Sequencing</p>
+        <h2>The roadmap I would run instead</h2>
+        <p class="dek">
+          Your phase order is risk-inverted. It begins with an architecture document, which is the cheapest
+          artifact to produce and the one most likely to be invalidated by facts you have not gathered yet.
+        </p>
+      </div>
+
+      <div class="phases">
+
+        <div class="phase">
+          <div class="when"><b>Week 0</b>before architecture</div>
+          <div>
+            <h3>Two throwaway spikes</h3>
+            <p>
+              Only two things can kill this project: media latency and iOS economics. Measure both before
+              committing to any design. <em>Spike one:</em> scrcpy into WebRTC on a single emulator, and measure
+              glass-to-glass properly — a high-frame-rate camera pointed at a stopwatch app next to the browser,
+              not a console timestamp. <em>Spike two:</em> boot simulators on one Mac mini until it falls over,
+              and find the real density cliff. If latency will not go under about 120 ms, or the mini tops out at
+              three simulators, the entire plan changes — and you want to know that in week zero, not month four.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="when"><b>Phase 1</b>~4 weeks</div>
+          <div>
+            <h3>Vertical slice, tenancy-correct</h3>
+            <p>
+              Your existing Phase 2 — one Android device end to end — but built on <code>org_id</code> plus RLS,
+              the Postgres allocator, metering events, and a versioned worker protocol. Same demo, foundations
+              that survive.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="when"><b>Phase 2</b>~4 weeks</div>
+          <div>
+            <h3>The wedge — not iOS</h3>
+            <p>
+              Snapshot reset, per-second metering, the CLI and GitHub Action, and the WebDriver-compatible
+              endpoint. This is the counter-intuitive call: iOS makes the product <em>complete</em>, but this
+              phase makes it <em>sellable</em>. A team can migrate a real Android suite here and see the bill
+              drop. Get that evidence before spending on Apple hardware.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="when"><b>Phase 3</b>~4 weeks</div>
+          <div>
+            <h3>iOS simulator density</h3>
+            <p>
+              Same architecture, new <code>DeviceControl</code> and <code>MediaSource</code> implementations only —
+              which is the real test of whether gap 03 was fixed properly. If this phase requires touching the
+              scheduler or the API, the abstraction was wrong.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="when"><b>Phase 4</b>~6 weeks</div>
+          <div>
+            <h3>The determinism kit</h3>
+            <p>
+              Clock injection, locale and timezone pinning, network record and replay through the session proxy,
+              seeded data, and a published flake score per test. This is the first thing a competitor cannot
+              copy in a quarter.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="when"><b>Phase 5</b>~4 weeks</div>
+          <div>
+            <h3>The agent surface</h3>
+            <p>
+              MCP server, semantic screen description from the accessibility tree, intent-level actions, per-run
+              spend ceilings, and a session flight recorder that makes every agent action replayable and
+              diffable. Cheap to build, and the widest distribution channel available to you.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="when"><b>Phase 6</b>ongoing</div>
+          <div>
+            <h3>Triage AI and default artifacts</h3>
+            <p>
+              Failure clustering, new-versus-known ranking, locator healing that opens pull requests, and the
+              non-functional bundle attached to every session automatically.
+            </p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="when"><b>Phase 7</b>on demand</div>
+          <div>
+            <h3>Real hardware</h3>
+            <p>
+              Physical devices arrive when a paying customer's requirement pulls them in, and never before.
+              They are the highest-capex, lowest-margin part of this business and the reason the incumbents
+              cannot move quickly.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CUT + RISK ============ -->
+  <section>
+    <div class="wrap">
+      <div class="sec-head prose">
+        <p class="label">Section 07 · Edits</p>
+        <h2>What to cut, and what to say out loud</h2>
+      </div>
+
+      <div class="split">
+
+        <div class="listbox">
+          <h3>Cut from the guide</h3>
+          <ul class="ticks">
+            <li>
+              <div>
+                <b>The bespoke test model (§12).</b> Do not invent a <code>TestDefinition</code>/<code>Step</code>
+                DSL. Teams already have Appium, Maestro, Espresso and XCUITest suites and will not rewrite them to
+                try you. Store runs and artifacts; execute <em>their</em> code. A proprietary step model is lock-in
+                that buys you nothing and costs you every migration.
+              </div>
+            </li>
+            <li>
+              <div>
+                <b>"One active session per device" as a model.</b> Fine as an initial limit, wrong as a domain
+                assumption — it is what lets you skip building a scheduler.
+              </div>
+            </li>
+            <li>
+              <div>
+                <b>The UI as the product.</b> It is the demo surface and the debugging surface, and it should be
+                excellent at both. The CLI and the wire protocol are the product.
+              </div>
+            </li>
+            <li>
+              <div>
+                <b>Architecture-document-first sequencing.</b> Replace with the week-zero spikes. Write the
+                architecture document after you know the two numbers.
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <div class="listbox">
+          <h3>Risks worth naming before someone else does</h3>
+          <ul class="ticks keep">
+            <li>
+              <div>
+                <b>Apple licensing is a capex problem.</b> macOS runs only on Apple hardware, with per-host
+                virtualisation limits. iOS capacity is a balance-sheet item, not an elastic cloud line. Plan the
+                cash, and do not promise iOS elasticity you cannot fund.
+              </div>
+            </li>
+            <li>
+              <div>
+                <b>Virtual is not real, and saying so builds trust.</b> Publish exactly what emulators and
+                simulators cannot cover — biometrics, camera, cellular radio, GPU and thermal behaviour, DRM,
+                certain vendor SDKs. Overselling virtual is how you lose the first enterprise deal and the
+                reference that came with it.
+              </div>
+            </li>
+            <li>
+              <div>
+                <b>The incumbent response is a price cut, not a rebuild.</b> They will discount virtual Android
+                before they re-architect. Price alone is therefore not a moat — determinism, the agent surface,
+                and the open control plane are.
+              </div>
+            </li>
+            <li>
+              <div>
+                <b>Corellium is the one to watch.</b> They already hold the iOS virtualisation capability that
+                would compress the cost line you are counting on. Track their pricing and positioning
+                deliberately rather than incidentally.
+              </div>
+            </li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="label">MFARM_CLOUD · architecture &amp; market review</p>
+    <p>
+      Cost and density figures are order-of-magnitude planning estimates derived from public list pricing and
+      typical hardware, intended for sequencing decisions rather than budgeting. Validate the two week-zero
+      numbers — glass-to-glass latency and simulators per Mac mini — before committing to the architecture,
+      because both the pricing thesis and the roadmap depend on them.
+    </p>
+  </div>
+</footer>

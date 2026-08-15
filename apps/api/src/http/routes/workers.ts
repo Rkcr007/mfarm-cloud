@@ -1,0 +1,145 @@
+import type { FastifyInstance } from 'fastify';
+import { timingSafeEqual, createHash } from 'node:crypto';
+import { withSystem } from '../../db.ts';
+import { generateWorkerToken } from '../../auth.ts';
+import { negotiate, type WorkerRegistration } from '@mfarm/protocol';
+import { resetComplete } from '../../allocator.ts';
+import { ingest, type MeterKind } from '../../metering.ts';
+import { requireWorker } from '../server.ts';
+import { unauthorized, badRequest } from '../errors.ts';
+
+const digest = (s: string) => createHash('sha256').update(s).digest();
+
+function registrationTokenValid(presented: string | undefined): boolean {
+  const expected = process.env.WORKER_REGISTRATION_TOKEN;
+  if (!expected || !presented) return false;
+  // Hash both sides so the comparison is fixed-length regardless of input.
+  return timingSafeEqual(digest(presented), digest(expected));
+}
+
+export async function workerRoutes(app: FastifyInstance) {
+  /**
+   * Bootstrap. Authenticated by a shared registration token, not a bearer credential — this is the
+   * one endpoint a worker can reach before it has an identity.
+   *
+   * Registration is the credential-issuing operation: it returns a worker token the host persists
+   * and uses for everything afterwards, plus the public key it needs to verify session tokens
+   * offline. The worker never learns the signing key, so a compromised host cannot mint access to
+   * the rest of the fleet.
+   */
+  app.post<{ Body: WorkerRegistration }>('/workers/register', async (req, reply) => {
+    if (!registrationTokenValid(req.headers['x-worker-registration-token'] as string | undefined)) {
+      throw unauthorized('Invalid or missing X-Worker-Registration-Token.');
+    }
+
+    const reg = req.body;
+    if (!reg?.hostname || !reg?.region) throw badRequest('hostname and region are required.');
+
+    const result = negotiate(reg);
+    if (!result.ok) throw badRequest(result.reason);
+
+    const token = generateWorkerToken();
+
+    const host = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `INSERT INTO hosts (region, hostname, state, protocol_version, capabilities,
+                            cores, memory_mb, endpoint, token_prefix, token_hash, last_heartbeat_at)
+         VALUES ($1,$2,'UP',$3,$4::jsonb,$5,$6,$7,$8,$9, now())
+         ON CONFLICT (hostname) DO UPDATE SET
+           region = EXCLUDED.region, state = 'UP',
+           protocol_version = EXCLUDED.protocol_version,
+           capabilities = EXCLUDED.capabilities,
+           cores = EXCLUDED.cores, memory_mb = EXCLUDED.memory_mb,
+           endpoint = EXCLUDED.endpoint,
+           token_prefix = EXCLUDED.token_prefix, token_hash = EXCLUDED.token_hash,
+           last_heartbeat_at = now(),
+           quarantined_at = NULL, quarantine_reason = NULL
+         RETURNING id`,
+        [reg.region, reg.hostname, result.version, JSON.stringify(reg.capabilities),
+         reg.cores ?? null, reg.memoryMb ?? null, reg.endpoint ?? null,
+         token.prefix, token.hash],
+      );
+      const hostId = rows[0].id;
+
+      const schedulable = new Set(result.schedulable);
+      for (const d of reg.devices ?? []) {
+        await c.query(
+          `INSERT INTO devices (host_id, region, platform, tier, model, os_version,
+                                capabilities, local_id, state)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)
+           ON CONFLICT (host_id, local_id) WHERE local_id IS NOT NULL DO UPDATE SET
+             capabilities = EXCLUDED.capabilities,
+             os_version = EXCLUDED.os_version,
+             model = EXCLUDED.model,
+             updated_at = now()`,
+          [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,
+           JSON.stringify(d.capabilities), d.localId,
+           // A device missing snapshot-reset or persistent input registers so it stays visible and
+           // monitorable, but starts OFFLINE — it is never handed to a tenant.
+           schedulable.has(d.localId) ? 'READY' : 'OFFLINE'],
+        );
+      }
+      return hostId;
+    });
+
+    return reply.code(201).send({
+      hostId: host,
+      protocolVersion: result.version,
+      // Capabilities we know about that this worker did not advertise. Told plainly so an operator
+      // can see what the host is missing rather than discovering it when a feature silently no-ops.
+      degradedCapabilities: result.degraded,
+      schedulableDevices: result.schedulable,
+      workerToken: token.plaintext,
+      sessionPublicKey: app.signingKey.publicKeyPem,
+    });
+  });
+
+  /** Liveness. A host that stops heartbeating is a candidate for quarantine. */
+  app.post('/workers/heartbeat', async (req) => {
+    const { hostId } = requireWorker(req);
+    const row = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1 RETURNING state`,
+        [hostId],
+      );
+      return rows[0];
+    });
+    // Told on every beat so a host that was quarantined while partitioned learns it must drain.
+    return { ok: true, hostState: row?.state ?? 'DOWN' };
+  });
+
+  /**
+   * Worker-reported facts: metering and device state transitions.
+   *
+   * Batched because a busy host emits continuously and a request per event would cost more than the
+   * work being measured. Metering is idempotent by worker-supplied event id, so retrying a batch
+   * after a network failure cannot double-bill.
+   */
+  app.post<{
+    Body: {
+      metering?: Array<{ eventId: string; sessionId?: string | null; deviceId?: string | null;
+                         kind: MeterKind; quantity: number; occurredAt: string; orgId: string }>;
+      resets?: Array<{ deviceId: string; fence: number }>;
+    };
+  }>('/workers/events', async (req) => {
+    requireWorker(req);
+    const { metering = [], resets = [] } = req.body ?? {};
+
+    const recorded = await ingest(
+      metering.map((e) => ({
+        eventId: e.eventId, orgId: e.orgId, sessionId: e.sessionId ?? null,
+        deviceId: e.deviceId ?? null, kind: e.kind, quantity: e.quantity,
+        occurredAt: new Date(e.occurredAt),
+      })),
+    );
+
+    // A stale fence is expected, not exceptional: it means this worker was partitioned and the
+    // device has since moved on. Report it back rather than failing the batch.
+    const resetResults = [];
+    for (const r of resets) {
+      resetResults.push({ deviceId: r.deviceId, accepted: await resetComplete(r.deviceId, r.fence) });
+    }
+
+    return { meteringRecorded: recorded, meteringDuplicates: metering.length - recorded, resets: resetResults };
+  });
+}

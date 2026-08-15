@@ -1,0 +1,21 @@
+{
+  "name": "@mfarm/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "test": "node --test --test-concurrency=1 --experimental-strip-types test/*.test.ts"
+  },
+  "dependencies": {
+    "@mfarm/protocol": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@mfarm/api": "*",
+    "pg": "^8.13.1"
+  }
+}

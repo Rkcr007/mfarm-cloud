@@ -1,0 +1,8 @@
+{
+  "name": "mfarm",
+  "private": true,
+  "workspaces": ["packages/*", "apps/*", "workers/*"],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present"
+  }
+}
