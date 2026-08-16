@@ -13,7 +13,7 @@ Requires Node ≥ 22.6 (native TypeScript stripping — no build step) and Docke
 
 ## Status
 
-All 80 tests pass against a live PostgreSQL 16.
+All 116 tests pass against a live PostgreSQL 16.
 
 | Suite | Tests | Covers |
 |---|---:|---|
@@ -31,6 +31,8 @@ All 80 tests pass against a live PostgreSQL 16.
 | worker events | 3 | metering + reset reporting |
 | capability negotiation | 7 | v2 decision 10 |
 | WebDriver hub | 24 | v2 decision 10 |
+| configuration | 27 | what production refuses to start on |
+| lifecycle | 9 | probes, reaper scheduling, graceful shutdown |
 
 `npm run typecheck` runs `tsc --noEmit` over the workspace. Node strips types at runtime and never
 checks them, so without it nothing here is type-checked at all.
@@ -128,7 +130,8 @@ had done nothing, during exactly the fleet churn that makes expiry interesting
 
 | Route | Principal | Notes |
 |---|---|---|
-| `GET /health` | none | |
+| `GET /health` | none | liveness. No I/O, cannot fail while the process lives |
+| `GET /ready` | none | readiness. Queries both pools, 503 when either is down |
 | `GET /v1/devices`, `/v1/devices/:id` | tenant | RLS-filtered catalogue |
 | `POST /v1/sessions` | tenant | 201 allocated, 202 queued. Honours `Idempotency-Key` |
 | `GET /v1/sessions/:id` | tenant | |
@@ -182,11 +185,31 @@ The key rides in the URL because that is the only thing a WebDriver client is gi
 HTTP Basic, in either field, and only tenant keys are accepted that way — a worker credential has no
 business in a URL. `Authorization: Bearer` works too for clients that can set headers.
 
-**Vendor capabilities.** `mfarm:region` (required unless `MFARM_DEFAULT_REGION` is set),
-`mfarm:tier`, `mfarm:ttlMinutes`, `mfarm:queueTimeoutSeconds` (0 = fail immediately when the fleet is
-full; anything higher holds the request open until a device frees up). Non-standard capabilities
+**Vendor capabilities.** `mfarm:region` (required unless `MFARM_DEFAULT_REGION` is set, or a session
+is being bound), `mfarm:tier`, `mfarm:ttlMinutes`, `mfarm:queueTimeoutSeconds` (0 = fail immediately
+when the fleet is full; anything higher holds the request open until a device frees up), and
+`mfarm:sessionId`. Non-standard capabilities
 without a vendor prefix are rejected with a message naming the key, which is exactly what Appium 2
 does — a suite that works there works here.
+
+**Binding: driving a session you already hold.** By default `POST /session` allocates its own
+device. A caller that already has one — `mfarm run`, or anything using `POST /v1/sessions` — passes
+the session id instead, either as `mfarm:sessionId` or in the URL:
+
+```
+https://mfk_your_key:<session-id>@hub.mfarm.dev/wd/hub
+```
+
+The password half of the Basic credential is otherwise unused, and it is the only carrier a WebDriver
+client offers that needs no change to the suite. Both forms mean the same thing and must agree if
+both are present.
+
+A bound session belongs to its caller: the hub drives the device but releases nothing, not on failure
+and not on `driver.quit()`. Quit ends the WebDriver session only, so a suite that quits between tests
+re-binds the same device instead of allocating a new one for each. Without this the hub allocated a
+*second* device for every `mfarm run` and billed for it (ADR-0002 D1). The allocation capabilities
+above are refused alongside a binding rather than ignored — the device was chosen when the session
+was created, and `mfarm:region` is checked against it rather than obeyed.
 
 **The session id is the mfarm session id.** Not Appium's. One id in the test log, the API, the
 artifact index and the invoice, instead of a correlation exercise during an incident.
@@ -214,9 +237,41 @@ region alone, so a queued Android session could be promoted onto an iOS device.
 Artifacts, app install/launch outside Appium, and logcat streaming. Rate limiting is in-memory, so
 limits are per API instance — moving to Redis is required before running more than one.
 
-`reap()` is now schedulable — `buildServer({ reaperIntervalMs })` — but defaults to off, and there is
-no service entrypoint yet to turn it on. A deployment must, or expired sessions are never collected
-and `mfarm:queueTimeoutSeconds` can only ever time out.
+## Running it
+
+`npm start` (`node --experimental-strip-types src/main.ts`). `buildServer()` still defaults the
+reaper to off because that is right for tests; `main.ts` is what turns it on, from
+`REAPER_INTERVAL_MS`.
+
+`src/config.ts` reads the environment once and refuses to start with every problem listed at once,
+rather than one per restart. In production it additionally refuses:
+
+| Refusal | Because |
+|---|---|
+| no `SESSION_SIGNING_KEY` / `SESSION_PUBLIC_KEY` | the ephemeral fallback changes on every restart and every replica, so tokens in flight stop verifying |
+| half a signing keypair | `loadSigningKey()` needs both and silently falls back, so the deployed key is not the key in use |
+| `DATABASE_URL` still the local-dev default | localhost, a committed password, and a tmpfs data directory |
+| a committed password on any host | rotating the host does not make it a secret |
+| `DATABASE_URL` == `APP_DATABASE_URL` | the app would handle requests as the owner, and owners bypass RLS |
+| `REAPER_INTERVAL_MS` of 0 (or under 1s) | nothing expires sessions, promotes queued ones, or purges `idempotency_keys` |
+
+| Variable | Default | |
+|---|---|---|
+| `PORT` / `HOST` | `3000` / `0.0.0.0` | `0.0.0.0` because binding loopback in a container is a healthy, unreachable process |
+| `DATABASE_URL` | local dev | owner role; migrations and fleet ops |
+| `APP_DATABASE_URL` | local dev | `mfarm_app`; every request handler |
+| `SESSION_SIGNING_KEY` / `SESSION_PUBLIC_KEY` | ephemeral (dev only) | |
+| `REAPER_INTERVAL_MS` | `30000` | |
+| `RATE_LIMIT_MAX` | `120` | per org per minute, per instance |
+| `LOG_LEVEL` | `info` | validated here because pino throws on an unknown level |
+| `SHUTDOWN_GRACE_MS` | `15000` | fits inside Kubernetes' default 30s grace |
+
+Shutdown on SIGTERM/SIGINT: stop accepting connections, drain in-flight requests up to
+`SHUTDOWN_GRACE_MS`, clear the reaper interval (an `onClose` hook, so a `reap()` already in flight
+finishes its transaction), then `closePools()` — pools last, because ending one while a handler
+still holds a client turns a request that was about to succeed into a rolled-back transaction. A
+second signal exits immediately. An `uncaughtException` or `unhandledRejection` logs and exits
+non-zero rather than serving from a state nobody has reasoned about.
 
 ## Production notes
 

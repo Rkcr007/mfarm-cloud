@@ -69,10 +69,19 @@ export async function release(orgId: string, sessionId: string, reason = 'client
   });
 }
 
-/** Worker reports snapshot restore finished. Fleet operation — no tenant scope. */
-export async function resetComplete(deviceId: string, fence: number): Promise<boolean> {
+/**
+ * Worker reports snapshot restore finished.
+ *
+ * A fleet operation, so there is no tenant scope — but there IS a host scope, and it is the caller's
+ * authenticated host id, never a value from the request body. Without it any worker could mark any
+ * other host's device READY mid-restore (migration 008).
+ */
+export async function resetComplete(hostId: string, deviceId: string, fence: number): Promise<boolean> {
   return withSystem(async (c) => {
-    const { rows } = await c.query('SELECT device_reset_complete($1, $2) AS ok', [deviceId, fence]);
+    const { rows } = await c.query(
+      'SELECT device_reset_complete($1, $2, $3) AS ok',
+      [hostId, deviceId, fence],
+    );
     return rows[0].ok === true;
   });
 }

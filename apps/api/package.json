@@ -7,6 +7,7 @@
     "node": ">=22.6"
   },
   "scripts": {
+    "start": "node --experimental-strip-types src/main.ts",
     "db:up": "docker compose up -d && node scripts/wait-for-pg.mjs",
     "db:down": "docker compose down -v",
     "migrate": "node scripts/migrate.mjs",
@@ -20,6 +21,7 @@
     "@mfarm/protocol": "*"
   },
   "exports": {
+    "./config": "./src/config.ts",
     "./server": "./src/http/server.ts",
     "./db": "./src/db.ts",
     "./auth": "./src/auth.ts",

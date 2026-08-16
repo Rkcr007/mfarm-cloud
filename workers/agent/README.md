@@ -18,6 +18,14 @@ npm start         # requires the env below
 | `CF_INSTANCES` | no | instances to start, default 1 |
 | `AVD_NAME` | AVD fallback | only used when Cuttlefish is unavailable |
 | `DATA_PLANE_PORT` | no | default 8080 |
+| `APPIUM_ENABLED` | no | supervise an Appium 2 server for the device (see WebDriver below) |
+| `APPIUM_PATH` | no | binary to spawn, default `appium` on PATH |
+| `APPIUM_BASE_PORT` | no | first port of the derived range, default 4723 |
+| `APPIUM_ADVERTISE_HOST` | no | host in the *advertised* url only; the bind is always 127.0.0.1 |
+| `APPIUM_ENV_PASSTHROUGH` | no | extra env var names Appium may inherit; it gets an allowlist, not `process.env` |
+| `APPIUM_UNHEALTHY_GRACE_MS` | no | how long this host may still advertise `webdriver` after Appium stops answering before the agent drains to withdraw it, default 60000 |
+| `AGENT_DRAIN_TIMEOUT_MS` | no | hard deadline on a drain, default 30000 |
+| `AUTOMATION_ENDPOINT` | no | escape hatch for an externally-managed Appium; ignored when `APPIUM_ENABLED` is set |
 
 ## Structure
 
@@ -129,8 +137,50 @@ Cuttlefish instance serves WebDriver on one deployment and not on another.
 
 **The endpoint must not be publicly routable.** An open Appium port is unauthenticated device
 control — anyone who finds it owns every session on the host. The hub is the only ingress, because it
-is the only thing that knows about orgs. Running the Appium server itself is deployment work: the
-agent advertises it, it does not supervise it.
+is the only thing that knows about orgs.
+
+### Supervising Appium (`appium.ts`)
+
+Set `APPIUM_ENABLED=1` and the agent spawns Appium itself, bound to **127.0.0.1 only**, on a port
+derived from the device's local id (`cf-1` → 4723, `cf-2` → 4724). The `webdriver` capability is then
+advertised only after `GET /status` has actually answered — reporting ready on spawn alone means the
+first session of a freshly booted host hits a port Appium has not bound yet. A crash is restarted
+with exponential backoff (1s doubling to 60s); after 5 consecutive failed starts the supervisor goes
+permanently unhealthy instead of looping.
+
+**Withdrawal.** The capability has to come back off when Appium stops answering, and there is no
+in-place way to do that: the control plane writes `hosts.capabilities` at registration and nowhere
+else, the heartbeat ignores its body, and re-registering would also force `state = 'UP'` and clear
+any quarantine. So withdrawal is a drain and a non-zero exit, letting the process supervisor restart
+the agent into an honest registration. That now happens for a **transient** outage too, not only a
+permanent one: if Appium is unready for longer than `APPIUM_UNHEALTHY_GRACE_MS` (default 60s, sized
+to survive one ordinary crash plus cold start) while this host advertises `webdriver`, the agent
+drains. Recovery inside the window cancels it. The heartbeat also carries the current capability set
+already, which is inert until the control plane reads it — that is the real fix, and it is a
+protocol change.
+
+**Appium's environment is an allowlist, not an inheritance.** The agent's own environment holds
+`WORKER_REGISTRATION_TOKEN`, the credential that enrolls hosts fleet-wide; an automation server that
+loads third-party drivers must not have it. `PATH`, `HOME`, `JAVA_HOME`, the `ANDROID_*`/`APPIUM_*`/
+`ADB_*` families and a few locale and TLS variables pass through. Anything else a driver needs goes
+in `APPIUM_ENV_PASSTHROUGH` (comma-separated names).
+
+**Orphans.** Because the derived port is deliberately stable, an Appium that outlives its agent
+collides with the next one by design. The agent drains on `uncaughtException`/`unhandledRejection`
+as well as on signals, SIGKILLs the child's process group from a `process.on('exit')` backstop, and
+on the way in reclaims its port from a pid recorded in `<tmpdir>/mfarm-appium-<port>.pid` — only
+after confirming the live process still has `--port <port>` in its argv, so a recycled pid is never
+killed. A port held by anything else is reported, not seized.
+
+Two things this does not solve. Registration carries one host-level `automationEndpoint`, so a host
+with more than one device refuses to start Appium at all rather than advertise `webdriver` on a
+device the hub could never reach — use `AUTOMATION_ENDPOINT` and one operator-managed server for
+that shape. And a loopback-bound server is not reachable from the control plane on its own: that
+needs a private tunnel terminating on this host, with `APPIUM_ADVERTISE_HOST` naming its address.
+
+The supervision logic is tested against a fake server (`test/appium.test.ts`, no database). It has
+never spoken to a real Appium — see the header of `src/appium.ts` for the specific things that stay
+unverified until there is hardware.
 
 ## Not yet built
 

@@ -1,0 +1,276 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Read-only by default. A workflow that never needs to write should not hold a token that can.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Node 22, PostgreSQL 16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # -----------------------------------------------------------------------------------------
+      # This replicates apps/api/docker-compose.yml, which is local-only and never runs in CI.
+      # Three things must match it exactly or the suite talks to the wrong database:
+      #   image  postgres:16-alpine  (same major AND same variant as local, so behaviour matches)
+      #   user   mfarm / mfarm       -> becomes the superuser and schema OWNER, as in compose
+      #   db     mfarm
+      #   port   5433 on the host    -> compose maps 5433:5432 to dodge a local Postgres, and both
+      #                                 apps/api/src/db.ts and scripts/migrate.mjs hardcode 5433 as
+      #                                 their fallback. Publishing on 5433 here means the defaults
+      #                                 work untouched and there is one less thing to drift.
+      #
+      # The image tag is intentionally a floating major: it tracks whatever compose pulls locally,
+      # and "CI runs a different Postgres than my laptop" is a worse failure than a patch bump.
+      # Third-party *actions* are a different story and are pinned by SHA below.
+      # -----------------------------------------------------------------------------------------
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mfarm
+          POSTGRES_PASSWORD: mfarm
+          POSTGRES_DB: mfarm
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U mfarm -d mfarm"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      # -----------------------------------------------------------------------------------------
+      # TWO ROLES, TWO URLS. This is the single most dangerous thing in the repo to get wrong.
+      #
+      # DATABASE_URL     -> mfarm, the superuser/owner. Migrations and fleet ops ONLY.
+      # APP_DATABASE_URL -> mfarm_app, created by migrations/001_init.sql with plain LOGIN and no
+      #                     SUPERUSER and no BYPASSRLS. Everything that serves a tenant request.
+      #
+      # A PostgreSQL superuser bypasses row-level security unconditionally — FORCE ROW LEVEL
+      # SECURITY does not apply to them and no policy can stop them. So if APP_DATABASE_URL ever
+      # pointed at `mfarm`, every RLS policy in 002_rls.sql would still read as ENABLED in the
+      # catalog while enforcing nothing, and the cross-tenant isolation tests would pass green
+      # against a database with isolation switched off. That is a green build certifying a
+      # tenant-data breach. The "Verify Postgres role setup" step below exists to make that
+      # mistake impossible to merge rather than merely unlikely.
+      #
+      # The passwords are the local-dev ones from 001_init.sql and docker-compose.yml. They are
+      # public by construction and guard an ephemeral throwaway container; see HANDOFF.md issue 4.
+      # -----------------------------------------------------------------------------------------
+      DATABASE_URL: postgres://mfarm:mfarm@localhost:5433/mfarm
+      APP_DATABASE_URL: postgres://mfarm_app:mfarm_app@localhost:5433/mfarm
+
+    steps:
+      # Third-party actions are pinned to a full commit SHA rather than a tag on purpose.
+      # `@v7` is a mutable ref: whoever owns the action can move it to any commit at any time, and
+      # every workflow trusting the tag then executes that new code with this job's token and
+      # secrets. A SHA is immutable, so an upgrade becomes a reviewable diff instead of a silent
+      # substitution. The trailing comment records which release the SHA was, for upgrade sanity.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # >= 22.6 is a hard requirement: the repo has no build step and relies on Node's native
+          # TypeScript stripping to run .ts directly.
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      # `npm ci` deliberately, not `npm install`: it installs exactly the lockfile and refuses to
+      # edit it, so CI cannot silently resolve a different dependency tree than the one reviewed.
+      # The trade-off is that ADDING A WORKSPACE (a new apps/*, packages/* or workers/* directory)
+      # requires committing a refreshed package-lock.json, or this step fails. The hint below turns
+      # npm's rather opaque sync error into an actionable one.
+      - name: Install dependencies
+        run: |
+          set -uo pipefail
+          if ! npm ci; then
+            echo "::error title=Lockfile out of sync::npm ci failed. If a workspace was added or a dependency changed, run 'npm install' at the repo root and commit the updated package-lock.json."
+            exit 1
+          fi
+
+      # Runs as DATABASE_URL, i.e. the owner — matching the local `npm run migrate`. 001_init.sql
+      # is what creates the mfarm_app role, so nothing may connect as mfarm_app before this.
+      - name: Run migrations
+        working-directory: apps/api
+        run: npm run migrate
+
+      # -------------------------------------------------------------------------------------
+      # The guard. Everything after this point is only meaningful if these assertions hold.
+      # -------------------------------------------------------------------------------------
+      - name: Verify Postgres role setup (RLS is actually enforced)
+        run: |
+          set -euo pipefail
+
+          if [ "${DATABASE_URL}" = "${APP_DATABASE_URL}" ]; then
+            echo "::error::APP_DATABASE_URL equals DATABASE_URL. The app would connect as the superuser and RLS would be silently disabled."
+            exit 1
+          fi
+
+          # (1) Catalog check, as the owner. Proves the app role has no way around RLS.
+          psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 --no-psqlrc -q <<'SQL'
+          DO $$
+          DECLARE
+            r  record;
+            t  text;
+            rs boolean;
+            fs boolean;
+          BEGIN
+            SELECT rolsuper, rolbypassrls, rolcanlogin
+              INTO r
+              FROM pg_roles
+             WHERE rolname = 'mfarm_app';
+
+            IF NOT FOUND THEN
+              RAISE EXCEPTION 'role mfarm_app does not exist - migrations/001_init.sql did not run';
+            END IF;
+            IF r.rolsuper THEN
+              RAISE EXCEPTION 'mfarm_app is a SUPERUSER: it bypasses RLS unconditionally and every policy is decorative';
+            END IF;
+            IF r.rolbypassrls THEN
+              RAISE EXCEPTION 'mfarm_app has BYPASSRLS: every policy is decorative';
+            END IF;
+            IF NOT r.rolcanlogin THEN
+              RAISE EXCEPTION 'mfarm_app cannot log in; the app pool would fail to connect';
+            END IF;
+
+            -- ENABLE alone is not enough. Without FORCE, the table OWNER skips every policy, which
+            -- is exactly how people end up believing RLS is on when it is not (see 002_rls.sql).
+            FOREACH t IN ARRAY ARRAY['orgs','memberships','api_keys','devices','sessions','metering_events']
+            LOOP
+              SELECT relrowsecurity, relforcerowsecurity
+                INTO rs, fs
+                FROM pg_class
+               WHERE oid = format('public.%I', t)::regclass;
+
+              IF NOT rs THEN RAISE EXCEPTION 'table % does not have ROW LEVEL SECURITY enabled', t; END IF;
+              IF NOT fs THEN RAISE EXCEPTION 'table % does not have FORCE ROW LEVEL SECURITY', t; END IF;
+            END LOOP;
+
+            RAISE NOTICE 'mfarm_app: no superuser, no bypassrls; 6 tenant tables ENABLE+FORCE RLS';
+          END $$;
+          SQL
+
+          # (2) Live check, connecting the way the app actually connects. `is_superuser` is the
+          #     discriminating signal here: it is the one thing that would still report `on` if
+          #     APP_DATABASE_URL had been pointed at the owner, on an otherwise empty database
+          #     where a row-count check would look identical either way.
+          psql "${APP_DATABASE_URL}" -v ON_ERROR_STOP=1 --no-psqlrc -q <<'SQL'
+          DO $$
+          BEGIN
+            IF current_user <> 'mfarm_app' THEN
+              RAISE EXCEPTION 'APP_DATABASE_URL connects as %, expected mfarm_app', current_user;
+            END IF;
+            IF current_setting('is_superuser') <> 'off' THEN
+              RAISE EXCEPTION 'the app connection is a superuser; RLS is not being enforced';
+            END IF;
+            IF current_org() IS NOT NULL THEN
+              RAISE EXCEPTION 'app.org_id leaked onto a fresh connection: expected NULL, got %', current_org();
+            END IF;
+            RAISE NOTICE 'app connection verified: mfarm_app, is_superuser=off, current_org()=NULL';
+          END $$;
+          SQL
+
+          # (3) SECURITY DEFINER reach. RLS says nothing about these — a definer function runs as the
+          #     owner and every policy is off inside it, so the only thing standing between request
+          #     handling and a fleet-wide mutation is the EXECUTE grant. Postgres grants EXECUTE to
+          #     PUBLIC by default, which means a new definer function is reachable from the app pool
+          #     unless a migration says otherwise; forgetting that REVOKE is silent, and this is what
+          #     catches it (see migrations/008_scope_worker_mutations.sql).
+          psql "${APP_DATABASE_URL}" -v ON_ERROR_STOP=1 --no-psqlrc -q <<'SQL'
+          DO $$
+          DECLARE fn text;
+          BEGIN
+            FOREACH fn IN ARRAY ARRAY[
+              'expire_sessions()',
+              'promote_queued(integer)',
+              'quarantine_host(uuid,text)',
+              'device_reset_complete(uuid,uuid,bigint)',
+              'record_metering(uuid,uuid[],uuid[],uuid[],text[],numeric[],timestamptz[])'
+            ]
+            LOOP
+              IF has_function_privilege('mfarm_app', fn, 'EXECUTE') THEN
+                RAISE EXCEPTION
+                  'mfarm_app can EXECUTE %, a fleet-wide SECURITY DEFINER function. It is called on the system pool; revoke it.', fn;
+              END IF;
+            END LOOP;
+            RAISE NOTICE 'fleet-wide definer functions are unreachable from the app pool';
+          END $$;
+          SQL
+
+          echo "RLS enforcement verified."
+
+      # Deliberately three separate steps rather than one `&&` chain: on a red build the step name
+      # in the UI should already say whether it was the schema, the tests, or the types.
+      - name: Run tests
+        run: npm test
+
+      # tsc --noEmit is the ONLY thing that checks types in this repo. Node strips them without
+      # looking at them, so a wrong field name runs fine until the branch that touches it.
+      - name: Typecheck
+        run: npm run typecheck
+
+  yaml-lint:
+    name: Workflow hygiene (YAML, pins, shell syntax)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A broken action.yml is invisible until a customer's workflow fails on it, so parse it here.
+      # Uses the runner's preinstalled python3 + PyYAML — no third-party action, nothing to pin.
+      - name: Parse every workflow and action.yml
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, sys, yaml
+
+          files = sorted(pathlib.Path('.github/workflows').glob('*.y*ml'))
+          files.append(pathlib.Path('action.yml'))
+
+          failed = False
+          for f in files:
+              try:
+                  yaml.safe_load(f.read_text())
+                  print(f'ok   {f}')
+              except yaml.YAMLError as e:
+                  print(f'FAIL {f}: {e}')
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+      # -------------------------------------------------------------------------------------
+      # Three rules that were previously enforced by a reviewer noticing, which is not
+      # enforcement. Each one is here because it was violated at least once.
+      #
+      #   1. Every third-party `uses:` is a 40-hex SHA. A tag is a mutable pointer its owner can
+      #      move to any commit, so `@v5` executes unaudited code with this job's secrets. This
+      #      also covers docs/ci.md, because the snippet we hand customers is the one that ends
+      #      up in their repos.
+      #   2. No `run:` block is syntactically broken. `bash -n` parses without executing, which
+      #      catches an unterminated heredoc or quote before a customer's job does.
+      #   3. No floating npm dist-tag in action.yml. The CLI process holds MFARM_API_KEY and
+      #      derives MFARM_WEBDRIVER_URL from it, so `@latest` means an unreviewed publish runs
+      #      with the customer's credential on their next CI run.
+      # -------------------------------------------------------------------------------------
+      - name: Check pins, shell syntax and dependency versions
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-workflow-hygiene.py

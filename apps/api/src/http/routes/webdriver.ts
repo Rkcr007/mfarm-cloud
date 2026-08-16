@@ -2,6 +2,8 @@ import type { FastifyError, FastifyInstance, FastifyRequest } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, activate, release } from '../../allocator.ts';
 import { requireTenant } from '../server.ts';
+import { sessionBindingFromBasic } from '../../auth.ts';
+import { mintSessionToken, type SessionClaims } from '../../tokens.ts';
 import { ApiError } from '../errors.ts';
 import { parseCapabilities } from '../webdriver/capabilities.ts';
 import {
@@ -114,6 +116,25 @@ function redact(caps: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function webdriverRoutes(app: FastifyInstance) {
+  /**
+   * The credential the automation hop travels under (ADR-0004).
+   *
+   * Appium binds loopback, so something on the worker has to terminate the connection and forward —
+   * and that something must be able to tell an authorised request from a stranger's. This is that
+   * proof, and it is deliberately the SAME token a browser presents to drive a device: minted with
+   * the control plane's Ed25519 key, verifiable offline by a worker that holds only the public half,
+   * scoped to one session, one device and one host, and valid for two minutes.
+   *
+   * The alternative was a private network, which authenticates the packet's origin rather than the
+   * request — so every peer on it could drive every device. See ADR-0004 for why that is worse
+   * rather than simpler.
+   *
+   * A bare Appium ignores the header, so sending it is safe before the worker-side gateway exists.
+   */
+  const grantHeader = (claims: Omit<SessionClaims, 'iat' | 'exp'>) => ({
+    authorization: `Bearer ${mintSessionToken(claims, app.signingKey.privateKeyPem)}`,
+  });
+
   // Registered under two prefixes (Appium 2 serves at `/`, Selenium Grid and Appium 1 at `/wd/hub`),
   // so the proxy has to know which one it was reached through to reconstruct the upstream path.
   const prefix = app.prefix;
@@ -181,50 +202,80 @@ export async function webdriverRoutes(app: FastifyInstance) {
     const { orgId } = requireTenant(req);
     const caps = parseCapabilities(req.body, {
       defaultRegion: process.env.MFARM_DEFAULT_REGION,
+      urlSessionId: sessionBindingFromBasic(req.headers.authorization),
     });
 
-    const alloc = await allocate({
-      orgId,
-      userId: null,
-      region: caps.region,
-      platform: caps.platform,
-      tier: caps.tier ?? null,
-      ttlMinutes: caps.ttlMinutes,
-      // A device with no automation server cannot serve this session. Demanding the capability up
-      // front is the difference between "no capacity" and allocating, failing, and trying again.
-      requireCapabilities: ['webdriver'],
-    });
+    // Two ways in, and which one it is decides who owns the device afterwards.
+    //
+    //   bind      — the caller already allocated a session and is telling us to drive it. They keep
+    //               the lifecycle; we borrow the device and give back nothing (ADR-0002 D1).
+    //   allocate  — a plain WebDriver client with only a hub URL. We allocate, and we are then
+    //               responsible for releasing on every exit path.
+    const bound = caps.bindSessionId
+      ? await bind(orgId, caps.bindSessionId, caps.platform, caps.region)
+      : null;
 
-    let deviceId = alloc.deviceId;
-    let fence = alloc.fence;
+    let sessionId: string;
+    let deviceId: string | null;
+    let fence: number | null;
+    const hubAllocated = bound === null;
 
-    if (deviceId === null) {
-      const promoted = await waitForCapacity(req, orgId, alloc.sessionId, caps.queueTimeoutSeconds);
-      if (!promoted) {
-        await release(orgId, alloc.sessionId, 'no_capacity');
-        throw sessionNotCreated(
-          caps.queueTimeoutSeconds > 0
-            ? `No ${caps.platform} device with an automation server became free in ${caps.queueTimeoutSeconds}s in region ${caps.region}.`
-            : `No ${caps.platform} device with an automation server is free in region ${caps.region}. Set the \`mfarm:queueTimeoutSeconds\` capability to wait for one instead of failing.`,
-          'no_capacity',
-        );
+    if (bound) {
+      ({ sessionId, deviceId, fence } = bound);
+    } else {
+      const region = caps.region;
+      if (region === undefined) {
+        // parseCapabilities enforces this whenever there is no session to bind to. Restated here
+        // because the type cannot carry "one of these two is always present".
+        throw sessionNotCreated('A region is required. Set the `mfarm:region` capability.', 'no_region');
       }
-      deviceId = promoted.deviceId;
-      fence = promoted.fence;
+
+      const alloc = await allocate({
+        orgId,
+        userId: null,
+        region,
+        platform: caps.platform,
+        tier: caps.tier ?? null,
+        ttlMinutes: caps.ttlMinutes,
+        // A device with no automation server cannot serve this session. Demanding the capability up
+        // front is the difference between "no capacity" and allocating, failing, and trying again.
+        requireCapabilities: ['webdriver'],
+      });
+      sessionId = alloc.sessionId;
+      deviceId = alloc.deviceId;
+      fence = alloc.fence;
+
+      if (deviceId === null) {
+        const promoted = await waitForCapacity(req, orgId, sessionId, caps.queueTimeoutSeconds);
+        if (!promoted) {
+          await release(orgId, sessionId, 'no_capacity');
+          throw sessionNotCreated(
+            caps.queueTimeoutSeconds > 0
+              ? `No ${caps.platform} device with an automation server became free in ${caps.queueTimeoutSeconds}s in region ${region}.`
+              : `No ${caps.platform} device with an automation server is free in region ${region}. Set the \`mfarm:queueTimeoutSeconds\` capability to wait for one instead of failing.`,
+            'no_capacity',
+          );
+        }
+        deviceId = promoted.deviceId;
+        fence = promoted.fence;
+      }
     }
 
-    // From here on the device is OURS and every exit path has to give it back. A device left in
-    // RESERVED because Appium failed to start is capacity that is billed to nobody and usable by
-    // nobody until the reaper notices.
+    // From here on the device is in play and every exit path has to leave it in a defensible state.
+    // A device left in RESERVED because Appium failed to start is capacity that is billed to nobody
+    // and usable by nobody until the reaper notices — but only the session's OWNER may release it,
+    // which on the bound path is not us.
     try {
       const target = await withSystem(async (c) => {
         const { rows } = await c.query(
-          `SELECT d.local_id, h.automation_endpoint
+          `SELECT d.local_id, d.host_id, h.automation_endpoint
              FROM devices d JOIN hosts h ON h.id = d.host_id
             WHERE d.id = $1`,
           [deviceId],
         );
-        return rows[0] as { local_id: string | null; automation_endpoint: string | null } | undefined;
+        return rows[0] as {
+          local_id: string | null; host_id: string; automation_endpoint: string | null;
+        } | undefined;
       });
 
       if (!target?.automation_endpoint) {
@@ -244,7 +295,10 @@ export async function webdriverRoutes(app: FastifyInstance) {
         `${base}/session`,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            ...grantHeader({ sid: sessionId, did: deviceId, org: orgId, fence: fence!, aud: target.host_id }),
+          },
           body: JSON.stringify({ capabilities: { alwaysMatch: upstreamCaps, firstMatch: [{}] } }),
         },
         NEW_SESSION_TIMEOUT_MS,
@@ -263,26 +317,41 @@ export async function webdriverRoutes(app: FastifyInstance) {
       await withTenant(orgId, (c) =>
         c.query(
           `INSERT INTO webdriver_sessions
-             (session_id, org_id, device_id, upstream_session_id, upstream_base_url, capabilities)
-           VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
-          [alloc.sessionId, orgId, deviceId, created.id, base, JSON.stringify(redact(created.capabilities))],
+             (session_id, org_id, device_id, upstream_session_id, upstream_base_url, capabilities,
+              hub_allocated)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+          [sessionId, orgId, deviceId, created.id, base,
+           JSON.stringify(redact(created.capabilities)), hubAllocated],
         ),
       );
 
       // The WebDriver session being live IS the session being active — there is no separate signal
-      // to wait for, and leaving it ALLOCATING would have the reaper collect a working session.
-      await activate(orgId, alloc.sessionId, fence!);
+      // to wait for, and leaving it ALLOCATING would have the reaper collect a working session. A
+      // bound session may already be ACTIVE (its owner drove the data plane first, or an earlier
+      // WebDriver session on the same allocation already activated it), and activate() answering
+      // false for that is not a failure.
+      await activate(orgId, sessionId, fence!);
 
       // The session id we hand back is the mfarm session id, not Appium's. One id in the test log,
       // the API, the artifact index and the invoice.
-      const value = { sessionId: alloc.sessionId, capabilities: created.capabilities };
+      const value = { sessionId, capabilities: created.capabilities };
       return reply
         .code(200)
         .send(caps.protocol === 'jsonwp'
-          ? { sessionId: alloc.sessionId, status: 0, value: created.capabilities }
+          ? { sessionId, status: 0, value: created.capabilities }
           : { value });
     } catch (err) {
-      await release(orgId, alloc.sessionId, 'session_not_created').catch(() => {});
+      // Only the owner releases. On the bound path the caller is holding this session — `mfarm run`
+      // will release it on its own way out — and releasing it here would end a run that is still
+      // going, from under a process that believes it owns the device.
+      if (hubAllocated) {
+        await release(orgId, sessionId, 'session_not_created').catch(() => {});
+      } else {
+        req.log.warn(
+          { sessionId, err },
+          'webdriver session could not be created on a bound session; leaving it for its owner to release',
+        );
+      }
       throw err;
     }
   });
@@ -316,7 +385,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
     // follows erases whatever the upstream would have tidied anyway.
     await callUpstream(
       `${row.upstream_base_url}/session/${encodeURIComponent(row.upstream_session_id)}`,
-      { method: 'DELETE' },
+      { method: 'DELETE', headers: grantFor(orgId, req.params.sessionId, row) },
       30_000,
     ).catch((e: Error) => {
       req.log.warn({ err: e, sessionId: req.params.sessionId }, 'upstream session delete failed; releasing anyway');
@@ -325,7 +394,15 @@ export async function webdriverRoutes(app: FastifyInstance) {
     await withTenant(orgId, (c) =>
       c.query('DELETE FROM webdriver_sessions WHERE session_id = $1', [req.params.sessionId]),
     );
-    await release(orgId, req.params.sessionId, 'webdriver_quit');
+
+    // `driver.quit()` ends the WebDriver session. Whether it also ends the mfarm SESSION depends on
+    // who allocated it: for a plain client the two are the same thing, but under `mfarm run` the
+    // caller owns the device and quit is just the end of one test. Releasing here would take the
+    // device away mid-run — and a suite that quits between tests would then need a fresh allocation
+    // for every one of them, which is the double-billing defect in a different shape.
+    if (row.hub_allocated) {
+      await release(orgId, req.params.sessionId, 'webdriver_quit');
+    }
 
     return { value: null };
   });
@@ -357,7 +434,12 @@ export async function webdriverRoutes(app: FastifyInstance) {
         `${row.upstream_base_url}${upstreamPath}`,
         {
           method: req.method,
-          headers: hasBody ? { 'content-type': 'application/json' } : {},
+          headers: {
+            ...(hasBody ? { 'content-type': 'application/json' } : {}),
+            // Minted per command, not per session: a grant lives two minutes, and a suite's session
+            // lives for the length of the suite.
+            ...grantFor(orgId, req.params.sessionId, row),
+          },
           body: hasBody ? JSON.stringify(req.body ?? {}) : undefined,
         },
         COMMAND_TIMEOUT_MS,
@@ -382,11 +464,116 @@ export async function webdriverRoutes(app: FastifyInstance) {
 
   // ---------------------------------------------------------------- helpers
 
+  /**
+   * Resolve a session the caller already owns into something this hub can drive.
+   *
+   * Everything here is a refusal the alternative — allocating a second device — would have hidden.
+   * The session must be this org's (RLS), live, actually holding a device, that device must be able
+   * to run Appium, and it must not already be driving a WebDriver session. Each of those is a
+   * question the allocator answers implicitly on the unbound path, so binding has to ask them all
+   * explicitly.
+   */
+  async function bind(
+    orgId: string,
+    sessionId: string,
+    declaredPlatform: 'android' | 'ios',
+    declaredRegion: string | undefined,
+  ): Promise<{ sessionId: string; deviceId: string; fence: number }> {
+    const row = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT s.state, s.device_id, s.fence, s.region,
+                d.platform AS device_platform,
+                d.capabilities AS device_capabilities,
+                (SELECT count(*) FROM webdriver_sessions w WHERE w.session_id = s.id) AS bound
+           FROM sessions s
+           LEFT JOIN devices d ON d.id = s.device_id
+          WHERE s.id = $1`,
+        [sessionId],
+      );
+      return rows[0] as {
+        state: string; device_id: string | null; fence: string | null; region: string;
+        device_platform: string | null; device_capabilities: string[] | null; bound: string;
+      } | undefined;
+    });
+
+    // Another org's session id is indistinguishable from one that never existed — the same
+    // disclosure boundary the rest of the API keeps.
+    if (!row) {
+      throw sessionNotCreated(
+        `No session ${sessionId} in this organisation. \`mfarm:sessionId\` must name a session this API key can see.`,
+        'unknown_session',
+      );
+    }
+    if (row.state === 'QUEUED') {
+      throw sessionNotCreated(
+        `Session ${sessionId} is still queued and has no device yet. Wait for it to reach ALLOCATING or ACTIVE before pointing a WebDriver client at it.`,
+        'session_queued',
+      );
+    }
+    if (row.state !== 'ALLOCATING' && row.state !== 'ACTIVE') {
+      throw sessionNotCreated(
+        `Session ${sessionId} is ${row.state}; it can no longer be driven.`,
+        'session_not_live',
+      );
+    }
+    if (!row.device_id || row.fence === null) {
+      throw sessionNotCreated(`Session ${sessionId} holds no device.`, 'session_has_no_device');
+    }
+    if (Number(row.bound) > 0) {
+      throw sessionNotCreated(
+        `Session ${sessionId} already has a WebDriver session. Quit it before starting another, or allocate a second session.`,
+        'session_already_bound',
+      );
+    }
+    // The unbound path demands the `webdriver` capability from the allocator. Binding has to check
+    // the same thing, or `mfarm run` on a device with no Appium fails several hundred milliseconds
+    // later at the proxy hop with a far worse message.
+    if (!(row.device_capabilities ?? []).includes('webdriver')) {
+      throw sessionNotCreated(
+        `The device on session ${sessionId} has no automation server, so it cannot serve WebDriver. Allocate with the \`webdriver\` capability.`,
+        'no_automation_endpoint',
+      );
+    }
+    // `platformName` is required by the protocol, so every client sends one. It is a claim about
+    // what the device is, and if it is wrong the run cannot work — the mismatch would otherwise
+    // surface as an unrelated Appium error several hundred milliseconds later.
+    if (row.device_platform !== declaredPlatform) {
+      throw sessionNotCreated(
+        `\`platformName\` is ${declaredPlatform} but session ${sessionId} holds a ${row.device_platform} device.`,
+        'platform_mismatch',
+      );
+    }
+    // A region on the request is a claim about where this test is running. If it disagrees with the
+    // session, one of the two is wrong and quietly preferring either is how a suite ends up
+    // reporting results from a region it never asked for.
+    if (declaredRegion !== undefined && declaredRegion !== row.region) {
+      throw sessionNotCreated(
+        `\`mfarm:region\` is ${declaredRegion} but session ${sessionId} is in ${row.region}. The session's region wins; remove the capability.`,
+        'region_mismatch',
+      );
+    }
+
+    return { sessionId, deviceId: row.device_id, fence: Number(row.fence) };
+  }
+
   interface SessionRow {
     upstream_session_id: string;
     upstream_base_url: string;
     last_command_at: Date;
+    hub_allocated: boolean;
+    /** Everything the automation grant has to say. Read here so no proxied command needs a second
+     *  round trip to mint one (ADR-0004). */
+    device_id: string;
+    host_id: string;
+    fence: string;
   }
+
+  /** The grant for a live session, built from the row `lookup` already fetched. */
+  const grantFor = (orgId: string, sessionId: string, row: SessionRow) =>
+    grantHeader({
+      sid: sessionId, did: row.device_id, org: orgId,
+      fence: Number(row.fence), aud: row.host_id,
+    });
 
   /**
    * Resolve a WebDriver session id for this tenant.
@@ -403,8 +590,11 @@ export async function webdriverRoutes(app: FastifyInstance) {
 
     const row = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
-        `SELECT w.upstream_session_id, w.upstream_base_url, w.last_command_at
-           FROM webdriver_sessions w JOIN sessions s ON s.id = w.session_id
+        `SELECT w.upstream_session_id, w.upstream_base_url, w.last_command_at, w.hub_allocated,
+                w.device_id, s.fence, d.host_id
+           FROM webdriver_sessions w
+           JOIN sessions s ON s.id = w.session_id
+           JOIN devices  d ON d.id = w.device_id
           WHERE w.session_id = $1 AND s.state IN ('ALLOCATING','ACTIVE')`,
         [sessionId],
       );

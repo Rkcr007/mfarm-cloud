@@ -1,0 +1,742 @@
+name: Action self-test
+
+# Exercises action.yml end to end. Two layers, deliberately:
+#
+#   `scenarios`  drives a bash STUB that implements exactly the slice of the frozen `mfarm` CLI
+#                contract the action depends on. Fast, hermetic, and able to inject exit codes the
+#                real CLI would need a real outage to produce. What it proves is the action's own
+#                wiring: argument construction, the secret never reaching argv, the child's
+#                environment surfacing as outputs, and the exit-code verdict.
+#
+#   `real-cli`   drives the ACTUAL apps/cli/src/bin.ts against a stub control-plane HTTP server.
+#                A stub CLI written from the same contract document as the action only proves one
+#                reading of that document agrees with itself; this job is the only thing that
+#                tests the apps/cli <-> action.yml seam, which is where a live bug was found
+#                (`--platform ''` was reaching the CLI as a value rather than as an absence).
+#
+# Both jobs also run locally, against the same matrix and the same assertions, via
+# `.github/scripts/action-selftest-local.py`.
+
+on:
+  push:
+    paths:
+      - 'action.yml'
+      - '.github/workflows/action-test.yml'
+      - '.github/scripts/**'
+      - 'apps/cli/**'
+  pull_request:
+    paths:
+      - 'action.yml'
+      - '.github/workflows/action-test.yml'
+      - '.github/scripts/**'
+      - 'apps/cli/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: action-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scenarios:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The child runs and passes -> action succeeds, ids surface as outputs.
+          - name: 'child exits 0 -> success'
+            scenario: 'child'
+            command: 'echo "running against $MFARM_SESSION_ID"; exit 0'
+            platform: 'android'
+            tier: 'cuttlefish'
+            ttl: '15'
+            wait: '120'
+            api_url: 'https://stub.invalid'
+            expect_outcome: 'success'
+            expect_child_ran: 'true'
+            expect_code: '0'
+            expect_verdict: 'pass'
+          # Only the three required inputs. The four optional flags must be ABSENT, not passed
+          # empty: `--ttl ''` would override the CLI's own default with nonsense, and the CLI is
+          # the single source of truth for defaults.
+          - name: 'required inputs only -> optional flags omitted'
+            scenario: 'child'
+            command: 'exit 0'
+            platform: 'android'
+            tier: ''
+            ttl: ''
+            wait: ''
+            api_url: ''
+            expect_outcome: 'success'
+            expect_child_ran: 'true'
+            expect_code: '0'
+            expect_verdict: 'pass'
+          # --platform gets the same treatment as the other optional flags. It did NOT, and the
+          # CLI reads `--platform ''` as the literal empty string and rejects it, which turned an
+          # empty input into a setup failure instead of "let the CLI choose". Same rule as --ttl.
+          - name: 'empty platform -> --platform omitted, not passed empty'
+            scenario: 'child'
+            command: 'exit 0'
+            platform: ''
+            tier: ''
+            ttl: ''
+            wait: ''
+            api_url: ''
+            expect_outcome: 'success'
+            expect_child_ran: 'true'
+            expect_code: '0'
+            expect_verdict: 'pass'
+          # A genuine test failure with an unusual code. Must come back verbatim, not remapped.
+          - name: 'child exits 3 -> failure, code preserved'
+            scenario: 'child'
+            command: 'exit 3'
+            platform: 'android'
+            tier: 'cuttlefish'
+            ttl: '15'
+            wait: '120'
+            api_url: 'https://stub.invalid'
+            expect_outcome: 'failure'
+            expect_child_ran: 'true'
+            expect_code: '3'
+            expect_verdict: 'test-failure'
+          # Contract exit 1 WITH the child having run: an ordinary failing suite. Must be annotated
+          # as a test failure, not as a setup failure - same code, different cause.
+          - name: 'child exits 1 -> test failure'
+            scenario: 'child'
+            command: 'exit 1'
+            platform: 'android'
+            tier: 'cuttlefish'
+            ttl: '15'
+            wait: '120'
+            api_url: 'https://stub.invalid'
+            expect_outcome: 'failure'
+            expect_child_ran: 'true'
+            expect_code: '1'
+            expect_verdict: 'test-failure'
+          # Contract exit 75 (EX_TEMPFAIL): out of capacity. Must fail the job but be annotated as
+          # a warning, and the child must never have started.
+          - name: 'CLI exits 75 -> capacity, child never ran'
+            scenario: 'capacity'
+            command: 'echo "should never run"; exit 0'
+            platform: 'android'
+            tier: 'cuttlefish'
+            ttl: '15'
+            wait: '120'
+            api_url: 'https://stub.invalid'
+            expect_outcome: 'failure'
+            expect_child_ran: 'false'
+            expect_code: '75'
+            expect_verdict: 'capacity'
+          # Contract exit 1 BEFORE the child starts: auth/config/allocation failure.
+          - name: 'CLI exits 1 before child -> setup failure'
+            scenario: 'setup-failure'
+            command: 'echo "should never run"; exit 0'
+            platform: 'android'
+            tier: 'cuttlefish'
+            ttl: '15'
+            wait: '120'
+            api_url: 'https://stub.invalid'
+            expect_outcome: 'failure'
+            expect_child_ran: 'false'
+            expect_code: '1'
+            expect_verdict: 'setup-failure'
+
+    env:
+      # Obviously fake, and deliberately NOT a secret: GitHub would mask a real secret everywhere,
+      # which would hide the very leak this job is trying to catch. If the action ever puts the key
+      # on a command line, the argv assertion below sees it in the clear and fails.
+      STUB_API_KEY: 'mfk_stub_key_must_never_reach_argv'
+      STUB_REGION: 'us-east'
+
+    steps:
+      - name: Check out
+        # Pinned to a full commit SHA rather than @v7 — a tag is mutable and can be re-pointed at
+        # arbitrary code by the action's owner. actions/checkout v7.0.1.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the stub mfarm CLI
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/stub"
+
+          cat > "${RUNNER_TEMP}/stub/mfarm" <<'STUB_EOF'
+          #!/usr/bin/env bash
+          # Stand-in for the real `mfarm` CLI. Implements only the contract surface action.yml
+          # touches, and records what it was handed so the test can assert on it.
+          set -uo pipefail
+
+          : > "${STUB_ARGV_FILE}"
+          for a in "$@"; do printf '%s\n' "$a" >> "${STUB_ARGV_FILE}"; done
+
+          # The contract's env-preferred auth path. Record whether the key arrived here, where it
+          # belongs, rather than on the command line.
+          printf '%s\n' "${MFARM_API_KEY:-<unset>}" > "${STUB_ENV_KEY_FILE}"
+
+          case "${STUB_SCENARIO}" in
+            capacity)
+              echo "mfarm: no capacity in ${STUB_REGION} before --wait expired" >&2
+              exit 75
+              ;;
+            setup-failure)
+              echo "mfarm: 401 unauthorized" >&2
+              exit 1
+              ;;
+          esac
+
+          # Discard everything up to and including the `--` separator; what is left is the child.
+          # Done with shift rather than an array so the script also runs under bash 3.2, where
+          # expanding an empty array under `set -u` is itself an error.
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--" ]; then shift; break; fi
+            shift
+          done
+          if [ "$#" -eq 0 ]; then
+            echo "stub: no child command after --" >&2
+            exit 1
+          fi
+
+          # The environment the contract promises the child.
+          export MFARM_SESSION_ID='11111111-2222-3333-4444-555555555555'
+          export MFARM_DEVICE_ID='66666666-7777-8888-9999-aaaaaaaaaaaa'
+          export MFARM_REGION="${STUB_REGION}"
+          export MFARM_WEBDRIVER_URL="https://${MFARM_API_KEY:-nokey}@stub.invalid/wd/hub"
+          export MFARM_DATA_PLANE_ENDPOINT='wss://stub.invalid/v1/dataplane'
+          export MFARM_SESSION_TOKEN='stub-session-token'
+
+          "$@"
+          # The child's exit code, verbatim. Never remapped; CI reads it.
+          exit $?
+          STUB_EOF
+
+          chmod +x "${RUNNER_TEMP}/stub/mfarm"
+
+          {
+            echo "MFARM_CLI_BIN=${RUNNER_TEMP}/stub/mfarm"
+            echo "STUB_ARGV_FILE=${RUNNER_TEMP}/stub-argv.txt"
+            echo "STUB_ENV_KEY_FILE=${RUNNER_TEMP}/stub-env-key.txt"
+            echo "STUB_SCENARIO=${{ matrix.scenario }}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Run the action under test
+        id: act
+        # The action fails the job by design on every non-zero code. Absorb that here so the
+        # assertions below can run and check that it failed for the right reason.
+        continue-on-error: true
+        uses: ./
+        with:
+          api-key: ${{ env.STUB_API_KEY }}
+          region: ${{ env.STUB_REGION }}
+          platform: ${{ matrix.platform }}
+          tier: ${{ matrix.tier }}
+          ttl: ${{ matrix.ttl }}
+          wait: ${{ matrix.wait }}
+          api-url: ${{ matrix.api_url }}
+          command: ${{ matrix.command }}
+          working-directory: '.'
+
+      - name: Assert the action behaved
+        env:
+          EXPECT_OUTCOME: ${{ matrix.expect_outcome }}
+          EXPECT_CHILD_RAN: ${{ matrix.expect_child_ran }}
+          EXPECT_CODE: ${{ matrix.expect_code }}
+          EXPECT_VERDICT: ${{ matrix.expect_verdict }}
+          ACTUAL_OUTCOME: ${{ steps.act.outcome }}
+          IN_PLATFORM: ${{ matrix.platform }}
+          IN_TIER: ${{ matrix.tier }}
+          IN_TTL: ${{ matrix.ttl }}
+          IN_WAIT: ${{ matrix.wait }}
+          IN_API_URL: ${{ matrix.api_url }}
+          # Interpolated through env, never spliced into the script body.
+          OUT_SESSION_ID: ${{ steps.act.outputs.session-id }}
+          OUT_DEVICE_ID: ${{ steps.act.outputs.device-id }}
+          OUT_EXIT_CODE: ${{ steps.act.outputs.exit-code }}
+        run: |
+          set -uo pipefail
+          fails=0
+          fail() { echo "ASSERTION FAILED: $*"; fails=$((fails + 1)); }
+
+          # --- 1. the verdict ------------------------------------------------------------------
+          if [ "${ACTUAL_OUTCOME}" != "${EXPECT_OUTCOME}" ]; then
+            fail "outcome was '${ACTUAL_OUTCOME}', expected '${EXPECT_OUTCOME}'"
+          fi
+
+          # --- 2. the CLI invocation ------------------------------------------------------------
+          if [ ! -f "${STUB_ARGV_FILE}" ]; then
+            fail "the action never invoked the CLI"
+          else
+            echo "--- argv the action passed to mfarm ---"
+            cat -n "${STUB_ARGV_FILE}"
+            echo "---------------------------------------"
+
+            argv="$(cat "${STUB_ARGV_FILE}")"
+
+            # THE security assertion. The key must never appear in argv: process listings are world
+            # readable and `set -x` echoes arguments verbatim.
+            if printf '%s' "${argv}" | grep -qF "${STUB_API_KEY}"; then
+              fail "the API KEY LEAKED INTO ARGV"
+            fi
+            if printf '%s' "${argv}" | grep -qE -- '--api-key'; then
+              fail "the action passed --api-key on the command line"
+            fi
+
+            # ... and it must have arrived through the environment instead.
+            if [ "$(cat "${STUB_ENV_KEY_FILE}")" != "${STUB_API_KEY}" ]; then
+              fail "MFARM_API_KEY did not reach the CLI through the environment"
+            fi
+
+            # The always-present part: the subcommand, the one required option, the separator.
+            # --platform is NOT in this list any more; it is optional like the rest, see below.
+            for expected in run --region us-east --; do
+              if ! grep -qxF -- "${expected}" "${STUB_ARGV_FILE}"; then
+                fail "expected '${expected}' in the CLI argv"
+              fi
+            done
+
+            # Each optional flag must appear with its value when the input was set, and must be
+            # ABSENT when the input was empty. Passing `--ttl ''` would clobber the CLI's default;
+            # passing `--platform ''` is worse, because the CLI rejects it outright.
+            assert_opt() { # <flag> <input-value>
+              if [ -n "$2" ]; then
+                if ! grep -qxF -- "$1" "${STUB_ARGV_FILE}"; then fail "expected '$1' in the CLI argv"; fi
+                if ! grep -qxF -- "$2" "${STUB_ARGV_FILE}"; then fail "expected '$1' value '$2' in the CLI argv"; fi
+              else
+                if grep -qxF -- "$1" "${STUB_ARGV_FILE}"; then fail "'$1' was passed even though the input was empty"; fi
+              fi
+            }
+            assert_opt --platform "${IN_PLATFORM}"
+            assert_opt --tier "${IN_TIER}"
+            assert_opt --ttl  "${IN_TTL}"
+            assert_opt --wait "${IN_WAIT}"
+            assert_opt --api  "${IN_API_URL}"
+
+            # No argument may be the empty string. That is the general form of the --platform bug:
+            # an unset optional input must produce an ABSENT flag, never a present-but-empty one.
+            if grep -qx '' "${STUB_ARGV_FILE}"; then
+              fail "the action passed an empty-string argument to the CLI"
+            fi
+
+            # An undefined flag would mean the action invented CLI surface.
+            while IFS= read -r tok; do
+              case "${tok}" in
+                --region|--platform|--tier|--ttl|--wait|--api|--) ;;
+                --*) fail "action passed an undefined flag: ${tok}" ;;
+              esac
+            done < "${STUB_ARGV_FILE}"
+          fi
+
+          # --- 3. did the child run, and did its environment surface? ---------------------------
+          # Asserted on the GITHUB_ENV copy, not on the step outputs: a composite action that has
+          # failed the job does not reliably publish outputs, and four of these scenarios fail on
+          # purpose. Outputs are checked separately, on the runs that succeed.
+          echo "env:     MFARM_SESSION_ID='${MFARM_SESSION_ID:-}' MFARM_DEVICE_ID='${MFARM_DEVICE_ID:-}' MFARM_EXIT_CODE='${MFARM_EXIT_CODE:-}' MFARM_CHILD_STARTED='${MFARM_CHILD_STARTED:-}'"
+          echo "outputs: session-id='${OUT_SESSION_ID}' device-id='${OUT_DEVICE_ID}' exit-code='${OUT_EXIT_CODE}'"
+
+          if [ "${MFARM_CHILD_STARTED:-}" != "${EXPECT_CHILD_RAN}" ]; then
+            fail "child-started was '${MFARM_CHILD_STARTED:-<unset>}', expected '${EXPECT_CHILD_RAN}'"
+          fi
+
+          if [ "${EXPECT_CHILD_RAN}" = "true" ]; then
+            if [ "${MFARM_SESSION_ID:-}" != "11111111-2222-3333-4444-555555555555" ]; then
+              fail "MFARM_SESSION_ID did not surface from the child (got '${MFARM_SESSION_ID:-<unset>}')"
+            fi
+            if [ "${MFARM_DEVICE_ID:-}" != "66666666-7777-8888-9999-aaaaaaaaaaaa" ]; then
+              fail "MFARM_DEVICE_ID did not surface from the child (got '${MFARM_DEVICE_ID:-<unset>}')"
+            fi
+          else
+            if [ -n "${MFARM_SESSION_ID:-}" ]; then
+              fail "MFARM_SESSION_ID was set to '${MFARM_SESSION_ID}' although the child never ran"
+            fi
+          fi
+
+          # --- 4. the exit code, verbatim -------------------------------------------------------
+          # The contract's first rule: the child's code is never remapped, because CI reads it.
+          #
+          # This assertion, and 5 below, could not pass at all before the `-e` fix in action.yml:
+          # GitHub injects `-e` into every `shell: bash` step, so a non-zero CLI exit killed the
+          # run step outright and MFARM_EXIT_CODE / MFARM_VERDICT were never written. Four of
+          # these scenarios therefore assert on values that previously could not exist.
+          if [ "${MFARM_EXIT_CODE:-}" != "${EXPECT_CODE}" ]; then
+            fail "MFARM_EXIT_CODE was '${MFARM_EXIT_CODE:-<unset>}', expected '${EXPECT_CODE}'"
+          fi
+
+          # --- 5. the classification ------------------------------------------------------------
+          # This is the assertion behind the ::warning:: vs ::error:: split. The verdict step
+          # switches on exactly this value, so pinning it pins the annotation: `capacity` is the
+          # only verdict that annotates as a warning, and exit 1 must resolve to test-failure or
+          # setup-failure according to whether the child ever started.
+          if [ "${MFARM_VERDICT:-}" != "${EXPECT_VERDICT}" ]; then
+            fail "MFARM_VERDICT was '${MFARM_VERDICT:-<unset>}', expected '${EXPECT_VERDICT}'"
+          fi
+
+          # Outputs must work on the happy path, which is when callers actually consume them.
+          if [ "${EXPECT_OUTCOME}" = "success" ]; then
+            if [ "${OUT_SESSION_ID}" != "${MFARM_SESSION_ID:-}" ] || [ -z "${OUT_SESSION_ID}" ]; then
+              fail "the session-id output did not propagate on a successful run"
+            fi
+            if [ "${OUT_EXIT_CODE}" != "0" ]; then
+              fail "the exit-code output was '${OUT_EXIT_CODE}', expected '0'"
+            fi
+          fi
+
+          if [ "${fails}" -ne 0 ]; then
+            echo "::error title=Action self-test::${fails} assertion(s) failed for scenario '${STUB_SCENARIO}'."
+            exit 1
+          fi
+          echo "scenario '${STUB_SCENARIO}' passed."
+
+  # =============================================================================================
+  # The seam that had no coverage: action.yml driving the REAL apps/cli/src/bin.ts.
+  #
+  # Everything above this point drives a stub CLI that was written from the same contract document
+  # as the action, by the same author. That proves one reading of the contract is self-consistent;
+  # it cannot prove the action and the CLI agree, and they did not — the action passed `--platform`
+  # unconditionally while the CLI treats `--platform ''` as a value rather than an absence.
+  #
+  # So: the real CLI, the real argument parsing, the real HTTP client, against a stub control
+  # plane that records every request. No devices and no network beyond loopback.
+  # =============================================================================================
+  real-cli:
+    name: 'e2e: ${{ matrix.name }}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # THE REGRESSION. An empty platform input must not reach the control plane as an empty
+          # platform, and must not fail the run. Asserted on what the API actually received, so
+          # the test holds whether the action omits the flag or the CLI ignores an empty one.
+          - name: 'empty platform -> API sees the CLI default, run succeeds'
+            mode: 'allocate'
+            platform: ''
+            wait: ''
+            command: 'test -n "$MFARM_WEBDRIVER_URL"'
+            expect_outcome: 'success'
+            expect_code: '0'
+            expect_verdict: 'pass'
+            expect_api_platform: 'android'
+          # ... and a real platform still gets through, so the guard above did not silently
+          # disable the flag.
+          - name: 'platform ios -> reaches the API verbatim'
+            mode: 'allocate'
+            platform: 'ios'
+            wait: ''
+            command: 'exit 0'
+            expect_outcome: 'success'
+            expect_code: '0'
+            expect_verdict: 'pass'
+            expect_api_platform: 'ios'
+          # The child's own exit code, through the real CLI, all the way to MFARM_EXIT_CODE.
+          - name: 'child exits 3 -> verbatim through the real CLI'
+            mode: 'allocate'
+            platform: 'android'
+            wait: ''
+            command: 'exit 3'
+            expect_outcome: 'failure'
+            expect_code: '3'
+            expect_verdict: 'test-failure'
+            expect_api_platform: 'android'
+          # ADR-0002 decision 3, end to end for the first time: the control plane queues the
+          # session and never attaches a device, `--wait 0` gives up immediately, and the action
+          # must classify that as `capacity` rather than as a test failure.
+          - name: 'queue never drains -> exit 75 capacity'
+            mode: 'queue-forever'
+            platform: 'android'
+            wait: '0'
+            command: 'echo "must never run"; exit 0'
+            expect_outcome: 'failure'
+            expect_code: '75'
+            expect_verdict: 'capacity'
+            expect_api_platform: 'android'
+
+    env:
+      STUB_API_KEY: 'mfk_e2e_key_must_never_reach_argv'
+      STUB_REGION: 'us-east'
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        # >= 22.6: apps/cli/src/bin.ts is run directly, with no build step, via type stripping.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Start the stub control plane
+        env:
+          STUB_MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+
+          cat > "${RUNNER_TEMP}/control-plane.mjs" <<'CP_EOF'
+          // A stub of the slice of the control plane apps/cli/src/client.ts speaks: create a
+          // session, poll it, release it. Zero dependencies, loopback only, and it appends every
+          // request it receives as one JSON object per line so the test can assert on the wire
+          // rather than on the CLI's own log output.
+          import { createServer } from 'node:http';
+          import { appendFileSync, writeFileSync } from 'node:fs';
+
+          const LOG = process.env.CP_REQUEST_LOG;
+          const MODE = process.env.STUB_MODE ?? 'allocate';
+          const PORT_FILE = process.env.CP_PORT_FILE;
+
+          const SESSION_ID = '11111111-2222-3333-4444-555555555555';
+          const DEVICE_ID = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+
+          const server = createServer((req, res) => {
+            let raw = '';
+            req.on('data', (c) => { raw += c; });
+            req.on('end', () => {
+              let body = null;
+              try { body = raw ? JSON.parse(raw) : null; } catch { body = { unparseable: raw }; }
+              appendFileSync(LOG, JSON.stringify({
+                method: req.method,
+                path: req.url,
+                authorization: req.headers.authorization ?? null,
+                body,
+              }) + '\n');
+
+              const send = (status, payload) => {
+                res.writeHead(status, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(payload));
+              };
+
+              // POST /v1/sessions
+              if (req.method === 'POST' && req.url === '/v1/sessions') {
+                if (MODE === 'queue-forever') {
+                  // 202: the session is real and holds a place in line, but has no device.
+                  return send(202, {
+                    session: { id: SESSION_ID, state: 'QUEUED', deviceId: null, region: 'us-east' },
+                  });
+                }
+                return send(201, {
+                  session: {
+                    id: SESSION_ID, state: 'ALLOCATING', deviceId: DEVICE_ID, region: 'us-east',
+                  },
+                  dataPlane: {
+                    endpoint: 'wss://stub.invalid/v1/dataplane',
+                    token: 'stub-session-token',
+                    expiresInSeconds: 900,
+                  },
+                });
+              }
+
+              // GET /v1/sessions/:id -- in queue-forever mode a device never arrives, which is
+              // what makes the CLI give up with 75 once --wait expires.
+              if (req.method === 'GET' && req.url.startsWith('/v1/sessions/')) {
+                return send(200, {
+                  session: MODE === 'queue-forever'
+                    ? { id: SESSION_ID, state: 'QUEUED', deviceId: null, region: 'us-east' }
+                    : { id: SESSION_ID, state: 'ACTIVE', deviceId: DEVICE_ID, region: 'us-east' },
+                });
+              }
+
+              // DELETE /v1/sessions/:id -- release. ADR-0002 decision 4 says this must happen on
+              // every exit path, and the test asserts on the recorded request, not on a log line.
+              if (req.method === 'DELETE' && req.url.startsWith('/v1/sessions/')) {
+                return send(200, { released: true });
+              }
+
+              send(404, { error: { code: 'not_found', message: `no route for ${req.method} ${req.url}` } });
+            });
+          });
+
+          // Never outlive the job, even if the kill step is skipped.
+          const bomb = setTimeout(() => process.exit(0), 120_000);
+          bomb.unref();
+
+          server.listen(0, '127.0.0.1', () => {
+            writeFileSync(PORT_FILE, String(server.address().port));
+          });
+          CP_EOF
+
+          CP_REQUEST_LOG="${RUNNER_TEMP}/cp-requests.jsonl"
+          CP_PORT_FILE="${RUNNER_TEMP}/cp-port"
+          : > "${CP_REQUEST_LOG}"
+          rm -f "${CP_PORT_FILE}"
+
+          # Output to a FILE, not to the inherited stdout: a background process holding the step's
+          # stdout pipe open keeps the step from ever finishing.
+          CP_REQUEST_LOG="${CP_REQUEST_LOG}" CP_PORT_FILE="${CP_PORT_FILE}" STUB_MODE="${STUB_MODE}" \
+            node "${RUNNER_TEMP}/control-plane.mjs" > "${RUNNER_TEMP}/cp.log" 2>&1 &
+          cp_pid=$!
+
+          for _ in $(seq 1 50); do
+            if [ -s "${CP_PORT_FILE}" ]; then break; fi
+            sleep 0.1
+          done
+          if [ ! -s "${CP_PORT_FILE}" ]; then
+            echo "::error::the stub control plane never bound a port"
+            cat "${RUNNER_TEMP}/cp.log" || true
+            exit 1
+          fi
+
+          {
+            echo "CP_PID=${cp_pid}"
+            echo "CP_REQUEST_LOG=${CP_REQUEST_LOG}"
+            echo "CP_URL=http://127.0.0.1:$(cat "${CP_PORT_FILE}")"
+            # The seam under test: the real CLI entry point, not a stub.
+            echo "MFARM_CLI_BIN=${GITHUB_WORKSPACE:-$PWD}/apps/cli/src/bin.ts"
+          } >> "${GITHUB_ENV}"
+
+      - name: Run the action against the real CLI
+        id: act
+        continue-on-error: true
+        uses: ./
+        with:
+          api-key: ${{ env.STUB_API_KEY }}
+          region: ${{ env.STUB_REGION }}
+          platform: ${{ matrix.platform }}
+          wait: ${{ matrix.wait }}
+          api-url: ${{ env.CP_URL }}
+          command: ${{ matrix.command }}
+          working-directory: '.'
+
+      - name: Stop the stub control plane
+        # Before the assertions, not after: the assertions only read the recorded request log, and
+        # killing here means no `if: always()` step is needed to avoid a stray process.
+        run: kill "${CP_PID}" 2>/dev/null || true
+
+      - name: Assert the real CLI seam
+        env:
+          EXPECT_OUTCOME: ${{ matrix.expect_outcome }}
+          EXPECT_CODE: ${{ matrix.expect_code }}
+          EXPECT_VERDICT: ${{ matrix.expect_verdict }}
+          EXPECT_API_PLATFORM: ${{ matrix.expect_api_platform }}
+          ACTUAL_OUTCOME: ${{ steps.act.outcome }}
+        run: |
+          set -uo pipefail
+          fails=0
+          fail() { echo "ASSERTION FAILED: $*"; fails=$((fails + 1)); }
+
+          echo "--- requests the real CLI made to the control plane ---"
+          cat -n "${CP_REQUEST_LOG}" || true
+          echo "-------------------------------------------------------"
+
+          if [ ! -s "${CP_REQUEST_LOG}" ]; then
+            fail "the real CLI never reached the control plane at all"
+          fi
+
+          # jq is preinstalled on ubuntu-latest and on the local harness's macOS image; the local
+          # runner checks for it up front rather than failing here.
+          post_body="$(jq -c 'select(.method == "POST" and .path == "/v1/sessions") | .body' \
+            "${CP_REQUEST_LOG}" | head -1)"
+
+          if [ -z "${post_body}" ]; then
+            fail "no POST /v1/sessions was recorded"
+          else
+            # THE regression assertion. `--platform ''` must never arrive as an empty platform:
+            # not as "", not as null, not as a rejected usage error that never gets this far.
+            got_platform="$(printf '%s' "${post_body}" | jq -r '.platform // "<absent>"')"
+            if [ "${got_platform}" != "${EXPECT_API_PLATFORM}" ]; then
+              fail "POST /v1/sessions carried platform '${got_platform}', expected '${EXPECT_API_PLATFORM}'"
+            fi
+            if [ "${got_platform}" = "" ]; then
+              fail "an EMPTY platform reached the control plane"
+            fi
+
+            # The key travels in a header, having arrived through the environment. If the action
+            # had put it on argv the CLI would still work — so this asserts the mechanism, and the
+            # argv assertion in the `scenarios` job asserts the absence.
+            got_auth="$(jq -r 'select(.method == "POST") | .authorization' "${CP_REQUEST_LOG}" | head -1)"
+            if [ "${got_auth}" != "Bearer ${STUB_API_KEY}" ]; then
+              fail "authorization header was '${got_auth}', expected 'Bearer ${STUB_API_KEY}'"
+            fi
+
+            # No field may be the empty string. Same general rule as the argv check.
+            empties="$(printf '%s' "${post_body}" | jq -r 'to_entries[] | select(.value == "") | .key')"
+            if [ -n "${empties}" ]; then
+              fail "empty-string field(s) reached the control plane: ${empties}"
+            fi
+          fi
+
+          # ADR-0002 decision 4: the device is released on every exit path, including the queue
+          # timeout and the failing-suite path.
+          if ! jq -e 'select(.method == "DELETE")' "${CP_REQUEST_LOG}" > /dev/null; then
+            fail "the CLI never released the session (no DELETE /v1/sessions/:id recorded)"
+          fi
+
+          # --- the action's own contract, now driven by the real CLI ---------------------------
+          if [ "${ACTUAL_OUTCOME}" != "${EXPECT_OUTCOME}" ]; then
+            fail "outcome was '${ACTUAL_OUTCOME}', expected '${EXPECT_OUTCOME}'"
+          fi
+          if [ "${MFARM_EXIT_CODE:-}" != "${EXPECT_CODE}" ]; then
+            fail "MFARM_EXIT_CODE was '${MFARM_EXIT_CODE:-<unset>}', expected '${EXPECT_CODE}'"
+          fi
+          if [ "${MFARM_VERDICT:-}" != "${EXPECT_VERDICT}" ]; then
+            fail "MFARM_VERDICT was '${MFARM_VERDICT:-<unset>}', expected '${EXPECT_VERDICT}'"
+          fi
+
+          if [ "${fails}" -ne 0 ]; then
+            echo "::error title=Real-CLI e2e::${fails} assertion(s) failed."
+            exit 1
+          fi
+          echo "real-CLI seam verified."
+
+  missing-key:
+    name: 'empty api-key -> fails before doing anything'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A repository whose secret is missing gets an empty string, not an error. Failing loudly at
+      # the mask step beats a confusing 401 from the control plane several minutes later.
+      - name: Run the action with no key
+        id: act
+        continue-on-error: true
+        uses: ./
+        with:
+          api-key: ''
+          region: 'us-east'
+          command: 'echo should-never-run'
+
+      - name: Assert it failed
+        env:
+          ACTUAL_OUTCOME: ${{ steps.act.outcome }}
+          OUT_EXIT_CODE: ${{ steps.act.outputs.exit-code }}
+        run: |
+          set -uo pipefail
+          fails=0
+          fail() { echo "ASSERTION FAILED: $*"; fails=$((fails + 1)); }
+
+          if [ "${ACTUAL_OUTCOME}" != "failure" ]; then
+            fail "expected the action to fail on an empty api-key, got '${ACTUAL_OUTCOME}'"
+          fi
+
+          # "It failed" is not enough, and asserting only that is how this test stayed green
+          # against a mutant that deleted the empty-key check entirely: the run would then reach
+          # the CLI and fail there instead, several minutes and one confusing 401 later. What is
+          # actually being asserted is that it failed AT THE MASK STEP, before anything ran. The
+          # run step is the only thing that writes MFARM_EXIT_CODE / MFARM_VERDICT, so their
+          # absence is the proof that the run step was never reached.
+          if [ -n "${MFARM_EXIT_CODE:-}" ]; then
+            fail "the run step executed despite an empty api-key (MFARM_EXIT_CODE='${MFARM_EXIT_CODE}')"
+          fi
+          if [ -n "${MFARM_VERDICT:-}" ]; then
+            fail "the run step executed despite an empty api-key (MFARM_VERDICT='${MFARM_VERDICT}')"
+          fi
+          if [ -n "${OUT_EXIT_CODE}" ]; then
+            fail "an exit-code output was published despite an empty api-key ('${OUT_EXIT_CODE}')"
+          fi
+
+          if [ "${fails}" -ne 0 ]; then
+            echo "::error title=Action self-test::${fails} assertion(s) failed for the empty-api-key job."
+            exit 1
+          fi
+          echo "empty api-key correctly rejected before the CLI was reached."

@@ -123,7 +123,7 @@ describe('allocator under concurrency', () => {
       assert.equal(a.deviceId, dev, 'same device should come back around');
       seen.push(a.fence!);
       await release(orgA, a.sessionId, 'test');
-      await resetComplete(dev, a.fence!);   // worker confirms snapshot restore
+      await resetComplete(host, dev, a.fence!);   // worker confirms snapshot restore
     }
 
     assert.deepEqual(seen, [1, 2, 3, 4, 5]);
@@ -141,7 +141,7 @@ describe('allocator under concurrency', () => {
     assert.equal(b.deviceId, null, 'must queue: an unreset device still holds the last tenant state');
     assert.equal(b.state, 'QUEUED');
 
-    await resetComplete(dev, a.fence!);
+    await resetComplete(host, dev, a.fence!);
     const c = await allocate({ orgId: orgB, userId: null, region: REGION, platform: 'android' });
     assert.equal(c.deviceId, dev, 'allocatable once the snapshot restore is confirmed');
   });
@@ -151,13 +151,13 @@ describe('allocator under concurrency', () => {
     const [dev] = await seedDevices(1);
     const first = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
     await release(orgA, first.sessionId, 'test');
-    await resetComplete(dev, first.fence!);
+    await resetComplete(host, dev, first.fence!);
 
     const second = await allocate({ orgId: orgB, userId: null, region: REGION, platform: 'android' });
     await release(orgB, second.sessionId, 'test');
 
     // A worker partitioned during the first allocation finally reports in with the old fence.
-    const stale = await resetComplete(dev, first.fence!);
+    const stale = await resetComplete(host, dev, first.fence!);
     assert.equal(stale, false, 'stale fence must be rejected');
 
     const still = await withSystem(async (c) =>
@@ -234,7 +234,7 @@ describe('reaper', () => {
     assert.equal(st, 'ENDED');
 
     // still CLEANING until the worker confirms, so promotion should not have taken it yet
-    await resetComplete(dev, a.fence!);
+    await resetComplete(host, dev, a.fence!);
     const { promoted } = await reap();
     assert.equal(promoted, 1, 'queued session should now get the freed device');
   });
@@ -281,16 +281,101 @@ describe('metering', () => {
     const a = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
     const eventId = crypto.randomUUID();
     const ev = {
-      eventId, orgId: orgA, sessionId: a.sessionId, deviceId: a.deviceId,
+      eventId, sessionId: a.sessionId, deviceId: a.deviceId,
       kind: 'device_seconds' as const, quantity: 42.5, occurredAt: new Date(),
     };
 
-    assert.equal(await ingest([ev]), 1, 'first delivery recorded');
-    assert.equal(await ingest([ev]), 0, 'retry must not double-count');
-    assert.equal(await ingest([ev, { ...ev, eventId: crypto.randomUUID() }]), 1, 'only the new one');
+    assert.deepEqual(await ingest(host, [ev]), { recorded: 1, duplicates: 0, rejected: 0 });
+    assert.deepEqual(await ingest(host, [ev]), { recorded: 0, duplicates: 1, rejected: 0 },
+                     'retry must not double-count');
+    assert.deepEqual(await ingest(host, [ev, { ...ev, eventId: crypto.randomUUID() }]),
+                     { recorded: 1, duplicates: 1, rejected: 0 }, 'only the new one');
 
     const u = await usage(orgA, new Date(Date.now() - 60_000), new Date(Date.now() + 60_000));
     assert.equal(u.device_seconds, 85, 'two distinct events of 42.5');
+  });
+
+  // --- migration 008: a worker may bill only for work its own hardware did -------------------
+
+  test('a host cannot bill for a session that is not on it', async () => {
+    await resetFleet();
+    await seedDevices(1);
+    const a = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+
+    const other = await withSystem(async (c) =>
+      (await c.query(
+        `INSERT INTO hosts (region, hostname, state, protocol_version)
+         VALUES ($1, $2, 'UP', 1) RETURNING id`,
+        [REGION, `impostor-${crypto.randomUUID().slice(0, 8)}`])).rows[0].id as string);
+
+    try {
+      const r = await ingest(other, [{
+        eventId: crypto.randomUUID(), sessionId: a.sessionId, deviceId: a.deviceId,
+        kind: 'device_seconds', quantity: 9_999, occurredAt: new Date(),
+      }]);
+      assert.deepEqual(r, { recorded: 0, duplicates: 0, rejected: 1 },
+                       'a host billing another host\'s session must be refused, and counted as such');
+
+      const u = await usage(orgA, new Date(Date.now() - 60_000), new Date(Date.now() + 60_000));
+      assert.equal(u.device_seconds, undefined, 'nothing was charged to the org');
+    } finally {
+      await withSystem((c) => c.query('DELETE FROM hosts WHERE id = $1', [other]));
+    }
+  });
+
+  test('the paying org comes from the session, not from the worker', async () => {
+    await resetFleet();
+    await seedDevices(1);
+    // orgB's session. A worker cannot ask for the charge to land on orgA, because it is not asked.
+    const b = await allocate({ orgId: orgB, userId: null, region: REGION, platform: 'android' });
+
+    await ingest(host, [{
+      eventId: crypto.randomUUID(), sessionId: b.sessionId, deviceId: b.deviceId,
+      kind: 'device_seconds', quantity: 12, occurredAt: new Date(),
+    }]);
+
+    const window = [new Date(Date.now() - 60_000), new Date(Date.now() + 60_000)] as const;
+    assert.equal((await usage(orgB, ...window)).device_seconds, 12);
+    assert.equal((await usage(orgA, ...window)).device_seconds, undefined);
+  });
+
+  test('an unknown session is rejected rather than silently absorbed as a duplicate', async () => {
+    await resetFleet();
+    const r = await ingest(host, [{
+      eventId: crypto.randomUUID(), sessionId: crypto.randomUUID(), deviceId: null,
+      kind: 'device_seconds', quantity: 5, occurredAt: new Date(),
+    }]);
+    assert.deepEqual(r, { recorded: 0, duplicates: 0, rejected: 1 });
+  });
+});
+
+describe('device reset scoping', () => {
+  test('a host cannot confirm a reset for another host\'s device', async () => {
+    await resetFleet();
+    const [dev] = await seedDevices(1);
+    const a = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    await release(orgA, a.sessionId, 'test');   // device is now CLEANING
+
+    const other = await withSystem(async (c) =>
+      (await c.query(
+        `INSERT INTO hosts (region, hostname, state, protocol_version)
+         VALUES ($1, $2, 'UP', 1) RETURNING id`,
+        [REGION, `impostor-${crypto.randomUUID().slice(0, 8)}`])).rows[0].id as string);
+
+    try {
+      // The fence is not secret and not hard to guess — the host scope is what has to stop this.
+      assert.equal(await resetComplete(other, dev, a.fence!), false);
+
+      const state = await withSystem(async (c) =>
+        (await c.query('SELECT state FROM devices WHERE id = $1', [dev])).rows[0].state);
+      assert.equal(state, 'CLEANING',
+                   'a device must not go READY mid-restore on a stranger\'s say-so');
+
+      // And the real owner still can.
+      assert.equal(await resetComplete(host, dev, a.fence!), true);
+    } finally {
+      await withSystem((c) => c.query('DELETE FROM hosts WHERE id = $1', [other]));
+    }
   });
 });
 

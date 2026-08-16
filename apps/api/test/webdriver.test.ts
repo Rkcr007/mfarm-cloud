@@ -21,6 +21,7 @@ import { buildServer } from '../src/http/server.ts';
 import { withSystem, closePools } from '../src/db.ts';
 import { createApiKey } from '../src/auth.ts';
 import { parseCapabilities } from '../src/http/webdriver/capabilities.ts';
+import { verifySessionToken } from '../src/tokens.ts';
 
 let app: FastifyInstance;
 let orgA: string, orgB: string, hostId: string;
@@ -37,7 +38,7 @@ const androidCaps = (extra: Record<string, unknown> = {}) => ({
 
 // ---------------------------------------------------------------- stub automation server
 
-interface Recorded { method: string; url: string; body: unknown }
+interface Recorded { method: string; url: string; body: unknown; auth?: string }
 
 let upstream: Server;
 let upstreamUrl: string;
@@ -53,6 +54,9 @@ function startUpstream(): Promise<string> {
       recorded.push({
         method: req.method!, url: req.url!,
         body: raw ? JSON.parse(raw) : undefined,
+        // ADR-0004: the automation hop carries a signed grant. A real Appium ignores it; the
+        // worker-side gateway that will terminate this hop does not.
+        auth: req.headers.authorization,
       });
       const json = (code: number, body: unknown) => {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
@@ -579,7 +583,8 @@ describe('waiting for capacity', () => {
     await new Promise((r) => setTimeout(r, 600));
     await app.inject({ method: 'DELETE', url: `/wd/hub/session/${firstId}`, headers: auth(keyA) });
     await withSystem((c) => c.query(
-      `SELECT device_reset_complete($1, (SELECT fence FROM devices WHERE id = $1))`, [dev]));
+      `SELECT device_reset_complete((SELECT host_id FROM devices WHERE id = $1),
+                                    $1, (SELECT fence FROM devices WHERE id = $1))`, [dev]));
 
     const r = await waiting;
     assert.equal(r.statusCode, 200, r.body);
@@ -606,5 +611,369 @@ describe('waiting for capacity', () => {
     assert.equal(Number(promoted), 0);
     assert.equal(await sessionState(queued), 'QUEUED');
     assert.equal(await deviceState(plain), 'READY');
+  });
+});
+
+// ---------------------------------------------------------------- binding (ADR-0002 D1)
+
+/**
+ * The double-billing defect, and the fix.
+ *
+ * `mfarm run` allocates a session and hands the child a hub URL. Before binding existed the hub had
+ * no way to be told about that session, so it allocated a second device from the client's
+ * capabilities: the suite held two devices, paid for two, and never touched the CLI's. Nothing
+ * failed — it overcharged, which is the kind of bug a customer finds on an invoice.
+ *
+ * These tests are written around the property that matters, which is a COUNT: one `mfarm run`, one
+ * session, one device, however many times the suite calls `driver.quit()`.
+ */
+describe('binding to a session the caller already owns', () => {
+  /** How `mfarm run` presents itself: the key as the Basic username, the session as the password. */
+  const hubUrlAuth = (key: string, sessionId?: string) => ({
+    authorization: `Basic ${Buffer.from(`${key}:${sessionId ?? ''}`).toString('base64')}`,
+  });
+
+  const liveSessions = (orgId: string) => withSystem(async (c) =>
+    Number((await c.query(
+      `SELECT count(*)::int AS n FROM sessions
+        WHERE org_id = $1 AND state IN ('QUEUED','ALLOCATING','ACTIVE')`, [orgId])).rows[0].n));
+
+  /** Allocate the way the CLI does, through the REST API. */
+  async function cliAllocate(key: string) {
+    const r = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(key),
+      payload: { region: REGION, platform: 'android', requireCapabilities: ['webdriver'] },
+    });
+    assert.equal(r.statusCode, 201, r.body);
+    return r.json().session as { id: string; deviceId: string };
+  }
+
+  test('a suite under `mfarm run` holds one device, not two', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+
+    // The suite is unchanged: no mfarm capabilities at all, not even a region. All it got was a URL.
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id),
+      payload: { capabilities: { alwaysMatch: { platformName: 'android' }, firstMatch: [{}] } },
+    });
+
+    assert.equal(r.statusCode, 200, r.body);
+    assert.equal(r.json().value.sessionId, cli.id, 'the hub drives the session the CLI allocated');
+    assert.equal(await liveSessions(orgA), 1, 'ONE session — this count is the whole defect');
+    assert.equal(await deviceState(dev), 'SESSION_ACTIVE');
+    assert.equal(await sessionState(cli.id), 'ACTIVE');
+  });
+
+  test('without a binding the hub still allocates its own session', async () => {
+    // The unbound path is unchanged, and this test exists to keep the contrast visible: the same
+    // request without the session id in the URL is what used to happen under `mfarm run`.
+    await clearFleet();
+    await seedDevices(2);
+    const cli = await cliAllocate(keyA);
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA), payload: androidCaps(),
+    });
+    assert.equal(r.statusCode, 200, r.body);
+    assert.notEqual(r.json().value.sessionId, cli.id);
+    assert.equal(await liveSessions(orgA), 2, 'two sessions, two devices, two bills');
+  });
+
+  test('the `mfarm:sessionId` capability binds the same way the URL does', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:sessionId': cli.id }),
+    });
+    assert.equal(r.statusCode, 200, r.body);
+    assert.equal(r.json().value.sessionId, cli.id);
+    assert.equal(await liveSessions(orgA), 1);
+  });
+
+  test('the binding never reaches the automation server', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+    await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:sessionId': cli.id }),
+    });
+    const sent = recorded.find((r) => r.url === '/session')!.body as
+      { capabilities: { alwaysMatch: Record<string, unknown> } };
+    assert.equal(sent.capabilities.alwaysMatch['mfarm:sessionId'], undefined);
+  });
+
+  test('quit ends the WebDriver session but not the run', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+    await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id), payload: androidCaps(),
+    });
+
+    const q = await app.inject({
+      method: 'DELETE', url: `/wd/hub/session/${cli.id}`, headers: hubUrlAuth(keyA, cli.id),
+    });
+    assert.equal(q.statusCode, 200);
+
+    // The device is still ours. `mfarm run` releases it when the child exits, and only then.
+    assert.equal(await sessionState(cli.id), 'ACTIVE', 'quit must not end a session it does not own');
+    assert.equal(await deviceState(dev), 'SESSION_ACTIVE');
+
+    // And a suite that quits between tests re-binds instead of buying another device.
+    const second = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id), payload: androidCaps(),
+    });
+    assert.equal(second.statusCode, 200, second.body);
+    assert.equal(second.json().value.sessionId, cli.id);
+    assert.equal(await liveSessions(orgA), 1, 'N tests, one device');
+  });
+
+  test('quit still releases a session the hub allocated itself', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const created = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA), payload: androidCaps(),
+    });
+    const id = created.json().value.sessionId;
+    await app.inject({ method: 'DELETE', url: `/wd/hub/session/${id}`, headers: auth(keyA) });
+    assert.equal(await sessionState(id), 'ENDED');
+    assert.equal(await deviceState(dev), 'CLEANING');
+  });
+
+  test('a failed upstream leaves a bound session for its owner to release', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+    upstreamMode = 'reject';
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id), payload: androidCaps(),
+    });
+    assert.equal(r.statusCode, 500);
+    // The unbound path gives the device back here. The bound path must not: `mfarm run` is still
+    // running, still believes it holds this device, and will release it on its own way out.
+    assert.notEqual(await sessionState(cli.id), 'ENDED');
+    assert.notEqual(await deviceState(dev), 'CLEANING');
+  });
+
+  test("another org's session id is not bindable", async () => {
+    await clearFleet();
+    await seedDevices(2);
+    const mine = await cliAllocate(keyB);
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, mine.id), payload: androidCaps(),
+    });
+    assert.equal(r.statusCode, 500);
+    assert.match(r.json().value.message, /No session .* in this organisation/);
+    assert.equal(await sessionState(mine.id), 'ALLOCATING', "orgB's session is untouched");
+  });
+
+  test('a session already driving a WebDriver session cannot be bound twice', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+    await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id), payload: androidCaps(),
+    });
+
+    const again = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id), payload: androidCaps(),
+    });
+    assert.equal(again.statusCode, 500);
+    assert.match(again.json().value.message, /already has a WebDriver session/);
+    assert.equal(await liveSessions(orgA), 1);
+  });
+
+  test('binding to a device that cannot run Appium fails before the proxy hop', async () => {
+    await clearFleet();
+    await seedDevices(1, { webdriver: false });
+    // Allocated without demanding `webdriver`, the way `mfarm run` does for a non-WebDriver suite.
+    const s = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+      payload: { region: REGION, platform: 'android' },
+    });
+    const id = s.json().session.id;
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, id), payload: androidCaps(),
+    });
+    assert.equal(r.statusCode, 500);
+    assert.match(r.json().value.message, /no automation server/);
+  });
+
+  test('a queued session says so rather than looking like a fleet failure', async () => {
+    await clearFleet();
+    const queued = await withSystem(async (c) =>
+      (await c.query(
+        `SELECT o_session_id AS id FROM allocate_device($1,NULL,$2,'android',NULL,'30 minutes','{}'::jsonb,'[]'::jsonb)`,
+        [orgA, REGION])).rows[0].id);
+    assert.equal(await sessionState(queued), 'QUEUED');
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, queued), payload: androidCaps(),
+    });
+    assert.match(r.json().value.message, /still queued/);
+  });
+
+  test('a URL binding and a capability that disagree are refused, not resolved', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id),
+      payload: androidCaps({ 'mfarm:sessionId': randomUUID() }),
+    });
+    assert.equal(r.statusCode, 400);
+    assert.match(r.json().value.message, /does not match the session in the hub URL/);
+  });
+
+  test('allocation capabilities cannot be combined with a binding', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+
+    for (const extra of [{ 'mfarm:tier': 'cuttlefish' }, { 'mfarm:ttlMinutes': 60 },
+                         { 'mfarm:queueTimeoutSeconds': 30 }]) {
+      const r = await app.inject({
+        method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id),
+        payload: androidCaps(extra),
+      });
+      assert.equal(r.statusCode, 400, JSON.stringify(extra));
+      assert.match(r.json().value.message, /cannot be combined with `mfarm:sessionId`/);
+    }
+  });
+
+  test('a region that disagrees with the session is refused', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const cli = await cliAllocate(keyA);
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id),
+      payload: {
+        capabilities: {
+          alwaysMatch: { platformName: 'android', 'mfarm:region': 'somewhere-else' },
+          firstMatch: [{}],
+        },
+      },
+    });
+    assert.equal(r.statusCode, 500);
+    assert.match(r.json().value.message, /is in wd-test/);
+  });
+
+  test('a platformName that disagrees with the session is refused', async () => {
+    await clearFleet();
+    await seedDevices(1);           // android
+    const cli = await cliAllocate(keyA);
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, cli.id),
+      payload: { capabilities: { alwaysMatch: { platformName: 'iOS' }, firstMatch: [{}] } },
+    });
+    assert.equal(r.statusCode, 500);
+    assert.match(r.json().value.message, /holds a android device/);
+  });
+
+  test('a non-uuid in the password half is ignored, not an error', async () => {
+    // Plenty of clients put a placeholder there. Failing their first request over it would be a
+    // poor welcome, and the key alone is still a complete credential.
+    await clearFleet();
+    await seedDevices(1);
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubUrlAuth(keyA, 'x'), payload: androidCaps(),
+    });
+    assert.equal(r.statusCode, 200, r.body);
+  });
+});
+
+// ---------------------------------------------------------------- automation transport (ADR-0004)
+
+/**
+ * Appium binds loopback, so the hop from the hub to it has to terminate on the worker — and the
+ * thing that terminates it has to be able to tell an authorised request from a stranger's, because
+ * on the other side of it is unauthenticated device control.
+ *
+ * The answer is the token the system already has: an Ed25519 grant the worker verifies offline with
+ * the public key it was handed at registration. These tests assert the control-plane half. The
+ * gateway that consumes it does not exist yet (ADR-0004, "what is not implemented"), which is
+ * exactly why the wire format is pinned down here rather than discovered later on a bare-metal box.
+ */
+describe('the automation grant', () => {
+  const grantOn = (r: Recorded): string => {
+    const header = r.auth ?? '';
+    assert.ok(header.startsWith('Bearer '), `no grant on ${r.method} ${r.url}`);
+    return header.slice(7);
+  };
+
+  test('every upstream request carries a grant the worker can verify', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const created = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA), payload: androidCaps(),
+    });
+    const id = created.json().value.sessionId;
+    await app.inject({ method: 'GET', url: `/wd/hub/session/${id}/screenshot`, headers: auth(keyA) });
+    await app.inject({ method: 'DELETE', url: `/wd/hub/session/${id}`, headers: auth(keyA) });
+
+    assert.ok(recorded.length >= 3, 'new session, one command, and the quit');
+    for (const r of recorded) {
+      const v = verifySessionToken(grantOn(r), app.signingKey.publicKeyPem, hostId);
+      assert.equal(v.ok, true, `grant on ${r.method} ${r.url} did not verify`);
+      assert.equal(v.ok && v.claims.sid, id, 'names the session it is for');
+      assert.equal(v.ok && v.claims.did, dev, 'and the device — a leaked grant drives nothing else');
+      assert.equal(v.ok && v.claims.org, orgA);
+    }
+  });
+
+  test('a grant is useless at another host', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA), payload: androidCaps(),
+    });
+    const v = verifySessionToken(
+      grantOn(recorded[0]), app.signingKey.publicKeyPem, randomUUID(),
+    );
+    assert.equal(v.ok, false);
+    assert.equal(v.ok === false && v.reason, 'wrong_audience');
+  });
+
+  test('the grant carries the fence, so a replayed command is refusable', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA), payload: androidCaps(),
+    });
+    const fence = await withSystem(async (c) =>
+      Number((await c.query('SELECT fence FROM devices WHERE id = $1', [dev])).rows[0].fence));
+    const v = verifySessionToken(grantOn(recorded[0]), app.signingKey.publicKeyPem, hostId);
+    assert.equal(v.ok && v.claims.fence, fence,
+                 'a partitioned hub replaying an old command presents an old fence');
+  });
+
+  test('a bound session grants against the device its owner allocated', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const s = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+      payload: { region: REGION, platform: 'android', requireCapabilities: ['webdriver'] },
+    });
+    const cli = s.json().session;
+
+    await app.inject({
+      method: 'POST', url: '/wd/hub/session',
+      headers: { authorization: `Basic ${Buffer.from(`${keyA}:${cli.id}`).toString('base64')}` },
+      payload: androidCaps(),
+    });
+
+    const v = verifySessionToken(grantOn(recorded[0]), app.signingKey.publicKeyPem, hostId);
+    assert.equal(v.ok && v.claims.sid, cli.id);
+    assert.equal(v.ok && v.claims.did, dev);
   });
 });

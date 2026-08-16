@@ -233,11 +233,22 @@ describe('metering', () => {
     const agent = makeAgent([fakeBackend()], `dup-${randomUUID().slice(0, 8)}`);
     const state = await agent.start();
     const sessionId = randomUUID();
-    await withSystem((c) => c.query(
-      `INSERT INTO sessions (id, org_id, state, region) VALUES ($1,$2,'ACTIVE',$3)`, [sessionId, orgId, REGION]));
+    // The session has to sit on a device of THIS host: since migration 008 the control plane bills
+    // by joining the event's session to a device and checking whose hardware it is, so a session
+    // floating free of any device is refused rather than charged to whoever asked.
+    const deviceId = await withSystem(async (c) => {
+      const d = await c.query(
+        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, local_id)
+         VALUES ($1,$2,'android','cuttlefish','fake','15','SESSION_ACTIVE',$3) RETURNING id`,
+        [state.hostId, REGION, `dup-dev-${randomUUID().slice(0, 8)}`]);
+      await c.query(
+        `INSERT INTO sessions (id, org_id, state, region, device_id) VALUES ($1,$2,'ACTIVE',$3,$4)`,
+        [sessionId, orgId, REGION, d.rows[0].id]);
+      return d.rows[0].id as string;
+    });
 
     const event = {
-      eventId: deterministicUuid(`${sessionId}:0`), orgId, sessionId, deviceId: null,
+      eventId: deterministicUuid(`${sessionId}:0`), orgId, sessionId, deviceId,
       kind: 'device_seconds', quantity: 30, occurredAt: new Date().toISOString(),
     };
     const post = () => fetch(`${baseUrl}/v1/workers/events`, {
@@ -257,10 +268,12 @@ describe('reset and release', () => {
     const b = fakeBackend();
     b.control.resetDurationMs = 120;
     const agent = makeAgent([b], `reset-${randomUUID().slice(0, 8)}`);
-    await agent.start();
+    const registered = await agent.start();
 
+    // This host's own device. A worker can only confirm a restore for hardware it owns (migration
+    // 008), and picking whichever host in the region answered first used to work by accident.
     const deviceId = await withSystem(async (c) => {
-      const host = (await c.query(`SELECT id FROM hosts WHERE region = $1 LIMIT 1`, [REGION])).rows[0].id;
+      const host = registered.hostId;
       return (await c.query(
         `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, fence, local_id)
          VALUES ($1,$2,'android','cuttlefish','fake','15','CLEANING',1,$3) RETURNING id`,
@@ -280,10 +293,10 @@ describe('reset and release', () => {
     const b = fakeBackend();
     b.control.failNextReset = true;
     const agent = makeAgent([b], `resetfail-${randomUUID().slice(0, 8)}`);
-    await agent.start();
+    const registered = await agent.start();
 
     const deviceId = await withSystem(async (c) => {
-      const host = (await c.query(`SELECT id FROM hosts WHERE region = $1 LIMIT 1`, [REGION])).rows[0].id;
+      const host = registered.hostId;
       return (await c.query(
         `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, fence, local_id)
          VALUES ($1,$2,'android','cuttlefish','fake','15','CLEANING',1,$3) RETURNING id`,

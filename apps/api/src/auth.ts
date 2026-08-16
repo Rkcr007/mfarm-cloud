@@ -59,7 +59,7 @@ function safeEqualHex(a: string, b: string): boolean {
  * credential belongs in. WORKER tokens are deliberately not accepted here: workers never live in a
  * URL, so allowing it would only widen where a fleet credential can appear.
  */
-function tenantKeyFromBasic(header: string): string | null {
+function basicParts(header: string): string[] | null {
   let decoded: string;
   try {
     decoded = Buffer.from(header.slice(6).trim(), 'base64').toString('utf8');
@@ -67,8 +67,37 @@ function tenantKeyFromBasic(header: string): string | null {
     return null;
   }
   const sep = decoded.indexOf(':');
-  const parts = sep === -1 ? [decoded] : [decoded.slice(0, sep), decoded.slice(sep + 1)];
-  return parts.find((p) => p.startsWith('mfk_')) ?? null;
+  return sep === -1 ? [decoded] : [decoded.slice(0, sep), decoded.slice(sep + 1)];
+}
+
+function tenantKeyFromBasic(header: string): string | null {
+  return basicParts(header)?.find((p) => p.startsWith('mfk_')) ?? null;
+}
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The mfarm session id a WebDriver URL is carrying, if it is carrying one.
+ *
+ * `https://<api-key>:<session-id>@hub.mfarm.dev/wd/hub` — the key in the username half, the session
+ * to bind to in the password half. It looks like an odd place to put it, and it is the only place
+ * that works: a WebDriver client is handed exactly one string and offers no other hook, the path is
+ * fixed by the protocol, and a query string does not survive the naive `base + '/session'`
+ * concatenation most clients do. So the second Basic field — which carries nothing today, because
+ * the key alone is the credential — is the seam.
+ *
+ * This is what closes ADR-0002 D1 without asking anyone to edit a test suite: `mfarm run` allocates
+ * once and puts the session id here, and the hub drives that device instead of allocating a second
+ * one. It is not a credential and grants nothing on its own: the key still has to authenticate, and
+ * the session still has to belong to the org that key resolves to.
+ *
+ * Anything that is not a uuid is ignored rather than rejected — plenty of clients put a placeholder
+ * in the password field, and failing their first request over it would be a poor welcome.
+ */
+export function sessionBindingFromBasic(header: string | undefined): string | undefined {
+  if (!header?.startsWith('Basic ')) return undefined;
+  const candidate = basicParts(header)?.find((p) => !p.startsWith('mfk_') && SESSION_ID.test(p));
+  return candidate ?? undefined;
 }
 
 /**

@@ -17,6 +17,16 @@ const createSchema = {
       tier: { type: 'string', enum: ['cuttlefish', 'avd', 'container', 'simulator', 'physical'] },
       ttlMinutes: { type: 'integer', minimum: 1, maximum: 240 },
       requested: { type: 'object' },
+      // Capabilities the device must declare, e.g. ["webdriver"]. Distinct from `requested`, which
+      // is an opaque tenant blob: these are scheduling input, and the allocator records them on the
+      // session so promotion off the queue re-applies the same constraints.
+      //
+      // Without this the CLI could not allocate a device it can then drive over WebDriver — it would
+      // get any device, and binding would fail at the hub with "no automation server" (ADR-0002 D1).
+      requireCapabilities: {
+        type: 'array', maxItems: 8, uniqueItems: true,
+        items: { type: 'string', minLength: 1, maxLength: 64 },
+      },
     },
   },
 } as const;
@@ -27,6 +37,7 @@ interface CreateBody {
   tier?: 'cuttlefish' | 'avd' | 'container' | 'simulator' | 'physical';
   ttlMinutes?: number;
   requested?: Record<string, unknown>;
+  requireCapabilities?: string[];
 }
 
 export async function sessionRoutes(app: FastifyInstance) {
@@ -72,6 +83,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       tier: req.body.tier ?? null,
       ttlMinutes: req.body.ttlMinutes,
       requested: req.body.requested,
+      requireCapabilities: req.body.requireCapabilities,
     });
 
     let status: number;

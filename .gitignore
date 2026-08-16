@@ -1,1 +1,9 @@
 node_modules/
+
+# Ruflo / claude-flow runtime state. Agent coordination scratch and a local vector DB —
+# machine-specific, regenerated on demand, and noisy in a diff. Never a build input.
+.claude-flow/
+.swarm/
+ruvector.db
+agentdb.rvf
+agentdb.rvf.lock

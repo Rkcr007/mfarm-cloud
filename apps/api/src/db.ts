@@ -1,4 +1,5 @@
 import { Pool, type PoolClient } from 'pg';
+import { ConfigError } from './config.ts';
 
 /**
  * Two roles, two pools. This split is load-bearing, not tidiness.
@@ -17,15 +18,77 @@ const APP_URL =
 const SYSTEM_URL =
   process.env.DATABASE_URL ?? 'postgres://mfarm:mfarm@localhost:5433/mfarm';
 
+/** Without this, `pool.connect()` queues forever once every connection is checked out, so anything
+ *  that can saturate a pool can hold every later caller indefinitely instead of failing one of them.
+ *  Generous: a request that waits ten seconds for a connection has already missed its deadline. */
+const CONNECT_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 10_000);
+
 export const appPool = new Pool({
   connectionString: APP_URL,
   max: Number(process.env.PG_POOL_MAX ?? 20),
+  connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
 });
 
 export const systemPool = new Pool({
   connectionString: SYSTEM_URL,
   max: Number(process.env.PG_SYSTEM_POOL_MAX ?? 5),
+  connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
 });
+
+/** One row, four booleans: everything that decides whether RLS is real on this connection. */
+const RLS_BOUNDARY_SQL = `
+  SELECT current_user                                    AS role,
+         current_setting('is_superuser') = 'on'          AS is_superuser,
+         COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false)
+                                                         AS bypasses_rls,
+         COALESCE(pg_get_userbyid((SELECT relowner FROM pg_class
+                                    WHERE oid = to_regclass('public.sessions'))) = current_user, false)
+                                                         AS owns_tenant_tables`;
+
+interface RlsBoundaryRow {
+  role: string;
+  is_superuser: boolean;
+  bypasses_rls: boolean;
+  owns_tenant_tables: boolean;
+}
+
+/**
+ * Asks the server — not the environment — whether the app connection is actually bound by RLS.
+ *
+ * config.ts can only compare two strings it was handed. It cannot see that `db.internal` and
+ * `db-primary.internal` are the same host, or that the pgbouncer address in front of the primary
+ * resolves to it, or that someone rotated `APP_DATABASE_URL`'s credentials onto the owner role. Any
+ * of those produces request handling that runs as the owner, which bypasses RLS (FORCE does not
+ * apply to superusers, and the owner skips policies without it) — every policy reads as enabled
+ * while enforcing nothing, and the first symptom is a customer seeing another customer's session.
+ *
+ * One query, at startup, on the pool that matters. `ci.yml` makes this same check, but only in CI,
+ * where the URLs are hardcoded and correct — i.e. exactly where it cannot fail.
+ */
+export async function assertAppRoleIsRlsBound(pool: Pool = appPool): Promise<void> {
+  const { rows } = await pool.query<RlsBoundaryRow>(RLS_BOUNDARY_SQL);
+  const r = rows[0];
+  if (!r) throw new ConfigError(['The RLS boundary check returned no rows; refusing to serve.']);
+
+  const problems: string[] = [];
+  if (r.is_superuser) {
+    problems.push(
+      `APP_DATABASE_URL connects as "${r.role}", which is a SUPERUSER. Superusers bypass row-level ` +
+        'security unconditionally — FORCE does not apply to them — so every tenant policy is decorative.',
+    );
+  }
+  if (r.bypasses_rls) {
+    problems.push(`APP_DATABASE_URL connects as "${r.role}", which has BYPASSRLS. Every tenant policy is decorative.`);
+  }
+  if (r.owns_tenant_tables) {
+    problems.push(
+      `APP_DATABASE_URL connects as "${r.role}", which OWNS the tenant tables. Request handling must ` +
+        'not run as the schema owner: DATABASE_URL and APP_DATABASE_URL have converged on one role, ' +
+        'however differently the two connection strings are spelt.',
+    );
+  }
+  if (problems.length > 0) throw new ConfigError(problems);
+}
 
 /**
  * Runs `fn` inside a transaction scoped to one tenant, on the RLS-bound pool.

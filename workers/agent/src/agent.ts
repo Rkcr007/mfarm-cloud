@@ -24,6 +24,10 @@ export interface AgentOptions {
    * `http://10.0.3.14:4723`. INTERNAL address: the control plane's WebDriver hub reaches it, the
    * internet must not. Set it and the host advertises `webdriver`; leave it unset and the host
    * simply does not take WebDriver traffic.
+   *
+   * The INITIAL value only. A supervised Appium moves it at runtime through
+   * `setAutomationEndpoint`, because the capability tracks the server's health rather than the
+   * configuration it was started with (ADR-0003 decision 3).
    */
   automationEndpoint?: string;
   devices: DeviceBackend[];
@@ -88,14 +92,54 @@ export class Agent {
   private readonly fenceHighWater = new Map<string, number>();
 
   private readonly opts: AgentOptions;
+  /**
+   * Live, not frozen at construction. ADR-0003 decision 3 makes `webdriver` a claim about the
+   * present, so the supervisor moves this every time Appium's health changes and everything that
+   * reports capabilities reads it from here rather than from `opts`.
+   */
+  private automation?: string;
 
   // Explicit field + assignment rather than a constructor parameter property: those emit runtime
   // code, so Node's strip-only type removal rejects them and the no-build-step setup breaks.
   constructor(opts: AgentOptions) {
     this.opts = opts;
+    this.automation = opts.automationEndpoint;
   }
 
   get hostId(): string | undefined { return this.state?.hostId; }
+  get automationEndpoint(): string | undefined { return this.automation; }
+
+  /**
+   * Point the host at a different automation server, or at none.
+   *
+   * `undefined` withdraws `webdriver` from everything this agent reports from now on. It cannot
+   * un-say what registration already said — see the heartbeat for how far that actually gets
+   * today — but it does mean the agent never re-asserts a capability it can no longer serve.
+   */
+  setAutomationEndpoint(url: string | undefined): void {
+    if (this.automation === url) return;
+    this.automation = url;
+    // Deliberately about what the AGENT now reports, not about what the control plane believes:
+    // nothing here reaches the control plane until the next registration.
+    console.warn(
+      url === undefined
+        ? '[agent] no automation endpoint is serving; `webdriver` dropped from reported capabilities'
+        : `[agent] automation endpoint is ${url}; \`webdriver\` in reported capabilities`,
+    );
+  }
+
+  /**
+   * The host-level capability set, computed from present state every time it is asked for.
+   *
+   * `webdriver` is declared by the host having a *reachable* automation server, not by the device
+   * tier and not by configuration: the same Cuttlefish instance can serve WebDriver on one
+   * deployment and not on another, and claiming the capability without the server behind it means
+   * the scheduler sends sessions to a device that cannot run them.
+   */
+  private capabilities(): Capability[] {
+    const automation: Capability[] = this.automation ? ['webdriver'] : [];
+    return ['screen-stream', 'input-datachannel', 'snapshot-reset', ...automation];
+  }
   get sessionPublicKey(): string | undefined { return this.state?.sessionPublicKey; }
   get bufferedEventCount(): number { return this.buffer.size; }
   deviceIdFor(localId: string): string | undefined { return this.state?.deviceIds[localId]; }
@@ -116,21 +160,17 @@ export class Agent {
   }
 
   private async register(): Promise<AgentState> {
-    // `webdriver` is declared by the host having an automation server, not by the device tier:
-    // the same Cuttlefish instance can serve WebDriver on one deployment and not on another, and
-    // claiming the capability without the server behind it means the scheduler sends sessions to a
-    // device that cannot run them.
-    const automation: Capability[] = this.opts.automationEndpoint ? ['webdriver'] : [];
+    const automation: Capability[] = this.automation ? ['webdriver'] : [];
 
     const registration: WorkerRegistration = {
       protocolVersion: PROTOCOL_VERSION,
       hostname: this.opts.hostname,
       region: this.opts.region,
       endpoint: this.opts.endpoint,
-      automationEndpoint: this.opts.automationEndpoint,
+      automationEndpoint: this.automation,
       cores: this.opts.cores ?? 0,
       memoryMb: this.opts.memoryMb ?? 0,
-      capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset', ...automation] as Capability[],
+      capabilities: this.capabilities(),
       devices: this.opts.devices.map((d) => ({
         localId: d.control.info.localId,
         platform: d.control.info.platform,
@@ -185,15 +225,37 @@ export class Agent {
 
   // ---------------------------------------------------------------- heartbeat
 
+  /**
+   * Liveness, and — as far as the protocol currently allows — the host's CURRENT capability set.
+   *
+   * The capability payload is the right home for ADR-0003 decision 3. Registration states
+   * capabilities once and never revisits them, so a supervised Appium that crashes and comes back
+   * leaves the control plane believing whatever was true at boot. A beat already happens every 10s
+   * and already carries the worker credential, so attaching present state costs one field and
+   * bounds the lie at one heartbeat interval.
+   *
+   * IT DOES NOT WORK YET, AND THAT IS NOT SILENT. `POST /workers/heartbeat` in
+   * `apps/api/src/http/routes/workers.ts` touches `last_heartbeat_at` and reads nothing from the
+   * body, and `packages/protocol` has no type for it — so today this body is parsed and dropped.
+   * It is sent anyway because it is inert on the current control plane (the route has no body
+   * schema, so an unexpected body is accepted and ignored) and because the worker half then needs
+   * no change at all when the protocol catches up. Until it does, the real withdrawal path is the
+   * drain-and-exit in index.ts. See the report accompanying ADR-0003 for the exact protocol change.
+   */
   async heartbeat(): Promise<{ ok: boolean; hostState?: string }> {
     const token = this.state?.workerToken ?? (await this.loadState())?.workerToken;
     if (!token) return { ok: false };
     try {
       const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/heartbeat`, {
         method: 'POST',
-        // No content-type: this request has no body, and claiming JSON with an empty body is what
-        // made the control plane 500.
-        headers: { authorization: `Bearer ${token}` },
+        // A real body, so content-type is honest. Claiming JSON with an EMPTY body is what made the
+        // control plane 500 before; an empty body is no longer possible here.
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: this.capabilities(),
+          automationEndpoint: this.automation ?? null,
+        }),
       });
       if (!res.ok) return { ok: false };
       const body = await res.json() as { hostState: string };
@@ -239,6 +301,9 @@ export class Agent {
     const quantity = Math.max(0, elapsed - alreadyBilled);
     if (quantity <= 0) return;
     const eventId = deterministicUuid(`${s.sessionId}:${s.ticksEmitted}`);
+    // `orgId` is still sent for older control planes, but it no longer decides anything: since
+    // migration 008 the control plane derives the paying org from the session and ignores this
+    // field. Do not add logic that assumes a worker's opinion about billing carries weight.
     this.pushEvent({
       eventId, orgId: s.orgId, sessionId: s.sessionId, deviceId: s.deviceId,
       kind: 'device_seconds', quantity: Number(quantity.toFixed(3)),
@@ -275,7 +340,10 @@ export class Agent {
         body: JSON.stringify({ metering, resets }),
       });
       if (!res.ok) return { recorded: 0, ok: false };
-      const body = await res.json() as { meteringRecorded: number; resets: Array<{ deviceId: string; accepted: boolean }> };
+      const body = await res.json() as {
+        meteringRecorded: number; meteringRejected?: number;
+        resets: Array<{ deviceId: string; accepted: boolean }>;
+      };
 
       // Only clear what we actually sent — anything added while the request was in flight stays.
       for (const e of metering) this.buffer.delete(e.eventId);
@@ -288,6 +356,15 @@ export class Agent {
           // Expected, not exceptional: this worker was partitioned and the device has moved on.
           console.warn(`[agent] reset for ${r.deviceId} rejected as stale — device was reallocated`);
         }
+      }
+      // Not expected, and not retryable: the control plane says these sessions are not on this host,
+      // and re-sending will get the same answer. Dropped from the buffer above along with everything
+      // else, so this line is the only trace it will ever leave — usage that will never be billed.
+      if (body.meteringRejected) {
+        console.error(
+          `[agent] ${body.meteringRejected} of ${metering.length} metering events REJECTED as not ` +
+          'belonging to this host — usage has been lost. This is a bug, not a retryable failure.',
+        );
       }
       return { recorded: body.meteringRecorded, ok: true };
     } catch {

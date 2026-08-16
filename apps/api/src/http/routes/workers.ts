@@ -119,29 +119,53 @@ export async function workerRoutes(app: FastifyInstance) {
    */
   app.post<{
     Body: {
+      // `orgId` is accepted and IGNORED. Older agents still send it; the org that gets charged is
+      // derived from the session inside record_metering, because a worker that can name the paying
+      // org can bill any org (migration 008).
       metering?: Array<{ eventId: string; sessionId?: string | null; deviceId?: string | null;
-                         kind: MeterKind; quantity: number; occurredAt: string; orgId: string }>;
+                         kind: MeterKind; quantity: number; occurredAt: string; orgId?: string }>;
       resets?: Array<{ deviceId: string; fence: number }>;
     };
   }>('/workers/events', async (req) => {
-    requireWorker(req);
+    const { hostId } = requireWorker(req);
     const { metering = [], resets = [] } = req.body ?? {};
 
-    const recorded = await ingest(
+    const meter = await ingest(
+      hostId,
       metering.map((e) => ({
-        eventId: e.eventId, orgId: e.orgId, sessionId: e.sessionId ?? null,
+        eventId: e.eventId, sessionId: e.sessionId ?? null,
         deviceId: e.deviceId ?? null, kind: e.kind, quantity: e.quantity,
         occurredAt: new Date(e.occurredAt),
       })),
     );
 
-    // A stale fence is expected, not exceptional: it means this worker was partitioned and the
-    // device has since moved on. Report it back rather than failing the batch.
-    const resetResults = [];
-    for (const r of resets) {
-      resetResults.push({ deviceId: r.deviceId, accepted: await resetComplete(r.deviceId, r.fence) });
+    // Rejection means a host reported usage for a session that is not on it. That is either a bug in
+    // the agent or a host reaching past its own hardware, and both need a human — a counter in a
+    // response body nobody reads is not a signal.
+    if (meter.rejected > 0) {
+      req.log.warn(
+        { hostId, rejected: meter.rejected, sent: metering.length },
+        'metering events rejected: the sessions they name are not on this host',
+      );
     }
 
-    return { meteringRecorded: recorded, meteringDuplicates: metering.length - recorded, resets: resetResults };
+    // A stale fence is expected, not exceptional: it means this worker was partitioned and the
+    // device has since moved on. Report it back rather than failing the batch. So is a device that
+    // is not ours — same answer, because telling a caller which of the two it was would let any
+    // worker probe the fleet's device ids.
+    const resetResults = [];
+    for (const r of resets) {
+      resetResults.push({
+        deviceId: r.deviceId,
+        accepted: await resetComplete(hostId, r.deviceId, r.fence),
+      });
+    }
+
+    return {
+      meteringRecorded: meter.recorded,
+      meteringDuplicates: meter.duplicates,
+      meteringRejected: meter.rejected,
+      resets: resetResults,
+    };
   });
 }

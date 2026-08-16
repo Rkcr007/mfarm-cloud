@@ -1,0 +1,357 @@
+name: 'MFARM Cloud'
+description: >-
+  Allocate a real mobile device from the MFARM cloud, run your existing test command against it,
+  and release the device on every exit path.
+author: 'MFARM'
+
+branding:
+  icon: 'smartphone'
+  color: 'purple'
+
+# ---------------------------------------------------------------------------------------------
+# Inputs mirror the frozen `mfarm` CLI contract one-for-one. Nothing here invents a flag: every
+# input maps to a documented option of `mfarm run`, and the defaults are deliberately LEFT EMPTY
+# where the CLI already has one, so the CLI stays the single source of truth for defaults.
+# ---------------------------------------------------------------------------------------------
+inputs:
+  api-key:
+    description: >-
+      MFARM API key. Pass a secret — never a literal. Reaches the CLI as MFARM_API_KEY in the
+      environment and is never placed on a command line.
+    required: true
+  region:
+    description: 'Region to allocate the device in (maps to `--region`). Required.'
+    required: true
+  platform:
+    description: >-
+      Device platform: `android` or `ios` (maps to `--platform`). Explicitly setting it to the
+      empty string omits the flag and lets the CLI apply its own default, which is also `android`.
+    required: false
+    default: 'android'
+  tier:
+    description: >-
+      Device tier (maps to `--tier`). Leave empty to let the server pick, which is the CLI default.
+    required: false
+    default: ''
+  ttl:
+    description: 'Session lifetime in minutes (maps to `--ttl`). Empty uses the CLI default of 30.'
+    required: false
+    default: ''
+  wait:
+    description: >-
+      Seconds to wait out a QUEUED session before giving up with exit 75 (maps to `--wait`).
+      `0` fails immediately. Empty uses the CLI default of 300.
+    required: false
+    default: ''
+  api-url:
+    description: >-
+      Control plane base URL (maps to `--api`). Empty uses the CLI default of https://api.mfarm.dev.
+    required: false
+    default: ''
+  command:
+    description: >-
+      The test command to run against the allocated device. Runs as the CLI's child process with
+      MFARM_SESSION_ID, MFARM_DEVICE_ID, MFARM_WEBDRIVER_URL and friends already in its environment.
+    required: true
+  working-directory:
+    description: 'Directory to run `command` from.'
+    required: false
+    default: '.'
+
+outputs:
+  session-id:
+    description: >-
+      MFARM session id (MFARM_SESSION_ID as seen by the test command). A composite action does not
+      reliably publish its outputs once it has failed the job, so the same three values are also
+      exported to the job environment as MFARM_SESSION_ID, MFARM_DEVICE_ID and MFARM_EXIT_CODE.
+      Use those from an `if: always()` step.
+    value: ${{ steps.mfarm.outputs.session-id }}
+  device-id:
+    description: 'Allocated device id (MFARM_DEVICE_ID as seen by the test command).'
+    value: ${{ steps.mfarm.outputs.device-id }}
+  exit-code:
+    description: >-
+      Raw exit code from `mfarm run`. The child's code verbatim when the test command ran;
+      1 for a setup failure, 75 for a capacity timeout, 130 for an interrupt.
+    value: ${{ steps.mfarm.outputs.exit-code }}
+  verdict:
+    description: >-
+      The exit code classified: `pass`, `test-failure`, `setup-failure`, `capacity` or
+      `interrupted`. Branch on this rather than on the raw code — it is what separates the two
+      quite different things exit 1 can mean. Also exported as MFARM_VERDICT.
+    value: ${{ steps.mfarm.outputs.verdict }}
+
+runs:
+  using: 'composite'
+  steps:
+    # -----------------------------------------------------------------------------------------
+    # FIRST, before the key can reach anything that prints.
+    #
+    # GitHub auto-masks values that came from `secrets.*`, but it does NOT mask a key that arrived
+    # from a `vars.*` entry, a matrix value, a file, or a composite caller that already unwrapped
+    # the secret — and this action cannot tell which of those it got. `::add-mask::` makes the
+    # masking unconditional.
+    #
+    # It also covers the derived value: the CLI builds MFARM_WEBDRIVER_URL as
+    # `https://<key>@host/wd/hub` and hands it to the test suite. Appium clients love to log their
+    # config. The runner redacts the masked string wherever it appears in a line, so masking the
+    # bare key also stars out the credential embedded in that URL.
+    #
+    # The key is read from the environment here, not interpolated into the script text, for the
+    # same reason it is never a CLI argument: argv is world-readable in `ps` output and is echoed
+    # verbatim by `set -x`.
+    # -----------------------------------------------------------------------------------------
+    - name: Mask the MFARM API key
+      shell: bash
+      env:
+        MFARM_API_KEY: ${{ inputs.api-key }}
+      run: |
+        set -uo pipefail
+        if [ -z "${MFARM_API_KEY:-}" ]; then
+          echo "::error title=MFARM::api-key is empty. Set it from a repository secret."
+          exit 1
+        fi
+        echo "::add-mask::${MFARM_API_KEY}"
+
+    # Node 22 because the CLI (and this repo) rely on native TypeScript stripping, which needs
+    # >= 22.6. Note this also sets the Node version for the rest of the job, since setup-node
+    # mutates PATH for the whole job and composite actions cannot scope that.
+    - name: Set up Node.js 22
+      # Pinned to a full commit SHA, not `@v7`: a tag is a mutable pointer the action's owner can
+      # re-point at any commit, so `@v7` is an unaudited-code-execution hole in every workflow that
+      # trusts it. actions/setup-node v7.0.0.
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: '22'
+
+    - name: Run the test command on an MFARM device
+      id: mfarm
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        # Every user-controlled value crosses into bash through the environment, never through
+        # `${{ }}` interpolation in the script body. Expression interpolation is a textual splice
+        # that happens before bash parses anything, so an input containing a backtick or $(...)
+        # would execute as this step's own shell.
+        MFARM_API_KEY: ${{ inputs.api-key }}
+        MFARM_USER_COMMAND: ${{ inputs.command }}
+        IN_REGION: ${{ inputs.region }}
+        IN_PLATFORM: ${{ inputs.platform }}
+        IN_TIER: ${{ inputs.tier }}
+        IN_TTL: ${{ inputs.ttl }}
+        IN_WAIT: ${{ inputs.wait }}
+        IN_API_URL: ${{ inputs.api-url }}
+      # -------------------------------------------------------------------------------------
+      # THE HAZARD: GitHub does not run `shell: bash` as plain bash. It runs
+      #
+      #     bash --noprofile --norc -eo pipefail {0}
+      #
+      # so `-e` is ALREADY ON before the first line of this script executes, and there is no way
+      # to opt out from the workflow syntax. `set -uo pipefail` adds `-u` and `pipefail`; it does
+      # NOT clear `-e`. Verify it yourself:
+      #
+      #     $ bash -e -o pipefail -c 'set -uo pipefail; false; echo reached'; echo "rc=$?"
+      #     rc=1        # "reached" never printed
+      #
+      # A bare `"${cli[@]}" ...` would therefore abort this entire step the instant the CLI exits
+      # non-zero — before `code=$?` runs. `exit-code`, `child-started` and `verdict` would never
+      # be written, the "Report MFARM result" step would be skipped (a failed composite step skips
+      # the rest of the action), and RUNNER_TEMP would be left dirty. Exit 75 would arrive as an
+      # unannotated bash failure indistinguishable from a failing suite, which is exactly the
+      # distinction ADR-0002 decision 3 exists to guarantee.
+      #
+      # Hence BOTH `set +e` below and `|| code=$?` at the call site. Either alone suffices; having
+      # both means a future edit that drops one does not silently reintroduce the bug. The step is
+      # designed to always exit 0 — the job is failed by the next step, from the recorded verdict.
+      # -------------------------------------------------------------------------------------
+      run: |
+        set -uo pipefail
+        # Clears the `-e` the runner injected. See the block comment above.
+        set +e
+
+        # With `-e` off, a failure while staging the child runner would otherwise fall through
+        # silently into a confusing CLI error. Record a setup-failure verdict and let the next
+        # step annotate it, so this step keeps its invariant: it always exits 0 having written
+        # exit-code, child-started and verdict.
+        fail_setup() {
+          {
+            printf 'exit-code=1\n'
+            printf 'child-started=false\n'
+            printf 'verdict=setup-failure\n'
+          } >> "${GITHUB_OUTPUT}"
+          {
+            printf 'MFARM_EXIT_CODE=1\n'
+            printf 'MFARM_CHILD_STARTED=false\n'
+            printf 'MFARM_VERDICT=setup-failure\n'
+          } >> "${GITHUB_ENV}"
+          echo "mfarm-action: $1" >&2
+          exit 0
+        }
+
+        RUNNER_SCRIPT="${RUNNER_TEMP}/mfarm-child-$$.sh"
+        export MFARM_CHILD_STARTED_FILE="${RUNNER_TEMP}/mfarm-child-started-$$"
+        rm -f "${MFARM_CHILD_STARTED_FILE}"
+
+        # The child of `mfarm run`. By the time this executes, the CLI has injected
+        # MFARM_SESSION_ID / MFARM_DEVICE_ID / MFARM_WEBDRIVER_URL / MFARM_DATA_PLANE_ENDPOINT /
+        # MFARM_SESSION_TOKEN into our environment — reading them here is the contract-sanctioned
+        # way to surface the ids, and it avoids parsing CLI stdout that the test suite shares.
+        cat > "${RUNNER_SCRIPT}" <<'MFARM_RUNNER_EOF'
+        #!/usr/bin/env bash
+        set -uo pipefail
+
+        # The step output is the documented surface. The duplicate into GITHUB_ENV is the one that
+        # survives: a composite action that fails the job does not reliably publish its outputs,
+        # and a failed run is exactly when someone wants the session id to fetch a video or a log.
+        if [ -n "${GITHUB_OUTPUT:-}" ]; then
+          {
+            printf 'session-id=%s\n' "${MFARM_SESSION_ID:-}"
+            printf 'device-id=%s\n' "${MFARM_DEVICE_ID:-}"
+          } >> "${GITHUB_OUTPUT}"
+        fi
+        if [ -n "${GITHUB_ENV:-}" ]; then
+          {
+            printf 'MFARM_SESSION_ID=%s\n' "${MFARM_SESSION_ID:-}"
+            printf 'MFARM_DEVICE_ID=%s\n' "${MFARM_DEVICE_ID:-}"
+          } >> "${GITHUB_ENV}"
+        fi
+
+        # Proof the child actually started. The contract spends exit code 1 on two very different
+        # events — "your tests failed" and "we never got you a device" — and only this marker
+        # tells them apart. CI teams need that distinction to know whom to page.
+        : > "${MFARM_CHILD_STARTED_FILE}"
+
+        # exec, so the user's command owns the process and its exit status is returned verbatim.
+        exec bash -c "${MFARM_USER_COMMAND}"
+        MFARM_RUNNER_EOF
+        chmod +x "${RUNNER_SCRIPT}" || fail_setup "could not stage the child runner under RUNNER_TEMP (${RUNNER_SCRIPT})."
+
+        # MFARM_CLI_BIN is a test seam (see .github/workflows/action-test.yml), not a public input.
+        # Normal runs resolve the published CLI from npm.
+        if [ -n "${MFARM_CLI_BIN:-}" ]; then
+          cli=( "${MFARM_CLI_BIN}" )
+        else
+          # -----------------------------------------------------------------------------------
+          # PACKAGE NAME. The CLI in this repo is `@mfarm/cli` (see apps/cli/package.json), NOT
+          # `mfarm`. The scope is the entire point: an unscoped `mfarm` on npm is a name this
+          # project does not own, so `npx mfarm` resolves to a stranger's package and executes it
+          # in a process holding MFARM_API_KEY. `@mfarm/cli` is still `"private": true` (ADR-0002,
+          # packaging note), so until it is actually published this path fails fast with a 404
+          # rather than running anything at all — which is the correct failure. Set MFARM_CLI_BIN
+          # to a checked-out `apps/cli/src/bin.ts` until the package ships.
+          #
+          # VERSION. Pinned, never `latest`. This process holds MFARM_API_KEY and derives
+          # MFARM_WEBDRIVER_URL (which embeds the key) for the child, so resolving a floating
+          # dist-tag at job time means any publish — ours, or one from a stolen npm token —
+          # executes with the customer's credential on their very next CI run, with no review and
+          # no diff. That is the same unaudited-code-execution hole this file refuses to accept
+          # from a mutable `@v7` action tag, and an npm dist-tag is strictly more mutable than a
+          # git tag: it can be re-pointed at an already-published version with no new commit
+          # anywhere. Bump this deliberately, as part of the action's own release.
+          #
+          # --package + a separate command name because the bin (`mfarm`) does not match the last
+          # segment of the package name (`cli`); npx cannot infer it.
+          # -----------------------------------------------------------------------------------
+          cli=( npx --yes --package "@mfarm/cli@${MFARM_CLI_VERSION:-0.1.0}" mfarm )
+        fi
+
+        # Only flags the contract defines, and only when the caller actually supplied a value.
+        # This applies to --platform too, even though the input defaults to `android`: the CLI
+        # reads `--platform ''` as the literal empty string rather than as an absence, and rejects
+        # it. An empty input must mean "the CLI decides", exactly as it does for the four below.
+        args=( run --region "${IN_REGION}" )
+        if [ -n "${IN_PLATFORM}" ]; then args+=( --platform "${IN_PLATFORM}" ); fi
+        if [ -n "${IN_TIER}" ];    then args+=( --tier "${IN_TIER}" ); fi
+        if [ -n "${IN_TTL}" ];     then args+=( --ttl "${IN_TTL}" ); fi
+        if [ -n "${IN_WAIT}" ];    then args+=( --wait "${IN_WAIT}" ); fi
+        if [ -n "${IN_API_URL}" ]; then args+=( --api "${IN_API_URL}" ); fi
+
+        # --api-key is deliberately absent. The contract accepts MFARM_API_KEY from the
+        # environment and prefers it in CI precisely because argv is not private.
+        #
+        # `|| code=$?` is load-bearing, not idiom: see the block comment above the `run:` key.
+        # Placing the CLI on the left of `||` also makes it a *tested* command, so even if the
+        # `set +e` above were removed the shell would not abort here.
+        code=0
+        "${cli[@]}" "${args[@]}" -- "${RUNNER_SCRIPT}" || code=$?
+
+        if [ -f "${MFARM_CHILD_STARTED_FILE}" ]; then started=true; else started=false; fi
+
+        # Classify here, in the step that always exits 0, rather than in the step that fails the
+        # job — so the classification is recorded even on the paths that matter most.
+        #
+        # `1` is the interesting one: the contract spends it on both "your suite failed" and
+        # "we never got you a device", and only the child-started marker separates them.
+        case "${code}" in
+          0)   verdict=pass ;;
+          75)  verdict=capacity ;;        # EX_TEMPFAIL: retryable, our fault, tests never ran
+          130) verdict=interrupted ;;
+          1)   if [ "${started}" = "true" ]; then verdict=test-failure; else verdict=setup-failure; fi ;;
+          *)   verdict=test-failure ;;    # any other code came from the child, verbatim
+        esac
+
+        {
+          printf 'exit-code=%s\n' "${code}"
+          printf 'child-started=%s\n' "${started}"
+          printf 'verdict=%s\n' "${verdict}"
+        } >> "${GITHUB_OUTPUT}"
+        {
+          printf 'MFARM_EXIT_CODE=%s\n' "${code}"
+          printf 'MFARM_CHILD_STARTED=%s\n' "${started}"
+          printf 'MFARM_VERDICT=%s\n' "${verdict}"
+        } >> "${GITHUB_ENV}"
+
+        rm -f "${RUNNER_SCRIPT}" "${MFARM_CHILD_STARTED_FILE}"
+        exit 0
+
+    # -----------------------------------------------------------------------------------------
+    # Turn the exit code into a verdict.
+    #
+    # Exit 75 (EX_TEMPFAIL) means we could not find you a device before --wait expired. That is our
+    # fault, not the code's. Annotating it as a warning with a distinct title — while still failing
+    # the job, because the tests genuinely did not run — is the difference between a team that
+    # trusts a device cloud and one that rips it out after the third mystery red build.
+    # -----------------------------------------------------------------------------------------
+    - name: Report MFARM result
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.mfarm.outputs.exit-code }}
+        VERDICT: ${{ steps.mfarm.outputs.verdict }}
+        SESSION_ID: ${{ steps.mfarm.outputs.session-id }}
+        DEVICE_ID: ${{ steps.mfarm.outputs.device-id }}
+      run: |
+        set -uo pipefail
+        where="session ${SESSION_ID:-unknown} on device ${DEVICE_ID:-unknown}"
+
+        # Belt and braces for the F1 class of bug: if the previous step somehow failed to publish
+        # its outputs, `exit ""` is a bash usage error (exit 2) that would look like a mysterious
+        # infrastructure fault rather than a reportable result.
+        if [ -z "${EXIT_CODE}" ]; then
+          echo "::error title=MFARM internal error::The run step published no exit code. This is an action bug, not a test result; please report it."
+          exit 1
+        fi
+
+        case "${VERDICT}" in
+          pass)
+            echo "::notice title=MFARM::Test command passed (${where})."
+            ;;
+          capacity)
+            # ::warning::, not ::error::. The tests never ran, so blaming the code would be a lie,
+            # and a team that cannot tell "we were out of devices" from "you broke the build" stops
+            # trusting the device cloud by about the third mystery red build.
+            echo "::warning title=MFARM capacity (retryable)::No device became available before --wait expired (exit 75, EX_TEMPFAIL). Your tests never ran, so this is a capacity signal rather than a test failure — re-running the job, or raising the wait input, is the correct response."
+            ;;
+          setup-failure)
+            echo "::error title=MFARM setup failure::Could not start the run: allocation, authentication or configuration failed before the test command was reached (exit ${EXIT_CODE}). Check the api-key secret and the region."
+            ;;
+          interrupted)
+            echo "::error title=MFARM interrupted::Run interrupted (exit 130). The device has been released."
+            ;;
+          *)
+            echo "::error title=MFARM test failure::Test command exited ${EXIT_CODE} (${where})."
+            ;;
+        esac
+
+        # The job still fails on every non-zero code, capacity included: the tests did not run, and
+        # a green build would be a lie. The annotation, not the status, carries the nuance.
+        exit "${EXIT_CODE}"

@@ -1,0 +1,20 @@
+{
+  "name": "@mfarm/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Allocate a device, run your existing test suite against it, always give the device back.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "bin": {
+    "mfarm": "./src/bin.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts"
+  }
+}

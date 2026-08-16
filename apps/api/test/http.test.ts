@@ -478,6 +478,30 @@ describe('worker events', () => {
     assert.equal(first.json().meteringRecorded, 1);
     assert.equal(retry.json().meteringRecorded, 0);
     assert.equal(retry.json().meteringDuplicates, 1);
+    assert.equal(retry.json().meteringRejected, 0);
+  });
+
+  test('a worker cannot bill another org by naming it (migration 008)', async () => {
+    await clearDevices();
+    await seedDevices(1);
+    const s = await app.inject({ method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+                                 payload: { region: REGION, platform: 'android' } });
+    const { id: sessionId, deviceId } = s.json().session;
+
+    // orgB is named in the payload; the session belongs to orgA. The claim is simply not consulted.
+    const r = await app.inject({
+      method: 'POST', url: '/v1/workers/events', headers: auth(workerToken),
+      payload: { metering: [{
+        eventId: randomUUID(), orgId: orgB, sessionId, deviceId,
+        kind: 'device_seconds', quantity: 30, occurredAt: new Date().toISOString(),
+      }] },
+    });
+    assert.equal(r.json().meteringRecorded, 1);
+    assert.equal(r.json().meteringRejected, 0);
+
+    const charged = await withSystem(async (c) =>
+      (await c.query('SELECT org_id FROM metering_events WHERE session_id = $1', [sessionId])).rows[0].org_id);
+    assert.equal(charged, orgA, 'the session decides who pays, not the request body');
   });
 
   test('a stale reset is reported, not fatal to the batch', async () => {
