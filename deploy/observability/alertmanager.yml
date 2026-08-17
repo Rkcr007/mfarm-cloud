@@ -1,0 +1,69 @@
+# Alertmanager routing.
+#
+# READ THIS BEFORE ASSUMING YOU ARE ALERTED.
+#
+# As shipped, the default receiver has NO integrations. Alerts fire, group, and appear in the
+# Alertmanager UI — and nothing reaches a human. That is not alerting; it is a dashboard with a
+# louder name. Fill in a receiver below before you rely on any of this, and then TEST it by causing
+# a real alert (stop the api container for three minutes).
+#
+# Alertmanager does not expand environment variables in this file, so a webhook URL written here is
+# written in plaintext. Keep this file out of the repo if you put a real one in it, or use
+# `*_file` variants (`slack_api_url_file`, `bot_token_file`) with the compose secrets mechanism —
+# which is why `deploy/secrets/` exists.
+
+route:
+  # Group by the alert and the thing it is about, so two devices failing produce two notifications
+  # rather than one that mentions "2 alerts".
+  group_by: ['alertname', 'hostname']
+  # Wait this long before sending the first notification for a new group — long enough that a
+  # restart which trips three rules at once arrives as one message.
+  group_wait: 30s
+  group_interval: 5m
+  # How long before an unresolved alert is repeated. Four hours: short enough that an overnight
+  # failure is still shouting in the morning, long enough not to train anyone to mute it.
+  repeat_interval: 4h
+  receiver: default
+
+  routes:
+    # Critical is the only severity worth waking someone for; warnings can wait for the next repeat
+    # cycle and are grouped more loosely.
+    - matchers: [severity="critical"]
+      receiver: default
+      group_wait: 10s
+      repeat_interval: 1h
+
+inhibit_rules:
+  # If the control plane is unreachable, every device and session gauge is stale by definition.
+  # Without this, one dead API produces a page for the API plus a page for each device it can no
+  # longer report on — and the useful one is buried.
+  - source_matchers: [alertname="MfarmControlPlaneDown"]
+    target_matchers: [severity=~"critical|warning"]
+    equal: ['farm']
+
+  # A silent host cannot report its devices, so its devices going OFFLINE is the same incident.
+  - source_matchers: [alertname="MfarmHostSilent"]
+    target_matchers: [alertname="MfarmDeviceOffline"]
+    equal: ['farm']
+
+receivers:
+  - name: default
+    # ---------------------------------------------------------------------------------------------
+    # NOTHING HERE MEANS NOTHING IS SENT. Uncomment one and restart alertmanager.
+    #
+    # slack_configs:
+    #   - api_url_file: /run/secrets/slack_webhook_url
+    #     channel: '#mfarm'
+    #     title: '{{ .CommonLabels.severity | toUpper }}: {{ .CommonAnnotations.summary }}'
+    #     text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
+    #
+    # webhook_configs:            # ntfy, Discord via a bridge, a script of your own
+    #   - url: http://ntfy:80/mfarm
+    #
+    # email_configs:
+    #   - to: you@example.com
+    #     from: mfarm@example.com
+    #     smarthost: smtp.example.com:587
+    #     auth_username: mfarm@example.com
+    #     auth_password_file: /run/secrets/smtp_password
+    # ---------------------------------------------------------------------------------------------

@@ -131,14 +131,26 @@ services:
       APP_DATABASE_URL: postgres://mfarm_app:${APP_DB_PASSWORD:?set APP_DB_PASSWORD and ALTER ROLE mfarm_app to match}@postgres:5432/${POSTGRES_DB:-mfarm}
       REAPER_INTERVAL_MS: ${REAPER_INTERVAL_MS:-30000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # A SECOND listener, on its own port. Everything it serves is fleet-wide and collected on the
+      # OWNER pool — RLS would hide it otherwise — so it must never share the listener that carries
+      # the WebDriver hub. 0.0.0.0 is inside the container only, so that `prometheus` can reach it
+      # across the compose network; `config.ts` refuses that combination in production without a
+      # token, which is the point.
+      METRICS_HOST: 0.0.0.0
+      METRICS_PORT: 9464
     secrets:
       - session_signing_key
       - session_public_key
       - worker_registration_token
+      - metrics_token
     ports:
       # Loopback only, exactly like Postgres. Tailscale is what makes this reachable; publishing on
       # 0.0.0.0 would put the control plane on the internet the first time a firewall rule relaxed.
       - "127.0.0.1:${API_PORT:-3000}:3000"
+      # Published so `curl -H "Authorization: Bearer $(cat deploy/secrets/metrics_token)"
+      # 127.0.0.1:9464/metrics` works from the host without Prometheus. Loopback, and behind the
+      # token either way.
+      - "127.0.0.1:${METRICS_PORT:-9464}:9464"
     # The signing key is a multi-line PEM, and compose .env files cannot hold multi-line values. So
     # the secrets arrive as files and are read into the environment here, immediately before exec.
     # They never appear in deploy/.env, in `docker inspect`, or in the compose config output.
@@ -153,6 +165,7 @@ services:
         SESSION_SIGNING_KEY="$$(cat /run/secrets/session_signing_key)"; export SESSION_SIGNING_KEY
         SESSION_PUBLIC_KEY="$$(cat /run/secrets/session_public_key)"; export SESSION_PUBLIC_KEY
         WORKER_REGISTRATION_TOKEN="$$(cat /run/secrets/worker_registration_token)"; export WORKER_REGISTRATION_TOKEN
+        METRICS_TOKEN="$$(cat /run/secrets/metrics_token)"; export METRICS_TOKEN
         exec node --experimental-strip-types apps/api/src/main.ts
     healthcheck:
       # /health is LIVENESS: no I/O, never fails while the process lives. Deliberately not /ready,
@@ -175,6 +188,10 @@ secrets:
     file: ./secrets/session_public_key.pem
   worker_registration_token:
     file: ./secrets/worker_registration_token
+  # Read by the API (to require it) and by Prometheus (to present it). One file, two consumers, so
+  # the two cannot drift into a scrape that 401s forever while every dashboard reads "No data".
+  metrics_token:
+    file: ./secrets/metrics_token
 
 volumes:
   pgdata:

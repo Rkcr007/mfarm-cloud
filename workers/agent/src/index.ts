@@ -258,8 +258,12 @@ async function main(): Promise<void> {
       })
     : undefined;
   if (gateway) {
-    await gateway.listen(gatewayPort);
-    console.log(`[agent] automation gateway listening on :${gatewayPort}`);
+    // BIND_HOST is the one knob that decides whether these listeners exist on a public interface.
+    // Unset means all interfaces, which is right for a box whose only NIC is the tailnet and wrong
+    // for a rented VM — see deploy/README.md, "Tailscale ingress only".
+    const bindHost = process.env.BIND_HOST?.trim() || undefined;
+    await gateway.listen(gatewayPort, bindHost);
+    console.log(`[agent] automation gateway listening on ${bindHost ?? '0.0.0.0'}:${gatewayPort}`);
   }
 
   const state = await agent.start();
@@ -275,8 +279,9 @@ async function main(): Promise<void> {
     resolveDevice: (uuid) => byUuid.get(uuid) ?? (backends.length === 1 ? backends[0] : undefined),
   });
 
-  const port = await dp.listen(Number(process.env.DATA_PLANE_PORT ?? 8080));
-  console.log(`[agent] data plane listening on :${port}`);
+  const dataPlaneHost = process.env.BIND_HOST?.trim() || undefined;
+  const port = await dp.listen(Number(process.env.DATA_PLANE_PORT ?? 8080), dataPlaneHost);
+  console.log(`[agent] data plane listening on ${dataPlaneHost ?? '0.0.0.0'}:${port}`);
 
   agent.startHeartbeat();
   agent.startMetering();

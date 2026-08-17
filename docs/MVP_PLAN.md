@@ -207,17 +207,39 @@ Tailscale against both devices in parallel.
 - ~~Compose with restart policies; the box reboots and the farm comes back unattended.~~
   **DONE 2026-08-17** — `api` and `migrate` services in `deploy/docker-compose.prod.yml`, ordered
   postgres-healthy → migrate-completed → api, all loopback-bound, secrets as files.
-- Rotate `mfarm_app`'s committed password (known issue 4) — an operator step, documented in
-  `deploy/README.md`; `config.ts` refuses to boot in production if it is skipped.
-- Tailscale ingress only. **No public ports.** TLS internally.
+- ~~Rotate `mfarm_app`'s committed password (known issue 4).~~ **DONE as far as the repo can take
+  it, 2026-08-17** — it is an operator step by nature. `config.ts` refuses to boot in production if
+  it sees either committed password, and `deploy/README.md` carries the exact `ALTER ROLE`. The
+  remaining half is running it on the box, which is Phase 0's first hour.
+- ~~Tailscale ingress only. **No public ports.** TLS internally.~~ **DONE 2026-08-17** — every
+  `ports:` entry in both compose files is `127.0.0.1:`-prefixed, and `deploy/README.md` has the
+  install, the `ss -tlnp` verification that catches a service someone adds later, the `ufw` rules,
+  and `tailscale serve` for TLS. Serve rather than a self-signed cert because Appium clients are
+  handed an `https://` hub URL and a private CA means a trust-store change on every teammate's
+  machine. The worker's two listeners took a code change: `BIND_HOST` now binds the data plane and
+  the automation gateway to one interface, defaulting to the previous all-interfaces behaviour.
 - ~~Collapse `db.ts`'s duplicated connection literals into `config.ts` (7); validate `PG_POOL_MAX`
   (8).~~ **DONE 2026-08-17** — one `parseDbConfig`, strict inside `parseConfig` so `main` reports and
   exits 78, lenient inside `db.ts` so a pool is never built with `NaN`. `db.ts` deliberately does not
   call `loadConfig()`: it is imported before `main` validates, and a throw there becomes an ESM stack
   trace instead of the sentence list.
-- Prometheus + Grafana + alerting on device health, queue depth, and reset failures.
+- ~~Prometheus + Grafana + alerting on device health, queue depth, and reset failures.~~
+  **DONE 2026-08-17** — `deploy/docker-compose.obs.yml` plus `deploy/observability/`. The control
+  plane exports on a **second listener** (`:9464`), never the API port: every gauge is fleet-wide and
+  collected on the owner pool, because RLS would otherwise hide it, so it must not share the listener
+  that carries the internet-facing WebDriver hub. 15 alert rules, checked by `promtool`.
+  Reset failures are alerted as **a device stuck in CLEANING** — a failed restore leaves it there by
+  design, so that is the only signal that exists. Gauges are zero-filled and the heartbeat is a
+  timestamp rather than an age, both because an absent series cannot be alerted on with `== 0`.
+  **Alertmanager has no receiver configured**: alerts reach its UI and no human until someone fills
+  one in and tests it. That, plus no backup-freshness alert and no host metrics, is written down in
+  `deploy/README.md` under "Known gaps" rather than left to be discovered.
 
 Exit: reboot the box, walk away, come back to a working farm.
+
+**Phase 2 is complete as code and documentation. It is unverified on real hardware** — the images
+have never been pulled on the box, `tailscale serve` has never been run, and no alert has ever been
+delivered to a person. Closing that is Phase 0's metered day, not more building.
 
 ### Phase 3 — Artifacts and observability
 

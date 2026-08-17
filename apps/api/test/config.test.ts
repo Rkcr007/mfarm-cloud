@@ -376,6 +376,63 @@ describe('database configuration', () => {
 });
 
 /**
+ * The metrics listener is a SECOND server, and the settings that decide who can reach it are the
+ * whole of its access control. Every gauge it serves is fleet-wide and collected on the owner pool
+ * because RLS would otherwise hide it, so a mistake here discloses every org's devices and sessions
+ * to whoever can open the port.
+ */
+describe('metrics listener configuration', () => {
+  test('the default is loopback, on its own port, with no credential needed', () => {
+    const c = parseConfig({});
+    assert.equal(c.metricsEnabled, true);
+    assert.equal(c.metricsHost, '127.0.0.1');
+    assert.equal(c.metricsPort, 9464);
+    assert.equal(c.metricsTokenSource, 'none');
+  });
+
+  test('the scrape token is never carried on Config, only whether one exists', () => {
+    const c = parseConfig({ METRICS_TOKEN: 'super-secret-scrape-token' });
+    assert.equal(c.metricsTokenSource, 'environment');
+    const described = JSON.stringify(describeConfig(c));
+    assert.ok(!described.includes('super-secret-scrape-token'), 'describeConfig() is logged');
+  });
+
+  test('a non-loopback bind with no token is refused in production', () => {
+    // The realistic case: METRICS_HOST must be 0.0.0.0 for Prometheus to scrape across a container
+    // network, and "only the docker network can reach it" stops being true the moment the port is
+    // published.
+    const problems = refusal(prod({ METRICS_HOST: '0.0.0.0' }));
+    assert.ok(mentions(problems, 'METRICS_TOKEN'));
+    // A token makes it acceptable.
+    assert.equal(parseConfig(prod({ METRICS_HOST: '0.0.0.0', METRICS_TOKEN: 'x' })).metricsHost, '0.0.0.0');
+    // So does staying on loopback.
+    assert.equal(parseConfig(prod({ METRICS_HOST: '127.0.0.1' })).metricsPort, 9464);
+  });
+
+  test('collision with the API port is refused', () => {
+    const problems = refusal(prod({ PORT: '9464' }));
+    assert.ok(mentions(problems, 'METRICS_PORT'));
+    // Which of the two listeners loses the bind is a race, so this must be caught before either.
+    assert.ok(mentions(problems, 'WebDriver'));
+  });
+
+  test('a mistyped METRICS_ENABLED is a refusal, not a silent "off"', () => {
+    // `x === 'true'` reads a typo as disabled, and a farm with no metrics does not announce itself.
+    assert.ok(mentions(refusal(prod({ METRICS_ENABLED: 'flase' })), 'not a boolean'));
+    for (const off of ['0', 'false', 'no', 'off', 'OFF']) {
+      assert.equal(parseConfig({ METRICS_ENABLED: off }).metricsEnabled, false, off);
+    }
+    for (const on of ['1', 'true', 'yes', 'on']) {
+      assert.equal(parseConfig({ METRICS_ENABLED: on }).metricsEnabled, true, on);
+    }
+  });
+
+  test('a disabled listener cannot collide, so the port check does not fire', () => {
+    assert.equal(parseConfig(prod({ METRICS_ENABLED: '0', PORT: '9464' })).metricsEnabled, false);
+  });
+});
+
+/**
  * The drift guard for known issue 7. `db.ts` builds its pools at module load, so what it resolved
  * is observable on the pool objects themselves — which is the only way to prove the two files agree
  * without re-reading the source.

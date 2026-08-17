@@ -1,0 +1,216 @@
+# Alert rules for a two-device farm.
+#
+# The bar for a rule being here: it fires BEFORE a person notices, and it names something a person
+# can act on. A two-device farm has no redundancy — losing one device is losing half the capacity —
+# so the interesting alerts are about a device that has quietly stopped being usable, not about
+# aggregate saturation.
+#
+# Every `expr` below is written to survive a series going to zero. Where a count can legitimately
+# reach zero, the gauge is zero-filled by the exporter (see DEVICE_STATES in `metrics.ts`) rather
+# than disappearing, because `== 0` cannot fire on an absent series and an alert that cannot fire is
+# worse than no alert at all — it looks like coverage.
+
+groups:
+  # ------------------------------------------------------------------ is anything there at all
+  - name: mfarm-availability
+    rules:
+      - alert: MfarmControlPlaneDown
+        expr: up{job="mfarm-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Control plane is not scrapeable
+          description: >-
+            The API's metrics listener has not answered for 2 minutes. Either the process is down or
+            it is wedged. Nothing else in this file can fire while this is true, so treat every
+            other alert as unknown rather than clear.
+          runbook: docker compose -f deploy/docker-compose.prod.yml logs --tail=200 api
+
+      - alert: MfarmMetricsStale
+        expr: increase(mfarm_scrape_errors_total[10m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: Fleet gauges are stale
+          description: >-
+            The control plane is answering scrapes but its database query is failing, so every
+            device, session and host gauge is a frozen copy of the last successful collection. This
+            is deliberately not a scrape failure — a 500 would hide the process metrics too — which
+            means the graphs look plausible and are not current.
+
+  # ------------------------------------------------------------------ devices
+  - name: mfarm-devices
+    rules:
+      # The reset-failure alert. A snapshot restore takes ~3 seconds and a powerwash roughly a cold
+      # boot; five minutes in CLEANING is not slow, it is failed. The device stays there BY DESIGN —
+      # a device never returns to READY without a worker confirming the reset — so nothing else will
+      # ever surface it. Untreated, the farm silently loses that device forever.
+      - alert: MfarmDeviceResetStuck
+        expr: mfarm_device_cleaning_age_seconds_max > 300
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: A device has been restoring for over five minutes
+          description: >-
+            Snapshot restore normally completes in seconds. A device left in CLEANING has failed its
+            reset and will never return to the pool on its own. Check the worker's log for the
+            restore, then walk the fallback ladder in docs/MVP_PLAN.md — powerwash_cvd, then
+            stop_cvd --resume=false and relaunch.
+
+      - alert: MfarmDeviceQuarantined
+        expr: sum(mfarm_devices{state="QUARANTINED"}) > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: A device is quarantined
+          description: >-
+            A quarantined device is drained and never scheduled. At two devices this is half the
+            farm, and it does not recover by itself.
+
+      - alert: MfarmDeviceOffline
+        expr: sum(mfarm_devices{state="OFFLINE"}) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: A device has not been reported by its host
+          description: >-
+            OFFLINE means the host has not reported the device. Five minutes is thirty missed
+            heartbeats. Usually the cvd instance died; sometimes the agent did.
+
+      # Not "no device is free" — at two devices, both being busy is a Tuesday. This is "no device
+      # is even capable of being allocated", which is a different sentence: nothing is READY and
+      # nothing is in use either.
+      - alert: MfarmNoUsableDevice
+        expr: >-
+          sum(mfarm_devices{state=~"READY|RESERVED|SESSION_ACTIVE"}) == 0
+          and sum(mfarm_devices_total) > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: No device in the fleet is usable
+          description: >-
+            Every device is offline, cleaning, quarantined or evicted. The farm cannot serve a
+            session, and a CI merge gate pointed at it is now failing with exit 75.
+
+  # ------------------------------------------------------------------ hosts
+  - name: mfarm-hosts
+    rules:
+      # The agent heartbeats every 10 seconds. 60s is six missed beats, plus a minute of `for` —
+      # comfortably past a scrape gap or a restart, well short of a suite noticing.
+      #
+      # The gauge is a TIMESTAMP, not an age, which is what makes "registered and never heartbeated"
+      # expressible: it reports 0, `time() - 0` is enormous, and this fires. An age gauge would have
+      # had to invent a number for that case, and every invented number is either a false alert or a
+      # silent one.
+      - alert: MfarmHostSilent
+        expr: time() - mfarm_host_last_heartbeat_timestamp_seconds > 60
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: 'Worker host {{ $labels.hostname }} has stopped heartbeating'
+          description: >-
+            No heartbeat for over a minute from {{ $labels.hostname }} ({{ $labels.region }}). Its
+            devices are still in whatever state they were last reported in, which means the control
+            plane's view of them is now fiction.
+
+  # ------------------------------------------------------------------ contention
+  - name: mfarm-queue
+    rules:
+      # At two devices, contention is the dominant user-visible problem, and queueing is the
+      # designed answer to it — so the alert is on the WAIT, not on the queue existing.
+      - alert: MfarmQueueWaitLong
+        expr: mfarm_session_queue_oldest_seconds > 900
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Someone has been waiting a quarter of an hour for a device
+          description: >-
+            The oldest queued session has waited {{ $value | humanizeDuration }}. Either a session
+            is holding a device longer than it should, or the farm needs a third device. Check who
+            holds what before adding hardware.
+
+      # The reaper is the only thing that expires an abandoned session and the only thing that
+      # promotes a queued one. It has no caller, so nothing retries it and nothing notices it
+      # stopping — the symptom is a device held forever by a client that crashed, discovered by a
+      # human hours later. This is the only signal that exists for it.
+      - alert: MfarmReaperNotRunning
+        expr: increase(mfarm_reaper_runs_total[10m]) == 0 and up{job="mfarm-api"} == 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: The session reaper has stopped sweeping
+          description: >-
+            No completed reaper sweep in ten minutes while the API is up. Abandoned sessions will
+            hold their devices indefinitely, queued sessions will never be promoted, and
+            idempotency_keys will grow without bound. Check REAPER_INTERVAL_MS.
+
+      - alert: MfarmReaperFailing
+        expr: increase(mfarm_reaper_failures_total[15m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: The session reaper is throwing
+          description: >-
+            The sweep is running and failing, which looks exactly like it running successfully in
+            every other signal.
+
+  # ------------------------------------------------------------------ integrity and capacity
+  - name: mfarm-integrity
+    rules:
+      # A host reporting usage for a session that is not on it. Migration 008 makes this harmless —
+      # the paying org is derived from the session, never taken from the request — so this is not a
+      # billing emergency. It IS either an agent bug or a host reaching past its own hardware, and
+      # both are worth a person.
+      - alert: MfarmMeteringRejected
+        expr: increase(mfarm_metering_events_total{outcome="rejected"}[15m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: A worker reported usage for a session that is not on it
+          description: >-
+            Rejected by record_metering(). Not a billing failure — the paying org is derived from
+            the session — but the agent that sent it believes something about the fleet that is not
+            true.
+
+      - alert: MfarmResetsRejected
+        expr: increase(mfarm_worker_resets_total{accepted="false"}[15m]) > 3
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: Reset confirmations are being rejected
+          description: >-
+            A rejected reset means a stale fence or another host's device. One after a partition is
+            expected. A rate of them means a worker is confirming resets for devices that have
+            already moved on, and those devices are not returning to the pool.
+
+      - alert: MfarmPgPoolSaturated
+        expr: mfarm_pg_pool_connections{state="waiting"} > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: 'Requests are queueing for a {{ $labels.pool }} database connection'
+          description: >-
+            Sustained waiting on the {{ $labels.pool }} pool. This is the shape every pool-exhaustion
+            incident has before it becomes a timeout, and the owner pool has only five connections —
+            the reaper shares them.
+
+      - alert: MfarmApiErrors
+        expr: sum(rate(mfarm_http_requests_total{status=~"5.."}[5m])) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: The control plane is returning 5xx
+          description: >-
+            Client errors are excluded on purpose: a 4xx is the caller's problem and a farm full of
+            them is a misconfigured suite, not an incident.
+
+      - alert: MfarmMetricSeriesDropped
+        expr: mfarm_metric_series_dropped_total > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: A metric has unbounded labels
+          description: >-
+            The exporter refused new label combinations after hitting its per-metric cap, so some
+            metric above is now reporting an incomplete picture while looking normal. Almost always
+            a label that took a URL, an id or an error message.

@@ -282,6 +282,39 @@ jobs:
       - name: Backup/restore drill
         run: ./deploy/restore-drill.sh
 
+  # ---------------------------------------------------------------------------------------------
+  # Alert rules are configuration that only executes in production, on the day something is already
+  # wrong. A typo in a PromQL expression is not a syntax error anywhere else in this repo's tooling:
+  # `promtool` is the only thing that reads it, Prometheus loads the file at startup, and a rule
+  # that failed to parse is a rule that silently does not exist. The failure mode is "the alert we
+  # wrote never fired", discovered by the outage it was supposed to catch.
+  #
+  # Runs in the Prometheus image itself so the checker is always the same version as the server.
+  # ---------------------------------------------------------------------------------------------
+  promtool:
+    name: Alert rules and scrape config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    container:
+      image: prom/prometheus:v2.55.1
+      options: --user root --entrypoint ""
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check rules and config
+        run: |
+          set -eu
+          promtool check rules deploy/observability/alerts.yml
+          # `check config` resolves rule_files and credentials_file against absolute paths that only
+          # exist inside the running container, so stage both where the config expects them.
+          mkdir -p /etc/prometheus /run/secrets
+          cp deploy/observability/alerts.yml /etc/prometheus/alerts.yml
+          echo ci-token > /run/secrets/metrics_token
+          promtool check config deploy/observability/prometheus.yml
+
   yaml-lint:
     name: Workflow hygiene (YAML, pins, shell syntax)
     runs-on: ubuntu-latest

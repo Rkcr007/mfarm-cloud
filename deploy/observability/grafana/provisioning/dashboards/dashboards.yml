@@ -1,0 +1,16 @@
+apiVersion: 1
+
+providers:
+  - name: mfarm
+    orgId: 1
+    folder: MFARM
+    type: file
+    # Edits made in the UI are overwritten on the next restart. That is the intent: the dashboard is
+    # a file in the repo, reviewed like anything else, and a farm rebuilt from scratch comes back
+    # with the same panels.
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { assertAppRoleIsRlsBound, closePools } from './db.ts';
 import { buildServer } from './http/server.ts';
+import { startMetricsServer, type MetricsServer } from './http/metrics-server.ts';
 import { ConfigError, describeConfig, loadConfig, type Config } from './config.ts';
 
 /**
@@ -55,6 +56,33 @@ export async function start(cfg: Config): Promise<Service> {
     reaperIntervalMs: cfg.reaperIntervalMs,
     rateLimitMax: cfg.rateLimitMax,
   });
+
+  // The metrics listener binds BEFORE the API does, and that order is deliberate in both halves.
+  //
+  // Before, because if it cannot bind — the port is taken, the address does not exist on this host —
+  // `start()` rejects while nothing is listening yet, so the process exits with nothing to leak. The
+  // reverse order leaves an API bound to a port and a process on its way out with no drain.
+  //
+  // And it is fatal rather than a warning, which is the less obvious half. A farm running blind is
+  // worse than a farm that refuses to start: "down" is discovered in seconds by the next suite,
+  // while "unmonitored" is discovered by the incident the monitoring was supposed to catch. The
+  // tempting fallback — keep serving and let `up == 0` raise it — depends on the alerting path,
+  // which is precisely the part that has not been exercised. A bind failure is also a
+  // misconfiguration, and misconfigurations here refuse to start; that is the whole of `config.ts`.
+  //
+  // The token is read from the environment here rather than carried on Config, exactly like the
+  // signing key: `describeConfig()` is logged, and the cheapest way to keep a secret out of a log
+  // line is for the logged object never to hold it.
+  let metrics: MetricsServer | undefined;
+  if (cfg.metricsEnabled) {
+    metrics = await startMetricsServer({
+      host: cfg.metricsHost,
+      port: cfg.metricsPort,
+      token: process.env.METRICS_TOKEN?.trim() || undefined,
+      onError: (err) => app.log.error({ err }, 'metrics scrape failed'),
+    });
+  }
+
   const address = await app.listen({ port: cfg.port, host: cfg.host });
 
   // Logged through the app logger so it carries the same redaction rules as everything else, and
@@ -64,6 +92,14 @@ export async function start(cfg: Config): Promise<Service> {
   app.log.info({ ...describeConfig(cfg), address }, 'control plane listening');
   if (cfg.signingKeySource === 'ephemeral') {
     app.log.warn('session keypair is ephemeral — tokens minted now stop verifying after a restart');
+  }
+  if (metrics) {
+    app.log.info(
+      { address: metrics.address, authenticated: cfg.metricsTokenSource === 'environment' },
+      'metrics listening',
+    );
+  } else {
+    app.log.warn('METRICS_ENABLED is off — device health, queue depth and reset failures are unobserved');
   }
 
   let draining: Promise<boolean> | undefined;
@@ -91,6 +127,12 @@ export async function start(cfg: Config): Promise<Service> {
         'grace period expired with requests still in flight — dropping them',
       );
     }
+
+    // The metrics listener closes after the API has drained and before the pools do. After, so the
+    // drain itself stays scrapeable — a slow shutdown is a thing you want a graph of. Before, so a
+    // scrape cannot arrive at a pool that has just been ended and turn a clean shutdown into an
+    // error log.
+    await metrics?.close();
 
     // Step 4, and last on purpose. Ending a pool while a handler still holds a client aborts a
     // request that was about to succeed and leaves the server to roll its transaction back on

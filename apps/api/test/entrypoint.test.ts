@@ -74,6 +74,10 @@ function spawnApi(entry: string, env: Record<string, string> = {}, nodeArgs: str
         APP_DATABASE_URL: process.env.APP_DATABASE_URL ?? DEV_APP_URL,
         PORT: '0',
         HOST: '127.0.0.1',
+        // Same reason as PORT: these children can overlap, and a fixed metrics port would have the
+        // second one fail to bind and exit — a failure with nothing to do with what is being tested.
+        METRICS_PORT: '0',
+        METRICS_HOST: '127.0.0.1',
         LOG_LEVEL: 'info',
         // Off: the reaper is fleet-wide and this child shares a database with the rest of the suite.
         REAPER_INTERVAL_MS: '0',
@@ -191,6 +195,48 @@ describe('exit codes', () => {
         assert.ok(child.err().includes(needle), `${needle} missing from:\n${child.err()}`);
       }
       assert.equal(boundAddress(child), undefined, 'a refused configuration must never bind a port');
+    } finally {
+      await reap(child);
+    }
+  });
+
+  test('the metrics listener is a second port, and it goes away with the process', async () => {
+    // The unit tests build the metrics server directly; this is the only place that proves `main`
+    // actually wires it up, on a port of its own, and tears it down on the way out. A control plane
+    // that starts without it is a farm running blind, which is the failure this whole listener
+    // exists to prevent.
+    const child = spawnApi(MAIN, { METRICS_TOKEN: 'entrypoint-scrape-token' });
+    try {
+      const api = await listening(child);
+      const metrics = await waitFor(
+        () => {
+          for (const line of child.out().split('\n')) {
+            if (!line.startsWith('{')) continue;
+            try {
+              const rec = JSON.parse(line) as { msg?: string; address?: string; authenticated?: boolean };
+              if (rec.msg === 'metrics listening' && rec.address) return rec;
+            } catch { /* half-written line */ }
+          }
+          return undefined;
+        },
+        30_000,
+        'the metrics listener to log its address',
+      );
+      assert.equal(metrics.authenticated, true);
+
+      const port = Number(metrics.address!.split(':').pop());
+      assert.notEqual(port, Number(new URL(api).port), 'it must not share the API listener');
+
+      const url = `http://127.0.0.1:${port}/metrics`;
+      assert.equal((await fetch(url)).status, 401, 'a token was set, so anonymous is refused');
+      const ok = await fetch(url, { headers: { authorization: 'Bearer entrypoint-scrape-token' } });
+      assert.equal(ok.status, 200);
+      assert.match(await ok.text(), /mfarm_devices/);
+
+      child.proc.kill('SIGTERM');
+      const { code } = await child.exit;
+      assert.equal(code, 0, child.err());
+      await assert.rejects(() => fetch(url), 'the port must be released on shutdown');
     } finally {
       await reap(child);
     }

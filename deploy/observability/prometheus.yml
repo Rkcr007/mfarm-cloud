@@ -1,0 +1,51 @@
+# Prometheus for a two-device farm.
+#
+# One scrape target, because there is one thing worth scraping: the control plane knows the state of
+# every device, session and host, and it is the only process that does. The worker agent is not
+# scraped — everything it would report about a device, the control plane already holds, and a second
+# exporter would be a second thing to keep truthful.
+#
+# Retention is 90 days. The questions this data answers are "was the farm healthy last sprint" and
+# "how often do we actually queue", both of which need months, and the volume is a few hundred
+# series at a 30s interval — single-digit MB.
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  # How often the alerting rules run. Deliberately the same as the scrape interval: evaluating
+  # faster only re-reads the same sample, and evaluating slower adds latency to every `for:` clause
+  # without saving anything.
+  evaluation_interval: 30s
+  external_labels:
+    farm: mfarm
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  # The control plane. `api` resolves on the compose network; the metrics listener is a SECOND
+  # server on port 9464, not the API port — see `metrics-server.ts` for why they are separate.
+  - job_name: mfarm-api
+    metrics_path: /metrics
+    # Required, because the listener binds 0.0.0.0 inside the container so that this container can
+    # reach it, and `config.ts` refuses to start a non-loopback metrics listener without a token.
+    # "Only the compose network can reach it" stops being true the first time someone publishes the
+    # port, and that is not a change anyone would think to review.
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token
+    static_configs:
+      - targets: ['api:9464']
+        labels:
+          service: control-plane
+
+  # Prometheus scrapes itself so that "the monitoring is down" is itself a fact in the data, rather
+  # than a gap that looks identical to a quiet farm.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

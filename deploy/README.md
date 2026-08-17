@@ -10,11 +10,15 @@ afterwards. They are separate files for that reason.
 
 ## What runs here
 
-| Service | Restart | Published on |
-|---|---|---|
-| `postgres` | `unless-stopped` | `127.0.0.1:5432` |
-| `migrate` | `no` — one-shot | — |
-| `api` | `unless-stopped` | `127.0.0.1:3000` |
+| Service | Restart | Published on | File |
+|---|---|---|---|
+| `postgres` | `unless-stopped` | `127.0.0.1:5432` | `docker-compose.prod.yml` |
+| `migrate` | `no` — one-shot | — | `docker-compose.prod.yml` |
+| `backup` | `unless-stopped` | — | `docker-compose.prod.yml` |
+| `api` | `unless-stopped` | `127.0.0.1:3000`, `127.0.0.1:9464` | `docker-compose.prod.yml` |
+| `prometheus` | `unless-stopped` | `127.0.0.1:9090` | `docker-compose.obs.yml` |
+| `alertmanager` | `unless-stopped` | `127.0.0.1:9093` | `docker-compose.obs.yml` |
+| `grafana` | `unless-stopped` | `127.0.0.1:3001` | `docker-compose.obs.yml` |
 
 `api` waits for `migrate` to **exit successfully**, which waits for `postgres` to be **healthy**. So
 the schema is never behind the code that assumes it, and a failed migration stops the rollout instead
@@ -36,11 +40,19 @@ openssl genpkey -algorithm ed25519 -out deploy/secrets/session_signing_key.pem
 openssl pkey -in deploy/secrets/session_signing_key.pem -pubout \
   -out deploy/secrets/session_public_key.pem
 openssl rand -base64 32 | tr -d '/+=' > deploy/secrets/worker_registration_token
+printf '%s' "$(openssl rand -base64 32 | tr -d '/+=')" > deploy/secrets/metrics_token
+printf '%s' "$(openssl rand -base64 24 | tr -d '/+=')" > deploy/secrets/grafana_admin_password
 chmod 600 deploy/secrets/*
 
-docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build
-docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env ps
+# Both files declare `name: mfarm`, so the second one joins the same project and network. Drop the
+# obs file to run the farm without Prometheus and Grafana.
+docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml \
+  --env-file deploy/.env up -d --build
+docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml \
+  --env-file deploy/.env ps
 curl -fsS http://127.0.0.1:3000/health && echo
+curl -fsS -H "Authorization: Bearer $(cat deploy/secrets/metrics_token)" \
+  http://127.0.0.1:9464/metrics | head -5
 ```
 
 Then make the database agree with `APP_DB_PASSWORD` — `migrations/001_init.sql` ships a committed
@@ -168,6 +180,173 @@ happens in a scratch database dropped on exit, including on failure.
   accepting connections, finish in-flight requests, clear the reaper, then close the pools, in that
   order. The `command` uses `exec` for the same reason — without it the shell stays PID 1 of the
   process group and Node never sees the signal.
+
+## Observability
+
+`docker-compose.obs.yml` adds Prometheus, Alertmanager and Grafana. It is a separate file so the
+farm can run without them, and so a Grafana upgrade cannot break the file that stands up the
+database.
+
+### Where the numbers come from
+
+The control plane exposes `/metrics` on a **second listener**, port 9464, not the API port.
+
+That separation is the whole design. Every gauge is fleet-wide — devices, sessions and hosts across
+every org — and it is collected on the **owner** pool, because `mfarm_app` is bound by RLS and with
+no `app.org_id` set every policy matches zero rows. So the exporter would report a perfectly healthy
+fleet of nothing on the app pool, and it reports everyone's data on the owner pool. Putting that on
+the listener which also carries the internet-facing WebDriver hub means one forgotten `PUBLIC_PATHS`
+entry discloses the fleet. A separate port cannot be reached by that class of mistake.
+
+`METRICS_HOST` defaults to `127.0.0.1`. The compose file sets `0.0.0.0` **inside the container** so
+Prometheus can reach it across the compose network, and `config.ts` refuses that combination in
+production unless `METRICS_TOKEN` is set. One file, `deploy/secrets/metrics_token`, is read by both
+the API (to require it) and Prometheus (to present it), so the two cannot drift into a scrape that
+401s forever while every dashboard reads "No data".
+
+No worker exporter. Everything one would report about a device, the control plane already holds, and
+a second source of truth is a second thing to keep honest.
+
+### What is alerted on
+
+`observability/alerts.yml`, 15 rules, validated with `promtool`. The ones that earn their place:
+
+| Alert | Fires when | Why it is not obvious otherwise |
+|---|---|---|
+| `MfarmDeviceResetStuck` | a device is CLEANING > 5 min | **This is the reset-failure signal.** A failed restore leaves the device in CLEANING by design — a device never returns to READY unconfirmed — so nothing else will ever surface it, and the farm silently loses that device forever |
+| `MfarmReaperNotRunning` | no sweep in 10 min while the API is up | the reaper has no caller; nothing retries it and nothing notices it stopping. The symptom is a crashed client's device still held, hours later |
+| `MfarmHostSilent` | no heartbeat for 60s | the agent beats every 10s. Past that, the control plane's view of that host's devices is fiction |
+| `MfarmQueueWaitLong` | oldest queued session > 15 min | at two devices contention is the dominant UX problem, and queueing is the designed answer — so the alert is on the wait, not on the queue existing |
+| `MfarmMetricsStale` | the fleet query fails | the API keeps answering scrapes with the last good gauges rather than 500ing, because a 500 reads as "target down" and hides the counters that say why. The graphs stay plausible and stop being current |
+
+Two shapes recur in that file and both are deliberate:
+
+- **Zero-filled gauges.** `mfarm_devices` publishes all eight device states for every placement, with
+  explicit zeros. An absent series is not a zero — `== 0` cannot fire on one — so a vanishing series
+  would make "no device is allocatable" silent at exactly the moment it matters.
+- **A heartbeat timestamp, not an age.** `mfarm_host_last_heartbeat_timestamp_seconds` reports 0 for
+  a host that registered and never beat, and `time() - 0` is enormous, so that case alerts. An age
+  gauge has to invent a number for "never", and every invented number is either a false alert or a
+  silent one.
+
+### Alertmanager sends nothing until you configure it
+
+As shipped, the default receiver has **no integrations**. Alerts fire, group, and appear in the
+Alertmanager UI, and no human is told. That is a dashboard with a louder name, not alerting.
+
+Fill in a receiver in `observability/alertmanager.yml` — Slack, email and webhook blocks are there,
+commented — and then **prove it**:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml \
+  --env-file deploy/.env stop api          # MfarmControlPlaneDown fires after 2m
+# ...wait for the notification, then:
+docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml \
+  --env-file deploy/.env start api
+```
+
+An alerting path that has never delivered a message is an alerting path that does not work. This is
+the single most common way monitoring is "set up" and useless.
+
+### Known gaps
+
+Stated rather than implied, because each of these looks covered from the dashboard:
+
+- **No backup-freshness alert.** The `backup` sidecar logs its failures and nothing scrapes it, so
+  backups can stop for six weeks without a page. `restore-drill.sh` in CI proves the *path* works;
+  it does not prove last night's dump exists. Until this is closed, check `deploy/backups/` by hand.
+- **No host metrics.** No disk, CPU, memory or temperature for the box itself. A full disk takes the
+  database down and the backups with it, and nothing here will say so first. `node-exporter` is the
+  fix and it needs host mounts.
+- **No worker-side metrics.** cvd instance health, adb responsiveness and Appium wedging are
+  invisible except through their effect on device state — and a wedged-but-alive Appium answers
+  `/status` 200 forever (known issue 2).
+- Grafana's own database is a named volume that nothing backs up. Everything in it is provisioned
+  from files in this repo, which is why that is acceptable — do not hand-edit dashboards in the UI
+  and expect them to survive.
+
+## Tailscale ingress only
+
+**Nothing in this stack is published beyond loopback.** Every `ports:` entry in both compose files
+begins `127.0.0.1:`. That is the invariant; the rest of this section is how to reach the farm anyway.
+
+### The model
+
+Tailscale is **defence in depth, not the authorization model**. A VPN authenticates the *network*;
+the ADR-0004 grant authenticates the *request*. Appium stays bound to `127.0.0.1` and is reachable
+only through the worker's gateway, which verifies a two-minute Ed25519 grant naming the session,
+device, org, fence and host — offline, against the key it received at registration. Losing the
+tailnet would not, by itself, give anyone a device.
+
+### Standing it up
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --ssh --hostname=mfarm-farm
+tailscale ip -4                                   # the address everything below uses
+```
+
+Then **verify** rather than assume. This is the check that catches a service someone added later:
+
+```bash
+sudo ss -tlnp | grep -v '127.0.0.1\|::1\|100\.' && echo "^ PUBLICLY BOUND — fix before continuing"
+```
+
+Every listener must be on loopback or on the `100.x.y.z` tailnet address. A bare `0.0.0.0` line is a
+finding, not a formatting quirk.
+
+Firewall, as a second layer, because a compose file edited in a hurry can undo the first:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow in on tailscale0
+sudo ufw allow 41641/udp                  # direct connections; without it you fall back to a relay
+sudo ufw enable
+```
+
+**Do this only once `tailscale ssh` works.** Enabling `ufw` while your only session is SSH on the
+public interface locks you out of a machine that has no console.
+
+### The worker's listeners
+
+The agent's data plane and automation gateway bind **all interfaces by default** — right for a box
+whose only NIC is the tailnet, wrong for a rented VM. Set `BIND_HOST` to the Tailscale address:
+
+```bash
+BIND_HOST=$(tailscale ip -4) DATA_PLANE_PORT=8080 AUTOMATION_GATEWAY_PORT=8090 node workers/agent/src/index.ts
+```
+
+Advertised endpoints (`AUTOMATION_ADVERTISE_BASE`, `APPIUM_ADVERTISE_HOST`) must then name the
+tailnet address or MagicDNS name — an endpoint the control plane registers but cannot reach is a
+device that absorbs sessions and fails them.
+
+### TLS internally
+
+Tailscale traffic is already WireGuard-encrypted end to end, so nothing on the tailnet is in the
+clear. TLS is still worth terminating for one concrete reason: Appium clients are handed
+`https://<key>:<session-id>@hub/wd/hub`, and a self-signed certificate means every teammate's suite
+needs a trust-store change.
+
+`tailscale serve` solves that with a real, publicly-trusted certificate and no open ports. Enable
+MagicDNS and HTTPS certificates in the tailnet admin console first, then:
+
+```bash
+sudo tailscale serve --bg --https=443  http://127.0.0.1:3000    # control plane + WebDriver hub
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:3001    # Grafana
+sudo tailscale serve status
+```
+
+The farm is then `https://mfarm-farm.<tailnet>.ts.net/` from any device on the tailnet, with a
+certificate every client already trusts, while `ss -tlnp` still shows nothing but loopback.
+
+Separate ports rather than sub-paths on purpose: Grafana behind a sub-path needs
+`GF_SERVER_SERVE_FROM_SUB_PATH` and a matching root URL, and getting one of the two wrong produces a
+UI that half-loads. Set `GRAFANA_ROOT_URL` in `deploy/.env` to the URL above either way, or every
+link Grafana generates points at `127.0.0.1` — a different machine for whoever is reading it.
+
+**Never `tailscale funnel`.** It is one word away from `serve` and it publishes to the open
+internet. An internet-facing Appium port is unauthenticated device control.
 
 ## Role hardening
 

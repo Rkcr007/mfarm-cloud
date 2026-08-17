@@ -54,6 +54,13 @@ export interface DataPlaneOptions {
   /** Maps the token's device uuid to a local backend. */
   resolveDevice: (deviceUuid: string) => DeviceBackend | undefined;
   port?: number;
+  /**
+   * Which interface to bind. Undefined means all of them — Node's default, and what this did before
+   * the option existed. A browser reaches this socket over the tailnet, so on a box with a public
+   * NIC set it to the Tailscale address (`tailscale ip -4`) rather than relying on the token check
+   * alone to be the only thing between a stranger and a live device.
+   */
+  host?: string;
 }
 
 export class DataPlane {
@@ -68,11 +75,16 @@ export class DataPlane {
   }
 
   /** Returns the bound port. Pass 0 (the test default) to let the OS choose a free one. */
-  async listen(port = this.opts.port ?? 0): Promise<number> {
+  async listen(port = this.opts.port ?? 0, host = this.opts.host): Promise<number> {
     this.http = createServer((_req, res) => { res.writeHead(426); res.end('websocket only'); });
     this.wss = new WebSocketServer({ server: this.http });
     this.wss.on('connection', (ws) => this.onConnection(ws));
-    await new Promise<void>((resolve) => this.http!.listen(port, resolve));
+    // `listen(port, undefined, cb)` puts undefined in the host slot rather than falling back to the
+    // two-argument overload, so the two cases are branched rather than passed through.
+    await new Promise<void>((resolve) => {
+      if (host) this.http!.listen(port, host, resolve);
+      else this.http!.listen(port, resolve);
+    });
     const addr = this.http.address();
     return typeof addr === 'object' && addr ? addr.port : 0;
   }

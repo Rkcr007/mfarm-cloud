@@ -1,0 +1,121 @@
+# MFARM observability — Prometheus, Alertmanager, Grafana.
+#
+# A SECOND file, composed alongside the production stack rather than folded into it:
+#
+#   docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml \
+#                  --env-file deploy/.env up -d
+#
+# Both files declare `name: mfarm`, so this joins the same project and the same default network —
+# which is how `prometheus` reaches `api:9464` by name. Keeping it separate means the farm can run
+# without it (a box with 32 GB does not always want three more containers) and that an upgrade to
+# Grafana cannot break the file that stands up the database.
+#
+# NOTHING IS PUBLISHED BEYOND LOOPBACK. Reachability is Tailscale's job — see deploy/README.md.
+# Grafana in particular is an authenticated web UI with a default admin account, and the internet
+# finds those in minutes.
+
+name: mfarm
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    # --web.enable-lifecycle is deliberately NOT set. It exposes an unauthenticated POST /-/reload
+    # on the same port as the metrics, and reloading is `docker compose restart prometheus`.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-90d}
+      - --web.listen-address=0.0.0.0:9090
+      - --web.external-url=${PROM_EXTERNAL_URL:-http://127.0.0.1:9090}
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    secrets:
+      - metrics_token
+    ports:
+      - "127.0.0.1:${PROM_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=${ALERTMANAGER_EXTERNAL_URL:-http://127.0.0.1:9093}
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Named volume, not tmpfs: silences and notification state live here, and losing them on a
+      # restart means every silenced alert comes back shouting.
+      - alertmanagerdata:/alertmanager
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+    environment:
+      # `__FILE` is Grafana's own convention for reading a setting out of a file. The password never
+      # appears in deploy/.env, in `docker inspect`, or in `docker compose config`.
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://127.0.0.1:3001}
+      GF_SERVER_HTTP_PORT: "3000"
+      # Nobody signs up for a two-person farm's Grafana. Leaving this on is how an exposed instance
+      # becomes someone else's instance.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # No phone-home from a box whose whole security posture is "nothing talks to the internet".
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    secrets:
+      - grafana_admin_password
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+secrets:
+  metrics_token:
+    file: ./secrets/metrics_token
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
+
+volumes:
+  promdata:
+    name: mfarm_promdata
+  alertmanagerdata:
+    name: mfarm_alertmanagerdata
+  grafanadata:
+    name: mfarm_grafanadata

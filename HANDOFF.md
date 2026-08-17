@@ -57,10 +57,10 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**300 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**327 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
-apps/api/         control plane + service entrypoint   180 tests
+apps/api/         control plane, entrypoint, metrics   207 tests
 apps/cli/         mfarm CLI                             48 tests
 workers/agent/    worker agent, Appium supervisor,      72 tests
                   automation gateway
@@ -97,7 +97,9 @@ interchangeable, Ed25519 session tokens, `Idempotency-Key` on session creation.
 and exits **78 (`EX_CONFIG`)** in production on: missing or half a signing keypair, unparseable key
 material, a dev-default or committed-password database URL, **`DATABASE_URL == APP_DATABASE_URL`**
 (that one means request handling runs as the owner, and owners bypass RLS), a reaper interval of 0
-or under 1000ms, or a misspelt `NODE_ENV`.
+or under 1000ms, a misspelt `NODE_ENV`, a `METRICS_PORT` that collides with `PORT`, or a
+non-loopback `METRICS_HOST` with no `METRICS_TOKEN` — that last one is an unauthenticated listener
+serving every org's fleet state.
 
 `/health` is liveness — no I/O, never fails while the process lives. `/ready` checks both pools and
 returns 503. They must stay separate: an orchestrator restarts on failed *liveness*, so a
@@ -106,6 +108,36 @@ exempt from the rate limiter, because a 429 is indistinguishable from a dead pod
 
 Shutdown drains in-flight requests, clears the reaper in `onClose`, then closes pools — in that
 order, and the order is load-bearing (see the ADR). The reaper is now actually on.
+
+### Observability — `apps/api/src/metrics.ts`, `deploy/observability/` (Phase 2)
+
+Prometheus metrics on a **second listener** (`METRICS_PORT`, default 9464), never the API port. That
+is not tidiness: every gauge is fleet-wide and collected on the **owner** pool — `mfarm_app` is
+bound by RLS and with no `app.org_id` set every policy matches zero rows, so the exporter would
+report a healthy fleet of nothing on the app pool. It reports every org's devices and sessions on
+the owner pool, and the API listener is the one that has to carry the internet-facing WebDriver hub.
+`config.ts` refuses a non-loopback `METRICS_HOST` in production without `METRICS_TOKEN`.
+
+No client library — the exposition format is a documented text protocol and encoding it is smaller
+than configuring a library to do it. Three properties in there are load-bearing and each fixes a
+silent failure:
+
+- **Gauges are zero-filled.** All eight device states are published for every placement, zeros
+  included. An absent series is not a zero, `== 0` cannot fire on one, and the alert for "no device
+  is allocatable" would be silent exactly when it matters. `metrics.test.ts` reads the enums back
+  out of Postgres so the list cannot drift from a migration.
+- **The heartbeat is a timestamp, not an age.** A host that registered and never beat reports 0;
+  `time() - 0` is enormous, so it alerts. An age gauge must invent a number for "never", and every
+  invented number is a false alert or a silent one.
+- **A failed fleet query does not fail the scrape.** A 500 reads as "target down" to Prometheus and
+  hides the counters that would say why — including the scrape-error counter itself. Stale gauges
+  are served, `mfarm_scrape_errors_total` moves, and a rule watches that.
+
+**Reset failure is alerted as a device stuck in CLEANING**, because that is the only signal there
+is: a restore that throws never reports completion, and the device stays in CLEANING by design.
+
+15 rules, `promtool`-checked. **Alertmanager ships with no receiver**, so alerts reach its UI and no
+human until someone configures one and tests it by stopping the API for three minutes.
 
 ### WebDriver hub — `apps/api/src/http/routes/webdriver.ts`
 
@@ -199,6 +231,13 @@ without one rather than advertise `127.0.0.1` to the fleet.
 - Web UI (deliberately last — it is the demo surface, not the product)
 - Publishing. Every package is `"private": true`, so `npx mfarm` does not work yet and the Action's
   `npx --yes mfarm@latest` has nothing to resolve.
+- Observability gaps, all of which look covered from the dashboard and are not: **no
+  backup-freshness alert** (the sidecar logs failures and nothing scrapes it — backups can stop for
+  six weeks without a page), **no host metrics** (a full disk takes the database and the backups
+  down and nothing here says so first), and **no worker-side metrics** (cvd health, adb
+  responsiveness and a wedged-but-alive Appium are invisible except through device state).
+- Nothing in Phase 2 has run on real hardware. The images have never been pulled on a box,
+  `tailscale serve` has never been run, and no alert has ever been delivered to a person.
 
 ## BLOCKERS — decide these before the hardware session
 

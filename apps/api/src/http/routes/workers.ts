@@ -5,6 +5,7 @@ import { generateWorkerToken } from '../../auth.ts';
 import { negotiate, deviceAutomationEndpoint, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
+import { meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
 import { unauthorized, badRequest } from '../errors.ts';
 
@@ -160,9 +161,14 @@ export async function workerRoutes(app: FastifyInstance) {
       })),
     );
 
+    meteringEvents.inc({ outcome: 'recorded' }, meter.recorded);
+    meteringEvents.inc({ outcome: 'duplicate' }, meter.duplicates);
+    meteringEvents.inc({ outcome: 'rejected' }, meter.rejected);
+
     // Rejection means a host reported usage for a session that is not on it. That is either a bug in
     // the agent or a host reaching past its own hardware, and both need a human — a counter in a
-    // response body nobody reads is not a signal.
+    // response body nobody reads is not a signal. It is now also alerted on
+    // (`MfarmMeteringRejected`), which is what makes this log line a detail rather than the signal.
     if (meter.rejected > 0) {
       req.log.warn(
         { hostId, rejected: meter.rejected, sent: metering.length },
@@ -176,10 +182,9 @@ export async function workerRoutes(app: FastifyInstance) {
     // worker probe the fleet's device ids.
     const resetResults = [];
     for (const r of resets) {
-      resetResults.push({
-        deviceId: r.deviceId,
-        accepted: await resetComplete(hostId, r.deviceId, r.fence),
-      });
+      const accepted = await resetComplete(hostId, r.deviceId, r.fence);
+      workerResets.inc({ accepted: String(accepted) });
+      resetResults.push({ deviceId: r.deviceId, accepted });
     }
 
     return {

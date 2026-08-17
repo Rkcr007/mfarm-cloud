@@ -9,6 +9,15 @@ import { deviceRoutes } from './routes/devices.ts';
 import { workerRoutes } from './routes/workers.ts';
 import { webdriverRoutes } from './routes/webdriver.ts';
 import { reap } from '../allocator.ts';
+import {
+  httpDuration,
+  httpRequests,
+  reaperDuration,
+  reaperExpired,
+  reaperFailures,
+  reaperPromoted,
+  reaperRuns,
+} from '../metrics.ts';
 import { appPool, systemPool } from '../db.ts';
 import type { Pool } from 'pg';
 
@@ -223,6 +232,23 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
     return payload;
   });
 
+  // --- metrics ---------------------------------------------------------------------------------
+  //
+  // `onResponse` rather than `onSend`, so the timing includes serialisation, and so a request that
+  // was rejected by the limiter or by auth is still counted — those are the responses worth
+  // graphing, and a hook placed later would miss every one of them.
+  //
+  // The label is `routeOptions.url`, the ROUTE PATTERN. Labelling by `req.url` would put a session
+  // uuid in a label and make the series count grow with traffic forever; `metrics.ts` caps it, but
+  // the cap is a backstop, not the design. An unmatched request has no pattern and is bucketed as
+  // one series rather than by the path it invented.
+  app.addHook('onResponse', async (req, reply) => {
+    const route = req.routeOptions?.url ?? 'unmatched';
+    const method = req.method;
+    httpRequests.inc({ method, route, status: String(reply.statusCode) });
+    httpDuration.observe({ method, route }, reply.elapsedTime / 1000);
+  });
+
   // --- errors ----------------------------------------------------------------------------------
   app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err instanceof ApiError) {
@@ -332,7 +358,22 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   // --- reaper ------------------------------------------------------------------------------------
   if (opts.reaperIntervalMs && opts.reaperIntervalMs > 0) {
     const timer = setInterval(() => {
-      void reap().catch((err: Error) => app.log.error({ err }, 'reaper failed'));
+      // Counted, not just logged. The reaper has no caller: nothing retries it, nothing notices a
+      // sweep that did not happen, and its two jobs — expiring an abandoned session, promoting a
+      // queued one — fail as "a device is stuck" and "my run never started" hours later and
+      // somewhere else. `mfarm_reaper_failures_total` is the only place that failure is legible.
+      const t0 = process.hrtime.bigint();
+      void reap()
+        .then((r) => {
+          reaperRuns.inc();
+          reaperExpired.inc({}, r.expired);
+          reaperPromoted.inc({}, r.promoted);
+        })
+        .catch((err: Error) => {
+          reaperFailures.inc();
+          app.log.error({ err }, 'reaper failed');
+        })
+        .finally(() => reaperDuration.observe({}, Number(process.hrtime.bigint() - t0) / 1e9));
     }, opts.reaperIntervalMs);
     timer.unref?.();
     app.addHook('onClose', async () => clearInterval(timer));

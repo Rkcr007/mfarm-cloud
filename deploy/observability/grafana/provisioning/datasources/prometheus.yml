@@ -1,0 +1,17 @@
+# Provisioned, not clicked. A datasource created through the UI lives in Grafana's SQLite database,
+# which is a volume nobody backs up — so the day the box is rebuilt, the dashboards come back
+# pointing at nothing.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: mfarm-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    # Matches Prometheus' evaluation_interval, so a panel never asks for a resolution finer than the
+    # data actually has and then draws the gaps as if they meant something.
+    jsonData:
+      timeInterval: 30s
+    editable: false

@@ -46,6 +46,16 @@ export interface GatewayOptions {
   targets: Map<string, number>;
   port?: number;
   /**
+   * Which interface to bind.
+   *
+   * Undefined means all of them, which is Node's default and is what this did before the option
+   * existed. That is correct when the box has no public interface and wrong the moment it does: on
+   * a rented VM, an all-interfaces bind puts the gateway on the internet, and the only thing between
+   * a stranger and a device is the grant check. The grant check is good, but "nothing is listening"
+   * is better. Set this to the Tailscale address (`tailscale ip -4`) on a box with a public NIC.
+   */
+  host?: string;
+  /**
    * Where Appium actually listens. Loopback, always, in any real deployment — it is a parameter so
    * tests can point at a fake on the same interface, not so operators can widen it.
    */
@@ -95,7 +105,7 @@ export class AutomationGateway {
 
   get port(): number | undefined { return this._port; }
 
-  async listen(port = this.opts.port ?? 8090): Promise<number> {
+  async listen(port = this.opts.port ?? 8090, host = this.opts.host): Promise<number> {
     const server = createServer((req, res) => { void this.handle(req, res); });
     // A socket that connects and says nothing costs a file descriptor until it does. The gateway is
     // internet-facing, so it gets a header deadline rather than Node's default of none.
@@ -103,7 +113,11 @@ export class AutomationGateway {
     server.requestTimeout = 0; // body streaming is bounded by maxBodyBytes, not by a clock
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
-      server.listen(port, () => { server.removeListener('error', reject); resolve(); });
+      // `listen(port)` and `listen(port, host)` are different overloads and `listen(port, undefined)`
+      // is not the former — it resolves to the callback position. Branch rather than pass through.
+      const done = () => { server.removeListener('error', reject); resolve(); };
+      if (host) server.listen(port, host, done);
+      else server.listen(port, done);
     });
     this.server = server;
     const addr = server.address();

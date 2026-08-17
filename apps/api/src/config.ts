@@ -58,6 +58,13 @@ export interface Config {
   rateLimitMax: number;
   logLevel: string;
   shutdownGraceMs: number;
+  /** Whether to bind the second listener that serves `/metrics`. */
+  metricsEnabled: boolean;
+  metricsPort: number;
+  metricsHost: string;
+  /** Whether a scrape credential was supplied. The token itself is deliberately NOT on this object,
+   *  for the same reason the signing key is not: `describeConfig` gets logged. */
+  metricsTokenSource: 'environment' | 'none';
 }
 
 // Fields are declared and assigned explicitly rather than through constructor parameter properties:
@@ -94,6 +101,27 @@ function intVar(
   }
   return n;
 }
+
+/**
+ * A boolean that refuses to guess.
+ *
+ * `Boolean(env.X)` is true for the string "false", and `x === 'true'` silently reads a typo as off —
+ * which for a feature flag means the feature is missing and nothing says so. Accept the spellings
+ * people actually type, reject everything else by name.
+ */
+function boolVar(raw: string | undefined, name: string, fallback: boolean, problems: string[]): boolean {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const v = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(v)) return true;
+  if (['0', 'false', 'no', 'off'].includes(v)) return false;
+  problems.push(`${name}="${raw}" is not a boolean. Use 1/0, true/false, yes/no or on/off.`);
+  return fallback;
+}
+
+/** Addresses that cannot be reached from off the box, so a listener on one needs no credential of
+ *  its own. Deliberately not a pattern: `127.0.0.2` is loopback too, and so is every address in
+ *  127/8, but nothing here binds one and a broad match is how `0.0.0.0` eventually slips in. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
 function parsePostgresUrl(raw: string, name: string, problems: string[]): URL | null {
   let url: URL;
@@ -381,6 +409,39 @@ export function parseConfig(env: Env): Config {
   // it is a SIGKILL in the middle of one.
   const shutdownGraceMs = intVar(env.SHUTDOWN_GRACE_MS, 'SHUTDOWN_GRACE_MS', 15_000, 0, 300_000, problems);
 
+  // --- metrics ---------------------------------------------------------------------------------
+  const metricsEnabled = boolVar(env.METRICS_ENABLED, 'METRICS_ENABLED', true, problems);
+  // 0 is allowed and means "let the kernel choose", exactly as it does for PORT. Useless for a
+  // deployment — Prometheus has to be told a number — and the only way a test can start the real
+  // entrypoint without two children fighting over a fixed port.
+  const metricsPort = intVar(env.METRICS_PORT, 'METRICS_PORT', 9464, 0, 65535, problems);
+  const metricsHost = env.METRICS_HOST?.trim() || '127.0.0.1';
+  const metricsToken = env.METRICS_TOKEN?.trim();
+  const metricsTokenSource = metricsToken ? 'environment' : 'none';
+
+  // `0 === 0` is not a collision: both mean "the kernel picks", and it picks twice.
+  if (metricsEnabled && metricsPort !== 0 && metricsPort === port) {
+    problems.push(
+      `METRICS_PORT=${metricsPort} is also PORT. The metrics listener is a second server on purpose — ` +
+        'sharing the port would put fleet-wide, cross-tenant gauges on the same listener as the ' +
+        'WebDriver hub, which is internet-facing by design. One of the two would also simply fail to ' +
+        'bind, and which one is a race.',
+    );
+  }
+
+  // Loopback is the default and needs no credential, because nothing off the box can reach it. Any
+  // other bind address can, so it must carry one. The realistic case is a container: `METRICS_HOST`
+  // has to be 0.0.0.0 for Prometheus to scrape across the compose network, and "only reachable on
+  // the docker network" stops being true the first time someone publishes the port.
+  if (isProduction && metricsEnabled && !LOOPBACK_HOSTS.has(metricsHost) && !metricsToken) {
+    problems.push(
+      `METRICS_HOST="${metricsHost}" is not loopback and METRICS_TOKEN is unset. /metrics reports every ` +
+        'device, session and host in the fleet across every org — it is collected on the owner pool ' +
+        'precisely because RLS would hide it — so an unauthenticated non-loopback listener discloses ' +
+        'the whole fleet. Set METRICS_TOKEN, or bind 127.0.0.1 and scrape through the host.',
+    );
+  }
+
   if (problems.length > 0) throw new ConfigError(problems);
 
   return Object.freeze({
@@ -398,6 +459,10 @@ export function parseConfig(env: Env): Config {
     rateLimitMax,
     logLevel,
     shutdownGraceMs,
+    metricsEnabled,
+    metricsPort,
+    metricsHost,
+    metricsTokenSource,
   });
 }
 
@@ -443,5 +508,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     rateLimitMax: c.rateLimitMax,
     logLevel: c.logLevel,
     shutdownGraceMs: c.shutdownGraceMs,
+    metrics: c.metricsEnabled ? `${c.metricsHost}:${c.metricsPort}` : 'disabled',
+    metricsTokenSource: c.metricsTokenSource,
   };
 }
