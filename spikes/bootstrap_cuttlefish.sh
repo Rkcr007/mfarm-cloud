@@ -10,8 +10,25 @@ set -euo pipefail
 
 STATE="${HOME}/.mfarm_bootstrap"
 WORKDIR="${WORKDIR:-${HOME}/cf}"
-BRANCH="${BRANCH:-aosp-main}"
+BRANCH="${BRANCH:-aosp-android-latest-release}"
 CF_REPO="https://github.com/google/android-cuttlefish"
+
+# A pinned, verified build — not merely a default.
+#
+# Google has retired anonymous access to the v3 build API's LISTING endpoints (403 "migrate to
+# Build API v4"), confirmed from four separate IPs. Single-artifact lookups still work, so a build
+# we already know can be downloaded, but no build can be DISCOVERED without a browser session on
+# ci.android.com. `cvd fetch` therefore has no unattended path to find an image on its own.
+#
+# 16102939 was read off the grid by hand and both artifacts verified present on 2026-08-18. Pinning
+# it also keeps every device in the farm on one image: two devices drifting onto different builds
+# turns any behavioural difference between them into a debugging problem you did not need.
+#
+# To move to a different build: open
+#   https://ci.android.com/builds/branches/aosp-android-latest-release/grid?legacy=1
+# pick a green cell under $CF_TARGET whose artifacts include the -img- zip, and either set
+# CF_BUILD_ID=<id> for one run or update this pin.
+CF_PINNED_BUILD_ID="${CF_PINNED_BUILD_ID:-16102939}"
 
 c_ok()   { printf '\033[32m  ok\033[0m  %s\n' "$*"; }
 c_info() { printf '\033[36m  ..\033[0m  %s\n' "$*"; }
@@ -68,9 +85,13 @@ echo "== preflight =="
 c_ok "${PRETTY_NAME:-unknown}"
 
 ARCH=$(uname -m)
+# Release branches name these targets "..._only_phone...". aosp-main used to publish a plain
+# aosp_cf_x86_64_phone-userdebug, and assuming that name is what sent an earlier run chasing a
+# missing artifact on a branch where it does not exist. Override with CF_TARGET if a branch you
+# pick names them differently again.
 case "$ARCH" in
-  x86_64)  CF_TARGET="aosp_cf_x86_64_phone-userdebug" ;;
-  aarch64) CF_TARGET="aosp_cf_arm64_only_phone-userdebug" ;;
+  x86_64)  CF_TARGET="${CF_TARGET:-aosp_cf_x86_64_only_phone-userdebug}" ;;
+  aarch64) CF_TARGET="${CF_TARGET:-aosp_cf_arm64_only_phone-userdebug}" ;;
   *) die "unsupported arch: $ARCH" ;;
 esac
 c_ok "arch $ARCH -> $CF_TARGET"
@@ -291,13 +312,31 @@ for b in d.get("builds", []):
     return 1
   }
 
+  # Prefer the pin, but never trust it blindly — CI artifacts are garbage-collected eventually, and
+  # a pin that has expired should degrade to a search rather than to a confusing download failure.
+  if [ -z "${CF_BUILD_ID:-}" ] && [ -n "${CF_PINNED_BUILD_ID:-}" ]; then
+    c_info "checking pinned build ${CF_PINNED_BUILD_ID}"
+    if build_has_image "$CF_PINNED_BUILD_ID"; then
+      CF_BUILD_ID="$CF_PINNED_BUILD_ID"
+    else
+      c_warn "pinned build ${CF_PINNED_BUILD_ID} no longer has a published image; searching instead"
+    fi
+  fi
+
   if [ -n "${CF_BUILD_ID:-}" ]; then
-    c_ok "using pinned CF_BUILD_ID=${CF_BUILD_ID}"
+    c_ok "using build ${CF_BUILD_ID}"
   else
     c_info "resolving newest build that has a published image"
     CF_BUILD_ID=$(resolve_build_id) \
       || die "could not find a build with a published image for ${BRANCH}/${CF_TARGET}.
   The reason is on the lines just above; raw API response is in ${BUILD_LIST_RAW}.
+
+  NOTE: anonymous listing on the v3 build API is being retired, so this search is EXPECTED to fail
+  with a 403. Discovery now needs a browser. Open the grid, pick a green build whose artifacts
+  include ${CF_PRODUCT}-img-<id>.zip, and re-run pinned to it:
+
+      https://ci.android.com/builds/branches/${BRANCH}/grid?legacy=1
+      CF_BUILD_ID=<id> $0
 
   Pick a build by hand from https://ci.android.com/builds/branches/${BRANCH}/grid — choose a green
   one that lists ${CF_PRODUCT}-img-<id>.zip among its artifacts — then re-run pinned to it:
