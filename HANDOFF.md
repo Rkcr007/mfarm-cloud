@@ -349,6 +349,25 @@ scheduler).
     name the target `aosp_cf_x86_64_only_phone-userdebug` — with an `_only_` that `aosp-main` did
     not use — so a correct build id with the old target name still 404s.
 
+11. **Booting a fetched image needs three things `cvd` will not infer.** All three surfaced on
+    2026-08-18 against `cvd` 1.55.1 on the lab VM, each with an error that points somewhere other
+    than the cause. Anything driving `cvd` — `bootstrap_cuttlefish.sh`, B7, and
+    `workers/agent/src/devices/cuttlefish.ts` — has to get all three right.
+
+    - **The verb is `create`, not `start`.** `cvd` 1.x keeps an instance database. `create` builds a
+      new instance group from artifacts and boots it; `start` only restarts a group that already
+      exists. On a fresh host the database is empty, so `cvd start` fails with ``Command `start...`
+      is not applicable: no devices present`` — which reads like a boot failure but happens before
+      anything boots. `launch_cvd`-era documentation has no such split.
+    - **`--host_path` and `--product_path` are mandatory.** `cvd create` ignores the current
+      directory and defaults both to `$HOME`, so it reports `'/home/<user>/bin/' does not contain
+      any of '[cvd_internal_start, launch_cvd]'` while the artifacts sit in `~/cf/image`. The
+      layout `cvd fetch` writes has moved between versions, so the script locates the roots by
+      searching for `bin/launch_cvd` and `super.img` rather than assuming a path.
+    - **Boot with the snapshot flags even when not snapshotting.** `--gpu_mode=guest_swiftshader
+      --enable_virtiofs=false` (issue 2 above). Without them the cold-boot baseline is measured on a
+      different device configuration than the snapshot restore it exists to be compared against.
+
     **The farm consequence:** every image refresh needs a human, and both devices must stay on one
     pinned build or differences between them become debugging noise. Revisit if upstream opens v4
     or ships an unauthenticated mirror.
