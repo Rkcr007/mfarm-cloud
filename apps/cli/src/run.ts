@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 import { webdriverUrl, maskUrl, describe } from './client.ts';
 import type {
-  ControlPlaneClient, CreateSessionResult, DataPlaneCoordinates, SessionSummary,
+  ControlPlaneClient, CreateSessionResult, DataPlaneCoordinates, SessionResult, SessionSummary,
 } from './client.ts';
 
 /**
@@ -168,10 +168,15 @@ export async function run(opts: RunOptions): Promise<number> {
   try {
     if (created.queued) {
       progress(`no device is free — session ${sessionId} is queued (waiting up to ${opts.waitSeconds}s)`);
-      session = await waitForDevice(opts, sessionId, {
+      const promoted = await waitForDevice(opts, sessionId, {
         interrupted: () => interrupted,
         sleep: interruptibleSleep,
       });
+      session = promoted.session;
+      // The coordinates arrive here or nowhere. This assignment is the whole of the known-issue-9
+      // fix on the client side: without it the child ran with no MFARM_DATA_PLANE_ENDPOINT and no
+      // MFARM_SESSION_TOKEN whenever it had waited in the queue, and with them whenever it had not.
+      dataPlane = promoted.dataPlane;
     }
     if (interrupted) throw new InterruptedError();
 
@@ -284,7 +289,7 @@ async function waitForDevice(
   opts: RunOptions,
   sessionId: string,
   ctx: { interrupted: () => boolean; sleep: (ms: number) => Promise<void> },
-): Promise<SessionSummary> {
+): Promise<SessionResult> {
   const deadline = Date.now() + opts.waitSeconds * 1_000;
   let delay = POLL_MIN_MS;
 
@@ -297,8 +302,12 @@ async function waitForDevice(
     await ctx.sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
     if (ctx.interrupted()) throw new InterruptedError();
 
-    const session = await opts.client.getSession(sessionId);
-    if (session.deviceId && READY_STATES.has(session.state)) return session;
+    const result = await opts.client.getSession(sessionId);
+    const session = result.session;
+    // The coordinates travel back with the session, not separately: on this path they are the ONLY
+    // ones the run will ever see. POST answered 202 with no device and therefore no endpoint and no
+    // token (known issue 9).
+    if (session.deviceId && READY_STATES.has(session.state)) return result;
     if (TERMINAL_STATES.has(session.state)) {
       const reason = session.endReason ? `: ${session.endReason}` : '';
       throw new Error(`Session ${sessionId} reached ${session.state} before a device was attached${reason}.`);
@@ -327,10 +336,11 @@ function childEnvironment(
     env.MFARM_DATA_PLANE_ENDPOINT = dataPlane.endpoint;
     env.MFARM_SESSION_TOKEN = dataPlane.token;
   } else {
-    // Only reachable on the queued path: GET /v1/sessions/:id carries no data-plane block, so a
-    // promoted session has no endpoint or token to hand down. WebDriver still works — it gets its
-    // coordinates from the hub — but anything speaking the raw data plane needs to know why the
-    // variables are missing rather than reading an empty string as "no device".
+    // No longer the queued path — `GET /v1/sessions/:id` now carries the block too (known issue 9).
+    // What is left is a control plane too old to send one, or a host with no endpoint registered.
+    // WebDriver still works either way, because it gets its coordinates from the hub; anything
+    // speaking the raw data plane needs the variables ABSENT rather than empty, so that it fails
+    // with "unset" instead of reading "" as an endpoint.
     delete env.MFARM_DATA_PLANE_ENDPOINT;
     delete env.MFARM_SESSION_TOKEN;
   }

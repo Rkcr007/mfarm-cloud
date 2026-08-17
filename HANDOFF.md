@@ -57,11 +57,11 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**327 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**333 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
-apps/api/         control plane, entrypoint, metrics   207 tests
-apps/cli/         mfarm CLI                             48 tests
+apps/api/         control plane, entrypoint, metrics   211 tests
+apps/cli/         mfarm CLI                             50 tests
 workers/agent/    worker agent, Appium supervisor,      72 tests
                   automation gateway
 packages/protocol shared contract
@@ -321,8 +321,15 @@ scheduler).
 8. ~~`PG_POOL_MAX` / `PG_SYSTEM_POOL_MAX` are unvalidated.~~ **FIXED 2026-08-17.** Bounded via
    `intVar`, so the pool gets an integer or the default and never `NaN`; `parseConfig` reports a
    typo in the same list as everything else and `main` exits 78. Also logged at startup.
-9. On the queued path the CLI cannot produce `MFARM_DATA_PLANE_ENDPOINT` / `MFARM_SESSION_TOKEN`,
-   because `GET /v1/sessions/:id` returns no `dataPlane` block. (ADR-0002, D2)
+9. ~~On the queued path the CLI cannot produce `MFARM_DATA_PLANE_ENDPOINT` / `MFARM_SESSION_TOKEN`,
+   because `GET /v1/sessions/:id` returns no `dataPlane` block.~~ **FIXED 2026-08-17.** A live
+   session carries coordinates on GET, minted with the claims `POST` would have issued. It was two
+   defects behind one symptom: a queued session had no coordinates to inherit, **and** a session
+   token lives 120 seconds, so even the immediate path went stale during any run longer than two
+   minutes with nowhere to refresh it. Only `ALLOCATING`/`ACTIVE` mint — a device is reassigned the
+   moment it is reset, so a token for an ended session is a credential for another tenant's device.
+   `mfarm session get --json` returns the block; the human rendering shows the endpoint and never
+   the token. (ADR-0002, D2)
 
 ## Rules earned the hard way
 

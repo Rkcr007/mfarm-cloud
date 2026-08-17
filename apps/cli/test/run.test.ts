@@ -11,7 +11,9 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startControlPlane, runCli, envDumper, API_KEY } from './harness.ts';
+import {
+  startControlPlane, runCli, envDumper, API_KEY, POLLED_ENDPOINT, POLLED_TOKEN,
+} from './harness.ts';
 
 const REGION = 'us-east';
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
@@ -176,6 +178,59 @@ describe('mfarm run', () => {
       assert.equal(api.of('DELETE', '/v1/sessions/').length, 1);
       assert.match(r.stderr, /queued/);
     } finally {
+      await api.close();
+    }
+  });
+
+  test('a promoted session hands the child the coordinates it could not have at creation', async () => {
+    // Known issue 9. POST answered 202 — no device, so no endpoint and no token — and the CLI used
+    // to run the child with neither variable set whenever it had waited in the queue, and with both
+    // whenever it had not. Identical commands, different environments, decided by whether the farm
+    // happened to be busy. Anything speaking the raw data plane simply did not work after a wait.
+    const api = await startControlPlane({ createStatuses: [202], pollStates: ['QUEUED', 'ACTIVE'] });
+    const dir = await mkdtemp(join(tmpdir(), 'mfarm-cli-'));
+    const dump = join(dir, 'env.json');
+    try {
+      const r = await runCli([
+        'run', '--api', api.url, '--region', REGION, '--wait', '30', '--',
+        'node', ...envDumper(dump),
+      ]);
+      assert.equal(r.code, 0);
+
+      const env = JSON.parse(await readFile(dump, 'utf8'));
+      assert.equal(env.MFARM_DEVICE_ID, DEVICE_ID);
+      // The POLLED values, not the ones POST returns. They differ in the harness precisely so this
+      // assertion can tell which response the environment was built from.
+      assert.equal(env.MFARM_DATA_PLANE_ENDPOINT, POLLED_ENDPOINT);
+      assert.equal(env.MFARM_SESSION_TOKEN, POLLED_TOKEN);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await api.close();
+    }
+  });
+
+  test('a control plane that sends no coordinates leaves the variables unset, not empty', async () => {
+    // An older control plane, or a host with no endpoint registered. WebDriver still works — it
+    // gets its coordinates from the hub — so the run must not fail. What it must not do is set the
+    // variables to "", which a client reads as a configured endpoint that then never connects.
+    const api = await startControlPlane({
+      createStatuses: [202], pollStates: ['QUEUED', 'ACTIVE'], omitPolledDataPlane: true,
+    });
+    const dir = await mkdtemp(join(tmpdir(), 'mfarm-cli-'));
+    const dump = join(dir, 'env.json');
+    try {
+      const r = await runCli([
+        'run', '--api', api.url, '--region', REGION, '--wait', '30', '--',
+        'node', ...envDumper(dump),
+      ]);
+      assert.equal(r.code, 0, r.stderr);
+
+      const env = JSON.parse(await readFile(dump, 'utf8'));
+      assert.ok(!('MFARM_DATA_PLANE_ENDPOINT' in env), 'absent, not empty');
+      assert.ok(!('MFARM_SESSION_TOKEN' in env), 'absent, not empty');
+      assert.ok(env.MFARM_WEBDRIVER_URL, 'the WebDriver path is unaffected');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
       await api.close();
     }
   });

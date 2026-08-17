@@ -41,6 +41,9 @@ export interface FakeControlPlaneOptions {
    * window exists for at all: a control plane that is slow, not down.
    */
   deleteDelayMs?: number;
+  /** Answer GET without a data-plane block, as a control plane older than the known-issue-9 fix
+   *  does. The CLI must degrade rather than crash. */
+  omitPolledDataPlane?: boolean;
 }
 
 export interface FakeControlPlane {
@@ -52,6 +55,11 @@ export interface FakeControlPlane {
 
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 const DEVICE_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+/** Deliberately different from the values POST hands back, so a test can tell WHICH response the
+ *  child's environment actually came from. */
+export const POLLED_ENDPOINT = 'wss://worker-2.mfarm.dev/ws';
+export const POLLED_TOKEN = 'v1.polled.token';
 
 export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Promise<FakeControlPlane> {
   const createStatuses = [...(opts.createStatuses ?? [201])];
@@ -75,6 +83,7 @@ export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Pro
       }
       if (req.method === 'GET' && path.startsWith('/v1/sessions/')) {
         const state = pollStates.length > 1 ? pollStates.shift()! : pollStates[0]!;
+        const live = state === 'ALLOCATING' || state === 'ACTIVE';
         return json(res, 200, {
           session: {
             id: SESSION_ID,
@@ -83,6 +92,12 @@ export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Pro
             region,
             endReason: state === 'FAILED' ? 'no_capacity' : null,
           },
+          // Mirrors the real route since known issue 9 was fixed: a live session carries its
+          // coordinates here too, which is the ONLY place a promoted session can get them — POST
+          // answered 202 with no device, so it had no endpoint and no token to give.
+          ...(live && !opts.omitPolledDataPlane
+            ? { dataPlane: { endpoint: POLLED_ENDPOINT, token: POLLED_TOKEN, expiresInSeconds: 120 } }
+            : {}),
         });
       }
       if (req.method === 'DELETE' && path.startsWith('/v1/sessions/')) {

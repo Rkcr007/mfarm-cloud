@@ -371,6 +371,83 @@ describe('idempotency', () => {
   });
 });
 
+/**
+ * Known issue 9. `GET /v1/sessions/:id` used to return the session and nothing else, which broke two
+ * things quietly: a session created on the QUEUED path never got data-plane coordinates at all — the
+ * POST that created it had no device to name — and a session token lives 120 seconds, so even the
+ * immediate path went stale during any run longer than two minutes with nowhere to refresh.
+ */
+describe('data-plane coordinates on GET', () => {
+  test('a live session carries an endpoint and a token that verifies', async () => {
+    await clearDevices();
+    const [deviceId] = await seedDevices(1);
+    const created = await app.inject({ method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+                                       payload: { region: REGION, platform: 'android' } });
+    assert.equal(created.statusCode, 201);
+    const id = created.json().session.id;
+
+    const got = await app.inject({ method: 'GET', url: `/v1/sessions/${id}`, headers: auth(keyA) });
+    assert.equal(got.statusCode, 200);
+    const dp = got.json().dataPlane;
+    assert.ok(dp, 'a live session must carry coordinates');
+    assert.equal(dp.endpoint, created.json().dataPlane.endpoint);
+
+    // Verified against the host it names, not merely parsed. A token that parses and does not
+    // verify is the failure that reaches the worker instead of the test.
+    const v = verifySessionToken(dp.token, app.signingKey.publicKeyPem, hostId);
+    assert.equal(v.ok, true, 'the worker must be able to verify this offline');
+    assert.equal(v.ok && v.claims.sid, id);
+    assert.equal(v.ok && v.claims.did, deviceId);
+    assert.equal(v.ok && v.claims.org, orgA);
+    // The fence is what makes a replayed command refusable, and it must be the session's own.
+    assert.equal(v.ok && v.claims.fence, created.json().session.fence);
+  });
+
+  test('a token minted here names the same host as the one minted at creation', async () => {
+    await clearDevices();
+    await seedDevices(1);
+    const created = await app.inject({ method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+                                       payload: { region: REGION, platform: 'android' } });
+    const id = created.json().session.id;
+    const got = await app.inject({ method: 'GET', url: `/v1/sessions/${id}`, headers: auth(keyA) });
+    // `aud` is the host the worker checks the token against, and it is checked offline — a refreshed
+    // token naming a different host is simply rejected, and the symptom is a session that worked
+    // and then stopped mid-run. Verifying both against the same hostId is the assertion.
+    for (const token of [created.json().dataPlane.token, got.json().dataPlane.token]) {
+      assert.equal(verifySessionToken(token, app.signingKey.publicKeyPem, hostId).ok, true);
+    }
+  });
+
+  test('a queued session gets no coordinates, because there is no device to name', async () => {
+    await clearDevices();                       // no devices at all
+    const created = await app.inject({ method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+                                       payload: { region: REGION, platform: 'android' } });
+    assert.equal(created.statusCode, 202);
+    const got = await app.inject({
+      method: 'GET', url: `/v1/sessions/${created.json().session.id}`, headers: auth(keyA),
+    });
+    assert.equal(got.statusCode, 200);
+    assert.equal(got.json().session.state, 'QUEUED');
+    assert.equal(got.json().dataPlane, undefined);
+  });
+
+  test('an ended session gets no coordinates', async () => {
+    await clearDevices();
+    await seedDevices(1);
+    const created = await app.inject({ method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+                                       payload: { region: REGION, platform: 'android' } });
+    const id = created.json().session.id;
+    assert.equal((await app.inject({ method: 'DELETE', url: `/v1/sessions/${id}`, headers: auth(keyA) })).statusCode, 204);
+
+    const got = await app.inject({ method: 'GET', url: `/v1/sessions/${id}`, headers: auth(keyA) });
+    assert.equal(got.statusCode, 200);
+    // The device is already in CLEANING and will be handed to someone else. A token naming it would
+    // be a credential for another tenant's device — the worker's fence check would reject it, but a
+    // token that has to be rejected should never have been minted.
+    assert.equal(got.json().dataPlane, undefined);
+  });
+});
+
 describe('tenant isolation over HTTP', () => {
   test("another org's session is 404, not 403", async () => {
     await clearDevices();

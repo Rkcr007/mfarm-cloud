@@ -40,11 +40,15 @@ export interface CreateSessionInput {
   requireCapabilities?: string[];
 }
 
-export interface CreateSessionResult {
+export interface SessionResult {
+  session: SessionSummary;
+  /** Null while the session is queued and once it has ended; non-null while it is live. */
+  dataPlane: DataPlaneCoordinates | null;
+}
+
+export interface CreateSessionResult extends SessionResult {
   /** 202 rather than 201: the session is real and holds a place in line, but has no device yet. */
   queued: boolean;
-  session: SessionSummary;
-  dataPlane: DataPlaneCoordinates | null;
 }
 
 export interface DeviceSummary {
@@ -175,13 +179,24 @@ export class ControlPlaneClient {
     };
   }
 
-  async getSession(id: string): Promise<SessionSummary> {
+  /**
+   * Fetch a session, with its data-plane coordinates when it has any.
+   *
+   * `dataPlane` is null for a session that is still queued or already over, and non-null for a live
+   * one — including a session that was queued when it was created and has since been promoted,
+   * which is the case `POST` cannot answer because there was no device yet. The token is short
+   * lived (120s), so this is also the only way to refresh coordinates during a long run.
+   *
+   * An older control plane returns no block at all; `?? null` keeps that a degraded run rather than
+   * a crash.
+   */
+  async getSession(id: string): Promise<SessionResult> {
     const res = await this.request('GET', `/v1/sessions/${encodeURIComponent(id)}`);
-    const payload = res.body as { session?: SessionSummary };
+    const payload = res.body as { session?: SessionSummary; dataPlane?: DataPlaneCoordinates };
     if (!payload?.session) {
       throw new TransportError(`Malformed session response: ${snippet(res.text)}`, 1);
     }
-    return payload.session;
+    return { session: payload.session, dataPlane: payload.dataPlane ?? null };
   }
 
   /**

@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { ControlPlaneClient, describe } from './client.ts';
 import { run, EXIT_FAILURE } from './run.ts';
-import type { DeviceSummary, SessionSummary } from './client.ts';
+import type { DataPlaneCoordinates, DeviceSummary, SessionSummary } from './client.ts';
 
 /**
  * `mfarm` entry point: parse, dispatch, and make sure nothing escapes without an exit code.
@@ -253,9 +253,12 @@ async function sessionCommand(flags: Flags, rest: string[]): Promise<number> {
   const g = globals(flags);
 
   if (sub === 'get') {
-    const session = await client(g).getSession(id);
-    if (g.json) process.stdout.write(`${JSON.stringify({ session })}\n`);
-    else process.stdout.write(sessionLines(session));
+    const { session, dataPlane } = await client(g).getSession(id);
+    // The token goes to `--json` and never to the human rendering. `--json` is consumed by a
+    // program that asked for the credential; the plain output is what gets pasted into a chat or
+    // scrolled past in a shared terminal, and a session token is a live handle on a device.
+    if (g.json) process.stdout.write(`${JSON.stringify({ session, dataPlane })}\n`);
+    else process.stdout.write(sessionLines(session, dataPlane));
     return 0;
   }
 
@@ -280,11 +283,13 @@ function deviceLine(d: DeviceSummary): string {
   ].join(' ').trimEnd();
 }
 
-function sessionLines(s: SessionSummary): string {
+function sessionLines(s: SessionSummary, dataPlane?: DataPlaneCoordinates | null): string {
   const fields: [string, unknown][] = [
     ['id', s.id], ['state', s.state], ['device', s.deviceId], ['region', s.region],
     ['created', s.createdAt], ['started', s.startedAt], ['expires', s.expiresAt],
     ['ended', s.endedAt], ['reason', s.endReason],
+    // Endpoint yes, token no — see the caller. `--json` carries both.
+    ['endpoint', dataPlane?.endpoint ?? null],
   ];
   return fields
     .filter(([, v]) => v !== null && v !== undefined)

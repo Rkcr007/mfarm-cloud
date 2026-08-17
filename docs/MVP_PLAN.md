@@ -247,8 +247,13 @@ delivered to a person. Closing that is Phase 0's metered day, not more building.
 - Logcat capture per session, streamed and stored.
 - Video recording per session; screenshots on demand and on failure.
 - Artifact store — MinIO on the same box, S3 API, retention policy.
-- Fix known issue 9: `GET /v1/sessions/:id` returns no `dataPlane` block, so the CLI cannot produce
-  `MFARM_DATA_PLANE_ENDPOINT` / `MFARM_SESSION_TOKEN` on the queued path.
+- ~~Fix known issue 9: `GET /v1/sessions/:id` returns no `dataPlane` block, so the CLI cannot produce
+  `MFARM_DATA_PLANE_ENDPOINT` / `MFARM_SESSION_TOKEN` on the queued path.~~ **DONE 2026-08-17** —
+  a live session now carries coordinates on GET, minted with the same claims `POST` would have
+  issued. It was two bugs, not one: the queued path had no coordinates at all, and a session token
+  lives 120s, so even the immediate path went stale during any run longer than two minutes with
+  nowhere to refresh. Only `ALLOCATING`/`ACTIVE` mint — a device is reassigned the moment it is
+  reset, so a token for an ended session is a credential for someone else's device.
 
 Exit: a failed CI run links to video, logcat, and screenshots of exactly that session.
 

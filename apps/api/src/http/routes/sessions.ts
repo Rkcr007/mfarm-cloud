@@ -40,6 +40,35 @@ interface CreateBody {
   requireCapabilities?: string[];
 }
 
+/** States in which a session has a device and can still be driven. Outside these there is nothing
+ *  to hand coordinates for, and minting a token would produce a credential for a device somebody
+ *  else now holds. */
+const LIVE_STATES = new Set(['ALLOCATING', 'ACTIVE']);
+
+interface HostRow {
+  id: string;
+  endpoint: string | null;
+  region: string;
+}
+
+/**
+ * The host behind a device, on the owner pool.
+ *
+ * `hosts` is fleet infrastructure with no `org_id`, so this cannot go through `withTenant` — the
+ * tenant-scoped read is the session row, and that has already happened by the time this is called.
+ */
+function hostForDevice(deviceId: string): Promise<HostRow | undefined> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query<HostRow>(
+      `SELECT h.id, h.endpoint, h.region
+         FROM devices d JOIN hosts h ON h.id = d.host_id
+        WHERE d.id = $1`,
+      [deviceId],
+    );
+    return rows[0];
+  });
+}
+
 export async function sessionRoutes(app: FastifyInstance) {
   /**
    * Allocate a device and return the DATA PLANE coordinates.
@@ -98,15 +127,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         message: 'No device is free right now. The session is queued and will start automatically.',
       };
     } else {
-      const host = await withSystem(async (c) => {
-        const { rows } = await c.query(
-          `SELECT h.id, h.endpoint, h.region
-             FROM devices d JOIN hosts h ON h.id = d.host_id
-            WHERE d.id = $1`,
-          [alloc.deviceId],
-        );
-        return rows[0];
-      });
+      const host = await hostForDevice(alloc.deviceId!);
 
       if (!host?.endpoint) {
         // A device whose host has no data-plane endpoint cannot serve a session. Give the device
@@ -155,6 +176,49 @@ export async function sessionRoutes(app: FastifyInstance) {
     // RLS makes another org's session indistinguishable from a nonexistent one, which is the
     // correct disclosure boundary — a 403 here would confirm the id exists.
     if (!row) throw notFound('Session');
+
+    /**
+     * The data-plane block, and the reason this endpoint mints a token at all (known issue 9).
+     *
+     * Two things made its absence a real bug rather than an omission. A session created on the
+     * QUEUED path gets no coordinates from `POST` — there is no device yet — so `mfarm run` had
+     * nothing to hand its child once the reaper promoted the session, and anything speaking the raw
+     * data plane simply did not work after a wait. And a session token lives for
+     * DEFAULT_TTL_SECONDS (120s), so even on the immediate path the coordinates from `POST` go
+     * stale during any run longer than two minutes and there was nowhere to refresh them.
+     *
+     * Minting on a GET is safe because it discloses nothing new: the caller already proved they are
+     * the org that owns this session — RLS returned the row — and the claims are exactly those
+     * `POST` would have issued. What it must not do is mint for a session that has ended, which is
+     * why LIVE_STATES is checked rather than just `device_id IS NOT NULL`: a device is reassigned
+     * the moment it is reset, and a token naming a fence that has moved on is a credential for
+     * someone else's device. The worker's fence check would reject it, but a token that has to be
+     * rejected should never have been issued.
+     */
+    let dataPlane: { endpoint: string; token: string; expiresInSeconds: number } | undefined;
+    if (row.device_id && row.fence !== null && LIVE_STATES.has(row.state)) {
+      const host = await hostForDevice(row.device_id);
+      // An endpoint-less host is a real state (a worker registered before it had one), not an
+      // error. `POST` releases the device in that case because it is mid-allocation and can still
+      // undo it; here the session is already running, so the honest answer is coordinates omitted.
+      if (host?.endpoint) {
+        dataPlane = {
+          endpoint: host.endpoint,
+          token: mintSessionToken(
+            {
+              sid: row.id,
+              did: row.device_id,
+              org: orgId,
+              fence: Number(row.fence),
+              aud: host.id,
+            },
+            app.signingKey.privateKeyPem,
+          ),
+          expiresInSeconds: DEFAULT_TTL_SECONDS,
+        };
+      }
+    }
+
     return {
       session: {
         id: row.id, state: row.state, deviceId: row.device_id,
@@ -162,6 +226,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         region: row.region, createdAt: row.created_at, startedAt: row.started_at,
         expiresAt: row.expires_at, endedAt: row.ended_at, endReason: row.end_reason,
       },
+      ...(dataPlane ? { dataPlane } : {}),
     };
   });
 
