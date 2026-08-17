@@ -20,6 +20,44 @@ die()    { printf '\033[31mBLOCKED\033[0m %s\n' "$*" >&2; exit 1; }
 phase_done() { grep -qx "$1" "$STATE" 2>/dev/null; }
 mark()   { echo "$1" >> "$STATE"; }
 
+# Every network fetch below pulls from GitHub, and this script is expected to run on a cloud VM.
+# Cloud providers hand out IP ranges shared by thousands of other machines, and GitHub rate-limits
+# anonymous archive downloads per IP — so a 429 here is routine traffic policing that says nothing
+# about this host, and credentials do not lift it on codeload.github.com. Bazel, git and cvd all
+# keep a download cache, so a retry resumes instead of restarting; another attempt costs only the
+# part that actually failed.
+#
+#     retry <attempts> <base_delay_seconds> <label> <command...>
+#
+# The backoff is exponential with jitter added. Jitter is not decoration: a rate limit is shared
+# with every other client behind the same IP, and they are all backing off on the same schedule.
+# Without jitter they wake in lockstep and collide again on the first retry.
+RETRY_MAX_DELAY=${RETRY_MAX_DELAY:-300}
+retry() {
+  local attempts=$1 base=$2 label=$3; shift 3
+  local n=1 delay
+  while :; do
+    if "$@"; then
+      [ "$n" -gt 1 ] && c_ok "${label}: succeeded on attempt ${n}"
+      return 0
+    fi
+    if [ "$n" -ge "$attempts" ]; then
+      c_warn "${label}: failed after ${n} attempts"
+      return 1
+    fi
+    delay=$(( base * (2 ** (n - 1)) + RANDOM % 20 ))
+    [ "$delay" -gt "$RETRY_MAX_DELAY" ] && delay=$RETRY_MAX_DELAY
+    c_warn "${label}: attempt ${n}/${attempts} failed, retrying in ${delay}s"
+    sleep "$delay"
+    n=$(( n + 1 ))
+  done
+}
+
+# True when a log contains the signature of a rate limit rather than a real build error. Worth
+# distinguishing because the two failures need opposite responses: wait and retry, versus stop and
+# read the log.
+rate_limited() { grep -qE '429 Too Many Requests|rate limit|too many requests' "$1" 2>/dev/null; }
+
 touch "$STATE"
 
 # ---------------------------------------------------------------- preflight
@@ -66,17 +104,40 @@ if ! phase_done pkgs; then
   if [ -d android-cuttlefish/.git ]; then
     git -C android-cuttlefish pull --ff-only >/dev/null 2>&1 || c_warn "pull failed, using existing checkout"
   else
-    git clone --depth 1 "$CF_REPO" >/dev/null 2>&1 || die "clone failed: $CF_REPO"
+    clone_once() { git clone --depth 1 "$CF_REPO" >/dev/null 2>&1; }
+    retry 4 20 "clone android-cuttlefish" clone_once || die "clone failed: $CF_REPO"
   fi
   cd android-cuttlefish
   c_ok "source at $PWD"
 
-  c_info "building debs (several minutes)"
+  c_info "building debs (several minutes; retries on rate limits)"
   if [ -x tools/buildutils/build_packages.sh ]; then
-    ./tools/buildutils/build_packages.sh >/tmp/cf_build.log 2>&1 \
-      || die "build failed. Last lines:
+    # Bazel resolves external deps by downloading archives from GitHub, which is where the 429s
+    # land. It keeps what it already fetched, so each retry re-attempts only the missing archive
+    # rather than rebuilding. Six attempts at 60s doubling reaches roughly half an hour of patience,
+    # which is the observed order of magnitude for a shared-IP limit to clear.
+    build_once() { ./tools/buildutils/build_packages.sh >/tmp/cf_build.log 2>&1; }
+    if ! retry 6 60 "cuttlefish build" build_once; then
+      if rate_limited /tmp/cf_build.log; then
+        die "build blocked by GitHub rate limiting, not by a build error.
+
+  Bazel could not download an external dependency because GitHub returned 429. This is applied
+  per source IP, and cloud VM IP ranges are shared, so it is not about your account — adding
+  credentials does not lift it on codeload.github.com.
+
+  Options, cheapest first:
+    - wait 30-60 minutes and re-run this script; it resumes from here
+    - re-run with more patience:  RETRY_MAX_DELAY=900 $0
+    - if it persists for hours, the VM's whole IP range is saturated. Recreate the instance to
+      land on a different address (step B11 then B3), or build from a different region.
+
+  Last lines of /tmp/cf_build.log:
+$(tail -15 /tmp/cf_build.log)"
+      fi
+      die "build failed. Last lines:
 $(tail -25 /tmp/cf_build.log)
   The upstream build steps change; check $CF_REPO README."
+    fi
   else
     # older layout: build each package directory in turn
     for d in base frontend; do
@@ -118,10 +179,13 @@ if ! phase_done image; then
   echo; echo "== phase 2: fetch device image (${BRANCH} / ${CF_TARGET}) =="
   mkdir -p "$WORKDIR/image"; cd "$WORKDIR/image"
   c_info "downloading, this is several GB"
-  if cvd fetch --default_build="${BRANCH}/${CF_TARGET}" >/tmp/cf_fetch.log 2>&1; then
+  fetch_once() { cvd fetch --default_build="${BRANCH}/${CF_TARGET}" >/tmp/cf_fetch.log 2>&1; }
+  if retry 4 45 "cvd fetch" fetch_once; then
     c_ok "image fetched via cvd fetch"
   else
     c_warn "cvd fetch failed; see /tmp/cf_fetch.log"
+    rate_limited /tmp/cf_fetch.log \
+      && c_warn "the log shows rate limiting — waiting an hour and re-running is likely enough"
     cat <<EOF
 
   Manual fallback — from https://ci.android.com/ pick branch ${BRANCH},
