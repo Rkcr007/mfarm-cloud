@@ -379,10 +379,23 @@ c_ok "device image present at $WORKDIR/image"
 echo; echo "== smoke test: boot one instance, then tear down =="
 cd "$WORKDIR/image"
 cvd stop >/dev/null 2>&1 || true
+cvd rm >/dev/null 2>&1 || true
 
+# cvd 1.x keeps an instance database, and the verbs are not interchangeable: `create` builds a new
+# instance group out of the artifacts in the current directory, `start` only restarts a group that
+# already exists. On a fresh host the database is empty, so `cvd start` fails with "no devices
+# present" — which reads like a boot failure but happens before anything is booted. Older
+# `launch_cvd`-era docs have no such split, hence the confusion.
+if cvd help 2>&1 | grep -qw create; then CVD_BOOT=create; else CVD_BOOT=start; fi
+c_info "booting with: cvd ${CVD_BOOT}"
+
+# These two flags are what B7's snapshot work needs (see docs/MVP_PLAN.md and HANDOFF.md known
+# issue 2). Boot with them here too, otherwise the cold-boot number below is measured against a
+# different device configuration than the snapshot restore it exists to be compared with.
 START=$(date +%s)
-cvd start --start_webrtc=true --report_anonymous_usage_stats=n --daemon >/tmp/cf_start.log 2>&1 \
-  || die "cvd start failed. Last lines:
+cvd "$CVD_BOOT" --start_webrtc=true --report_anonymous_usage_stats=n --daemon \
+  --gpu_mode=guest_swiftshader --enable_virtiofs=false >/tmp/cf_start.log 2>&1 \
+  || die "cvd ${CVD_BOOT} failed. Last lines:
 $(tail -25 /tmp/cf_start.log)"
 
 BOOTED=no
