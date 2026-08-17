@@ -39,9 +39,13 @@ c_ok "arch $ARCH -> $CF_TARGET"
 
 [ -e /dev/kvm ] || die "/dev/kvm missing.
   This is almost always one of:
-    - a VPS without nested virtualisation (Hetzner Cloud, most shared VMs) -> use BARE METAL
-    - virtualisation disabled in BIOS
-  Vultr Bare Metal, Latitude.sh and Equinix Metal all expose /dev/kvm."
+    - a cloud VM created WITHOUT nested virtualisation enabled. It is a per-instance setting and
+      it cannot be turned on after the fact — delete the instance and recreate it with the flag:
+        GCP  gcloud compute instances create ... --enable-nested-virtualization  (not E2, not Arm)
+        AWS  C8i/M8i/R8i with NestedVirtualization enabled, or a .metal instance
+    - a shared VPS that does not offer it at all (most 'KVM VPS' listings mean the HOST uses KVM)
+    - virtualisation disabled in BIOS, on a physical box
+  See docs/HARDWARE_DAY.md for the full walkthrough."
 c_ok "/dev/kvm present"
 
 CORES=$(nproc); RAM_GB=$(free -g | awk '/^Mem:/{print $2}'); DISK_GB=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
@@ -166,19 +170,27 @@ cvd stop >/dev/null 2>&1 || true
 c_ok "torn down cleanly"
 mark verified
 
+# The repo may be checked out anywhere, so resolve the spikes directory from THIS script's own
+# location rather than guessing a path relative to the image directory. The previous form assumed
+# the checkout sat next to $WORKDIR and printed a path that did not exist.
+SPIKES_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 cat <<EOF
 
 ================== READY ==================
   cold boot on this host: ${ELAPSED}s
   image dir:              ${WORKDIR}/image
 
-  Run the spikes from that directory:
+  Run the spikes from the image directory:
 
       cd ${WORKDIR}/image
-      ${PWD%/image}/../spikes/spike1_latency.sh       # then measure with a 240fps camera
-      ${PWD%/image}/../spikes/spike2_android_density.sh
+      ${SPIKES_DIR}/spike1_latency.sh       # then measure with a 240fps camera
+      ${SPIKES_DIR}/spike2_android_density.sh
 
   Spike 1 needs the camera protocol in spikes/README.md — a software timer cannot pass it.
   Spike 2a runs two passes (~1-2h) and prints the interactive/automated density ratio.
+
+  NOTE: this smoke test booted with default graphics. Snapshot/restore additionally needs
+        --gpu_mode=guest_swiftshader --enable_virtiofs=false — see docs/HARDWARE_DAY.md step 8.
 ===========================================
 EOF
