@@ -8,6 +8,11 @@
 # redoing. Safe to run repeatedly.
 set -euo pipefail
 
+# Resolve this BEFORE anything cd's. BASH_SOURCE is whatever path the caller typed, so for the
+# usual `./spikes/bootstrap_cuttlefish.sh` it is relative — and the smoke test cd's into
+# $WORKDIR/image first, where ./spikes does not exist. Resolving it late fails there.
+SPIKES_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 STATE="${HOME}/.mfarm_bootstrap"
 WORKDIR="${WORKDIR:-${HOME}/cf}"
 BRANCH="${BRANCH:-aosp-android-latest-release}"
@@ -493,11 +498,6 @@ c_ok "booted in ${ELAPSED}s"
 cvd stop >/dev/null 2>&1 || true
 c_ok "torn down cleanly"
 mark verified
-
-# The repo may be checked out anywhere, so resolve the spikes directory from THIS script's own
-# location rather than guessing a path relative to the image directory. The previous form assumed
-# the checkout sat next to $WORKDIR and printed a path that did not exist.
-SPIKES_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 cat <<EOF
 
