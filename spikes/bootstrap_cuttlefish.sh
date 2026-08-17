@@ -389,11 +389,50 @@ cvd rm >/dev/null 2>&1 || true
 if cvd help 2>&1 | grep -qw create; then CVD_BOOT=create; else CVD_BOOT=start; fi
 c_info "booting with: cvd ${CVD_BOOT}"
 
+# `cvd create` does not take the host tools from the current directory. It defaults --host_path to
+# $HOME, so on a fresh box it fails with "'/home/<user>/bin/' does not contain any of
+# '[cvd_internal_start, launch_cvd]'" even though cvd fetch put everything under $WORKDIR/image.
+# Locate both roots ourselves and pass them explicitly, which is what that error message advises.
+# The layout cvd fetch produces has moved between versions (sometimes flat, sometimes one level
+# down under a per-target directory), so search rather than assume.
+find_root() {  # find_root <relative/path> -> prints the directory that contains it, if any
+  local needle=$1 hit
+  hit=$(find "$WORKDIR/image" -maxdepth 4 -path "*/${needle}" -print -quit 2>/dev/null || true)
+  [ -n "$hit" ] && printf '%s\n' "${hit%/${needle}}"
+  return 0
+}
+HOST_PATH=$(find_root bin/launch_cvd)
+[ -n "$HOST_PATH" ] || HOST_PATH=$(find_root bin/cvd_internal_start)
+PRODUCT_PATH=$(find_root super.img)
+[ -n "$PRODUCT_PATH" ] || PRODUCT_PATH=$(find_root system.img)
+[ -n "$PRODUCT_PATH" ] || PRODUCT_PATH=$HOST_PATH
+
+if [ -z "$HOST_PATH" ]; then
+  die "host tools missing under $WORKDIR/image — cvd fetch downloaded the images but not
+cvd-host_package.tar.gz, or did not unpack it. What is actually there:
+
+$(ls -la "$WORKDIR/image" | head -30)
+
+Fetch and unpack the host package by hand, then re-run:
+
+    cd $WORKDIR/image
+    curl -L -o cvd-host_package.tar.gz \\
+      \"${BUILD_API}/builds/${CF_BUILD_ID:-16102939}/${CF_TARGET}/attempts/latest/artifacts/cvd-host_package.tar.gz/url?redirect=true\"
+    tar xzf cvd-host_package.tar.gz"
+fi
+c_info "host tools: ${HOST_PATH}/bin"
+c_info "product images: ${PRODUCT_PATH}"
+
+# `start` (restart an existing group) rejects the path flags; only `create` accepts them.
+PATH_FLAGS=()
+[ "$CVD_BOOT" = create ] && PATH_FLAGS=(--host_path="$HOST_PATH" --product_path="$PRODUCT_PATH")
+
 # These two flags are what B7's snapshot work needs (see docs/MVP_PLAN.md and HANDOFF.md known
 # issue 2). Boot with them here too, otherwise the cold-boot number below is measured against a
 # different device configuration than the snapshot restore it exists to be compared with.
 START=$(date +%s)
-cvd "$CVD_BOOT" --start_webrtc=true --report_anonymous_usage_stats=n --daemon \
+cvd "$CVD_BOOT" "${PATH_FLAGS[@]}" \
+  --start_webrtc=true --report_anonymous_usage_stats=n --daemon \
   --gpu_mode=guest_swiftshader --enable_virtiofs=false >/tmp/cf_start.log 2>&1 \
   || die "cvd ${CVD_BOOT} failed. Last lines:
 $(tail -25 /tmp/cf_start.log)"
@@ -436,7 +475,14 @@ cat <<EOF
   Spike 1 needs the camera protocol in spikes/README.md — a software timer cannot pass it.
   Spike 2a runs two passes (~1-2h) and prints the interactive/automated density ratio.
 
-  NOTE: this smoke test booted with default graphics. Snapshot/restore additionally needs
-        --gpu_mode=guest_swiftshader --enable_virtiofs=false — see docs/HARDWARE_DAY.md step 8.
+  The invocation that worked here — B7 and workers/agent/src/devices/cuttlefish.ts both need it,
+  and the two path flags are not optional (cvd defaults them to \$HOME, not the current directory):
+
+      cvd ${CVD_BOOT} --host_path=${HOST_PATH} --product_path=${PRODUCT_PATH} \\
+        --start_webrtc=true --report_anonymous_usage_stats=n --daemon \\
+        --gpu_mode=guest_swiftshader --enable_virtiofs=false
+
+  Those last two flags are the snapshot prerequisites, so ${ELAPSED}s is a like-for-like baseline
+  for the snapshot-restore time B7 measures — see docs/HARDWARE_DAY.html step 8.
 ===========================================
 EOF
