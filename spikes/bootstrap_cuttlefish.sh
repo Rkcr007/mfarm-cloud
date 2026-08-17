@@ -245,28 +245,49 @@ if ! phase_done image; then
     [ "$code" = 206 ] || [ "$code" = 200 ]
   }
 
+  # NOTE: this runs inside $( ), so stdout IS the return value. Every diagnostic here must go to
+  # stderr or it is silently swallowed into the captured build id — which is exactly how an earlier
+  # version managed to fail with no explanation at all.
+  BUILD_LIST_RAW=/tmp/cf_buildlist.json
   resolve_build_id() {
-    local list ids id
+    local list ids id n
+    # No server-side `successful` filter: it is not reliably honoured, and the artifact probe below
+    # is a stricter test anyway — a build with a published image is good by definition.
     list=$(curl -sS --max-time 30 \
-      "${BUILD_API}/builds?branch=${BRANCH}&buildType=submitted&target=${CF_TARGET}&maxResults=25&successful=true" 2>/dev/null) || return 1
+      "${BUILD_API}/builds?branch=${BRANCH}&buildType=submitted&target=${CF_TARGET}&maxResults=40" 2>/dev/null)
+    printf '%s' "$list" > "$BUILD_LIST_RAW"
+
+    if [ -z "$list" ]; then
+      c_warn "build API returned nothing (network or DNS)" >&2
+      return 1
+    fi
     # The legacy v3 API is being retired and throttles anonymous callers hard. Its 403 is not a
     # missing build, so say so rather than letting it look like one.
     if printf '%s' "$list" | grep -q rateLimitExceeded; then
-      c_warn "build API is rate-limiting this IP (legacy v3 API); cannot list builds"
+      c_warn "build API is rate-limiting this IP (legacy v3 API); cannot list builds" >&2
       return 1
     fi
     ids=$(printf '%s' "$list" | python3 -c '
 import json,sys
 try: d=json.load(sys.stdin)
-except Exception: sys.exit(1)
+except Exception as e:
+    sys.stderr.write("could not parse build list as JSON: %s\n" % e); sys.exit(1)
+if "error" in d:
+    sys.stderr.write("build API error: %s\n" % d["error"].get("message","?")); sys.exit(1)
 for b in d.get("builds", []):
     if b.get("buildId"): print(b["buildId"])
-' 2>/dev/null) || return 1
-    [ -n "$ids" ] || return 1
+')
+    if [ -z "$ids" ]; then
+      c_warn "build API listed no builds for ${BRANCH}/${CF_TARGET}; raw response in ${BUILD_LIST_RAW}" >&2
+      return 1
+    fi
+    n=$(printf '%s\n' "$ids" | wc -l | tr -d ' ')
+    c_info "build API listed ${n} builds; probing newest first for a published image" >&2
     for id in $ids; do
       if build_has_image "$id"; then printf '%s' "$id"; return 0; fi
-      c_info "build ${id} has no image zip yet, trying the one before it" >&2
+      c_info "  build ${id}: no image zip" >&2
     done
+    c_warn "none of the ${n} listed builds has a published image zip" >&2
     return 1
   }
 
@@ -276,9 +297,7 @@ for b in d.get("builds", []):
     c_info "resolving newest build that has a published image"
     CF_BUILD_ID=$(resolve_build_id) \
       || die "could not find a build with a published image for ${BRANCH}/${CF_TARGET}.
-
-  Either the build API is throttling this IP, or none of the last 25 successful builds have
-  finished uploading their artifacts.
+  The reason is on the lines just above; raw API response is in ${BUILD_LIST_RAW}.
 
   Pick a build by hand from https://ci.android.com/builds/branches/${BRANCH}/grid — choose a green
   one that lists ${CF_PRODUCT}-img-<id>.zip among its artifacts — then re-run pinned to it:
