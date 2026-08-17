@@ -18,6 +18,24 @@ Three consequences, in full detail in `docs/MVP_PLAN.md`:
    and x86_64.** The reset story in `device.ts` is only available with a *software* GPU. A GPU-less
    rented server lands on SwiftShader regardless, so this costs nothing here — but it must be
    configured deliberately, and Flutter/RN rendering perf needs measuring in Phase 1, not assumed.
+
+   **Measured 2026-08-18 on the lab VM (n2-standard-16, cvd 1.55.1, build 16102939): cold boot 38s,
+   snapshot restore 8s, snapshot size 4.0 GB.** So recycling a device is ~4.75x cheaper than
+   booting one, which is what the reset story assumed and now has a number for. The verified
+   sequence, and the parts that are not guessable from the flags alone:
+
+       cvd suspend                                        # a take on a RUNNING device is refused:
+       cvd snapshot_take --snapshot_path=<dir>            # "The device is not suspended"
+       cvd resume                                         # non-destructive; boot_completed stays 1
+
+       cvd --group_name=<g> stop
+       cvd --group_name=<g> start --snapshot_path=<dir> --daemon
+
+   Three things that cost time to discover. Selector flags go *before* the verb
+   (`cvd --group_name=X snapshot_take`), not after. Restore passes no `--gpu_mode` or
+   `--enable_virtiofs` — the device configuration is restored from the snapshot. And restore uses
+   `start`, not `create`, because `cvd stop` leaves the group in the database as `Stopped` and
+   `start` is the verb for an existing group (see issue 11).
 3. **Target Android 17 (API 37)**, AOSP tag `android-17.0.0_r1`, released 2026-06-16.
 
 ## What this project is

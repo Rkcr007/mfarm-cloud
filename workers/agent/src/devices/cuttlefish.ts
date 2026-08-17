@@ -16,14 +16,20 @@ import type { DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, MediaSourc
  *
  * REQUIRES Linux with /dev/kvm. It cannot run on macOS at all, which is why AvdDevice exists.
  *
- * The exact cvd flags below track a moving upstream. `spikes/bootstrap_cuttlefish.sh` pins a working
- * environment; verify against the version it installs before trusting the defaults here.
+ * The cvd invocations below were verified end to end against cvd 1.55.1 on 2026-08-18 (lab VM,
+ * n2-standard-16, AOSP build 16102939): cold boot 38s, snapshot restore 8s, snapshot 4.0 GB.
+ * `spikes/bootstrap_cuttlefish.sh` pins that environment. HANDOFF.md issues 2, 11 and 12 record why
+ * each flag is here — several are non-obvious and their absence produces errors that point
+ * somewhere else entirely.
  */
 
 export interface CuttlefishOptions {
   localId: string;
   instanceNum: number;
+  /** Holds both the host tools (`bin/`) and the device images. cvd needs it named explicitly. */
   imageDir: string;
+  /** Where snapshots are written and restored from. Reset is unavailable without it. */
+  snapshotDir?: string;
   webrtcPort?: number;
   publicHost?: string;
   osVersion?: string;
@@ -46,6 +52,8 @@ export class CuttlefishDevice implements DeviceControl {
   readonly info: DeviceInfo;
   private readonly opts: Required<Pick<CuttlefishOptions, 'webrtcPort' | 'gpuMode'>> & CuttlefishOptions;
   private readonly adbSerial: string;
+  /** Assigned by cvd at create time, parsed out of its output; needed as a selector afterwards. */
+  private groupName?: string;
 
   constructor(opts: CuttlefishOptions) {
     this.opts = { webrtcPort: 8443, gpuMode: 'guest_swiftshader', ...opts };
@@ -71,25 +79,58 @@ export class CuttlefishDevice implements DeviceControl {
 
   static async available(): Promise<{ ok: boolean; reason?: string }> {
     if (process.platform !== 'linux') return { ok: false, reason: `Cuttlefish requires Linux; this is ${process.platform}` };
-    const { access } = await import('node:fs/promises');
+    const { access, readFile } = await import('node:fs/promises');
     try { await access('/dev/kvm'); } catch { return { ok: false, reason: '/dev/kvm missing — bare metal with virtualisation enabled is required' }; }
     try { await run('cvd', ['version'], process.cwd(), 10_000); } catch { return { ok: false, reason: 'cvd not on PATH; run spikes/bootstrap_cuttlefish.sh' }; }
+    // Ubuntu 24.04 defaults this to 1, which denies CAP_SYS_ADMIN to the user namespaces crosvm
+    // uses to sandbox each virtual device. crosvm then dies during VM setup while cvd cheerfully
+    // reports "Starting" — and no Cuttlefish log names AppArmor, only dmesg does. Checking it here
+    // converts a multi-hour debug into one line (HANDOFF.md known issue 12).
+    try {
+      const v = (await readFile('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8')).trim();
+      if (v !== '0') return { ok: false, reason: 'kernel.apparmor_restrict_unprivileged_userns=1 blocks crosvm; set it to 0 (see spikes/bootstrap_cuttlefish.sh preflight)' };
+    } catch { /* not an AppArmor kernel, or the knob does not exist — fine */ }
     return { ok: true };
   }
 
   async start(): Promise<void> {
     const avail = await CuttlefishDevice.available();
     if (!avail.ok) throw new Error(`cannot start Cuttlefish: ${avail.reason}`);
-    await run('cvd', [
-      'start',
+    // `create`, not `start`. cvd 1.x keeps an instance database and the verbs are not
+    // interchangeable: create builds a new group from artifacts, start only restarts an existing
+    // stopped one. On a fresh host start fails with "no devices present", which reads like a boot
+    // failure but happens before anything boots.
+    //
+    // --host_path/--product_path are not optional either. cvd defaults both to $HOME rather than
+    // the working directory, so without them it looks in $HOME/bin and reports that the host tools
+    // are missing while they sit in imageDir.
+    const out = await run('cvd', [
+      'create',
+      `--host_path=${this.opts.imageDir}`,
+      `--product_path=${this.opts.imageDir}`,
       `--instance_nums=${this.opts.instanceNum}`,
       '--start_webrtc=true',
       `--webrtc_device_id=${this.info.localId}`,
       `--gpu_mode=${this.opts.gpuMode}`,
+      // Snapshot support is a boot-time property, so it goes on every device whether or not this
+      // one is ever snapshotted — a device booted without it cannot be made resettable later.
+      '--enable_virtiofs=false',
       '--report_anonymous_usage_stats=n',
       '--daemon',
     ], this.opts.imageDir);
+    // cvd names the group itself and prints "group:cvd_2|instance(s):2". Every later command needs
+    // that name as a selector, because a host running more than one device has more than one group
+    // and the unselected default is whichever cvd picks.
+    this.groupName = /group:(\S+?)\|/.exec(out)?.[1];
     await this.waitForBoot();
+    // Cheap, and the control plane surfaces it per session; unknown here would be a silent gap.
+    this.info.osVersion = await run('adb', ['-s', this.adbSerial, 'shell', 'getprop', 'ro.build.version.release'], process.cwd(), 10_000)
+      .catch(() => this.opts.osVersion ?? 'unknown');
+  }
+
+  /** Selector flags go BEFORE the verb: `cvd --group_name=X suspend`, not `cvd suspend --group_name=X`. */
+  private sel(...verb: string[]): string[] {
+    return this.groupName ? [`--group_name=${this.groupName}`, ...verb] : verb;
   }
 
   private async waitForBoot(timeoutMs = 300_000): Promise<void> {
@@ -105,13 +146,54 @@ export class CuttlefishDevice implements DeviceControl {
   }
 
   async stop(): Promise<void> {
-    await run('cvd', ['stop', `--instance_nums=${this.opts.instanceNum}`], this.opts.imageDir, 60_000)
+    await run('cvd', this.sel('stop'), this.opts.imageDir, 60_000)
       .catch(() => { /* already stopped */ });
   }
 
+  /**
+   * Capture the golden image this device resets to. Run once per image, after the device has booted
+   * and been brought to whatever state a session should start from.
+   *
+   * The suspend/resume pair is mandatory: `snapshot_take` on a running device is refused outright
+   * with "The device is not suspended, and snapshot cannot be taken". Resume is non-destructive —
+   * the device is still booted afterwards — so this is safe to call on a device about to be used.
+   *
+   * Measured: ~4.0 GB per snapshot, which is per device image rather than per device, but still the
+   * sizing constraint once the fleet keeps several Android versions warm.
+   */
+  async takeSnapshot(): Promise<void> {
+    const path = this.snapshotPath();
+    await run('cvd', this.sel('suspend'), this.opts.imageDir, 120_000);
+    try {
+      await run('cvd', this.sel('snapshot_take', `--snapshot_path=${path}`), this.opts.imageDir, 300_000);
+    } finally {
+      // Resume even if the take failed, otherwise the device is left suspended and every later
+      // health probe times out with nothing explaining why.
+      await run('cvd', this.sel('resume'), this.opts.imageDir, 120_000).catch(() => {});
+    }
+  }
+
+  /**
+   * Restore to the snapshot. Measured at 8s against a 38s cold boot — the ~4.75x that per-session
+   * device recycling is predicated on.
+   *
+   * `start`, not `create`, and that is consistent with start() above rather than a contradiction:
+   * `cvd stop` leaves the group in the database as Stopped, and start is the verb for an existing
+   * group. No --gpu_mode or --enable_virtiofs here either; the device configuration comes back out
+   * of the snapshot, and passing them again is a good way to get a confusing failure.
+   */
   async resetToSnapshot(): Promise<void> {
-    await run('cvd', ['snapshot_restore', `--instance_nums=${this.opts.instanceNum}`], this.opts.imageDir, 120_000);
+    const path = this.snapshotPath();
+    await run('cvd', this.sel('stop'), this.opts.imageDir, 60_000).catch(() => { /* already stopped */ });
+    await run('cvd', this.sel('start', `--snapshot_path=${path}`, '--daemon'), this.opts.imageDir, 120_000);
     await this.waitForBoot(60_000);
+  }
+
+  private snapshotPath(): string {
+    if (!this.opts.snapshotDir) {
+      throw new Error(`no snapshotDir configured for ${this.info.localId}; snapshot reset is unavailable`);
+    }
+    return this.opts.snapshotDir;
   }
 
   /**
