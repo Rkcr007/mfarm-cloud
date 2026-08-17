@@ -107,6 +107,27 @@ c_ok "arch $ARCH -> $CF_TARGET"
   See docs/HARDWARE_DAY.md for the full walkthrough."
 c_ok "/dev/kvm present"
 
+# Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1, which confines unprivileged
+# user namespaces to an AppArmor profile that denies CAP_SYS_ADMIN. crosvm sandboxes every virtual
+# device in a user namespace via minijail, so the denial kills it partway through VM setup. What
+# you see instead is a chain of misleading symptoms: crosvm reports "the architecture failed to
+# build the vm / failed to create a PCI root hub", kernel.log stays empty, `cvd fleet` still says
+# "Starting", and the webRTC and adb helpers retry forever against a VM that is already dead. The
+# only place AppArmor is named is `dmesg`. Check it here so nobody has to find that twice.
+#
+# This relaxes a host-wide hardening setting (unprivileged userns is a local-privesc surface).
+# Acceptable on a single-purpose device-farm host, which is what this script is for; think before
+# running it on a shared machine.
+USERNS_SYSCTL=kernel.apparmor_restrict_unprivileged_userns
+if [ "$(sysctl -n "$USERNS_SYSCTL" 2>/dev/null || echo 0)" != 0 ]; then
+  c_warn "${USERNS_SYSCTL}=1 — crosvm cannot sandbox its devices and will die during VM setup"
+  echo "${USERNS_SYSCTL}=0" | sudo tee /etc/sysctl.d/99-cuttlefish-userns.conf >/dev/null
+  sudo sysctl -q -w "${USERNS_SYSCTL}=0"
+  c_ok "disabled it, persisted in /etc/sysctl.d/99-cuttlefish-userns.conf"
+else
+  c_ok "unprivileged user namespaces available to crosvm"
+fi
+
 CORES=$(nproc); RAM_GB=$(free -g | awk '/^Mem:/{print $2}'); DISK_GB=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
 echo "  host: ${CORES} cores, ${RAM_GB} GB RAM, ${DISK_GB} GB free"
 [ "$RAM_GB" -lt 16 ] && c_warn "${RAM_GB} GB RAM is thin for a density ramp; expect an early cliff"
@@ -447,8 +468,26 @@ done
 ELAPSED=$(( $(date +%s) - START ))
 
 if [ "$BOOTED" != yes ]; then
-  cvd stop >/dev/null 2>&1 || true
-  die "instance did not reach boot_completed in 300s. See /tmp/cf_start.log"
+  # Do NOT tear down before collecting evidence: cvd stop takes the instance directory's logs with
+  # it, and /tmp/cf_start.log only holds the launcher's own stdout, which says nothing about why a
+  # guest failed to come up. The distinction that matters is whether crosvm is alive.
+  INST=$(ls -d /var/tmp/cvd/*/*/home/cuttlefish/instances/cvd-1 2>/dev/null | head -1)
+  if pgrep -x crosvm >/dev/null 2>&1; then
+    WHY="crosvm is still running, so the VM exists and the guest is genuinely slow or wedged.
+  Read the guest's own output:  tail -50 ${INST:-<instance dir>}/kernel.log"
+  else
+    WHY="crosvm is NOT running — the VM died during setup and nothing ever booted. cvd will still
+  have reported 'Starting'. The cause is usually a host restriction that Cuttlefish's own logs do
+  not name; dmesg does:  sudo dmesg | grep -iE 'apparmor|denied|crosvm|traps' | tail -20"
+  fi
+  die "instance did not reach boot_completed in 300s.
+
+  ${WHY}
+
+  Launcher log (crosvm's stderr is relayed into it, under 'log_tee'):
+      grep -a log_tee ${INST:-<instance dir>}/logs/launcher.log | grep -ai error
+
+  Nothing has been torn down, so the logs above are still intact. Clean up with: cvd stop; cvd rm"
 fi
 c_ok "booted in ${ELAPSED}s"
 cvd stop >/dev/null 2>&1 || true

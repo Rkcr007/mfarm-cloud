@@ -368,6 +368,37 @@ scheduler).
       --enable_virtiofs=false` (issue 2 above). Without them the cold-boot baseline is measured on a
       different device configuration than the snapshot restore it exists to be compared against.
 
+12. **Ubuntu 24.04 blocks crosvm by default, and every log lies about it.** 24.04 ships
+    `kernel.apparmor_restrict_unprivileged_userns=1`, confining unprivileged user namespaces to an
+    AppArmor profile that denies `CAP_SYS_ADMIN`. crosvm sandboxes each virtual device in a user
+    namespace via minijail, so it is denied mid-setup and dies. Fix, applied by
+    `bootstrap_cuttlefish.sh` preflight since 2026-08-18:
+
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   # persisted in
+                                                                        # /etc/sysctl.d/99-cuttlefish-userns.conf
+
+    Budget real time for this one if it ever recurs on a new host image — it cost most of an
+    evening because **no Cuttlefish log mentions AppArmor**. The visible symptoms all point
+    elsewhere: crosvm says `the architecture failed to build the vm / failed to create a PCI root
+    hub`, which reads like a device-model bug; `kernel.log` and `logcat` are zero bytes, which
+    reads like a hung guest; `cvd fleet` reports `"status": "Starting"` indefinitely, which reads
+    like a slow boot; and the webRTC and adb helpers log `vsock: No such device` and
+    `Connection refused` on a loop, which reads like a networking problem. `cvd create` itself
+    exits 0. The single place the truth appears is `sudo dmesg`:
+
+        apparmor="DENIED" operation="capable" profile="unprivileged_userns" \
+          comm="crosvm" capability=21 capname="sys_admin"
+        traps: crosvm[3266] general protection fault ... in libc.so.6
+
+    Hence the diagnostic rule now baked into the script's timeout message: **check whether `crosvm`
+    is in `ps` first.** Alive means a real boot problem, look at `kernel.log`. Absent means the VM
+    never existed, go straight to `dmesg` — the Cuttlefish logs will only mislead. The script also
+    no longer runs `cvd stop` before reporting a timeout, because that deleted the evidence.
+
+    Note this weakens a host-wide hardening setting (unprivileged userns is a local-privilege-
+    escalation surface). Fine on a single-purpose farm host; think before applying it to a shared
+    machine.
+
     **The farm consequence:** every image refresh needs a human, and both devices must stay on one
     pinned build or differences between them become debugging noise. Revisit if upstream opens v4
     or ships an unauthenticated mirror.
