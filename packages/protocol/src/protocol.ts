@@ -10,7 +10,20 @@
  * adapter growing a `throw new NotSupported()`.
  */
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * v2 (2026-08-17) — ADR-0004 / ADR-0003 B2. Two additions, both backward compatible:
+ *
+ *   1. `devices[].automationEndpoint`, so a host with more than one device can advertise a
+ *      DIFFERENT automation address per device. v1 carried exactly one host-level string, which is
+ *      why `index.ts` refused to run Appium at all on a multi-device host: two servers, one
+ *      advertised address, and every device claiming `webdriver` regardless.
+ *   2. `deviceIds` on the registration RESPONSE, mapping local id -> control-plane uuid. The worker
+ *      previously had no way to learn its own devices' uuids and inferred them from whatever
+ *      session token happened to arrive (`resolveDeviceIds` returned `{}`). The automation gateway
+ *      cannot do that: it has to decide, BEFORE proxying, whether a grant naming device uuid X may
+ *      drive the device at path `/automation/cf-2`. Guessing is not available to it.
+ */
+export const PROTOCOL_VERSION = 2;
 /** Oldest version the control plane still accepts. Bump only when N-1 is genuinely retired. */
 export const MIN_SUPPORTED_VERSION = 1;
 
@@ -41,9 +54,14 @@ export interface WorkerRegistration {
   /** Public data-plane address the browser connects to directly. Without it the host cannot take
    *  sessions at all, because there is nowhere to point the client (v2 decision 2). */
   endpoint?: string;
-  /** Base URL of this host's automation (Appium) server, e.g. `http://10.0.3.14:4723`. Reached by
-   *  the control plane over the internal network only — the WebDriver hub is the sole public ingress
-   *  to it, because an exposed Appium port is unauthenticated device control. */
+  /**
+   * HOST-LEVEL automation base url. **Legacy since v2** — prefer `devices[].automationEndpoint`.
+   *
+   * Retained because N-1 workers still send it and because a v1 control plane reads nothing else.
+   * A v2 worker sends it only when exactly ONE of its devices has an endpoint, so an older control
+   * plane sees precisely what it saw before and a multi-device host degrades to "no webdriver"
+   * rather than advertising one server for two devices.
+   */
   automationEndpoint?: string;
   cores: number;
   memoryMb: number;
@@ -55,7 +73,84 @@ export interface WorkerRegistration {
     model: string;
     osVersion: string;
     capabilities: Capability[];
+    /**
+     * v2. Base url the hub should dial for THIS device — the worker's automation gateway
+     * (`https://<host>:<port>/automation/<localId>`), not Appium itself. Appium stays on loopback;
+     * see ADR-0004.
+     *
+     * The hub appends `/session` exactly as before, so this is a change of what the url points at,
+     * not of how the hub uses it.
+     */
+    automationEndpoint?: string;
   }>;
+}
+
+/** What `POST /v1/workers/register` answers. */
+export interface RegistrationResponse {
+  hostId: string;
+  protocolVersion: number;
+  degradedCapabilities: string[];
+  schedulableDevices: string[];
+  workerToken: string;
+  sessionPublicKey: string;
+  /**
+   * v2. localId -> control-plane device uuid, for every device in the registration.
+   *
+   * The gateway authorizes on `claims.did`, which is a uuid, against a path segment, which is a
+   * local id. Without this map that comparison cannot be made and the only safe answer is to refuse
+   * every request.
+   */
+  deviceIds?: Record<string, string>;
+}
+
+/**
+ * The automation base url for one device, honouring the v1 fallback.
+ *
+ * Single reader for the precedence so the control plane and the worker cannot disagree about it:
+ * a device-level endpoint wins, and the host-level string is what a v1 worker meant.
+ */
+export function deviceAutomationEndpoint(
+  reg: Pick<WorkerRegistration, 'automationEndpoint'>,
+  device: { automationEndpoint?: string },
+): string | undefined {
+  return device.automationEndpoint ?? reg.automationEndpoint ?? undefined;
+}
+
+/**
+ * Path the automation gateway serves for a device, and the hub's advertised suffix.
+ *
+ * Shared so the two halves cannot drift: the worker parses what this builds. `localId` is encoded
+ * because it comes from operator configuration and reaches a url — nothing else validates it.
+ */
+export const AUTOMATION_PREFIX = '/automation';
+
+export function automationPath(localId: string): string {
+  return `${AUTOMATION_PREFIX}/${encodeURIComponent(localId)}`;
+}
+
+/**
+ * Inverse of `automationPath`, for the gateway's request handler.
+ *
+ * Returns the device's local id and the REMAINDER of the path, which is proxied verbatim. A request
+ * for exactly `/automation/cf-1` has a remainder of `''`, not `'/'` — Appium distinguishes them.
+ */
+export function parseAutomationPath(
+  pathname: string,
+): { localId: string; rest: string } | undefined {
+  if (!pathname.startsWith(`${AUTOMATION_PREFIX}/`)) return undefined;
+  const tail = pathname.slice(AUTOMATION_PREFIX.length + 1);
+  if (tail === '') return undefined;
+  const slash = tail.indexOf('/');
+  const rawId = slash === -1 ? tail : tail.slice(0, slash);
+  const rest = slash === -1 ? '' : tail.slice(slash);
+  if (rawId === '') return undefined;
+  let localId: string;
+  try {
+    localId = decodeURIComponent(rawId);
+  } catch {
+    return undefined; // malformed percent-encoding is a bad request, never a lookup
+  }
+  return { localId, rest };
 }
 
 export type NegotiationResult =

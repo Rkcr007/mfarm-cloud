@@ -68,7 +68,11 @@ function fakeBackend(localId = 'fake-1'): DeviceBackend & { control: FakeDevice 
   return { control, media: { async endpoint() { return { url: 'https://cf.example/?d=1', kind: 'webrtc' as const }; } } };
 }
 
-const makeAgent = (backends: DeviceBackend[], hostname: string) =>
+const makeAgent = (
+  backends: DeviceBackend[],
+  hostname: string,
+  extra: { automationEndpoint?: string; automationEndpoints?: Record<string, string> } = {},
+) =>
   new Agent({
     controlPlaneUrl: baseUrl,
     registrationToken: 'agent-test-registration-secret',
@@ -77,6 +81,7 @@ const makeAgent = (backends: DeviceBackend[], hostname: string) =>
     devices: backends,
     statePath: join(stateDir, `${hostname}.json`),
     cores: 8, memoryMb: 16384,
+    ...extra,
   });
 
 before(async () => {
@@ -515,5 +520,133 @@ describe('data plane', () => {
     const msg = await nextMessage(ws2);
     assert.equal(msg.code, 'stale_fence', 'the old client must not drive a device given to someone else');
     ws2.close();
+  });
+});
+
+/**
+ * ADR-0003 B2 / ADR-0004 point 4 — the automation endpoint belongs to the DEVICE.
+ *
+ * Before protocol v2 a host carried exactly one `automationEndpoint` and `agent.ts` stamped
+ * `webdriver` onto every device once it was set. On a two-device host that meant the second device
+ * advertised a capability whose server the hub could never reach, and every session allocated to it
+ * failed at the proxy hop — so `index.ts` refused to start Appium at all rather than lie.
+ *
+ * These run against the real control plane, so they cover the worker half and the control-plane half
+ * agreeing rather than each side's idea of the other.
+ */
+describe('per-device automation endpoints', () => {
+  test('only the devices with an endpoint advertise `webdriver`', async () => {
+    const served = fakeBackend('cf-1');
+    const bare = fakeBackend('cf-2');
+    const agent = makeAgent([served, bare], `b2-partial-${randomUUID().slice(0, 8)}`, {
+      automationEndpoints: { 'cf-1': 'https://worker.example:8443/automation/cf-1' },
+    });
+    await agent.start();
+
+    const rows = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT local_id, capabilities, automation_endpoint
+           FROM devices WHERE host_id = $1 ORDER BY local_id`,
+        [agent.hostId],
+      );
+      return rows as Array<{ local_id: string; capabilities: string[]; automation_endpoint: string | null }>;
+    });
+
+    assert.equal(rows.length, 2);
+    assert.ok(rows[0].capabilities.includes('webdriver'), 'cf-1 has a server behind it');
+    assert.equal(rows[0].automation_endpoint, 'https://worker.example:8443/automation/cf-1');
+
+    assert.ok(!rows[1].capabilities.includes('webdriver'),
+      'cf-2 has no server — before v2 it inherited cf-1\'s and absorbed sessions it could not run');
+    assert.equal(rows[1].automation_endpoint, null);
+  });
+
+  test('registration returns a control-plane uuid for every device', async () => {
+    // The gateway authorizes `claims.did` (a uuid) against a path segment (a local id). Without this
+    // mapping it cannot make that comparison and must refuse every request.
+    const agent = makeAgent([fakeBackend('cf-1'), fakeBackend('cf-2')], `b2-ids-${randomUUID().slice(0, 8)}`);
+    await agent.start();
+
+    const expected = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT local_id, id FROM devices WHERE host_id = $1 ORDER BY local_id`, [agent.hostId],
+      );
+      return rows as Array<{ local_id: string; id: string }>;
+    });
+
+    assert.equal(agent.deviceIdFor('cf-1'), expected[0].id);
+    assert.equal(agent.deviceIdFor('cf-2'), expected[1].id);
+    assert.equal(agent.deviceIdFor('cf-9'), undefined, 'a device this host does not have');
+  });
+
+  test('a host-level endpoint still covers every device — the v1 shape and the AUTOMATION_ENDPOINT hatch', async () => {
+    const agent = makeAgent([fakeBackend('cf-1'), fakeBackend('cf-2')], `b2-hostwide-${randomUUID().slice(0, 8)}`, {
+      automationEndpoint: 'http://10.0.3.14:4723',
+    });
+    await agent.start();
+
+    assert.equal(agent.automationEndpoint, 'http://10.0.3.14:4723',
+      'one url covering both devices is reportable at host level');
+
+    const rows = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT local_id, capabilities, automation_endpoint
+           FROM devices WHERE host_id = $1 ORDER BY local_id`, [agent.hostId],
+      );
+      return rows as Array<{ local_id: string; capabilities: string[]; automation_endpoint: string }>;
+    });
+    for (const r of rows) {
+      assert.ok(r.capabilities.includes('webdriver'), `${r.local_id} is genuinely fronted by that server`);
+      assert.equal(r.automation_endpoint, 'http://10.0.3.14:4723');
+    }
+  });
+
+  test('two distinct endpoints withhold the host-level field rather than naming one of them', async () => {
+    // A v1 control plane stores one string per host. Reporting either would tell it that BOTH
+    // devices are served by a server that can only reach one — the exact defect B2 describes.
+    // Answering nothing degrades that host to "no webdriver", which is true.
+    const agent = makeAgent([fakeBackend('cf-1'), fakeBackend('cf-2')], `b2-distinct-${randomUUID().slice(0, 8)}`, {
+      automationEndpoints: {
+        'cf-1': 'https://worker.example:8443/automation/cf-1',
+        'cf-2': 'https://worker.example:8443/automation/cf-2',
+      },
+    });
+    await agent.start();
+
+    assert.equal(agent.automationEndpoint, undefined, 'no single url describes this host');
+    assert.equal(agent.automationEndpointFor('cf-2'), 'https://worker.example:8443/automation/cf-2');
+
+    const rows = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT d.local_id, d.automation_endpoint AS dev, h.automation_endpoint AS host
+           FROM devices d JOIN hosts h ON h.id = d.host_id
+          WHERE d.host_id = $1 ORDER BY d.local_id`, [agent.hostId],
+      );
+      return rows as Array<{ local_id: string; dev: string; host: string | null }>;
+    });
+    assert.equal(rows[0].host, null, 'the legacy host column stays empty');
+    assert.equal(rows[0].dev, 'https://worker.example:8443/automation/cf-1');
+    assert.equal(rows[1].dev, 'https://worker.example:8443/automation/cf-2');
+  });
+
+  test('re-registering without a server WITHDRAWS the stored endpoint', async () => {
+    // A stale url left behind would keep the hub dialling a server that is gone (ADR-0003 d3).
+    const hostname = `b2-withdraw-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('cf-1')], hostname, {
+      automationEndpoints: { 'cf-1': 'https://worker.example:8443/automation/cf-1' },
+    });
+    await first.start();
+
+    const second = makeAgent([fakeBackend('cf-1')], hostname); // Appium did not come back
+    await second.start();
+
+    const row = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT capabilities, automation_endpoint FROM devices WHERE host_id = $1`, [second.hostId],
+      );
+      return rows[0] as { capabilities: string[]; automation_endpoint: string | null };
+    });
+    assert.equal(row.automation_endpoint, null);
+    assert.ok(!row.capabilities.includes('webdriver'));
   });
 });

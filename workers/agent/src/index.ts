@@ -1,6 +1,8 @@
 import { cpus, hostname as osHostname, totalmem } from 'node:os';
+import { automationPath } from '@mfarm/protocol';
 import { Agent } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
+import { AutomationGateway } from './gateway.ts';
 import { DataPlane } from './dataplane.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
 import { createAvdBackend } from './devices/avd.ts';
@@ -53,50 +55,56 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
 /**
  * Build one Appium supervisor per device, or none.
  *
- * Refuses to run with more than one device, and the reason is a protocol limit rather than a
- * limitation of the supervisor: `WorkerRegistration` carries exactly ONE host-level
- * `automationEndpoint` (packages/protocol/src/protocol.ts), and agent.ts stamps `webdriver` onto
- * every device once it is set. With two devices that means two Appium servers, one advertised
- * address, and a second device claiming a capability whose server the hub can never reach — sessions
- * allocated to it fail every time. Better to serve no WebDriver traffic than to lie about half of it.
+ * Multi-device is supported as of protocol v2. It was refused before, and the reason was a protocol
+ * limit rather than a limitation of the supervisor: `WorkerRegistration` carried exactly ONE
+ * host-level `automationEndpoint`, and `agent.ts` stamped `webdriver` onto every device once it was
+ * set — so a second device advertised a capability whose server the hub could never reach, and every
+ * session allocated to it failed. `devices[].automationEndpoint` plus the ADR-0004 gateway removes
+ * both halves of that: each device names its own gateway path, and only devices with a ready server
+ * carry the capability.
+ *
  * `AUTOMATION_ENDPOINT` remains the way to front several devices with one operator-managed server.
  */
 function createSupervisors(
   backends: DeviceBackend[],
-  onPermanentFailure: (reason: string) => void,
-  onHealthChange: (healthy: boolean) => void,
+  onPermanentFailure: (localId: string, reason: string) => void,
+  onHealthChange: (localId: string, healthy: boolean) => void,
 ): AppiumSupervisor[] {
   if (!flag('APPIUM_ENABLED')) return [];
 
-  if (backends.length > 1) {
-    console.error(
-      `[agent] APPIUM_ENABLED with ${backends.length} devices, but registration carries only one ` +
-      'automationEndpoint for the whole host — the hub could reach at most one of the servers while ' +
-      'every device advertised `webdriver`. Not starting Appium. Run one WebDriver device per host, ' +
-      'or set AUTOMATION_ENDPOINT to a single externally-managed Appium that fronts all of them.',
-    );
-    return [];
-  }
-
   const basePort = Number(process.env.APPIUM_BASE_PORT ?? 4723);
-  // Exactly one, always — the refusal above guarantees `backends.length === 1` here. A loop
-  // checking these supervisors for derived-port collisions used to sit below; it could never see a
-  // second entry to collide with, so it was a dead defence that read as a live one, and it is gone.
-  // When B2 is fixed and a host can advertise per-device endpoints, that check has to come back
-  // together with the multi-supervisor support — see the note on derivePort in appium.ts.
-  return backends.map((b) => new AppiumSupervisor({
-    localId: b.control.info.localId,
-    port: derivePort(b.control.info.localId, basePort),
-    command: process.env.APPIUM_PATH,
-    // The bind address is always loopback; this only changes what the control plane is told, for
-    // hosts where a private tunnel terminates on this machine and forwards to it.
-    advertiseHost: process.env.APPIUM_ADVERTISE_HOST,
-    // Appium does NOT inherit this process's environment — it would otherwise receive
-    // WORKER_REGISTRATION_TOKEN. Anything a particular driver genuinely needs is named here.
-    envPassthrough: (process.env.APPIUM_ENV_PASSTHROUGH ?? '').split(',').map((s) => s.trim()).filter(Boolean),
-    onPermanentFailure,
-    onHealthChange,
-  }));
+  const supervisors = backends.map((b) => {
+    const localId = b.control.info.localId;
+    return new AppiumSupervisor({
+      localId,
+      port: derivePort(localId, basePort),
+      command: process.env.APPIUM_PATH,
+      // Deliberately NOT advertiseHost. Since ADR-0004 nothing outside this host is ever told where
+      // Appium is: the gateway is what gets advertised, and it reaches Appium over loopback. The
+      // supervisor's own endpoint is now used for health and for the proxy target, nothing else.
+      // Appium does NOT inherit this process's environment — it would otherwise receive
+      // WORKER_REGISTRATION_TOKEN. Anything a particular driver genuinely needs is named here.
+      envPassthrough: (process.env.APPIUM_ENV_PASSTHROUGH ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+      onPermanentFailure: (reason) => onPermanentFailure(localId, reason),
+      onHealthChange: (healthy) => onHealthChange(localId, healthy),
+    });
+  });
+
+  // Reinstated with multi-supervisor support, exactly as the note on `derivePort` asked. `derivePort`
+  // hashes any id that does not end in digits, and hashes collide — two devices sharing a port means
+  // the second Appium never binds, and the failure surfaces as an unrelated readiness timeout.
+  const byPort = new Map<number, string>();
+  for (const s of supervisors) {
+    const clash = byPort.get(s.port);
+    if (clash !== undefined) {
+      throw new Error(
+        `Appium port collision: devices '${clash}' and '${s.localId}' both derive port ${s.port}. ` +
+        'Rename one so it ends in a distinct number (cf-1, cf-2), or set APPIUM_BASE_PORT apart.',
+      );
+    }
+    byPort.set(s.port, s.localId);
+  }
+  return supervisors;
 }
 
 /**
@@ -120,35 +128,74 @@ const UNHEALTHY_GRACE_MS = Number(process.env.APPIUM_UNHEALTHY_GRACE_MS ?? 60_00
 const DRAIN_TIMEOUT_MS = Number(process.env.AGENT_DRAIN_TIMEOUT_MS ?? 30_000);
 
 /**
- * The address to register, or undefined to register without `webdriver`.
+ * The externally-reachable base url of this host's automation gateway.
  *
- * Waits for a genuine `/status` answer before returning anything. An endpoint advertised on hope is
- * worse than no endpoint at all: the control plane demands the `webdriver` capability when it
- * allocates for the hub, so a host that claims it and cannot serve it does not degrade — it absorbs
- * sessions and fails them.
+ * `AUTOMATION_ADVERTISE_BASE` wins outright and is what a TLS deployment sets
+ * (`https://worker-1.example:8443`) — the worker already terminates TLS for the data plane, and
+ * ADR-0004 point 3 puts automation on that same public listener rather than inventing a second
+ * exposure class. Otherwise it is composed from `APPIUM_ADVERTISE_HOST`, which keeps exactly the
+ * meaning ADR-0004 gives it: the externally-reachable name for the worker.
  */
-async function resolveAutomationEndpoint(supervisors: AppiumSupervisor[]): Promise<string | undefined> {
+function gatewayBase(port: number): string {
+  const explicit = process.env.AUTOMATION_ADVERTISE_BASE;
+  if (explicit) return explicit.replace(/\/+$/, '');
+  const host = process.env.APPIUM_ADVERTISE_HOST ?? process.env.PUBLIC_HOST;
+  if (!host) {
+    throw new Error(
+      'APPIUM_ENABLED needs somewhere to advertise the automation gateway. Set ' +
+      'AUTOMATION_ADVERTISE_BASE to its full public base url, or APPIUM_ADVERTISE_HOST/PUBLIC_HOST ' +
+      'to this host\'s externally-reachable name. Advertising 127.0.0.1 would register an endpoint ' +
+      'only this machine can reach.',
+    );
+  }
+  return `http://${host}:${port}`;
+}
+
+/**
+ * Per-device automation endpoints to register, keyed by local id.
+ *
+ * Waits for a genuine `/status` answer per device before including it. An endpoint advertised on
+ * hope is worse than no endpoint at all: the control plane demands the `webdriver` capability when
+ * it allocates for the hub, so a device that claims it and cannot serve it does not degrade — it
+ * absorbs sessions and fails them.
+ *
+ * Per device rather than per host since v2. A host with one healthy Appium and one dead one now
+ * registers `webdriver` on the first device only, instead of the old all-or-nothing answer.
+ */
+async function resolveAutomationEndpoints(
+  supervisors: AppiumSupervisor[],
+  base: string,
+): Promise<Record<string, string>> {
   const manual = process.env.AUTOMATION_ENDPOINT;
   // Escape hatch, unchanged: an externally-managed Appium (a systemd unit, a sidecar, one server
-  // fronting several devices) is still a legitimate deployment and is not second-guessed here.
-  if (supervisors.length === 0) return manual;
+  // fronting several devices) is still a legitimate deployment and is not second-guessed here. It
+  // stays HOST-level, because that is the shape it has always had.
+  if (supervisors.length === 0) return {};
 
   if (manual) {
-    console.warn('[agent] AUTOMATION_ENDPOINT is ignored while APPIUM_ENABLED is set — the supervised server wins');
+    console.warn('[agent] AUTOMATION_ENDPOINT is ignored while APPIUM_ENABLED is set — the supervised servers win');
   }
 
-  const sup = supervisors[0]!;
-  if (await sup.start()) {
-    console.log(`[agent] Appium ready for ${sup.localId} at ${sup.endpoint}`);
-    return sup.endpoint;
-  }
-
-  console.error(
-    `[agent] Appium did not become ready (state: ${sup.state}) — registering WITHOUT the webdriver ` +
-    'capability rather than advertising a server that is not answering. The supervisor keeps ' +
-    'retrying; restart the agent once it is up to start taking WebDriver sessions.',
+  // Started concurrently: each cold start costs tens of seconds, and serialising them means the
+  // second device is unavailable for the duration of the first one's boot.
+  const started = await Promise.all(
+    supervisors.map(async (sup) => ({ sup, ready: await sup.start() })),
   );
-  return undefined;
+
+  const endpoints: Record<string, string> = {};
+  for (const { sup, ready } of started) {
+    if (ready) {
+      endpoints[sup.localId] = `${base}${automationPath(sup.localId)}`;
+      console.log(`[agent] Appium ready for ${sup.localId} on :${sup.port}, advertised at ${endpoints[sup.localId]}`);
+    } else {
+      console.error(
+        `[agent] Appium for ${sup.localId} did not become ready (state: ${sup.state}) — registering ` +
+        'that device WITHOUT the webdriver capability rather than advertising a server that is not ' +
+        'answering. The supervisor keeps retrying; restart the agent once it is up.',
+      );
+    }
+  }
+  return endpoints;
 }
 
 async function main(): Promise<void> {
@@ -160,14 +207,22 @@ async function main(): Promise<void> {
 
   // Rebound once shutdown() exists below. Until then a give-up can only be reported, because there
   // is nothing registered yet to drain.
-  let onGiveUp = (reason: string): void => {
-    console.error(`[agent] Appium gave up before registration completed: ${reason}`);
+  let onGiveUp = (localId: string, reason: string): void => {
+    console.error(`[agent] Appium for ${localId} gave up before registration completed: ${reason}`);
   };
-  // Health flips before registration are uninteresting: resolveAutomationEndpoint is waiting on the
+  // Health flips before registration are uninteresting: resolveAutomationEndpoints is waiting on the
   // first one anyway, and nothing has been advertised yet that could need withdrawing.
-  let onHealth = (_healthy: boolean): void => {};
-  const supervisors = createSupervisors(backends, (r) => onGiveUp(r), (h) => onHealth(h));
-  const automationEndpoint = await resolveAutomationEndpoint(supervisors);
+  let onHealth = (_localId: string, _healthy: boolean): void => {};
+  const supervisors = createSupervisors(
+    backends,
+    (id, r) => onGiveUp(id, r),
+    (id, h) => onHealth(id, h),
+  );
+
+  const gatewayPort = Number(process.env.AUTOMATION_GATEWAY_PORT ?? 8090);
+  const automationEndpoints = supervisors.length > 0
+    ? await resolveAutomationEndpoints(supervisors, gatewayBase(gatewayPort))
+    : {};
 
   const agent = new Agent({
     controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
@@ -175,14 +230,37 @@ async function main(): Promise<void> {
     hostname: env('WORKER_HOSTNAME', osHostname()),
     region: env('REGION'),
     endpoint: env('PUBLIC_ENDPOINT'),
-    // Derived from a server this agent started and proved is answering, or from AUTOMATION_ENDPOINT
-    // when Appium is managed outside. Either way it must NOT be publicly routable — an open Appium
-    // port is unauthenticated device control, and the hub is the only thing that knows about tenants.
-    automationEndpoint,
+    // The gateway's public path per device (ADR-0004), or — when Appium is managed outside this
+    // agent — whatever AUTOMATION_ENDPOINT names, which stays host-level and must not be publicly
+    // routable, because an open Appium port is unauthenticated device control.
+    automationEndpoint: supervisors.length === 0 ? process.env.AUTOMATION_ENDPOINT : undefined,
+    automationEndpoints,
     devices: backends,
     cores: cpus().length,
     memoryMb: Math.round(totalmem() / 1_048_576),
   });
+
+  /**
+   * The gateway comes up BEFORE registration, and that order is load-bearing.
+   *
+   * Registration is what puts this host in the scheduler's pool for WebDriver work, so the hub may
+   * dial the advertised endpoint the moment it returns. A gateway started afterwards leaves a window
+   * where the endpoint is published and nothing is listening on it.
+   *
+   * It binds the CONFIGURED port, never an ephemeral one: the url was already composed from that
+   * number and handed to the agent above. A failure to bind is therefore fatal rather than something
+   * to work around — the alternative is registering an endpoint that resolves to nothing.
+   */
+  const gateway = supervisors.length > 0
+    ? new AutomationGateway({
+        agent,
+        targets: new Map(supervisors.map((s) => [s.localId, s.port])),
+      })
+    : undefined;
+  if (gateway) {
+    await gateway.listen(gatewayPort);
+    console.log(`[agent] automation gateway listening on :${gatewayPort}`);
+  }
 
   const state = await agent.start();
   console.log(`[agent] registered as host ${state.hostId}`);
@@ -221,6 +299,9 @@ async function main(): Promise<void> {
       // session are given away free.
       await agent.shutdown();
       await dp.close();
+      // The gateway goes before Appium: it is the only route to Appium from off-host, so closing it
+      // first means no command can arrive for a device whose driver is already being torn down.
+      await gateway?.close();
       // Appium goes before the devices. It holds adb connections and an on-device helper app, and
       // pulling the device out from under a live driver leaves adb wedged and the helper installed —
       // which the next boot then inherits.
@@ -247,62 +328,78 @@ async function main(): Promise<void> {
   // the life of the process. Withdrawal is not worth silently defeating quarantine.
   //
   // So withdrawal is: drain and exit non-zero. The process supervisor restarts the agent, and it
-  // re-registers truthfully on the way in because resolveAutomationEndpoint runs again against an
+  // re-registers truthfully on the way in because resolveAutomationEndpoints runs again against an
   // Appium that is still down. Crude, but it is a real withdrawal rather than a promise, and it is
   // the same mechanism the permanent-failure path already used.
-  let withdrawTimer: NodeJS.Timeout | undefined;
-  const advertisedWebdriver = automationEndpoint !== undefined && supervisors.length > 0;
+  const withdrawTimers = new Map<string, NodeJS.Timeout>();
+  const supervisorFor = new Map(supervisors.map((s) => [s.localId, s]));
+  /** The devices that registered WITH an endpoint — the only ones with anything to withdraw. */
+  const advertisedWebdriver = new Set(Object.keys(automationEndpoints));
 
-  onHealth = (healthy: boolean): void => {
-    const sup = supervisors[0];
+  onHealth = (localId: string, healthy: boolean): void => {
+    const sup = supervisorFor.get(localId);
     if (!sup) return;
     // Keeps registration and the heartbeat payload honest even while the wire cannot carry the
     // change yet: if anything re-registers this agent, it will not re-assert a dead capability.
-    agent.setAutomationEndpoint(healthy ? sup.endpoint : undefined);
+    // The url is the GATEWAY's path for this device, not Appium's own address — the gateway is what
+    // the control plane was told about, and it keeps listening either way.
+    agent.setAutomationEndpoint(
+      localId,
+      healthy ? `${gatewayBase(gatewayPort)}${automationPath(localId)}` : undefined,
+    );
 
-    // The host registered without `webdriver` because Appium was not ready in time. There is
+    // This device registered without `webdriver` because its Appium was not ready in time. There is
     // nothing to withdraw, and bouncing the agent over a capability it never claimed would be pure
     // downtime — but the recovery is also not picked up, because only registration writes
     // capabilities. Say so once, rather than leaving idle WebDriver capacity to be discovered.
-    if (!advertisedWebdriver) {
+    if (!advertisedWebdriver.has(localId)) {
       if (healthy) {
         console.warn(
-          `[agent] Appium is ready at ${sup.endpoint}, but this host registered without ` +
+          `[agent] Appium for ${localId} is ready, but this device registered without ` +
           '`webdriver` and capabilities are only sent at registration — restart the agent to ' +
-          'start taking WebDriver sessions.',
+          'start taking WebDriver sessions on it.',
         );
       }
       return;
     }
 
     if (healthy) {
-      if (withdrawTimer) {
-        clearTimeout(withdrawTimer);
-        withdrawTimer = undefined;
-        console.log('[agent] Appium is ready again within the grace window — staying up');
+      const t = withdrawTimers.get(localId);
+      if (t) {
+        clearTimeout(t);
+        withdrawTimers.delete(localId);
+        console.log(`[agent] Appium for ${localId} is ready again within the grace window — staying up`);
       }
       return;
     }
 
     console.warn(
-      `[agent] Appium for ${sup.localId} is no longer ready (state: ${sup.state}) while this host ` +
-      `advertises \`webdriver\`. WebDriver sessions allocated here will fail at the proxy hop. ` +
+      `[agent] Appium for ${localId} is no longer ready (state: ${sup.state}) while that device ` +
+      'advertises `webdriver`. WebDriver sessions allocated to it will fail at the proxy hop. ' +
       `Withdrawing by draining in ${UNHEALTHY_GRACE_MS}ms unless it recovers first.`,
     );
-    withdrawTimer ??= setTimeout(() => {
-      console.error(
-        `[agent] Appium has been unready for ${UNHEALTHY_GRACE_MS}ms — draining to withdraw ` +
-        '`webdriver`. The agent re-registers without the capability while Appium stays down.',
-      );
-      void shutdown('appium-unhealthy', 1);
-    }, UNHEALTHY_GRACE_MS);
-    withdrawTimer.unref?.();
+    // Still a whole-agent drain, for the reason in the block comment above: capabilities are written
+    // at registration only, so one device's `webdriver` cannot be withdrawn without re-registering
+    // the host. Per-device endpoints make the RE-registration honest — the agent returns advertising
+    // only the devices whose Appium is actually up — but they do not make withdrawal in-place
+    // possible. That needs the heartbeat to carry capabilities.
+    if (!withdrawTimers.has(localId)) {
+      const timer = setTimeout(() => {
+        console.error(
+          `[agent] Appium for ${localId} has been unready for ${UNHEALTHY_GRACE_MS}ms — draining to ` +
+          'withdraw `webdriver`. The agent re-registers without it while that Appium stays down.',
+        );
+        void shutdown('appium-unhealthy', 1);
+      }, UNHEALTHY_GRACE_MS);
+      timer.unref?.();
+      withdrawTimers.set(localId, timer);
+    }
   };
 
-  onGiveUp = (reason: string): void => {
-    console.error(`[agent] Appium is permanently unhealthy: ${reason}`);
-    if (!advertisedWebdriver) return; // never advertised it; the host is already honest
-    console.error('[agent] this host registered `webdriver` and can no longer serve it — draining');
+  onGiveUp = (localId: string, reason: string): void => {
+    console.error(`[agent] Appium for ${localId} is permanently unhealthy: ${reason}`);
+    if (!advertisedWebdriver.has(localId)) return; // never advertised it; already honest
+    console.error(`[agent] ${localId} registered \`webdriver\` and can no longer serve it — draining`);
     void shutdown('appium-permanent-failure', 1);
   };
 

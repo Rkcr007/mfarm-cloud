@@ -119,40 +119,69 @@ milliseconds inside the device, and none of this touches the glass-to-glass path
 
 ## What is implemented, and what is not
 
-**Implemented (control-plane half).** The hub mints a grant and sends it on every upstream request —
-`POST /session` and every proxied command. Against a bare Appium the header is simply ignored, so
-this is safe to ship before the gateway exists and means the day the gateway lands, nothing in
-`apps/api` has to change.
+**Both halves are implemented as of 2026-08-17**, together with the B2 protocol change they shared a
+field with.
 
-**Not implemented (worker half).** `AutomationGateway` in `workers/agent`. Until it exists,
-`APPIUM_ADVERTISE_HOST` plus an operator-provided private path remains the only way to make
-`APPIUM_ENABLED=1` reachable, and that is still the documented escape hatch rather than the design.
-The gateway is the next piece of work on the WebDriver path, and it needs:
+**Control-plane half.** The hub mints a grant and sends it on every upstream request — `POST /session`
+and every proxied command. Against a bare Appium the header is simply ignored, which is why this was
+safe to ship first.
 
-1. an HTTP listener on the worker, `/automation/:localId/*`;
-2. `verifySessionToken(bearer, publicKey, ownHostId)`, then `claims.did === <the device with that
-   localId>`, then `acceptFence(did, claims.fence)`;
-3. a path-transparent proxy to `127.0.0.1:<port for that device>`, streaming both ways, with the body
-   limit the hub already enforces;
-4. `automationEndpoint` in the registration payload pointing at the gateway rather than at Appium.
+**Worker half — `workers/agent/src/gateway.ts`.** All four points landed:
 
-Point 4 collides with **B2** (`automationEndpoint` is host-level, so a multi-device host cannot
-advertise per-device endpoints). The gateway does not fix B2 and does not make it worse: the endpoint
-is still one string per host. B2's protocol change — moving `automationEndpoint` onto the device — is
-what lets the `<deviceLocalId>` in the path differ per device, and the two should land together.
+1. an HTTP listener on the worker, `/automation/:localId/*` (`AUTOMATION_GATEWAY_PORT`, default 8090);
+2. `verifySessionToken(bearer, publicKey, ownHostId)`, then `claims.did === deviceIdFor(localId)`,
+   then `acceptFence(did, claims.fence)` — in that order, with no path to the proxy that skips one;
+3. a path-transparent proxy to `127.0.0.1:<port for that device>`, streaming both ways, bounded by
+   the same 16 MB limit the hub enforces and with a 300s upstream deadline (the hub's new-session
+   timeout — anything shorter severs sessions the hub is still legitimately waiting for);
+4. `devices[].automationEndpoint` pointing at the gateway rather than at Appium.
 
-**Unverified.** No real Appium 2, no real device, no second machine. Nothing here has been tested
-against a real network, and the numbers that would justify or refute the extra hop do not exist yet.
+Two decisions worth recording that the original spec did not state:
+
+- **`authorization` is stripped before proxying.** Appium would not check the grant, and forwarding a
+  bearer token to a process that logs its requests is how credentials reach a log file. It is in the
+  hop-by-hop set alongside the RFC 9110 §7.6.1 list.
+- **An unknown device and a non-automation path return an identical 404.** Distinguishing them lets
+  an unauthenticated caller enumerate the host's devices.
+
+**B2 is resolved, not merely accommodated.** `WorkerRegistration.devices[].automationEndpoint` (v2)
+carries one endpoint per device, `devices.automation_endpoint` stores it (migration 010), and the hub
+reads `COALESCE(d.automation_endpoint, h.automation_endpoint)` so v1 workers are unaffected.
+`index.ts` no longer refuses to start Appium on a multi-device host, and the `derivePort` collision
+check the old comment asked for is reinstated now that a second supervisor can actually exist.
+
+**A third change was forced by the second.** The gateway authorizes a grant's `claims.did` — a
+uuid — against a path segment that is a local id, and only the control plane knows both. Registration
+now returns `deviceIds` (localId -> uuid). Before v2 `resolveDeviceIds` returned `{}` and the agent
+inferred the mapping from whatever session token arrived, which is fine for the data plane and
+unusable here: the gateway must decide before it proxies anything. An agent that cannot resolve the
+mapping refuses rather than trusting the path.
+
+**Unverified.** No real Appium 2, no real device, no second machine. The gateway has been tested
+against a fake upstream that answers correctly; a real driver will disagree about something. The
+numbers that would justify or refute the extra hop still do not exist.
 
 ## Verification
 
 ```bash
-cd apps/api && node --test --experimental-strip-types test/webdriver.test.ts
+cd apps/api      && node --test --experimental-strip-types test/webdriver.test.ts
+cd workers/agent && node --test --experimental-strip-types test/gateway.test.ts
+cd workers/agent && node --test --test-concurrency=1 --experimental-strip-types test/agent.test.ts
 ```
 
-Covers: every upstream request carries a bearer grant; the grant verifies against the server's public
-key; its claims name the session, the device and the host that was actually allocated; it is not
-accepted for another host.
+Control-plane side: every upstream request carries a bearer grant; the grant verifies against the
+server's public key; its claims name the session, the device and the host that was actually
+allocated; it is not accepted for another host.
+
+Worker side (17 tests, mostly about what is REFUSED): no grant, a grant signed by another key, an
+expired grant, a grant minted for another host, **a valid grant for a different device on the same
+host**, a stale fence, a fence below the high-water mark, an unregistered host. Then: path-transparent
+proxying with method/query/body, `base + '/session'` unchanged, the bare base becoming `/`, the grant
+not reaching Appium, verbatim upstream status, an oversized body, and an unreachable Appium as 502
+rather than a hang.
+
+The fifth refusal is the one this ADR exists for. Nothing is wrong with that grant's signature — the
+authorization is wrong, and it is the check no network transport could have made.
 
 ## Related
 

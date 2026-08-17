@@ -149,7 +149,28 @@ bind — so the shape is right and the transport is missing. As it stands `APPIU
 a host the hub cannot reach. **This is a deployment-architecture decision, and it is now the
 critical path for WebDriver on real hardware.**
 
-**B2 — `automationEndpoint` is host-level, so per-device Appium is not expressible.**
+**~~B2~~ — RESOLVED 2026-08-17, protocol v2 + migration 010.** `devices[].automationEndpoint` carries
+one endpoint per device, `devices.automation_endpoint` stores it, and the hub reads
+`COALESCE(d.automation_endpoint, h.automation_endpoint)` so v1 workers are untouched. `agent.ts` now
+stamps `webdriver` per device rather than per host, `index.ts` no longer refuses to start Appium on a
+multi-device host, and the `derivePort` collision check is reinstated. Landed with the ADR-0004
+gateway, which needed the same field. **Two things surfaced while fixing it, both caught by tests
+rather than review:**
+
+1. *The host-level compatibility field re-created the bug.* Reporting one url for a host where only
+   some devices had one made the control plane's fallback store it for the uncovered devices too. The
+   host-level field is now withheld unless **every** device is covered by the same url.
+2. *Withdrawal never reached the control plane.* `Agent.start()` reused a stored credential whenever
+   the heartbeat succeeded and skipped registration entirely — so the drain-and-restart withdrawal
+   this ADR's decision 3 relies on came back with the same token, never re-registered, and left the
+   control plane believing `webdriver` was available on a device whose Appium was still dead.
+   `AgentState.registered` now fingerprints what registration asserted, and a changed fingerprint
+   forces re-registration. **Note the interaction:** re-registering clears `quarantined_at`, so a
+   quarantined host that restarts with changed capabilities un-quarantines itself. That was already
+   true for any host whose credential was rejected; it is now reachable by one more path.
+
+The original blocker, unedited:
+
 `WorkerRegistration` carries exactly one endpoint, `hosts.automation_endpoint` stores one, and
 `agent.ts` stamps `webdriver` onto *every* device the moment it is set. On a two-device host both
 devices advertise the capability and both route to whichever single server was advertised.

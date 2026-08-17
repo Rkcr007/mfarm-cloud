@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { withSystem } from '../../db.ts';
 import { generateWorkerToken } from '../../auth.ts';
-import { negotiate, type WorkerRegistration } from '@mfarm/protocol';
+import { negotiate, deviceAutomationEndpoint, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
 import { requireWorker } from '../server.ts';
@@ -64,28 +64,39 @@ export async function workerRoutes(app: FastifyInstance) {
       const hostId = rows[0].id;
 
       const schedulable = new Set(result.schedulable);
+      const deviceIds: Record<string, string> = {};
       for (const d of reg.devices ?? []) {
-        await c.query(
+        const { rows: dev } = await c.query(
           `INSERT INTO devices (host_id, region, platform, tier, model, os_version,
-                                capabilities, local_id, state)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)
+                                capabilities, local_id, state, automation_endpoint)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)
            ON CONFLICT (host_id, local_id) WHERE local_id IS NOT NULL DO UPDATE SET
              capabilities = EXCLUDED.capabilities,
              os_version = EXCLUDED.os_version,
              model = EXCLUDED.model,
-             updated_at = now()`,
+             -- Re-asserted on every registration, and allowed to become NULL. This is the write
+             -- that WITHDRAWS an automation endpoint: an agent whose Appium did not come back
+             -- re-registers without one, and a stale url left behind here would keep the hub
+             -- dialling a server that is gone (ADR-0003 decision 3).
+             automation_endpoint = EXCLUDED.automation_endpoint,
+             updated_at = now()
+           RETURNING id`,
           [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,
            JSON.stringify(d.capabilities), d.localId,
            // A device missing snapshot-reset or persistent input registers so it stays visible and
            // monitorable, but starts OFFLINE — it is never handed to a tenant.
-           schedulable.has(d.localId) ? 'READY' : 'OFFLINE'],
+           schedulable.has(d.localId) ? 'READY' : 'OFFLINE',
+           // v1 workers name one server for the whole host; v2 names one per device. Resolved in
+           // `packages/protocol` so the hub's COALESCE and this write cannot drift apart.
+           deviceAutomationEndpoint(reg, d) ?? null],
         );
+        if (d.localId && dev[0]?.id) deviceIds[d.localId] = dev[0].id as string;
       }
-      return hostId;
+      return { hostId, deviceIds };
     });
 
     return reply.code(201).send({
-      hostId: host,
+      hostId: host.hostId,
       protocolVersion: result.version,
       // Capabilities we know about that this worker did not advertise. Told plainly so an operator
       // can see what the host is missing rather than discovering it when a feature silently no-ops.
@@ -93,6 +104,9 @@ export async function workerRoutes(app: FastifyInstance) {
       schedulableDevices: result.schedulable,
       workerToken: token.plaintext,
       sessionPublicKey: app.signingKey.publicKeyPem,
+      // v2. The worker cannot authorize an automation grant without this: a grant names a device
+      // uuid and the gateway's path names a local id, and only the control plane knows both.
+      deviceIds: host.deviceIds,
     });
   });
 

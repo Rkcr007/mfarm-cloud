@@ -268,7 +268,14 @@ export async function webdriverRoutes(app: FastifyInstance) {
     try {
       const target = await withSystem(async (c) => {
         const { rows } = await c.query(
-          `SELECT d.local_id, d.host_id, h.automation_endpoint
+          // COALESCE, not `d.automation_endpoint` alone: a v1 worker names one server for the whole
+          // host and sets no device column at all (migration 010). Preferring the device row is
+          // what lets a v2 host point each device at its own gateway path.
+          // COALESCE, not `d.automation_endpoint` alone: a v1 worker names one server for the whole
+          // host and sets no device column at all (migration 010). Preferring the device row is
+          // what lets a v2 host point each device at its own gateway path.
+          `SELECT d.local_id, d.host_id,
+                  COALESCE(d.automation_endpoint, h.automation_endpoint) AS automation_endpoint
              FROM devices d JOIN hosts h ON h.id = d.host_id
             WHERE d.id = $1`,
           [deviceId],

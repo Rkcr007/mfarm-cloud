@@ -1,6 +1,24 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-16. Read this first in a new session.
+Last updated 2026-08-17. Read this first in a new session.
+
+## SCOPE CHANGE 2026-08-17 — read `docs/MVP_PLAN.md` next
+
+The target is now a **self-hosted 2-device Android farm** (Cuttlefish on rented Indian bare metal,
+Tailscale access, Appium suites, small team) rather than a multi-tenant SaaS device cloud. The
+architecture below is unchanged and reusable; what changed is sequencing and what "done" means.
+
+Three consequences, in full detail in `docs/MVP_PLAN.md`:
+
+1. **The gate below no longer blocks delivery.** Density is a unit-economics number, irrelevant at
+   two devices on a box you already pay for; interactive latency is a manual-testing differentiator,
+   not an Appium one. Still run the spikes — the same box runs them on day one — but they gate
+   *scaling*, not *shipping*.
+2. **Cuttlefish snapshot/restore requires `--gpu_mode=guest_swiftshader`, `--enable_virtiofs=false`
+   and x86_64.** The reset story in `device.ts` is only available with a *software* GPU. A GPU-less
+   rented server lands on SwiftShader regardless, so this costs nothing here — but it must be
+   configured deliberately, and Flutter/RN rendering perf needs measuring in Phase 1, not assumed.
+3. **Target Android 17 (API 37)**, AOSP tag `android-17.0.0_r1`, released 2026-06-16.
 
 ## What this project is
 
@@ -39,12 +57,13 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**267 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**289 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
 apps/api/         control plane + service entrypoint   172 tests
 apps/cli/         mfarm CLI                             48 tests
-workers/agent/    worker agent + Appium supervisor      47 tests
+workers/agent/    worker agent, Appium supervisor,      69 tests
+                  automation gateway
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
@@ -148,11 +167,34 @@ only while a supervised server is genuinely ready, and withdraws it otherwise. P
 `AUTOMATION_ENDPOINT` being set was an unchecked promise, so a dead Appium still got fed real tenant
 sessions.
 
+### Automation gateway — `workers/agent/src/gateway.ts` (ADR-0004)
+
+The worker half of the automation transport, and **the one internet-facing listener whose
+correctness is a security boundary**. Appium stays on `127.0.0.1`; this is the only thing that can
+reach it. Every request must carry an Ed25519 grant from the hub, verified offline, and the checks
+run in a fixed order with no path to the proxy that skips one: signature → audience is this host →
+`claims.did` matches the device named in the path → fence is not stale.
+
+Deliberate properties, each of which a plausible implementation gets wrong:
+
+- **The grant is stripped before proxying.** Appium would not check it, and forwarding a bearer token
+  to a process that logs requests puts it in a log file.
+- **An unknown device and a non-automation path give an identical 404**, or an unauthenticated caller
+  can enumerate the host's devices.
+- **No redirect following.** A 302 from a compromised Appium would otherwise become a request the
+  gateway makes on its behalf, from its network position.
+- **The body limit is enforced while streaming**, not after buffering — buffering to measure is the
+  exhaustion the limit exists to prevent.
+- **There is no unauthenticated path at all**, not one behind a flag, so no configuration mistake can
+  produce one.
+
+`AUTOMATION_GATEWAY_PORT` (default 8090), `AUTOMATION_ADVERTISE_BASE` for the public base url (a TLS
+deployment sets this), falling back to `APPIUM_ADVERTISE_HOST`/`PUBLIC_HOST`. It refuses to start
+without one rather than advertise `127.0.0.1` to the fleet.
+
 ## What is NOT built
 
-- **The worker-side automation gateway** (ADR-0004). Decided and specified, not built — so a
-  loopback-bound Appium is still unreachable from the hub without an operator-supplied tunnel.
-- Blockers 3, 4 and 5 below.
+- Blockers 4 and 5 below.
 - App install / launch outside Appium, logcat streaming, video recording, artifacts
 - Web UI (deliberately last — it is the demo surface, not the product)
 - Publishing. Every package is `"private": true`, so `npx mfarm` does not work yet and the Action's
@@ -178,17 +220,16 @@ that proxies to it; every hub request carries a two-minute Ed25519 token naming 
 org, fence and host, which the worker verifies offline with the public key it already gets at
 registration. A VPN was rejected because it authenticates the network rather than the request — every
 peer on it could drive every device, which is the exposure loopback binding exists to prevent, just
-moved inside the perimeter. **The control-plane half is implemented and tested. The worker-side
-gateway is not built** — that is now the next piece of work on the WebDriver path, and until it lands
-`APPIUM_ADVERTISE_HOST` plus an operator-supplied private path is still the only way to make
-`APPIUM_ENABLED=1` reachable. ADR-0004 has the four-point spec.
+moved inside the perimeter. **BOTH HALVES ARE NOW BUILT (2026-08-17)** —
+`workers/agent/src/gateway.ts`, 17 tests, all four spec points. `APPIUM_ENABLED=1` no longer needs an
+operator-supplied tunnel. Still never tested against a real Appium.
 
-**3. `automationEndpoint` is host-level, so per-device Appium is inexpressible.** (ADR-0003, B2) One
-endpoint per host in the protocol, but `agent.ts` stamps `webdriver` onto every device on that host.
-The agent currently refuses to start Appium when a host has more than one device rather than
-advertise a lie. Real fix is a protocol change moving the endpoint onto the device. **This should now
-land together with the ADR-0004 gateway**, whose URL contains a device local id — the two changes
-want the same protocol field.
+**~~3. `automationEndpoint` is host-level, so per-device Appium is inexpressible.~~ FIXED 2026-08-17.**
+(ADR-0003, B2) Protocol v2 adds `devices[].automationEndpoint`; migration 010 adds
+`devices.automation_endpoint`; the hub reads `COALESCE(d.automation_endpoint, h.automation_endpoint)`
+so v1 workers are unaffected. `agent.ts` stamps `webdriver` per device, `index.ts` no longer refuses
+multi-device hosts, and the `derivePort` collision check is back. Landed with the gateway below —
+they wanted the same field.
 
 **4. `appium:udid` is set to the mfarm local id, not the adb serial.** (ADR-0003, B3)
 `webdriver.ts` sends `cf-1` / `avd-1`; UiAutomator2 matches against `emulator-5560` /
@@ -268,6 +309,20 @@ created. Never granting it does nothing. `008` revokes, and `ci.yml` now checks.
 being set made a host advertise `webdriver` with nothing checking anything was listening, so a dead
 Appium kept receiving real tenant sessions. Anything that advertises capacity must verify it.
 
+**A valid credential is not evidence that the control plane's picture is still right.**
+`Agent.start()` reused a stored worker token whenever the heartbeat succeeded and skipped
+registration entirely. Since registration is the *only* writer of capabilities, the drain-and-exit
+withdrawal in `index.ts` withdrew nothing: the agent restarted, heartbeated, never re-registered, and
+the control plane went on believing `webdriver` was live on a device whose Appium was dead. Fixed by
+fingerprinting what registration asserted (`AgentState.registered`) and re-registering when it
+changes. **Whenever a stored credential lets you skip a write, ask what that write was also saying.**
+
+**A backward-compatibility fallback can re-create the bug it is compatible with.** The host-level
+`automationEndpoint` is resolved by the control plane as the default for any device that names none.
+Reporting it on a host where only *some* devices had a server therefore stored one device's URL on
+the others — B2 exactly, arriving through the compatibility path. It is now withheld unless every
+device is covered by the same URL. Caught by a test, not by review.
+
 ## Working notes for whoever picks this up
 
 **Context is cache; disk is truth.** This file, `docs/adrs/`, and the test suite are the system of
@@ -284,14 +339,16 @@ agent running a DB-backed suite will corrupt the first's run.
 
 ## Suggested next step
 
-Blockers 1 and 2 are closed (1 fixed, 2 decided as ADR-0004). What is left, in this order:
+Blockers 1, 2 and 3 are closed. What is left, in this order:
 
-1. **Book the box and clear the gate.** Nothing else on this list changes whether the product is
-   viable, and everything else is cheaper to do once the numbers exist. The same machine that runs
-   spikes 1 and 2a can run a real Appium 2 against a Cuttlefish instance and finally test the hub and
-   the supervisor against something real. Expect blocker 4 (`appium:udid`) to bite immediately.
-2. **Build the ADR-0004 gateway, together with the B2 protocol change.** They want the same protocol
-   field — the gateway's URL contains a device local id, and B2 is what lets that differ per device.
-   Doing them separately means changing the registration payload twice. The spec is four points at
-   the end of ADR-0004. This is the last thing standing between `APPIUM_ENABLED=1` and a host the hub
-   can actually reach without an operator-supplied tunnel.
+1. **Blocker 4 — `appium:udid`.** The highest-value thing buildable without hardware, and the one
+   most likely to break first on real Cuttlefish. The worker has to register the adb serial
+   alongside the local id — another `devices[]` field, the same shape as the endpoint that just
+   landed — and the hub has to send that instead of `cf-1`. `appium:systemPort` needs a distinct
+   value per concurrent session at the same time, and nothing sets it.
+2. **A metered day on nested-virt hardware** (see `docs/MVP_PLAN.md` Tier 1). Verify the `cvd` flags,
+   prove snapshot/restore under `guest_swiftshader`, run spikes 1 and 2a, and finally point a real
+   Appium 2 at a real Cuttlefish instance. The gateway and the supervisor have only ever spoken to
+   fakes that answer correctly; a real driver will disagree about something.
+3. **Phase 2 onward** in `docs/MVP_PLAN.md` — durable Postgres before anything else, since
+   `docker-compose.yml` still mounts data on tmpfs.

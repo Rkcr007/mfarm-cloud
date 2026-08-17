@@ -21,7 +21,9 @@ npm start         # requires the env below
 | `APPIUM_ENABLED` | no | supervise an Appium 2 server for the device (see WebDriver below) |
 | `APPIUM_PATH` | no | binary to spawn, default `appium` on PATH |
 | `APPIUM_BASE_PORT` | no | first port of the derived range, default 4723 |
-| `APPIUM_ADVERTISE_HOST` | no | host in the *advertised* url only; the bind is always 127.0.0.1 |
+| `APPIUM_ADVERTISE_HOST` | no | this host's externally-reachable name, used to compose the gateway url; the Appium bind is always 127.0.0.1 |
+| `AUTOMATION_GATEWAY_PORT` | no | port the ADR-0004 automation gateway listens on, default 8090 |
+| `AUTOMATION_ADVERTISE_BASE` | no | full public base url of the gateway, e.g. `https://worker-1.example:8443`. Wins over `APPIUM_ADVERTISE_HOST`; set it for a TLS deployment |
 | `APPIUM_ENV_PASSTHROUGH` | no | extra env var names Appium may inherit; it gets an allowlist, not `process.env` |
 | `APPIUM_UNHEALTHY_GRACE_MS` | no | how long this host may still advertise `webdriver` after Appium stops answering before the agent drains to withdraw it, default 60000 |
 | `AGENT_DRAIN_TIMEOUT_MS` | no | hard deadline on a drain, default 30000 |
@@ -172,11 +174,13 @@ on the way in reclaims its port from a pid recorded in `<tmpdir>/mfarm-appium-<p
 after confirming the live process still has `--port <port>` in its argv, so a recycled pid is never
 killed. A port held by anything else is reported, not seized.
 
-Two things this does not solve. Registration carries one host-level `automationEndpoint`, so a host
-with more than one device refuses to start Appium at all rather than advertise `webdriver` on a
-device the hub could never reach — use `AUTOMATION_ENDPOINT` and one operator-managed server for
-that shape. And a loopback-bound server is not reachable from the control plane on its own: that
-needs a private tunnel terminating on this host, with `APPIUM_ADVERTISE_HOST` naming its address.
+**Both of the things this used to leave unsolved are solved as of 2026-08-17.** A host with more than
+one device no longer refuses to start Appium: protocol v2 carries `automationEndpoint` per device, so
+each one advertises its own address and a device with no ready server simply does not claim
+`webdriver`. And a loopback-bound server no longer needs an operator-supplied tunnel — the automation
+gateway (`src/gateway.ts`, ADR-0004) terminates the hop on this host and authenticates every request
+with a two-minute signed grant. `AUTOMATION_ENDPOINT` remains available for one operator-managed
+Appium fronting several devices.
 
 The supervision logic is tested against a fake server (`test/appium.test.ts`, no database). It has
 never spoken to a real Appium — see the header of `src/appium.ts` for the specific things that stay

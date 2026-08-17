@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { withTenant, withSystem, withAppUnscoped, closePools } from '../src/db.ts';
 import { allocate, activate, release, resetComplete, reap } from '../src/allocator.ts';
 import { ingest, usage } from '../src/metering.ts';
-import { negotiate, acceptFence, type WorkerRegistration } from '@mfarm/protocol';
+import { negotiate, acceptFence, PROTOCOL_VERSION, type WorkerRegistration } from '@mfarm/protocol';
 
 let orgA: string, orgB: string, host: string;
 const REGION = 'test-eu';
@@ -392,7 +392,9 @@ describe('worker protocol negotiation', () => {
   test('a newer worker is accepted and downgraded, not rejected', () => {
     const r = negotiate({ ...base, protocolVersion: 99, capabilities: [...base.capabilities, 'time-travel' as never] });
     assert.equal(r.ok, true);
-    assert.equal(r.ok && r.version, 1, 'speak our version; workers upgrade first during a rollout');
+    // Against the constant, not a literal: this assertion is about the DOWNGRADE rule, and pinning
+    // it to a number meant every protocol bump failed a test that had not stopped being true.
+    assert.equal(r.ok && r.version, PROTOCOL_VERSION, 'speak our version; workers upgrade first during a rollout');
   });
 
   test('a device that cannot snapshot-reset registers but is not schedulable', () => {

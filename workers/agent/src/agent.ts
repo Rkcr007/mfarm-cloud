@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { PROTOCOL_VERSION, type Capability, type WorkerRegistration } from '@mfarm/protocol';
+import {
+  PROTOCOL_VERSION,
+  type Capability,
+  type RegistrationResponse,
+  type WorkerRegistration,
+} from '@mfarm/protocol';
 import type { DeviceBackend } from './device.ts';
 
 /**
@@ -20,16 +25,25 @@ export interface AgentOptions {
   /** Public data-plane address the browser connects to. Without it the host cannot take sessions. */
   endpoint: string;
   /**
-   * Base URL of the automation (Appium) server fronting this host's devices, e.g.
-   * `http://10.0.3.14:4723`. INTERNAL address: the control plane's WebDriver hub reaches it, the
-   * internet must not. Set it and the host advertises `webdriver`; leave it unset and the host
-   * simply does not take WebDriver traffic.
+   * Automation base url applied to EVERY device on this host — the v1 shape.
+   *
+   * Still meaningful for the escape hatch in `AUTOMATION_ENDPOINT`: one externally-managed Appium
+   * genuinely can front several devices. For a supervised, per-device setup use
+   * `automationEndpoints` instead, which is what the ADR-0004 gateway produces.
    *
    * The INITIAL value only. A supervised Appium moves it at runtime through
    * `setAutomationEndpoint`, because the capability tracks the server's health rather than the
    * configuration it was started with (ADR-0003 decision 3).
    */
   automationEndpoint?: string;
+  /**
+   * v2. Per-device automation base urls, keyed by local id — `cf-1` -> the gateway path for `cf-1`.
+   *
+   * Takes precedence over `automationEndpoint` for the devices it names. This is what makes B2
+   * expressible: a device with no entry here simply does not advertise `webdriver`, so a host can
+   * serve WebDriver on one device and not on another instead of lying about both.
+   */
+  automationEndpoints?: Record<string, string>;
   devices: DeviceBackend[];
   statePath?: string;
   cores?: number;
@@ -44,6 +58,13 @@ export interface AgentState {
   sessionPublicKey: string;
   /** localId -> control-plane device uuid */
   deviceIds: Record<string, string>;
+  /**
+   * What this host last told the control plane it could do. See `capabilityFingerprint()`.
+   *
+   * Absent on a state file written before v2, which reads as "unknown" and forces one
+   * re-registration on first start. That is the safe direction: it re-asserts the truth.
+   */
+  registered?: string;
 }
 
 interface MeterEvent {
@@ -93,38 +114,73 @@ export class Agent {
 
   private readonly opts: AgentOptions;
   /**
-   * Live, not frozen at construction. ADR-0003 decision 3 makes `webdriver` a claim about the
-   * present, so the supervisor moves this every time Appium's health changes and everything that
-   * reports capabilities reads it from here rather than from `opts`.
+   * Live, not frozen at construction, and keyed by device local id. ADR-0003 decision 3 makes
+   * `webdriver` a claim about the present, so the supervisor moves entries here every time an
+   * Appium's health changes and everything that reports capabilities reads from this map rather
+   * than from `opts`.
+   *
+   * Per-device since v2 (B2): with one string per host, a second device inherited the first one's
+   * endpoint and advertised a server the hub could never reach.
    */
-  private automation?: string;
+  private readonly automation = new Map<string, string>();
 
   // Explicit field + assignment rather than a constructor parameter property: those emit runtime
   // code, so Node's strip-only type removal rejects them and the no-build-step setup breaks.
   constructor(opts: AgentOptions) {
     this.opts = opts;
-    this.automation = opts.automationEndpoint;
+    // Host-level first so a per-device entry can override it, which is the same precedence
+    // `deviceAutomationEndpoint` applies on the control-plane side.
+    if (opts.automationEndpoint) {
+      for (const d of opts.devices) this.automation.set(d.control.info.localId, opts.automationEndpoint);
+    }
+    for (const [localId, url] of Object.entries(opts.automationEndpoints ?? {})) {
+      this.automation.set(localId, url);
+    }
   }
 
   get hostId(): string | undefined { return this.state?.hostId; }
-  get automationEndpoint(): string | undefined { return this.automation; }
 
   /**
-   * Point the host at a different automation server, or at none.
+   * The HOST-level endpoint to report, or undefined.
    *
-   * `undefined` withdraws `webdriver` from everything this agent reports from now on. It cannot
-   * un-say what registration already said — see the heartbeat for how far that actually gets
-   * today — but it does mean the agent never re-asserts a capability it can no longer serve.
+   * Deliberately answers only when exactly one distinct url is in play. A v1 control plane can
+   * store one string per host, so reporting one of two would tell it that both devices are served
+   * by a server that can only reach one — the precise defect B2 describes. Answering `undefined`
+   * instead means an old control plane sees a host with no automation server and schedules no
+   * WebDriver work at it, which is a truthful degradation.
    */
-  setAutomationEndpoint(url: string | undefined): void {
-    if (this.automation === url) return;
-    this.automation = url;
+  get automationEndpoint(): string | undefined {
+    // EVERY device must be covered, not merely "all the entries agree". The control plane resolves a
+    // missing device-level endpoint by falling back to this field, so reporting cf-1's url on a host
+    // where cf-2 has none makes the control plane store it for cf-2 as well — which is precisely the
+    // B2 defect, re-entering through the compatibility path. Caught by a test, not by review.
+    if (this.automation.size !== this.opts.devices.length) return undefined;
+    const distinct = new Set(this.automation.values());
+    return distinct.size === 1 ? [...distinct][0] : undefined;
+  }
+
+  automationEndpointFor(localId: string): string | undefined {
+    return this.automation.get(localId);
+  }
+
+  /**
+   * Point one device at a different automation server, or at none.
+   *
+   * `undefined` withdraws `webdriver` from that device in everything this agent reports from now
+   * on. It cannot un-say what registration already said — see the heartbeat for how far that
+   * actually gets today — but it does mean the agent never re-asserts a capability it can no longer
+   * serve.
+   */
+  setAutomationEndpoint(localId: string, url: string | undefined): void {
+    if (this.automation.get(localId) === url) return;
+    if (url === undefined) this.automation.delete(localId);
+    else this.automation.set(localId, url);
     // Deliberately about what the AGENT now reports, not about what the control plane believes:
     // nothing here reaches the control plane until the next registration.
     console.warn(
       url === undefined
-        ? '[agent] no automation endpoint is serving; `webdriver` dropped from reported capabilities'
-        : `[agent] automation endpoint is ${url}; \`webdriver\` in reported capabilities`,
+        ? `[agent] no automation endpoint is serving ${localId}; \`webdriver\` dropped for it`
+        : `[agent] automation endpoint for ${localId} is ${url}; \`webdriver\` advertised for it`,
     );
   }
 
@@ -135,9 +191,12 @@ export class Agent {
    * tier and not by configuration: the same Cuttlefish instance can serve WebDriver on one
    * deployment and not on another, and claiming the capability without the server behind it means
    * the scheduler sends sessions to a device that cannot run them.
+   *
+   * At host level this is an ANY: the host can serve WebDriver if at least one of its devices can.
+   * Which devices is said per-device in the registration payload.
    */
   private capabilities(): Capability[] {
-    const automation: Capability[] = this.automation ? ['webdriver'] : [];
+    const automation: Capability[] = this.automation.size > 0 ? ['webdriver'] : [];
     return ['screen-stream', 'input-datachannel', 'snapshot-reset', ...automation];
   }
   get sessionPublicKey(): string | undefined { return this.state?.sessionPublicKey; }
@@ -146,13 +205,47 @@ export class Agent {
 
   // ---------------------------------------------------------------- registration
 
+  /**
+   * A stable summary of everything registration ASSERTS about this host's abilities.
+   *
+   * Exists because a valid credential is not evidence that the control plane's picture is still
+   * right. `start()` used to reuse a stored credential whenever the heartbeat succeeded, and skip
+   * registration — which meant the drain-and-restart withdrawal documented in `index.ts` did not
+   * withdraw anything. The agent came back with the same token, never re-registered, and the control
+   * plane went on believing `webdriver` was available on a device whose Appium was still dead.
+   *
+   * Fingerprinting the claim and re-registering when it changes is what makes that path real.
+   */
+  private capabilityFingerprint(): string {
+    const devices = this.opts.devices
+      .map((d) => {
+        const localId = d.control.info.localId;
+        return {
+          localId,
+          caps: [...d.control.info.capabilities].sort(),
+          automation: this.automation.get(localId) ?? null,
+        };
+      })
+      .sort((a, b) => a.localId.localeCompare(b.localId));
+    return JSON.stringify({ host: [...this.capabilities()].sort(), devices });
+  }
+
   async start(): Promise<AgentState> {
     const restored = await this.loadState();
-    if (restored && (await this.heartbeat()).ok) {
+    const fingerprint = this.capabilityFingerprint();
+
+    if (restored && restored.registered === fingerprint && (await this.heartbeat()).ok) {
       this.state = restored;
     } else {
-      // No usable credential, or the control plane rejected it (host rebuilt, token rotated
-      // elsewhere). Re-register rather than sitting silently offline.
+      // Three ways to land here, and all three want the same answer:
+      //   - no usable credential, or the control plane rejected it (host rebuilt, token rotated);
+      //   - a state file from before v2, which cannot prove what it registered;
+      //   - what this host can do has CHANGED since it last registered — an Appium that died and
+      //     did not come back, or one that came back after registering without it.
+      // Re-register rather than sitting silently offline, or worse, silently lying.
+      if (restored && restored.registered !== fingerprint) {
+        console.warn('[agent] capabilities differ from what was last registered — re-registering');
+      }
       this.state = await this.register();
       await this.saveState(this.state);
     }
@@ -160,25 +253,33 @@ export class Agent {
   }
 
   private async register(): Promise<AgentState> {
-    const automation: Capability[] = this.automation ? ['webdriver'] : [];
-
     const registration: WorkerRegistration = {
       protocolVersion: PROTOCOL_VERSION,
       hostname: this.opts.hostname,
       region: this.opts.region,
       endpoint: this.opts.endpoint,
-      automationEndpoint: this.automation,
+      // Legacy field: set only when one url covers the whole host. See the getter.
+      automationEndpoint: this.automationEndpoint,
       cores: this.opts.cores ?? 0,
       memoryMb: this.opts.memoryMb ?? 0,
       capabilities: this.capabilities(),
-      devices: this.opts.devices.map((d) => ({
-        localId: d.control.info.localId,
-        platform: d.control.info.platform,
-        tier: d.control.info.tier,
-        model: d.control.info.model,
-        osVersion: d.control.info.osVersion,
-        capabilities: [...d.control.info.capabilities, ...automation],
-      })),
+      devices: this.opts.devices.map((d) => {
+        const localId = d.control.info.localId;
+        const endpoint = this.automation.get(localId);
+        // Per DEVICE, not per host. Before v2 this list was `[...info.capabilities, ...automation]`
+        // with one host-level `automation`, so every device on a host with any Appium claimed
+        // `webdriver` — including the ones no server was fronting.
+        const automation: Capability[] = endpoint ? ['webdriver'] : [];
+        return {
+          localId,
+          platform: d.control.info.platform,
+          tier: d.control.info.tier,
+          model: d.control.info.model,
+          osVersion: d.control.info.osVersion,
+          capabilities: [...d.control.info.capabilities, ...automation],
+          automationEndpoint: endpoint,
+        };
+      }),
     };
 
     const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/register`, {
@@ -187,10 +288,7 @@ export class Agent {
       body: JSON.stringify(registration),
     });
     if (!res.ok) throw new Error(`registration failed: ${res.status} ${await res.text()}`);
-    const body = await res.json() as {
-      hostId: string; workerToken: string; sessionPublicKey: string;
-      schedulableDevices: string[]; degradedCapabilities: string[];
-    };
+    const body = await res.json() as RegistrationResponse;
 
     // The control plane decides which devices may take tenant traffic. Anything it withheld is
     // reported here rather than left for someone to notice as unexplained idle capacity.
@@ -201,26 +299,45 @@ export class Agent {
       console.warn(`[agent] not schedulable (missing required capabilities): ${withheld.join(', ')}`);
     }
 
-    const deviceIds = await this.resolveDeviceIds(body.workerToken);
     return {
       hostId: body.hostId,
       workerToken: body.workerToken,
       sessionPublicKey: body.sessionPublicKey,
-      deviceIds,
+      deviceIds: this.resolveDeviceIds(body, registration),
+      // Recorded AFTER the control plane accepted it, so a failed registration never leaves a state
+      // file claiming the fleet knows something it does not.
+      registered: this.capabilityFingerprint(),
     };
   }
 
   /**
    * Map local device names to the control plane's uuids.
    *
-   * Registration returns local ids because that is what the worker knows; everything afterwards
-   * (metering, resets, fences) is keyed by the control plane's uuid.
+   * Registration sends local ids because that is what the worker knows; everything afterwards
+   * (metering, resets, fences, automation grants) is keyed by the control plane's uuid.
+   *
+   * v2 gets this from the response. Before that it returned `{}` and the agent inferred a device's
+   * uuid from whatever session token arrived — authenticated and therefore safe, but only usable
+   * AFTER a token shows up, and ambiguous on a host with more than one device. The automation
+   * gateway needs the mapping *before* it proxies anything, to decide whether a grant naming uuid X
+   * may drive the device at `/automation/cf-2`, so inference is not an option there.
    */
-  private async resolveDeviceIds(_token: string): Promise<Record<string, string>> {
-    // Populated by the control plane on the next protocol revision; until then the agent learns a
-    // device's uuid from the session token that arrives for it (claims.did), which is authenticated
-    // and therefore trustworthy.
-    return {};
+  private resolveDeviceIds(
+    body: RegistrationResponse,
+    sent: WorkerRegistration,
+  ): Record<string, string> {
+    const ids = body.deviceIds ?? {};
+    // A v1 control plane sends none. Say so once: it is the difference between "the gateway will
+    // refuse every request" and "WebDriver is quietly broken on this host".
+    const missing = sent.devices.map((d) => d.localId).filter((id) => !ids[id]);
+    if (missing.length > 0) {
+      console.warn(
+        `[agent] the control plane returned no device uuid for: ${missing.join(', ')}. ` +
+        'The automation gateway cannot authorize grants for these devices and will refuse them. ' +
+        'This control plane predates protocol v2.',
+      );
+    }
+    return ids;
   }
 
   // ---------------------------------------------------------------- heartbeat
@@ -254,7 +371,10 @@ export class Agent {
         body: JSON.stringify({
           protocolVersion: PROTOCOL_VERSION,
           capabilities: this.capabilities(),
-          automationEndpoint: this.automation ?? null,
+          automationEndpoint: this.automationEndpoint ?? null,
+          // Per-device since v2, for the same reason registration carries it: one string cannot
+          // describe a host whose devices are served by different gateways.
+          devices: Object.fromEntries(this.automation),
         }),
       });
       if (!res.ok) return { ok: false };
