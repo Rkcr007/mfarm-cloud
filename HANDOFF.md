@@ -261,9 +261,13 @@ scheduler).
    supervised one. Both are tested against fakes that answer correctly; a real driver will disagree
    about something. The supervisor also detects **process death only** — a wedged-but-alive Appium
    answers `/status` 200 forever and stays advertised.
-3. `apps/api/docker-compose.yml` mounts Postgres data on tmpfs — fast, non-durable, local only.
-4. `mfarm_app` has a local-dev password in `001_init.sql`. Rotate before any deployment. (`config.ts`
-   now refuses to boot in production if it sees it.)
+3. `apps/api/docker-compose.yml` mounts Postgres data on tmpfs — fast, non-durable, **and that is
+   correct for what it is**: the test stack. The farm's durable database is
+   `deploy/docker-compose.prod.yml` (named volume, `--data-checksums`, restart policy, verified
+   backups every 6h). `deploy/README.md` has the standing-up and recovery procedures, and
+   `deploy/restore-drill.sh` proves the restore path actually works — it runs in CI.
+4. `mfarm_app` has a local-dev password in `001_init.sql`. Rotate before any deployment (`config.ts`
+   refuses to boot in production if it sees it). `deploy/README.md` has the exact `ALTER ROLE`.
 5. Allocator functions are `SECURITY DEFINER` owned by the superuser. Give them a dedicated owner
    role with minimal grants before launch.
 6. Tests run `--test-concurrency=1`: the reaper is fleet-wide by design, so suites cannot share one
@@ -314,6 +318,15 @@ session rather than accepted from the request.
 **Revoke EXECUTE from PUBLIC, or the grant is not a control.** Postgres grants EXECUTE on every new
 function to PUBLIC, so a `SECURITY DEFINER` function is callable by `mfarm_app` the moment it is
 created. Never granting it does nothing. `008` revokes, and `ci.yml` now checks.
+
+**A backup is not a backup until a restore has been rehearsed.** `pg_dump` captures a database and
+nothing else — roles are cluster-wide, so a restore into a fresh cluster dies on the first `GRANT`
+against `mfarm_app`, and the tempting fix (restore everything as the owner) hands you request
+handling that bypasses RLS. `pg_restore` also defaults to reporting errors and carrying on, so a
+half-restored database exits 0 and reads as success. Both are invisible until the day they are not.
+`deploy/backup.sh` dumps globals alongside the data, `restore.sh` uses `--exit-on-error` and
+deliberately does NOT pass `--no-owner --no-privileges` (ownership decides whether RLS applies at
+all), and `restore-drill.sh` destroys and rebuilds a scratch database in CI to prove all of it.
 
 **A capability is a claim about observed state, not about configuration.** `AUTOMATION_ENDPOINT`
 being set made a host advertise `webdriver` with nothing checking anything was listening, so a dead

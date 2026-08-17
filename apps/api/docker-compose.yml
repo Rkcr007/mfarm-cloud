@@ -1,3 +1,15 @@
+# TEST AND LOCAL DEV ONLY. THIS DATABASE IS NOT DURABLE.
+#
+# The data directory is tmpfs, so everything in it is gone when the container stops. That is
+# deliberate — tests want the fsync cost out of their concurrency measurements and every run starts
+# from nothing — and it is exactly wrong for anything you would miss.
+#
+# The farm's real database is `deploy/docker-compose.prod.yml`: named volume, data checksums,
+# restart policy, and a verified backup every few hours. See `deploy/README.md`.
+#
+# `npm run db:down` here runs `down -v`, which destroys the volume. That is correct for this file
+# and is the one command to keep away from the production one.
+
 services:
   postgres:
     image: postgres:16-alpine

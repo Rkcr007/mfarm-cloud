@@ -1,0 +1,97 @@
+# MFARM production data tier — durable Postgres plus automatic backups.
+#
+# THIS IS NOT `apps/api/docker-compose.yml`. That one mounts the data directory on tmpfs and is
+# correct for what it does: tests want the fsync cost out of their concurrency measurements, and
+# every run starts from nothing. Using it for the farm would lose every session, device, artifact
+# and metering row on reboot, silently, and only tell you about it afterwards.
+#
+# Start:   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d
+# Migrate: DATABASE_URL=... npm --prefix apps/api run migrate
+#
+# WHAT THIS GIVES YOU, STATED PLAINLY:
+#   * the data survives reboots, `docker compose down`, and container replacement
+#   * data-checksums, so silent corruption is detected rather than served
+#   * a logical backup every BACKUP_INTERVAL_SECONDS, verified after it is written
+#   * an RPO equal to that interval — see the note on PITR below
+#
+# WHAT IT DOES NOT GIVE YOU:
+#   * point-in-time recovery. There is no WAL archiving here, so the most you can lose is one
+#     backup interval. For a two-device farm that is a proportionate trade; if the farm's history
+#     becomes something you would miss by the hour, add WAL-G or pgBackRest and revisit.
+#   * off-box copies. A backup on the same disk as the database survives a bad migration, not a
+#     dead disk. `deploy/README.md` covers pushing them somewhere else.
+
+name: mfarm
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in deploy/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env — never the dev default}
+      POSTGRES_DB: ${POSTGRES_DB:-mfarm}
+      # Checksums can ONLY be enabled at initdb time. Adding them later means dumping and reloading
+      # the whole cluster, so it is set now even though nothing has gone wrong yet.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    # Bound to loopback, never 0.0.0.0. Reachability comes from Tailscale terminating on this host;
+    # publishing 5432 to the internet would expose the database to the world the first time someone
+    # relaxed a firewall rule. Change this and you have changed the security model.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # The default 64MB is not enough for parallel query and index builds; the symptom is an
+    # "unexpected EOF" that reads like a network fault.
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  backup:
+    # Deliberately the SAME image as the server. pg_dump refuses to dump a server newer than itself,
+    # so a mismatched client is a backup that stops working at the next Postgres upgrade — and
+    # announces it only when you next try to back up.
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:?}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?}
+      PGDATABASE: ${POSTGRES_DB:-mfarm}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-21600}   # 6h
+      BACKUP_KEEP: ${BACKUP_KEEP:-28}
+      BACKUP_DIR: /backups
+    volumes:
+      - ./backup.sh:/usr/local/bin/backup.sh:ro
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
+    # A plain loop rather than cron: it needs no crontab in the image, it logs to the same place as
+    # everything else, and `restart: unless-stopped` already gives it supervision.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "[backup] every $${BACKUP_INTERVAL_SECONDS}s, keeping $${BACKUP_KEEP}, into $${BACKUP_DIR}"
+        while true; do
+          /usr/local/bin/backup.sh || echo "[backup] FAILED — see above"
+          sleep "$${BACKUP_INTERVAL_SECONDS}"
+        done
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  pgdata:
+    # Named, not bind-mounted: `docker compose down` leaves it alone. Note that `down -v` does NOT —
+    # that flag is what the test stack uses on purpose, and it is the one command to keep away from
+    # this file.
+    name: mfarm_pgdata

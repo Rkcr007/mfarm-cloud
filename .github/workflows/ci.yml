@@ -224,6 +224,24 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # ---------------------------------------------------------------------------------------
+      # Proves the RECOVERY path, not just the code. deploy/backup.sh and deploy/restore.sh are
+      # shell scripts that no unit test touches, and the failure they guard against is silent:
+      # backups that have been producing unusable archives for weeks, discovered on the one day
+      # it matters.
+      #
+      # The drill seeds a scratch database with rows, an RLS policy and a granted role, backs it
+      # up with the real script, DROPS the database and the role, restores with the real script,
+      # and then checks that the rows, the checksum, RLS + FORCE, the policy and the grants all
+      # survived. Two of those — cluster roles and privileges — are exactly what a naive
+      # dump/restore loses, and losing them here would mean an app that cannot read its own data
+      # or, worse, one "fixed" with a broad GRANT that undoes migration 002.
+      #
+      # It runs against the service container above and never touches the suite's own database.
+      # ---------------------------------------------------------------------------------------
+      - name: Backup/restore drill
+        run: ./deploy/restore-drill.sh
+
   yaml-lint:
     name: Workflow hygiene (YAML, pins, shell syntax)
     runs-on: ubuntu-latest

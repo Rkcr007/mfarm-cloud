@@ -190,9 +190,16 @@ Tailscale against both devices in parallel.
 
 ### Phase 2 — Production host
 
-- Durable Postgres. **`docker-compose.yml` currently mounts data on tmpfs** (known issue 3) — that is
-  a local-dev choice and would lose the farm's entire history on reboot.
-- Backups with a tested restore. Untested backups are not backups.
+- ~~Durable Postgres.~~ **DONE 2026-08-17** — `deploy/docker-compose.prod.yml`: named volume,
+  `--data-checksums` (only settable at initdb, so it had to be decided now), `restart: unless-stopped`,
+  loopback-only binding, `shm_size` raised, capped logs. The tmpfs stack stays as the *test* stack and
+  now says so in a header nobody can miss.
+- ~~Backups with a tested restore.~~ **DONE 2026-08-17** — a sidecar on the same image as the server
+  dumps the database *and the cluster roles* every 6h, verifies each archive with `pg_restore --list`,
+  writes `.partial` then renames, and prunes only after a success. `deploy/restore-drill.sh` seeds a
+  scratch database, destroys it, restores with the real scripts, and checks rows, checksum, RLS+FORCE,
+  policies and grants. **It runs in CI.** RPO is one backup interval — there is no WAL archiving, and
+  no off-box copy yet; `deploy/README.md` states both plainly rather than implying otherwise.
 - Rotate `mfarm_app`'s committed password (known issue 4); dedicated owner role with minimal grants
   for the `SECURITY DEFINER` allocator functions (known issue 5).
 - systemd units or compose with restart policies; the box reboots and the farm comes back unattended.

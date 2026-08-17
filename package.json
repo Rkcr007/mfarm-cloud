@@ -4,7 +4,8 @@
   "workspaces": ["packages/*", "apps/*", "workers/*"],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "backup:drill": "./deploy/restore-drill.sh"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

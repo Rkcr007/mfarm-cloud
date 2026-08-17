@@ -7,3 +7,7 @@ node_modules/
 ruvector.db
 agentdb.rvf
 agentdb.rvf.lock
+
+# Production secrets and backup artifacts (deploy/). .env.example is the tracked template.
+deploy/.env
+deploy/backups/
