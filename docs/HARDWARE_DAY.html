@@ -615,6 +615,29 @@
     </ol>
   </div>
 
+  <div class="panel note">
+    <span class="panel-label">Pausing mid-session, when you have to step away</span>
+    <p>
+      If you are leaving the machine for more than an hour but are not finished with it, stop it
+      rather than letting it idle at ₹55–75 an hour. The catch: <code>gcloud compute instances
+      stop</code> <strong>fails from inside the VM</strong> with
+      <code>PERMISSION_DENIED … ACCESS_TOKEN_SCOPE_INSUFFICIENT</code>, because a VM authenticates
+      as its own service account and that account has no permission to stop instances. Run it from
+      the <em>Cloud Shell</em> tab, where you are authenticated as yourself:
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>Cloud Shell</span><button class="copy" type="button">Copy</button></div>
+<pre><code>gcloud compute instances stop mfarm-lab --zone=asia-south1-c
+gcloud compute instances list   # want STATUS: TERMINATED</code></pre>
+    </div>
+    <p>
+      Or, from inside the VM where it always works and needs no permissions at all,
+      <code>sudo poweroff</code>. Powering off the guest moves the instance to
+      <code>TERMINATED</code> and stops the compute bill just the same. The disk keeps billing
+      either way — see rule 3.
+    </p>
+  </div>
+
   <p>
     Prices move and vary by region. Ignore the numbers above as gospel — the create-instance screen
     shows a live monthly estimate on the right-hand side, and that estimate is the one to trust.
@@ -1019,14 +1042,32 @@ gcloud compute ssh mfarm-lab --zone=asia-south1-c \
   <div class="step-num">B6</div>
   <div class="step-body">
     <h2>Bootstrap Cuttlefish</h2>
-    <p class="step-hint">~1–2 hours, mostly waiting · <span class="chip chip-both">M1</span></p>
+    <p class="step-hint">~30–60 minutes, mostly waiting · <span class="chip chip-both">M1</span></p>
     <p>
-      Our script does the work: installs build dependencies, builds and installs the Cuttlefish
-      Debian packages, adds you to the <code>kvm</code>, <code>cvdnetwork</code> and
-      <code>render</code> groups, downloads a prebuilt Android image, then boots one device as a
-      smoke test. <strong>It runs in two phases with a reboot between them</strong>, because group
-      membership does not apply to a shell that is already running.
+      Our script does the work: installs the Cuttlefish Debian packages, adds you to the
+      <code>kvm</code>, <code>cvdnetwork</code> and <code>render</code> groups, downloads a prebuilt
+      Android image, then boots one device as a smoke test. <strong>It runs in two phases with a
+      reboot between them</strong>, because group membership does not apply to a shell that is
+      already running.
     </p>
+    <div class="panel note">
+      <span class="panel-label">Why it no longer builds from source</span>
+      <p>
+        The script installs prebuilt packages from Google's Artifact Registry, and only falls back
+        to building from source if that fails. This is not just a speed optimisation. Building
+        drives Bazel to download external dependencies from GitHub, GitHub rate-limits those
+        <em>per source IP</em>, and cloud VM IP ranges are shared with thousands of other machines —
+        so the build fails with <code>429 Too Many Requests</code> on traffic that is not yours.
+        Credentials do not help, because <code>codeload.github.com</code> does not honour them for
+        archive downloads. We hit this on the first attempt and retrying with backoff did not clear
+        it. Artifact Registry is a different host with no such limit.
+      </p>
+      <p>
+        <code>CF_INSTALL=source</code> forces the old build path if you ever need it;
+        <code>CF_INSTALL=prebuilt</code> makes a registry failure stop the script rather than
+        quietly starting an hour-long build.
+      </p>
+    </div>
     <div class="cmd">
       <div class="cmd-head"><span>on the VM — phase 1</span><button class="copy" type="button">Copy</button></div>
 <pre><code>cd ~/mfarm
