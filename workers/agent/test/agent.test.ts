@@ -47,6 +47,8 @@ class FakeDevice implements DeviceControl {
       localId, platform: 'android', tier: 'cuttlefish', model: 'fake', osVersion: '15',
       capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset'],
       screen: { width: 720, height: 1280, density: 320 },
+      // Deliberately unlike the local id — B3 is precisely the two being confused.
+      adbSerial: `0.0.0.0:adb-${localId}`,
     };
   }
   async start() { this.calls.push('start'); }
@@ -648,5 +650,79 @@ describe('per-device automation endpoints', () => {
     });
     assert.equal(row.automation_endpoint, null);
     assert.ok(!row.capabilities.includes('webdriver'));
+  });
+});
+
+/**
+ * ADR-0003 B3 — the device's identity as the DRIVER knows it, not as we do.
+ *
+ * The hub sent `appium:udid = local_id` (`cf-1`), and UiAutomator2 matches `udid` against the adb
+ * serial. Both worker backends already computed the correct serial and kept it private, so the value
+ * existed the whole time and simply never left the class.
+ */
+describe('device automation identity', () => {
+  test('the adb serial reaches the control plane, and is not the local id', async () => {
+    const agent = makeAgent([fakeBackend('cf-1')], `b3-serial-${randomUUID().slice(0, 8)}`, {
+      automationEndpoints: { 'cf-1': 'https://worker.example:8443/automation/cf-1' },
+    });
+    await agent.start();
+
+    const row = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT local_id, adb_serial, system_port, mjpeg_server_port
+           FROM devices WHERE host_id = $1`, [agent.hostId],
+      );
+      return rows[0] as { local_id: string; adb_serial: string; system_port: number; mjpeg_server_port: number };
+    });
+
+    assert.equal(row.adb_serial, '0.0.0.0:adb-cf-1');
+    assert.notEqual(row.adb_serial, row.local_id, 'our name for the device is not the driver\'s');
+    assert.ok(row.system_port >= 8200 && row.system_port < 8300, 'derived clear of the Appium range');
+    assert.ok(row.mjpeg_server_port >= 7810 && row.mjpeg_server_port < 7910);
+  });
+
+  test('two devices on one host get distinct driver ports', async () => {
+    // The whole reason these fields exist: UiAutomator2 defaults every session to 8200/7810, so the
+    // second concurrent session on a host fails to start. Unreachable until migration 010 let one
+    // host serve WebDriver on more than one device.
+    const agent = makeAgent([fakeBackend('cf-1'), fakeBackend('cf-2')], `b3-ports-${randomUUID().slice(0, 8)}`, {
+      automationEndpoints: {
+        'cf-1': 'https://worker.example:8443/automation/cf-1',
+        'cf-2': 'https://worker.example:8443/automation/cf-2',
+      },
+    });
+    await agent.start();
+
+    const rows = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT local_id, system_port, mjpeg_server_port FROM devices WHERE host_id = $1 ORDER BY local_id`,
+        [agent.hostId],
+      );
+      return rows as Array<{ local_id: string; system_port: number; mjpeg_server_port: number }>;
+    });
+
+    assert.equal(rows.length, 2);
+    assert.notEqual(rows[0].system_port, rows[1].system_port);
+    assert.notEqual(rows[0].mjpeg_server_port, rows[1].mjpeg_server_port);
+    // Stable across a restart, like the Appium port — firewall rules and tunnels are written
+    // against fixed numbers, and a random free port would invalidate them silently.
+    const again = makeAgent([fakeBackend('cf-1')], `b3-stable-${randomUUID().slice(0, 8)}`, {
+      automationEndpoints: { 'cf-1': 'https://worker.example:8443/automation/cf-1' },
+    });
+    await again.start();
+    const stable = await withSystem(async (c) =>
+      (await c.query('SELECT system_port FROM devices WHERE host_id = $1', [again.hostId])).rows[0]);
+    assert.equal(stable.system_port, rows[0].system_port);
+  });
+
+  test('a device with no automation server reports no driver ports', async () => {
+    // They are only meaningful alongside a server, and a port reserved for nothing is a port an
+    // operator will spend time explaining.
+    const agent = makeAgent([fakeBackend('cf-1')], `b3-noports-${randomUUID().slice(0, 8)}`);
+    await agent.start();
+    const row = await withSystem(async (c) =>
+      (await c.query('SELECT adb_serial, system_port FROM devices WHERE host_id = $1', [agent.hostId])).rows[0]);
+    assert.equal(row.system_port, null);
+    assert.equal(row.adb_serial, '0.0.0.0:adb-cf-1', 'identity is reported regardless — it is a fact about the device');
   });
 });

@@ -62,6 +62,10 @@ export class CuttlefishDevice implements DeviceControl {
         'app-install', 'logcat', 'recording',
       ] as Capability[],
       screen: { width: 720, height: 1280, density: 320 },
+      // Published, not just used internally. This class has always known the serial — every adb
+      // call below uses it — but it never left the object, so the hub sent `cf-1` as `appium:udid`
+      // and UiAutomator2 matched it against nothing (B3).
+      adbSerial: this.adbSerial,
     };
   }
 

@@ -176,8 +176,10 @@ The critical path. Nothing here is optional and none of it is currently proven a
 - ~~**ADR-0004 worker automation gateway** + the B2 protocol change.~~ **DONE 2026-08-17** —
   `workers/agent/src/gateway.ts`, protocol v2, migration 010. `APPIUM_ENABLED=1` no longer needs an
   operator-supplied tunnel, and a host can now serve WebDriver on more than one device.
-- **Blocker 4:** `appium:udid` must be the real adb serial (`0.0.0.0:6520`-style for cvd), not
-  `cf-1`. Plus a distinct `appium:systemPort` per concurrent session, which nothing sets today.
+- ~~**Blocker 4:** the real adb serial as `appium:udid`, plus a distinct `appium:systemPort`.~~
+  **DONE 2026-08-17** — protocol v2, migration 011. Both backends already computed the serial and
+  never published it; `systemPort` and `mjpegServerPort` are now derived per device by the worker.
+  A device reporting no serial is refused rather than mis-targeted.
 - Real Appium 2 + UiAutomator2 against real Cuttlefish. The hub has only ever spoken to a stub; the
   supervisor has only ever supervised a fake. **Expect disagreement.**
 - Run the real Kotlin suite and the real Flutter/RN suite. Measure. This is where the SwiftShader

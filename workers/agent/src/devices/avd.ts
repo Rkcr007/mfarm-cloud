@@ -75,6 +75,9 @@ export class AvdDevice implements DeviceControl {
       // channel with no per-event process spawn — it is simply a slow one.
       capabilities: ['input-datachannel', 'snapshot-reset', 'app-install', 'logcat'] as Capability[],
       screen: { width: 1080, height: 2220, density: 440 },
+      // See the note in cuttlefish.ts: the serial has always been known here and never published,
+      // which is why the hub sent the local id as `appium:udid` (B3).
+      adbSerial: this.serial,
     };
   }
 

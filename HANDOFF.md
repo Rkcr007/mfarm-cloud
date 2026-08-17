@@ -57,12 +57,12 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**289 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**294 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
-apps/api/         control plane + service entrypoint   172 tests
+apps/api/         control plane + service entrypoint   174 tests
 apps/cli/         mfarm CLI                             48 tests
-workers/agent/    worker agent, Appium supervisor,      69 tests
+workers/agent/    worker agent, Appium supervisor,      72 tests
                   automation gateway
 packages/protocol shared contract
 docs/adrs/        architecture decision records
@@ -194,7 +194,7 @@ without one rather than advertise `127.0.0.1` to the fleet.
 
 ## What is NOT built
 
-- Blockers 4 and 5 below.
+- Blocker 5 below (multi-instance).
 - App install / launch outside Appium, logcat streaming, video recording, artifacts
 - Web UI (deliberately last — it is the demo surface, not the product)
 - Publishing. Every package is `"private": true`, so `npx mfarm` does not work yet and the Action's
@@ -231,11 +231,21 @@ so v1 workers are unaffected. `agent.ts` stamps `webdriver` per device, `index.t
 multi-device hosts, and the `derivePort` collision check is back. Landed with the gateway below —
 they wanted the same field.
 
-**4. `appium:udid` is set to the mfarm local id, not the adb serial.** (ADR-0003, B3)
-`webdriver.ts` sends `cf-1` / `avd-1`; UiAutomator2 matches against `emulator-5560` /
-`0.0.0.0:6520`. Overriding the capability is right, the value is wrong. **Expect this to be the
-first thing that breaks on real hardware.** Related: concurrent sessions on one Appium each need a
-distinct `appium:systemPort` or the second fails, and nothing sets it.
+**~~4. `appium:udid` is set to the mfarm local id, not the adb serial.~~ FIXED 2026-08-17.**
+(ADR-0003, B3) Protocol v2 adds `devices[].adbSerial`, `systemPort` and `mjpegServerPort`; migration
+011 stores all three; the hub sends the serial as `appium:udid` and the two ports alongside it.
+
+The serial was never missing — `CuttlefishDevice` and `AvdDevice` both computed it and used it for
+every adb call, and neither published it to `DeviceInfo`. One field on each backend.
+
+Two decisions worth knowing:
+- **A device with no serial is refused** (`no_device_identity`), not guessed at. Sending `local_id`
+  is the original bug; omitting `appium:udid` lets the driver pick any attached device, possibly
+  another tenant's. Pre-migration rows stay NULL and their hosts must re-register.
+- **Three typed columns, not a jsonb capability bag.** A bag would be extensible without a
+  migration, and would also let a worker inject arbitrary Appium capabilities — `appium:app`, say —
+  into a tenant's session. Migration 008's rule applies: worker input is scoped, never trusted
+  wholesale.
 
 **5. Multi-instance is blocked twice over.** (ADR-0001) Rate limiting is in-memory, so per-instance.
 And the reaper now runs inside the API process, so N instances run N fleet-wide reaps. Both are
@@ -341,14 +351,9 @@ agent running a DB-backed suite will corrupt the first's run.
 
 Blockers 1, 2 and 3 are closed. What is left, in this order:
 
-1. **Blocker 4 — `appium:udid`.** The highest-value thing buildable without hardware, and the one
-   most likely to break first on real Cuttlefish. The worker has to register the adb serial
-   alongside the local id — another `devices[]` field, the same shape as the endpoint that just
-   landed — and the hub has to send that instead of `cf-1`. `appium:systemPort` needs a distinct
-   value per concurrent session at the same time, and nothing sets it.
-2. **A metered day on nested-virt hardware** (see `docs/MVP_PLAN.md` Tier 1). Verify the `cvd` flags,
+1. **A metered day on nested-virt hardware** (see `docs/MVP_PLAN.md` Tier 1). Verify the `cvd` flags,
    prove snapshot/restore under `guest_swiftshader`, run spikes 1 and 2a, and finally point a real
    Appium 2 at a real Cuttlefish instance. The gateway and the supervisor have only ever spoken to
    fakes that answer correctly; a real driver will disagree about something.
-3. **Phase 2 onward** in `docs/MVP_PLAN.md` — durable Postgres before anything else, since
+2. **Phase 2 onward** in `docs/MVP_PLAN.md` — durable Postgres before anything else, since
    `docker-compose.yml` still mounts data on tmpfs.

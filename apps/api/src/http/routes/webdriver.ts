@@ -274,7 +274,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
           // COALESCE, not `d.automation_endpoint` alone: a v1 worker names one server for the whole
           // host and sets no device column at all (migration 010). Preferring the device row is
           // what lets a v2 host point each device at its own gateway path.
-          `SELECT d.local_id, d.host_id,
+          `SELECT d.local_id, d.host_id, d.adb_serial, d.system_port, d.mjpeg_server_port,
                   COALESCE(d.automation_endpoint, h.automation_endpoint) AS automation_endpoint
              FROM devices d JOIN hosts h ON h.id = d.host_id
             WHERE d.id = $1`,
@@ -282,6 +282,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
         );
         return rows[0] as {
           local_id: string | null; host_id: string; automation_endpoint: string | null;
+          adb_serial: string | null; system_port: number | null; mjpeg_server_port: number | null;
         } | undefined;
       });
 
@@ -292,11 +293,33 @@ export async function webdriverRoutes(app: FastifyInstance) {
         );
       }
 
+      // A device whose worker never told us its serial cannot be targeted. Refusing is deliberate:
+      // the two alternatives are both worse. Sending `local_id` is what B3 was — a udid no driver
+      // matches — and omitting `appium:udid` lets the driver pick whichever device it feels like,
+      // which on a multi-device host can be one currently allocated to another tenant.
+      if (!target.adb_serial) {
+        throw sessionNotCreated(
+          `The allocated device reports no adb serial, so no WebDriver session can be targeted at it. ` +
+          `Its worker must register one (protocol v2). This is expected for a host that has not ` +
+          `re-registered since the upgrade — restart its agent.`,
+          'no_device_identity',
+        );
+      }
+
       const base = target.automation_endpoint.replace(/\/+$/, '');
       const upstreamCaps: Record<string, unknown> = { ...caps.upstream };
       // Overridden, never merged: a client that picks its own udid is choosing a device, and the
       // device it chooses may belong to another tenant right now.
-      if (target.local_id) upstreamCaps['appium:udid'] = target.local_id;
+      //
+      // The value is the ADB SERIAL, not `local_id`. `local_id` is our name for the device and
+      // UiAutomator2 has never heard of it — that was blocker B3, and it would have failed on the
+      // first real driver.
+      upstreamCaps['appium:udid'] = target.adb_serial;
+      // Both default to a fixed number for every session (8200 and 7810), so two concurrent
+      // sessions on one host collide and the second fails to start. Only reachable since a host
+      // could serve more than one WebDriver device, which is why nothing caught it before.
+      if (target.system_port !== null) upstreamCaps['appium:systemPort'] = target.system_port;
+      if (target.mjpeg_server_port !== null) upstreamCaps['appium:mjpegServerPort'] = target.mjpeg_server_port;
 
       const upstreamRes = await callUpstream(
         `${base}/session`,

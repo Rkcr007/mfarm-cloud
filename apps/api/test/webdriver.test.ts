@@ -104,10 +104,15 @@ async function seedDevices(n: number, opts: { webdriver?: boolean; platform?: st
     const ids: string[] = [];
     for (let i = 0; i < n; i++) {
       const { rows } = await c.query(
-        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities, local_id)
-         VALUES ($1,$2,$3,'cuttlefish','cf_x86_64','15','READY',$4::jsonb,$5)
+        // adb_serial, system_port and mjpeg_server_port are part of the fixture because they are
+        // part of a real device (migration 011). Without a serial the hub refuses the session
+        // outright rather than sending a udid no driver can match — see `no_device_identity`.
+        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities,
+                              local_id, adb_serial, system_port, mjpeg_server_port)
+         VALUES ($1,$2,$3,'cuttlefish','cf_x86_64','15','READY',$4::jsonb,$5,$6,$7,$8)
          RETURNING id`,
-        [hostId, REGION, opts.platform ?? 'android', JSON.stringify(caps), `wd-${randomUUID()}`],
+        [hostId, REGION, opts.platform ?? 'android', JSON.stringify(caps), `wd-${randomUUID()}`,
+         `0.0.0.0:${6520 + i}`, 8200 + i, 7810 + i],
       );
       ids.push(rows[0].id);
     }
@@ -267,11 +272,11 @@ describe('new session', () => {
     assert.ok(!('mfarm:region' in sent), 'our vendor caps are stripped');
   });
 
-  test('the udid is chosen by the allocator, never by the client', async () => {
+  test('the udid is chosen by the allocator, never by the client, and it is the ADB SERIAL', async () => {
     await clearFleet();
     const [dev] = await seedDevices(1);
-    const local = await withSystem(async (c) =>
-      (await c.query('SELECT local_id FROM devices WHERE id = $1', [dev])).rows[0].local_id);
+    const row = await withSystem(async (c) =>
+      (await c.query('SELECT local_id, adb_serial, system_port, mjpeg_server_port FROM devices WHERE id = $1', [dev])).rows[0]);
 
     await app.inject({
       method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
@@ -281,7 +286,46 @@ describe('new session', () => {
 
     const sent = (recorded.find((x) => x.url === '/session')!.body as
       { capabilities: { alwaysMatch: Record<string, unknown> } }).capabilities.alwaysMatch;
-    assert.equal(sent['appium:udid'], local, 'the hub overrides the requested udid');
+    assert.equal(sent['appium:udid'], row.adb_serial, 'the hub overrides the requested udid');
+    // B3: this used to be `local_id`. UiAutomator2 matches `udid` against the adb serial and has
+    // never heard of `cf-1`, so every session the hub created would have targeted nothing.
+    assert.notEqual(sent['appium:udid'], row.local_id, 'the local id is our name, not the driver\'s');
+  });
+
+  test('per-device driver ports are injected so two concurrent sessions do not collide', async () => {
+    // UiAutomator2 defaults systemPort to 8200 and its MJPEG server to 7810 for every session, so a
+    // second concurrent session on one host fails to start. Only reachable since migration 010 let
+    // one host serve WebDriver on more than one device.
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const row = await withSystem(async (c) =>
+      (await c.query('SELECT system_port, mjpeg_server_port FROM devices WHERE id = $1', [dev])).rows[0]);
+
+    await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'appium:systemPort': 9999 }),
+    });
+
+    const sent = (recorded.find((x) => x.url === '/session')!.body as
+      { capabilities: { alwaysMatch: Record<string, unknown> } }).capabilities.alwaysMatch;
+    assert.equal(sent['appium:systemPort'], row.system_port, 'the client does not get to pick a host port');
+    assert.equal(sent['appium:mjpegServerPort'], row.mjpeg_server_port);
+  });
+
+  test('a device with no adb serial is refused rather than mis-targeted', async () => {
+    // The two alternatives are both worse: `local_id` is a udid no driver matches (B3), and omitting
+    // `appium:udid` lets the driver pick any attached device — possibly another tenant's.
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    await withSystem((c) => c.query('UPDATE devices SET adb_serial = NULL WHERE id = $1', [dev]));
+
+    const res = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA), payload: androidCaps(),
+    });
+    assert.equal(res.statusCode, 500);
+    const body = res.json() as { value: { message: string } };
+    assert.match(body.value.message, /adb serial/i);
+    assert.equal(recorded.find((x) => x.url === '/session'), undefined, 'nothing reached the driver');
   });
 
   test('a rejected upstream session gives the device back', async () => {

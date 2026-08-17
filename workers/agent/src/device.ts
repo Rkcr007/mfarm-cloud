@@ -28,6 +28,20 @@ export interface DeviceInfo {
   osVersion: string;
   capabilities: Capability[];
   screen: Screen;
+  /**
+   * The serial the platform's own tooling matches on — `0.0.0.0:6520` for Cuttlefish,
+   * `emulator-5560` for an AVD, a hardware serial for a physical handset.
+   *
+   * Distinct from `localId`, and the distinction is the whole of blocker B3. `localId` is OUR name
+   * for the device (`cf-1`) and is what the control plane, the metering rows and the gateway path
+   * use. UiAutomator2 has never heard of it: it matches `appium:udid` against the adb serial, so a
+   * session created with the local id targets nothing and fails on a real driver.
+   *
+   * Optional because a tier may genuinely not have one (iOS simulators use a UDID, not adb). A
+   * device that does not report one cannot serve WebDriver — the hub refuses rather than guessing,
+   * because on a multi-device host a guess can land on another tenant's device.
+   */
+  adbSerial?: string;
 }
 
 export type DeviceHealth =

@@ -68,8 +68,9 @@ export async function workerRoutes(app: FastifyInstance) {
       for (const d of reg.devices ?? []) {
         const { rows: dev } = await c.query(
           `INSERT INTO devices (host_id, region, platform, tier, model, os_version,
-                                capabilities, local_id, state, automation_endpoint)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)
+                                capabilities, local_id, state, automation_endpoint,
+                                adb_serial, system_port, mjpeg_server_port)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13)
            ON CONFLICT (host_id, local_id) WHERE local_id IS NOT NULL DO UPDATE SET
              capabilities = EXCLUDED.capabilities,
              os_version = EXCLUDED.os_version,
@@ -79,6 +80,11 @@ export async function workerRoutes(app: FastifyInstance) {
              -- re-registers without one, and a stale url left behind here would keep the hub
              -- dialling a server that is gone (ADR-0003 decision 3).
              automation_endpoint = EXCLUDED.automation_endpoint,
+             -- Same rule for identity: a rebuilt host can legitimately hand a device a different
+             -- serial or port, and the last registration is the truth.
+             adb_serial = EXCLUDED.adb_serial,
+             system_port = EXCLUDED.system_port,
+             mjpeg_server_port = EXCLUDED.mjpeg_server_port,
              updated_at = now()
            RETURNING id`,
           [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,
@@ -88,7 +94,8 @@ export async function workerRoutes(app: FastifyInstance) {
            schedulable.has(d.localId) ? 'READY' : 'OFFLINE',
            // v1 workers name one server for the whole host; v2 names one per device. Resolved in
            // `packages/protocol` so the hub's COALESCE and this write cannot drift apart.
-           deviceAutomationEndpoint(reg, d) ?? null],
+           deviceAutomationEndpoint(reg, d) ?? null,
+           d.adbSerial ?? null, d.systemPort ?? null, d.mjpegServerPort ?? null],
         );
         if (d.localId && dev[0]?.id) deviceIds[d.localId] = dev[0].id as string;
       }

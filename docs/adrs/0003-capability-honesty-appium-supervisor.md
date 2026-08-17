@@ -180,7 +180,30 @@ operator to the manual `AUTOMATION_ENDPOINT` escape hatch — the only shape tod
 describe honestly. The real fix is moving `automationEndpoint` onto the device in the registration
 payload, which is a protocol change.
 
-**B3 — `appium:udid` is set to the mfarm local id, which is not an adb serial.**
+**~~B3~~ — RESOLVED 2026-08-17, protocol v2 + migration 011.** `devices[].adbSerial` carries the real
+serial, `devices.adb_serial` stores it, and the hub sends *that* as `appium:udid`.
+
+The value existed the whole time. `CuttlefishDevice` computed `0.0.0.0:${6519 + instanceNum}` and
+`AvdDevice` computed `emulator-${port}`; both used it for every adb call they made and neither ever
+published it to `DeviceInfo`. The fix was one field on each backend — which is worth remembering
+next time something looks like it needs new machinery.
+
+**A device that reports no serial is now REFUSED, not guessed at** (`no_device_identity`). The two
+alternatives are both worse: sending `local_id` is the original bug, and omitting `appium:udid`
+lets the driver pick whichever device it likes — on a multi-device host, possibly one currently
+allocated to another tenant. Nothing regresses in practice, because the old value never worked
+against a real driver either.
+
+The related `systemPort` note below is fixed in the same migration, and it stopped being theoretical
+the moment B2 let one host serve WebDriver on two devices. `appium:systemPort` and
+`appium:mjpegServerPort` are now derived per device by the worker — which owns its own port space,
+the same reason it and not the control plane derives the Appium port — using `derivePort` with bases
+8200 and 7810, clear of the 4723 range. Three typed columns rather than one jsonb capability bag,
+deliberately: a bag would also let a worker inject arbitrary capabilities into a tenant's session,
+and migration 008 settled that worker input is scoped, never trusted wholesale.
+
+The original blocker, unedited:
+
 `webdriver.ts` sets `upstreamCaps['appium:udid'] = target.local_id` (`cf-1`, `avd-1`), but
 UiAutomator2 matches `udid` against the adb serial (`emulator-5560`, `0.0.0.0:6520`). Overriding the
 capability is right — a client choosing its own udid is choosing another tenant's device — but the

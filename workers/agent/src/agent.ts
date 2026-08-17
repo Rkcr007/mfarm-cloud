@@ -7,7 +7,17 @@ import {
   type RegistrationResponse,
   type WorkerRegistration,
 } from '@mfarm/protocol';
+import { derivePort } from './appium.ts';
 import type { DeviceBackend } from './device.ts';
+
+/**
+ * Bases for the two ports UiAutomator2 otherwise defaults to a single fixed number.
+ *
+ * Kept clear of the Appium port range (4723 + 0..99) so the three derivations for one device can
+ * never land on each other.
+ */
+const UIAUTOMATOR2_SYSTEM_PORT_BASE = 8200;
+const UIAUTOMATOR2_MJPEG_PORT_BASE = 7810;
 
 /**
  * Worker agent — the control-plane side of a host.
@@ -278,6 +288,17 @@ export class Agent {
           osVersion: d.control.info.osVersion,
           capabilities: [...d.control.info.capabilities, ...automation],
           automationEndpoint: endpoint,
+          // The device's real identity, as the driver knows it (B3).
+          adbSerial: d.control.info.adbSerial,
+          // Only meaningful alongside an automation server, and only the worker can allocate them:
+          // this host's port space is its own. Same derivation as the Appium port, different base,
+          // so they are stable across a restart and never overlap.
+          ...(endpoint
+            ? {
+                systemPort: derivePort(localId, UIAUTOMATOR2_SYSTEM_PORT_BASE),
+                mjpegServerPort: derivePort(localId, UIAUTOMATOR2_MJPEG_PORT_BASE),
+              }
+            : {}),
         };
       }),
     };

@@ -82,6 +82,26 @@ export interface WorkerRegistration {
      * not of how the hub uses it.
      */
     automationEndpoint?: string;
+    /**
+     * v2. The serial the driver matches on — `0.0.0.0:6520`, `emulator-5560`, a hardware serial.
+     *
+     * NOT `localId`. The hub sends this as `appium:udid`; sending the local id instead was blocker
+     * B3, and it fails on any real driver because UiAutomator2 has never heard of `cf-1`.
+     */
+    adbSerial?: string;
+    /**
+     * v2. Port reserved on THIS host for the driver's device-side helper (`appium:systemPort`).
+     *
+     * UiAutomator2 defaults every session to 8200, so two concurrent sessions on one host fight over
+     * it and the second fails to start. Harmless while a host could only ever run one WebDriver
+     * device; a live defect now that per-device endpoints make two the point.
+     *
+     * The WORKER supplies it because the worker owns its own port space — the same reason it, and
+     * not the control plane, derives the Appium port.
+     */
+    systemPort?: number;
+    /** v2. Same defect, same fix, different default: UiAutomator2's MJPEG server sits on 7810. */
+    mjpegServerPort?: number;
   }>;
 }
 
