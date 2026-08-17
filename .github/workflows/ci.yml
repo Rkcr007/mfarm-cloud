@@ -210,6 +210,46 @@ jobs:
             END LOOP;
             RAISE NOTICE 'fleet-wide definer functions are unreachable from the app pool';
           END $$;
+
+          -- (4) No SECURITY DEFINER function may be owned by a superuser, and none may be
+          -- EXECUTE-able by PUBLIC.
+          --
+          -- Both are properties Postgres gives you by default and neither announces itself.
+          -- A definer function executes as its OWNER, so one owned by the cluster superuser turns
+          -- any future bug in it into superuser execution rather than a bounded allocator bug.
+          -- And EXECUTE is granted to PUBLIC on every new function, so an explicit
+          -- `GRANT ... TO mfarm_app` is decorative until PUBLIC is revoked — which is exactly how
+          -- migration 008 left the three tenant-facing functions until 012 closed them.
+          --
+          -- Checked here because both regress by omission: adding a function and forgetting two
+          -- lines looks identical to adding one correctly.
+          DO $$
+          DECLARE r record; bad int := 0;
+          BEGIN
+            FOR r IN
+              SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS fn,
+                     pg_get_userbyid(p.proowner) AS owner,
+                     ro.rolsuper AS owner_is_super,
+                     has_function_privilege('public', p.oid, 'EXECUTE') AS public_can_execute
+                FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                JOIN pg_roles ro ON ro.oid = p.proowner
+               WHERE n.nspname = 'public' AND p.prosecdef
+            LOOP
+              IF r.owner_is_super THEN
+                RAISE WARNING 'SECURITY DEFINER % is owned by superuser % — it executes as one.', r.fn, r.owner;
+                bad := bad + 1;
+              END IF;
+              IF r.public_can_execute THEN
+                RAISE WARNING 'SECURITY DEFINER % is EXECUTE-able by PUBLIC; the explicit grants are decorative.', r.fn;
+                bad := bad + 1;
+              END IF;
+            END LOOP;
+            IF bad > 0 THEN
+              RAISE EXCEPTION '% SECURITY DEFINER ownership/PUBLIC problem(s); see warnings above.', bad;
+            END IF;
+            RAISE NOTICE 'definer functions: non-superuser owner, no PUBLIC execute';
+          END $$;
           SQL
 
           echo "RLS enforcement verified."

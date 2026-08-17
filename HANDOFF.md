@@ -268,8 +268,12 @@ scheduler).
    `deploy/restore-drill.sh` proves the restore path actually works — it runs in CI.
 4. `mfarm_app` has a local-dev password in `001_init.sql`. Rotate before any deployment (`config.ts`
    refuses to boot in production if it sees it). `deploy/README.md` has the exact `ALTER ROLE`.
-5. Allocator functions are `SECURITY DEFINER` owned by the superuser. Give them a dedicated owner
-   role with minimal grants before launch.
+5. ~~Allocator functions are `SECURITY DEFINER` owned by the superuser.~~ **FIXED 2026-08-17,
+   migration 012.** They are owned by `mfarm_definer` — NOLOGIN, NOSUPERUSER, privileges on the
+   five tables the bodies touch, plus BYPASSRLS (the tenant tables are FORCE RLS and these
+   functions do fleet-wide work by design). The same migration revoked PUBLIC EXECUTE from
+   `allocate_device`, `release_device` and `session_activate`, which 008 had missed — their
+   explicit grants to `mfarm_app` had been decorative. `ci.yml` now asserts both.
 6. Tests run `--test-concurrency=1`: the reaper is fleet-wide by design, so suites cannot share one
    database concurrently. **This also means parallel agents must not run DB-backed suites at the
    same time.**
@@ -318,6 +322,13 @@ session rather than accepted from the request.
 **Revoke EXECUTE from PUBLIC, or the grant is not a control.** Postgres grants EXECUTE on every new
 function to PUBLIC, so a `SECURITY DEFINER` function is callable by `mfarm_app` the moment it is
 created. Never granting it does nothing. `008` revokes, and `ci.yml` now checks.
+
+**The privilege a lock needs is not the privilege a write needs.** `allocate_device` runs
+`SELECT max_concurrent FROM orgs WHERE id = $1 FOR UPDATE` to serialise the concurrency-cap check.
+It writes nothing, so `GRANT SELECT` looked sufficient — and every allocator test failed with
+"permission denied for table orgs", because a row lock requires UPDATE on at least one column.
+Granted as `UPDATE (max_concurrent)` rather than table-wide: Postgres only asks for one column, and
+that is the column the lock exists to protect.
 
 **A backup is not a backup until a restore has been rehearsed.** `pg_dump` captures a database and
 nothing else — roles are cluster-wide, so a restore into a fresh cluster dies on the first `GRANT`

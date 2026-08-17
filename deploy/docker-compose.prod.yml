@@ -89,6 +89,93 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
+  # One-shot. Runs to completion, exits, and the API waits for it — so the schema is never behind the
+  # code that assumes it. `restart: "no"` matters: a migration that fails must stay failed and visible
+  # rather than looping, because the second attempt of a half-applied migration is rarely better than
+  # the first.
+  migrate:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: mfarm-api:${MFARM_VERSION:-latest}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # The OWNER connection, and only here. Migrations create tables and own them; request handling
+      # must never use this URL — see the api service below and `db.ts`.
+      DATABASE_URL: postgres://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-mfarm}
+    command: ["node", "apps/api/scripts/migrate.mjs"]
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: mfarm-api:${MFARM_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0            # inside the container only; the published port is loopback-bound below
+      # TWO ROLES, TWO URLS — the single most dangerous thing in this repo to get wrong.
+      # `mfarm_app` is non-superuser, has no BYPASSRLS and owns nothing, so row-level security is
+      # real on this connection. config.ts exits 78 if these two ever converge, because request
+      # handling that runs as the owner bypasses RLS while every policy still reads as enabled.
+      DATABASE_URL: postgres://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-mfarm}
+      APP_DATABASE_URL: postgres://mfarm_app:${APP_DB_PASSWORD:?set APP_DB_PASSWORD and ALTER ROLE mfarm_app to match}@postgres:5432/${POSTGRES_DB:-mfarm}
+      REAPER_INTERVAL_MS: ${REAPER_INTERVAL_MS:-30000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    secrets:
+      - session_signing_key
+      - session_public_key
+      - worker_registration_token
+    ports:
+      # Loopback only, exactly like Postgres. Tailscale is what makes this reachable; publishing on
+      # 0.0.0.0 would put the control plane on the internet the first time a firewall rule relaxed.
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+    # The signing key is a multi-line PEM, and compose .env files cannot hold multi-line values. So
+    # the secrets arrive as files and are read into the environment here, immediately before exec.
+    # They never appear in deploy/.env, in `docker inspect`, or in the compose config output.
+    #
+    # `exec` so node replaces the shell and becomes the process tini signals — without it SIGTERM
+    # reaches sh, node never drains, and in-flight requests are cut off mid-response.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        SESSION_SIGNING_KEY="$$(cat /run/secrets/session_signing_key)"; export SESSION_SIGNING_KEY
+        SESSION_PUBLIC_KEY="$$(cat /run/secrets/session_public_key)"; export SESSION_PUBLIC_KEY
+        WORKER_REGISTRATION_TOKEN="$$(cat /run/secrets/worker_registration_token)"; export WORKER_REGISTRATION_TOKEN
+        exec node --experimental-strip-types apps/api/src/main.ts
+    healthcheck:
+      # /health is LIVENESS: no I/O, never fails while the process lives. Deliberately not /ready,
+      # which touches both pools — a DB-touching liveness check turns a brief database blip into a
+      # restart loop that outlasts it.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+secrets:
+  session_signing_key:
+    file: ./secrets/session_signing_key.pem
+  session_public_key:
+    file: ./secrets/session_public_key.pem
+  worker_registration_token:
+    file: ./secrets/worker_registration_token
+
 volumes:
   pgdata:
     # Named, not bind-mounted: `docker compose down` leaves it alone. Note that `down -v` does NOT —

@@ -1,0 +1,24 @@
+# Build context is the repo root (see apps/api/Dockerfile), so this keeps the context small and,
+# more importantly, keeps secrets and local state out of the image.
+node_modules
+**/node_modules
+
+# Secrets and backups. deploy/.env holds every password; a backup in the image would be a database
+# copy shipped to wherever the image goes.
+deploy/.env
+deploy/backups
+
+# Local agent/vector state — machine-specific, regenerated, never a build input.
+.claude-flow
+.swarm
+ruvector.db
+agentdb.rvf
+agentdb.rvf.lock
+
+.git
+.github
+docs
+spikes
+**/test
+*.md
+*.html

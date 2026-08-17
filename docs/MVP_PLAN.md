@@ -200,9 +200,15 @@ Tailscale against both devices in parallel.
   scratch database, destroys it, restores with the real scripts, and checks rows, checksum, RLS+FORCE,
   policies and grants. **It runs in CI.** RPO is one backup interval — there is no WAL archiving, and
   no off-box copy yet; `deploy/README.md` states both plainly rather than implying otherwise.
-- Rotate `mfarm_app`'s committed password (known issue 4); dedicated owner role with minimal grants
-  for the `SECURITY DEFINER` allocator functions (known issue 5).
-- systemd units or compose with restart policies; the box reboots and the farm comes back unattended.
+- ~~Dedicated owner role for the `SECURITY DEFINER` allocator functions (known issue 5).~~
+  **DONE 2026-08-17, migration 012** — `mfarm_definer`, NOLOGIN/NOSUPERUSER, privileges on exactly
+  the five tables the bodies touch. Also revoked PUBLIC EXECUTE from the three tenant-facing
+  functions, which 008 had missed. CI asserts both.
+- ~~Compose with restart policies; the box reboots and the farm comes back unattended.~~
+  **DONE 2026-08-17** — `api` and `migrate` services in `deploy/docker-compose.prod.yml`, ordered
+  postgres-healthy → migrate-completed → api, all loopback-bound, secrets as files.
+- Rotate `mfarm_app`'s committed password (known issue 4) — an operator step, documented in
+  `deploy/README.md`; `config.ts` refuses to boot in production if it is skipped.
 - Tailscale ingress only. **No public ports.** TLS internally.
 - Collapse `db.ts`'s duplicated connection literals into `config.ts` (known issue 7); validate
   `PG_POOL_MAX` (known issue 8).
