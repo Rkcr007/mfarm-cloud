@@ -330,6 +330,28 @@ scheduler).
    moment it is reset, so a token for an ended session is a credential for another tenant's device.
    `mfarm session get --json` returns the block; the human rendering shows the endpoint and never
    the token. (ADR-0002, D2)
+10. **`cvd fetch` can no longer discover a device image without a human at a browser.** Google has
+    retired anonymous access to the v3 Android build API's *listing* endpoints — `builds?...` and
+    `artifacts?...` both return `403 "Rate limit exceeded for legacy API. You must migrate to Build
+    API v4"`. Confirmed 2026-08-18 from four separate IPs (laptop, the GCE lab VM, Cloud Shell) and
+    across every branch tried, sustained over an hour with no decay — a deprecation, not throttling
+    that waiting clears. There is no public v4 endpoint to migrate to; `/v4/builds` is a plain 404.
+
+    *Single-artifact* lookups still work — `artifacts/<name>/url?redirect=true` returns a valid
+    signed storage URL. So a build you already know downloads fine; no build can be found. This is
+    why `bootstrap_cuttlefish.sh` carries `CF_PINNED_BUILD_ID` (currently `16102939`, verified) and
+    why the search is only a fallback. When that build is eventually garbage-collected, the script
+    says so and someone must read a fresh id off
+    `https://ci.android.com/builds/branches/aosp-android-latest-release/grid?legacy=1` by hand.
+
+    Two related traps found the same day. `ci.android.com` is a JavaScript app: fetching an artifact
+    path with `curl` returns a ~4 KB HTML shell named like a zip, not the file. And release branches
+    name the target `aosp_cf_x86_64_only_phone-userdebug` — with an `_only_` that `aosp-main` did
+    not use — so a correct build id with the old target name still 404s.
+
+    **The farm consequence:** every image refresh needs a human, and both devices must stay on one
+    pinned build or differences between them become debugging noise. Revisit if upstream opens v4
+    or ships an unauthenticated mirror.
 
 ## Rules earned the hard way
 
