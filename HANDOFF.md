@@ -57,10 +57,10 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**294 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**300 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
-apps/api/         control plane + service entrypoint   174 tests
+apps/api/         control plane + service entrypoint   180 tests
 apps/cli/         mfarm CLI                             48 tests
 workers/agent/    worker agent, Appium supervisor,      72 tests
                   automation gateway
@@ -277,9 +277,11 @@ scheduler).
 6. Tests run `--test-concurrency=1`: the reaper is fleet-wide by design, so suites cannot share one
    database concurrently. **This also means parallel agents must not run DB-backed suites at the
    same time.**
-7. `db.ts` reads its connection URLs independently of `config.ts`, so the dev-default literals now
-   exist in two files and will drift silently. Collapse by having `db.ts` take them from config.
-8. `PG_POOL_MAX` / `PG_SYSTEM_POOL_MAX` are unvalidated — a typo becomes `NaN` at pool construction.
+7. ~~`db.ts` reads its connection URLs independently of `config.ts`.~~ **FIXED 2026-08-17.** Both
+   go through `parseDbConfig(env, problems)`; the literals have one definition.
+8. ~~`PG_POOL_MAX` / `PG_SYSTEM_POOL_MAX` are unvalidated.~~ **FIXED 2026-08-17.** Bounded via
+   `intVar`, so the pool gets an integer or the default and never `NaN`; `parseConfig` reports a
+   typo in the same list as everything else and `main` exits 78. Also logged at startup.
 9. On the queued path the CLI cannot produce `MFARM_DATA_PLANE_ENDPOINT` / `MFARM_SESSION_TOKEN`,
    because `GET /v1/sessions/:id` returns no `dataPlane` block. (ADR-0002, D2)
 

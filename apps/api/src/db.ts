@@ -1,5 +1,5 @@
 import { Pool, type PoolClient } from 'pg';
-import { ConfigError } from './config.ts';
+import { ConfigError, parseDbConfig } from './config.ts';
 
 /**
  * Two roles, two pools. This split is load-bearing, not tidiness.
@@ -13,26 +13,40 @@ import { ConfigError } from './config.ts';
  *   systemPool  -> owner. Migrations and genuine fleet operations only, never a request handler.
  */
 
-const APP_URL =
-  process.env.APP_DATABASE_URL ?? 'postgres://mfarm_app:mfarm_app@localhost:5433/mfarm';
-const SYSTEM_URL =
-  process.env.DATABASE_URL ?? 'postgres://mfarm:mfarm@localhost:5433/mfarm';
-
-/** Without this, `pool.connect()` queues forever once every connection is checked out, so anything
- *  that can saturate a pool can hold every later caller indefinitely instead of failing one of them.
- *  Generous: a request that waits ten seconds for a connection has already missed its deadline. */
-const CONNECT_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 10_000);
+/**
+ * One reader for the database environment, shared with `config.ts` (known issues 7 and 8).
+ *
+ * NOT `loadConfig()`, and the distinction matters. This module is imported by `main.ts` at the top
+ * of the file, before `loadConfigOrExit()` runs — so parsing the *whole* configuration here would
+ * move every ConfigError to module-evaluation time, where it surfaces as an ESM stack trace instead
+ * of the list of sentences it was written to be. That is the exact reason `loadConfig` is a
+ * function and not a module-scope const; see its comment.
+ *
+ * So the problems array is collected and DELIBERATELY DISCARDED here. It is not ignored in the
+ * sense of unnoticed: `parseConfig` reads the same variables through the same function moments
+ * later, and reports anything wrong with them through main's handler, which exits 78. What this
+ * call buys is `intVar`'s fallback — the pool receives a validated integer or the default, and
+ * never `NaN`. `Number('twenty')` used to reach `new Pool({ max: NaN })` and fail silently under
+ * load rather than at startup.
+ *
+ * The connection strings themselves now have exactly one definition, in `config.ts`. They were
+ * duplicated here as literals, so a change to one file left the other pointing somewhere else.
+ */
+const db = parseDbConfig(process.env, []);
 
 export const appPool = new Pool({
-  connectionString: APP_URL,
-  max: Number(process.env.PG_POOL_MAX ?? 20),
-  connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  connectionString: db.appDatabaseUrl,
+  max: db.poolMax,
+  // Without this, `pool.connect()` queues forever once every connection is checked out, so anything
+  // that can saturate a pool holds every later caller indefinitely instead of failing one of them.
+  // Generous: a request that waits ten seconds for a connection has already missed its deadline.
+  connectionTimeoutMillis: db.pgConnectTimeoutMs,
 });
 
 export const systemPool = new Pool({
-  connectionString: SYSTEM_URL,
-  max: Number(process.env.PG_SYSTEM_POOL_MAX ?? 5),
-  connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
+  connectionString: db.databaseUrl,
+  max: db.systemPoolMax,
+  connectionTimeoutMillis: db.pgConnectTimeoutMs,
 });
 
 /** One row, four booleans: everything that decides whether RLS is real on this connection. */

@@ -210,8 +210,11 @@ Tailscale against both devices in parallel.
 - Rotate `mfarm_app`'s committed password (known issue 4) — an operator step, documented in
   `deploy/README.md`; `config.ts` refuses to boot in production if it is skipped.
 - Tailscale ingress only. **No public ports.** TLS internally.
-- Collapse `db.ts`'s duplicated connection literals into `config.ts` (known issue 7); validate
-  `PG_POOL_MAX` (known issue 8).
+- ~~Collapse `db.ts`'s duplicated connection literals into `config.ts` (7); validate `PG_POOL_MAX`
+  (8).~~ **DONE 2026-08-17** — one `parseDbConfig`, strict inside `parseConfig` so `main` reports and
+  exits 78, lenient inside `db.ts` so a pool is never built with `NaN`. `db.ts` deliberately does not
+  call `loadConfig()`: it is imported before `main` validates, and a throw there becomes an ESM stack
+  trace instead of the sentence list.
 - Prometheus + Grafana + alerting on device health, queue depth, and reset failures.
 
 Exit: reboot the box, walk away, come back to a working farm.

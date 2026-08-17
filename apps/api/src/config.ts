@@ -44,6 +44,12 @@ export interface Config {
   databaseUrl: string;
   /** `mfarm_app`, the RLS-bound role every request handler goes through. */
   appDatabaseUrl: string;
+  /** Connection ceiling for the RLS-bound request pool. */
+  poolMax: number;
+  /** Connection ceiling for the owner pool — migrations, fleet ops, the reaper. */
+  systemPoolMax: number;
+  /** How long `pool.connect()` waits before failing rather than queueing forever. */
+  pgConnectTimeoutMs: number;
   /** Whether a real keypair was supplied. The key material itself is deliberately NOT carried on
    *  this object: config gets logged, and the cheapest way to guarantee a private key never reaches
    *  a log line is for the thing being logged to have never held it. tokens.ts reads the env. */
@@ -237,6 +243,42 @@ function checkSigningKey(env: Env, isProduction: boolean, problems: string[]): '
   return 'environment';
 }
 
+/** Everything `db.ts` needs to build its two pools. */
+export interface DbConfig {
+  databaseUrl: string;
+  appDatabaseUrl: string;
+  poolMax: number;
+  systemPoolMax: number;
+  pgConnectTimeoutMs: number;
+}
+
+/**
+ * The single reader for the database environment. Called from `parseConfig` AND from `db.ts`.
+ *
+ * It exists because those two used to read the same variables independently: `db.ts` had its own
+ * copies of the local-dev connection strings, so the literals lived in two files and would drift
+ * silently — the day someone changed the dev port in one of them, the other would keep working
+ * against a database nobody meant to use (known issue 7).
+ *
+ * `problems` is an accumulator rather than a throw, which is what lets the two callers behave
+ * differently on bad input without duplicating the parsing. See the call in `db.ts`.
+ */
+export function parseDbConfig(env: Env, problems: string[]): DbConfig {
+  return {
+    databaseUrl: env.DATABASE_URL ?? DEV_SYSTEM_URL,
+    appDatabaseUrl: env.APP_DATABASE_URL ?? DEV_APP_URL,
+    // Bounded, and previously unbounded and unchecked: `Number('twenty')` is NaN, and a pool built
+    // with `max: NaN` does not fail loudly — it misbehaves under load, which is the worst time to
+    // find out (known issue 8). The upper bound is a sanity rail: a pool larger than Postgres'
+    // own max_connections cannot help and will exhaust the server instead.
+    poolMax: intVar(env.PG_POOL_MAX, 'PG_POOL_MAX', 20, 1, 1000, problems),
+    systemPoolMax: intVar(env.PG_SYSTEM_POOL_MAX, 'PG_SYSTEM_POOL_MAX', 5, 1, 1000, problems),
+    // 0 is allowed and means "wait forever", which is pg's own default. It is a bad idea here and
+    // the comment in db.ts says why, but it is a legitimate choice rather than a typo.
+    pgConnectTimeoutMs: intVar(env.PG_CONNECT_TIMEOUT_MS, 'PG_CONNECT_TIMEOUT_MS', 10_000, 0, 600_000, problems),
+  };
+}
+
 /**
  * Pure: reads `env`, touches nothing else, and throws a ConfigError naming every problem at once.
  */
@@ -259,8 +301,8 @@ export function parseConfig(env: Env): Config {
   // produces a process that is up, healthy, and unreachable from outside its own namespace.
   const host = env.HOST?.trim() || '0.0.0.0';
 
-  const databaseUrl = env.DATABASE_URL ?? DEV_SYSTEM_URL;
-  const appDatabaseUrl = env.APP_DATABASE_URL ?? DEV_APP_URL;
+  const db = parseDbConfig(env, problems);
+  const { databaseUrl, appDatabaseUrl } = db;
   const systemUrl = parsePostgresUrl(databaseUrl, 'DATABASE_URL', problems);
   const appUrl = parsePostgresUrl(appDatabaseUrl, 'APP_DATABASE_URL', problems);
 
@@ -348,6 +390,9 @@ export function parseConfig(env: Env): Config {
     host,
     databaseUrl,
     appDatabaseUrl,
+    poolMax: db.poolMax,
+    systemPoolMax: db.systemPoolMax,
+    pgConnectTimeoutMs: db.pgConnectTimeoutMs,
     signingKeySource,
     reaperIntervalMs,
     rateLimitMax,
@@ -390,6 +435,9 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     listen: `${c.host}:${c.port}`,
     databaseUrl: redactUrl(c.databaseUrl),
     appDatabaseUrl: redactUrl(c.appDatabaseUrl),
+    poolMax: c.poolMax,
+    systemPoolMax: c.systemPoolMax,
+    pgConnectTimeoutMs: c.pgConnectTimeoutMs,
     signingKeySource: c.signingKeySource,
     reaperIntervalMs: c.reaperIntervalMs,
     rateLimitMax: c.rateLimitMax,

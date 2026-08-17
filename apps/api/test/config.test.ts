@@ -17,6 +17,7 @@ import {
   DEV_SYSTEM_URL,
   describeConfig,
   parseConfig,
+  parseDbConfig,
   redactUrl,
 } from '../src/config.ts';
 import { generateKeypair } from '../src/tokens.ts';
@@ -316,5 +317,80 @@ describe('redaction', () => {
 
   test('an unparseable connection string does not get echoed back into the log', () => {
     assert.equal(redactUrl('postgres://user:pw@ho st/db'), '<unparseable>');
+  });
+});
+
+/**
+ * The database environment, read in exactly one place (known issues 7 and 8).
+ *
+ * `db.ts` used to carry its own copies of the local-dev connection strings and its own unchecked
+ * `Number()` calls for the pool sizes. Both are the same class of defect: a second reader that
+ * agrees with the first until the day it does not.
+ */
+describe('database configuration', () => {
+  test('an unset environment falls back to the shared dev defaults', () => {
+    const db = parseDbConfig({}, []);
+    // The literals live in config.ts and nowhere else. If db.ts ever grows its own copy again,
+    // this is not what catches it — the test below is.
+    assert.equal(db.databaseUrl, DEV_SYSTEM_URL);
+    assert.equal(db.appDatabaseUrl, DEV_APP_URL);
+    assert.equal(db.poolMax, 20);
+    assert.equal(db.systemPoolMax, 5);
+    assert.equal(db.pgConnectTimeoutMs, 10_000);
+  });
+
+  test('a non-numeric pool size is a reported problem, never NaN', () => {
+    // The actual defect: `Number('twenty')` reached `new Pool({ max: NaN })`, which does not throw.
+    // It misbehaves under load instead — the worst moment to discover a config typo.
+    const problems: string[] = [];
+    const db = parseDbConfig({ PG_POOL_MAX: 'twenty' }, problems);
+    assert.ok(!Number.isNaN(db.poolMax), 'the pool must never receive NaN');
+    assert.equal(db.poolMax, 20, 'falls back rather than propagating garbage');
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /PG_POOL_MAX/);
+  });
+
+  test('pool sizes are bounded on both ends', () => {
+    for (const [name, value] of [['PG_POOL_MAX', '0'], ['PG_SYSTEM_POOL_MAX', '0'],
+                                 ['PG_POOL_MAX', '99999'], ['PG_POOL_MAX', '2.5']] as const) {
+      const problems: string[] = [];
+      parseDbConfig({ [name]: value }, problems);
+      assert.equal(problems.length, 1, `${name}=${value} should be rejected`);
+      assert.match(problems[0], new RegExp(name));
+    }
+  });
+
+  test('parseConfig reports a pool typo alongside everything else, and exits 78 in production', () => {
+    // This is what makes discarding the problems array inside db.ts safe: the same variables are
+    // read again here, and main turns this into EX_CONFIG rather than a surprise at load.
+    const problems = refusal({ NODE_ENV: 'production', PG_POOL_MAX: 'lots' });
+    assert.ok(problems.some((p) => /PG_POOL_MAX/.test(p)),
+      'a pool typo must appear in the same list as every other problem');
+  });
+
+  test('pool sizing is logged at startup, so it is answerable without a shell', () => {
+    const described = describeConfig(parseConfig({ PG_POOL_MAX: '42' }));
+    assert.equal(described.poolMax, 42);
+    assert.equal(described.systemPoolMax, 5);
+  });
+});
+
+/**
+ * The drift guard for known issue 7. `db.ts` builds its pools at module load, so what it resolved
+ * is observable on the pool objects themselves — which is the only way to prove the two files agree
+ * without re-reading the source.
+ */
+describe('db.ts resolves its connections through config.ts', () => {
+  test('the pools were built from the shared defaults, not from private literals', async () => {
+    const { appPool, systemPool } = await import('../src/db.ts');
+    const appOpts = (appPool as unknown as { options: { connectionString?: string; max?: number } }).options;
+    const sysOpts = (systemPool as unknown as { options: { connectionString?: string; max?: number } }).options;
+    const expected = parseDbConfig(process.env, []);
+
+    assert.equal(appOpts.connectionString, expected.appDatabaseUrl);
+    assert.equal(sysOpts.connectionString, expected.databaseUrl);
+    assert.equal(appOpts.max, expected.poolMax);
+    assert.equal(sysOpts.max, expected.systemPoolMax);
+    assert.ok(!Number.isNaN(appOpts.max), 'a pool must never be constructed with NaN');
   });
 });
