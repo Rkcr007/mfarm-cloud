@@ -94,10 +94,53 @@ sudo -n true 2>/dev/null || c_info "sudo password will be requested"
 
 # ---------------------------------------------------------------- phase 1: packages
 if ! phase_done pkgs; then
-  echo; echo "== phase 1: build and install Cuttlefish =="
+  echo; echo "== phase 1: install Cuttlefish =="
   sudo apt-get update -qq
+  # Runtime deps only. The heavy build toolchain is installed further down, and only if we actually
+  # have to build — which on the prebuilt path we do not.
+  sudo apt-get install -y -qq curl ca-certificates unzip python3 f2fs-tools \
+       android-sdk-platform-tools bc >/dev/null
+  c_ok "runtime deps installed"
+
+  # ---- path A: prebuilt debs from Google's Artifact Registry.
+  #
+  # Strongly preferred, and the upstream README's first recommendation. Building from source drives
+  # Bazel to pull external archives from GitHub, which rate-limits per source IP — and cloud VM IP
+  # ranges are shared with thousands of other machines, so a 429 there is routine and unfixable from
+  # this end. Artifact Registry is a different host with no such limit, and skips the build outright:
+  # minutes instead of an hour, and no toolchain to go stale.
+  #
+  # CF_INSTALL=source forces the build path; CF_INSTALL=prebuilt makes a failure here fatal instead
+  # of falling through.
+  CF_INSTALL="${CF_INSTALL:-auto}"
+  PREBUILT_OK=no
+  if [ "$CF_INSTALL" != source ]; then
+    c_info "trying prebuilt packages from Artifact Registry"
+    prebuilt_once() {
+      sudo curl -fsSL https://us-apt.pkg.dev/doc/repo-signing-key.gpg \
+           -o /etc/apt/trusted.gpg.d/artifact-registry.asc \
+        && sudo chmod a+r /etc/apt/trusted.gpg.d/artifact-registry.asc \
+        && echo "deb https://us-apt.pkg.dev/projects/android-cuttlefish-artifacts android-cuttlefish main" \
+           | sudo tee /etc/apt/sources.list.d/artifact-registry.list >/dev/null \
+        && sudo apt-get update -qq \
+        && sudo apt-get install -y -qq cuttlefish-base cuttlefish-user >/dev/null
+    }
+    # tee (not tee -a) above: re-running must not stack duplicate source lines, which makes apt warn
+    # on every subsequent update.
+    if retry 3 20 "artifact registry install" prebuilt_once; then
+      PREBUILT_OK=yes
+      c_ok "cuttlefish-base + cuttlefish-user installed from Artifact Registry (no build needed)"
+    else
+      [ "$CF_INSTALL" = prebuilt ] && die "prebuilt install failed and CF_INSTALL=prebuilt forbids the source fallback."
+      c_warn "Artifact Registry unavailable; falling back to building from source"
+    fi
+  fi
+fi
+
+# ---- path B: build from source. Only reached when the prebuilt path was skipped or failed.
+if ! phase_done pkgs && [ "${PREBUILT_OK:-no}" != yes ]; then
   sudo apt-get install -y -qq git devscripts equivs config-package-dev debhelper-compat \
-       golang curl unzip python3 f2fs-tools android-sdk-platform-tools bc >/dev/null
+       golang >/dev/null
   c_ok "build deps installed"
 
   mkdir -p "$WORKDIR"; cd "$WORKDIR"
@@ -150,8 +193,12 @@ $(tail -25 /tmp/cf_build.log)
 
   sudo dpkg -i ./cuttlefish-base_*.deb ./cuttlefish-user_*.deb >/dev/null 2>&1 \
     || sudo apt-get install -f -y -qq >/dev/null
-  c_ok "cuttlefish-base + cuttlefish-user installed"
+  c_ok "cuttlefish-base + cuttlefish-user installed from source build"
+fi
 
+# ---- common tail. Runs once whichever install path got us here, so the groups and the phase
+# marker are not duplicated in both branches.
+if ! phase_done pkgs; then
   sudo usermod -aG kvm,cvdnetwork,render "$USER"
   mark pkgs
 
