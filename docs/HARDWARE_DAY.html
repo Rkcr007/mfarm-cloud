@@ -1,0 +1,1477 @@
+<title>Hardware Day Runbook</title>
+
+<style>
+  /* ---------------------------------------------------------------------------------------------
+     Tokens. The bare :root carries the COMPLETE light palette. The two blocks after it redefine
+     only tokens — never component colours — so the un-stamped "system" state, an explicit light
+     choice over a dark OS, and an explicit dark choice all resolve as a complete set.
+     --------------------------------------------------------------------------------------------- */
+  :root {
+    --paper:      #f4f6f8;
+    --surface:    #ffffff;
+    --surface-2:  #eaeef3;
+    --terminal:   #131a24;
+    --terminal-ink: #d8e2ef;
+    --ink:        #131822;
+    --ink-mid:    #3d4557;
+    --ink-muted:  #5f6879;
+    --rule:       #d9dfe7;
+    --rule-strong:#b9c2ce;
+    --accent:     #0e6ba8;
+    --accent-soft:#e2eef7;
+    --stop:       #9d2b2b;
+    --stop-soft:  #f8e8e8;
+    --warn:       #8a5a0c;
+    --warn-soft:  #fbf0dc;
+    --go:         #1c6349;
+    --go-soft:    #e2f1ea;
+    --shadow:     0 1px 2px rgba(19, 24, 34, .06), 0 8px 24px -12px rgba(19, 24, 34, .18);
+
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #0d1219;
+      --surface:    #151c26;
+      --surface-2:  #1c2531;
+      --terminal:   #080c12;
+      --terminal-ink: #cfdae8;
+      --ink:        #e4e9f0;
+      --ink-mid:    #b3bdcb;
+      --ink-muted:  #8d97a6;
+      --rule:       #253040;
+      --rule-strong:#3a4759;
+      --accent:     #5aa9e0;
+      --accent-soft:#13293b;
+      --stop:       #e08a8a;
+      --stop-soft:  #2e1a1a;
+      --warn:       #d8a457;
+      --warn-soft:  #2c2113;
+      --go:         #63c298;
+      --go-soft:    #12291f;
+      --shadow:     0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -12px rgba(0, 0, 0, .7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:      #0d1219;
+    --surface:    #151c26;
+    --surface-2:  #1c2531;
+    --terminal:   #080c12;
+    --terminal-ink: #cfdae8;
+    --ink:        #e4e9f0;
+    --ink-mid:    #b3bdcb;
+    --ink-muted:  #8d97a6;
+    --rule:       #253040;
+    --rule-strong:#3a4759;
+    --accent:     #5aa9e0;
+    --accent-soft:#13293b;
+    --stop:       #e08a8a;
+    --stop-soft:  #2e1a1a;
+    --warn:       #d8a457;
+    --warn-soft:  #2c2113;
+    --go:         #63c298;
+    --go-soft:    #12291f;
+    --shadow:     0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -12px rgba(0, 0, 0, .7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16.5px;
+    line-height: 1.62;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 830px; margin: 0 auto; padding: 0 24px 120px; }
+
+  /* ------------------------------------------------------------------ masthead */
+  header.masthead {
+    padding: 64px 0 32px;
+    border-bottom: 2px solid var(--ink);
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-size: clamp(34px, 5.5vw, 50px);
+    line-height: 1.05;
+    letter-spacing: -.028em;
+    font-weight: 660;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 19px;
+    line-height: 1.55;
+    color: var(--ink-mid);
+    margin: 0;
+    max-width: 62ch;
+    text-wrap: pretty;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    margin-top: 28px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-muted);
+  }
+  .meta b { color: var(--ink-mid); font-weight: 500; }
+
+  /* ------------------------------------------------------------------ typography */
+  h2 {
+    font-size: 27px;
+    letter-spacing: -.022em;
+    font-weight: 650;
+    line-height: 1.2;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+  h3 {
+    font-size: 18.5px;
+    font-weight: 620;
+    letter-spacing: -.012em;
+    margin: 34px 0 10px;
+    text-wrap: balance;
+  }
+  p { margin: 0 0 16px; max-width: 70ch; text-wrap: pretty; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  strong { font-weight: 630; color: var(--ink); }
+  code {
+    font-family: var(--mono);
+    font-size: .87em;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    padding: .08em .34em;
+    border-radius: 3px;
+    word-break: break-word;
+  }
+  ul, ol { margin: 0 0 16px; padding-left: 22px; max-width: 70ch; }
+  li { margin-bottom: 7px; }
+  li::marker { color: var(--ink-muted); }
+
+  /* ------------------------------------------------------------------ section intro */
+  .section-open {
+    margin: 72px 0 0;
+    padding-top: 26px;
+    border-top: 2px solid var(--ink);
+  }
+  .section-open .eyebrow { margin-bottom: 12px; }
+  .section-open p { color: var(--ink-mid); font-size: 17px; }
+
+  /* ------------------------------------------------------------------ steps */
+  .step {
+    display: grid;
+    grid-template-columns: 46px 1fr;
+    gap: 0 20px;
+    margin-top: 42px;
+  }
+  .step-num {
+    grid-row: 1 / span 2;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-muted);
+    padding-top: 5px;
+    border-top: 2px solid var(--rule-strong);
+    text-align: left;
+  }
+  .step-body { grid-column: 2; padding-top: 5px; border-top: 2px solid var(--rule-strong); }
+  .step-body > h2 { margin-bottom: 10px; }
+  .step-hint {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 14px;
+  }
+
+  /* ------------------------------------------------------------------ track chips */
+  .chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border: 1px solid currentColor;
+    border-radius: 2px;
+    vertical-align: 2px;
+    font-weight: 500;
+  }
+  .chip-a { color: var(--go); }
+  .chip-b { color: var(--accent); }
+  .chip-both { color: var(--ink-muted); }
+
+  /* ------------------------------------------------------------------ panels
+     Labelled instrument panels: a heavy top rule carrying a small mono label, square corners.
+     Deliberately not a rounded card with a left accent bar. */
+  .panel {
+    margin: 24px 0;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--rule-strong);
+    padding: 18px 20px 4px;
+  }
+  .panel > .panel-label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    margin: -30px 0 14px;
+    padding: 0 7px 0 0;
+    background: var(--surface);
+    width: fit-content;
+    position: relative;
+    top: -8px;
+    color: var(--ink-muted);
+  }
+  .panel p:last-child, .panel ul:last-child, .panel ol:last-child { margin-bottom: 16px; }
+
+  .panel.stop  { border-top-color: var(--stop); background: var(--stop-soft); }
+  .panel.stop  > .panel-label { color: var(--stop); background: var(--stop-soft); }
+  .panel.money { border-top-color: var(--warn); background: var(--warn-soft); }
+  .panel.money > .panel-label { color: var(--warn); background: var(--warn-soft); }
+  .panel.good  { border-top-color: var(--go); background: var(--go-soft); }
+  .panel.good  > .panel-label { color: var(--go); background: var(--go-soft); }
+  .panel.note  { border-top-color: var(--accent); background: var(--accent-soft); }
+  .panel.note  > .panel-label { color: var(--accent); background: var(--accent-soft); }
+
+  /* ------------------------------------------------------------------ commands */
+  .cmd { position: relative; margin: 18px 0; }
+  .cmd-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    border-bottom: none;
+    padding: 6px 8px 6px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+  }
+  .cmd pre {
+    margin: 0;
+    background: var(--terminal);
+    color: var(--terminal-ink);
+    border: 1px solid var(--rule);
+    padding: 15px 16px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.62;
+    tab-size: 2;
+  }
+  .cmd pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
+  .copy {
+    font: inherit;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    background: var(--surface);
+    color: var(--ink-mid);
+    border: 1px solid var(--rule-strong);
+    border-radius: 2px;
+    padding: 3px 9px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .copy:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .copy.done { background: var(--go); color: #fff; border-color: var(--go); }
+
+  /* ------------------------------------------------------------------ tables */
+  .tablewrap { overflow-x: auto; margin: 22px 0; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 460px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    font-weight: 500;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .yes { color: var(--go); font-weight: 600; }
+  .no  { color: var(--stop); font-weight: 600; }
+  .maybe { color: var(--warn); font-weight: 600; }
+
+  /* ------------------------------------------------------------------ checklist */
+  .checklist { list-style: none; padding: 0; margin: 20px 0; }
+  .checklist li {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 11px 14px;
+    border: 1px solid var(--rule);
+    border-bottom: none;
+    background: var(--surface);
+    margin: 0;
+  }
+  .checklist li:last-child { border-bottom: 1px solid var(--rule); }
+  .checklist input[type="checkbox"] {
+    appearance: none;
+    flex: 0 0 auto;
+    width: 17px; height: 17px;
+    margin-top: 4px;
+    border: 1.5px solid var(--rule-strong);
+    border-radius: 2px;
+    background: var(--paper);
+    cursor: pointer;
+    position: relative;
+  }
+  .checklist input[type="checkbox"]:checked { background: var(--go); border-color: var(--go); }
+  .checklist input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 5px; top: 1px;
+    width: 4px; height: 9px;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  .checklist label { cursor: pointer; flex: 1; }
+  .checklist input:checked + label { color: var(--ink-muted); text-decoration: line-through; text-decoration-color: var(--rule-strong); }
+  .checklist .ml-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-muted);
+    letter-spacing: .06em;
+  }
+
+  /* ------------------------------------------------------------------ contents */
+  nav.toc {
+    margin: 40px 0 0;
+    padding: 20px 0 0;
+    border-top: 1px solid var(--rule);
+  }
+  nav.toc ol { list-style: none; padding: 0; margin: 0; columns: 2; column-gap: 34px; max-width: none; }
+  nav.toc li { margin-bottom: 5px; break-inside: avoid; font-size: 14.5px; }
+  nav.toc a { text-decoration: none; color: var(--ink-mid); }
+  nav.toc a:hover { color: var(--accent); text-decoration: underline; }
+  nav.toc .n { font-family: var(--mono); font-size: 12px; color: var(--ink-muted); margin-right: 8px; }
+  @media (max-width: 620px) { nav.toc ol { columns: 1; } }
+
+  details {
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    padding: 12px 16px;
+    margin: 18px 0;
+  }
+  summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+  details[open] summary { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--rule); }
+
+  footer.end {
+    margin-top: 80px;
+    padding-top: 24px;
+    border-top: 2px solid var(--ink);
+    font-size: 14px;
+    color: var(--ink-muted);
+  }
+
+  @media (max-width: 560px) {
+    .step { grid-template-columns: 1fr; gap: 0; }
+    .step-num { grid-row: auto; border-top: none; padding-top: 0; margin-bottom: -4px; }
+    .step-body { grid-column: 1; }
+    body { font-size: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">MFARM · Phase 0</p>
+  <h1>Hardware day runbook</h1>
+  <p class="standfirst">
+    Everything we have built has only ever talked to a fake. This is the day we find out whether it
+    talks to a real Android device — on someone else's computer, for no money.
+  </p>
+  <div class="meta">
+    <span><b>Written</b> 2026-08-17</span>
+    <span><b>Assumes</b> no prior cloud experience</span>
+    <span><b>Budget</b> ₹0</span>
+    <span><b>Canonical copy</b> docs/HARDWARE_DAY.html</span>
+  </div>
+</header>
+
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><span class="n">00</span><a href="#why">What this day is for</a></li>
+    <li><span class="n">01</span><a href="#tracks">The two tracks</a></li>
+    <li><span class="n">02</span><a href="#milestones">Milestones</a></li>
+    <li><span class="n">03</span><a href="#money">The money rules</a></li>
+    <li><span class="n">A1</span><a href="#a-repo">Probe repo</a></li>
+    <li><span class="n">A2</span><a href="#a-workflow">The workflow</a></li>
+    <li><span class="n">A3</span><a href="#a-run">Run and read it</a></li>
+    <li><span class="n">B1</span><a href="#b-account">Google Cloud account</a></li>
+    <li><span class="n">B2</span><a href="#b-budget">Budget alarm</a></li>
+    <li><span class="n">B3</span><a href="#b-vm">Create the box</a></li>
+    <li><span class="n">B4</span><a href="#b-gate">The gate</a></li>
+    <li><span class="n">B5</span><a href="#b-code">Get the code across</a></li>
+    <li><span class="n">B6</span><a href="#b-bootstrap">Bootstrap Cuttlefish</a></li>
+    <li><span class="n">B7</span><a href="#b-snapshot">Snapshot &amp; restore</a></li>
+    <li><span class="n">B8</span><a href="#b-appium">Appium, for real</a></li>
+    <li><span class="n">B9</span><a href="#b-two">Two devices</a></li>
+    <li><span class="n">B10</span><a href="#b-save">Save the work</a></li>
+    <li><span class="n">B11</span><a href="#b-destroy">Destroy everything</a></li>
+    <li><span class="n">99</span><a href="#wrong">When it goes wrong</a></li>
+  </ol>
+</nav>
+
+
+<!-- ============================================================================ ORIENTATION -->
+<section class="section-open" id="why">
+  <p class="eyebrow">00 — Orientation</p>
+  <h2>What this day is for</h2>
+  <p>
+    One sentence: <strong>we are trying to make a real Appium test run green against a real Android
+    device on our own infrastructure, once.</strong> Everything else is secondary.
+  </p>
+  <p>
+    Right now the repo has 333 passing tests and a complete-looking automation path in which the
+    WebDriver hub has only ever spoken to a stub and the Appium supervisor has only ever supervised a
+    fake. Phases 3 and 4 — artifacts, video, the web UI — all sit on top of that path. If it is wrong
+    in some structural way, everything built on it gets reworked. So we prove it before we build more.
+  </p>
+
+  <h3>Why we need someone else's computer</h3>
+  <p>
+    Cuttlefish is Google's virtual Android device. It runs the real Android OS in a virtual machine,
+    which means the machine running it must itself be able to run virtual machines. Three hard
+    requirements:
+  </p>
+  <ul>
+    <li><strong>Linux</strong> — not macOS.</li>
+    <li><strong>x86_64</strong> — Intel/AMD. Snapshot-restore is x86_64 only.</li>
+    <li><strong>A working <code>/dev/kvm</code></strong> — the kernel's virtualisation device.</li>
+  </ul>
+  <p>
+    Your MacBook is Apple Silicon, which is Arm, and macOS has no <code>/dev/kvm</code>. There is no
+    workaround worth trying — emulating x86 in software to then run a VM inside it would be
+    unusably slow. That is the whole reason we go to the cloud.
+  </p>
+
+  <div class="panel note">
+    <span class="panel-label">The jargon, once</span>
+    <p>
+      <strong>Nested virtualisation</strong> is the cloud provider letting <em>your</em> virtual
+      machine run virtual machines of its own. Normally they don't. It is a setting chosen when the
+      machine is created and <strong>it cannot be switched on afterwards</strong> — get it wrong and
+      you delete the machine and make a new one. This is the single most common way people lose an
+      hour on day one.
+    </p>
+  </div>
+</section>
+
+
+<!-- ============================================================================ TRACKS -->
+<section class="section-open" id="tracks">
+  <p class="eyebrow">01 — Plan</p>
+  <h2>The two tracks, and why you want both</h2>
+  <p>
+    You asked whether GitHub could do this for free. Partly — and the part it does is genuinely
+    useful. These are not competing options; run them in order.
+  </p>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Question</th><th>Track A · GitHub Actions</th><th>Track B · Google Cloud</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Costs money?</td><td class="yes">No — unlimited on public repos</td><td>Free from $300 trial credit</td></tr>
+        <tr><td>Credit card needed?</td><td class="yes">No</td><td class="no">Yes, for identity — not charged</td></tr>
+        <tr><td>Does <code>/dev/kvm</code> work?</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+        <tr><td>One device boots?</td><td class="maybe">Probably — disk is tight</td><td class="yes">Yes</td></tr>
+        <tr><td>Snapshot / restore?</td><td class="maybe">Maybe</td><td class="yes">Yes</td></tr>
+        <tr><td>Appium suite green?</td><td class="maybe">One device, awkwardly</td><td class="yes">Yes</td></tr>
+        <tr><td>Two devices in parallel?</td><td class="no">No — not enough RAM</td><td class="yes">Yes</td></tr>
+        <tr><td>Poke at it interactively?</td><td class="no">Only via a debug SSH add-on</td><td class="yes">Yes, normal SSH</td></tr>
+        <tr><td>Density / latency numbers?</td><td class="no">Meaningless — shared hardware</td><td class="yes">Yes</td></tr>
+        <tr><td>Runs again automatically forever?</td><td class="yes">Yes — this is its superpower</td><td class="no">No</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel good">
+    <span class="panel-label">Recommended order</span>
+    <p>
+      <strong>Track A first, then Track B.</strong> Track A costs nothing and has no clock on it, so
+      it is where you discover that a <code>cvd</code> flag changed upstream or that a package name
+      moved — the boring failures. You then arrive at the paid box already knowing the flags work,
+      and spend metered hours only on what a real machine can do: two devices, real Appium, numbers.
+    </p>
+    <p>
+      Track A also keeps paying afterwards. Once it passes, it becomes a scheduled CI job that tells
+      you the day upstream Cuttlefish breaks our assumptions — which is otherwise the kind of thing
+      you find out during a demo.
+    </p>
+  </div>
+
+  <h3>Track A's hard ceiling, stated plainly</h3>
+  <p>
+    GitHub's free runners for <strong>public</strong> repositories are 4&nbsp;CPU cores /
+    16&nbsp;GB&nbsp;RAM / ~14&nbsp;GB free disk. For <strong>private</strong> repositories they are
+    2&nbsp;cores / 7&nbsp;GB, which will not boot Cuttlefish at all. Our repo is private, so
+    Track&nbsp;A runs from a <em>separate small public repo</em> holding only the probe — no
+    proprietary code. That is step A1.
+  </p>
+</section>
+
+
+<!-- ============================================================================ MILESTONES -->
+<section class="section-open" id="milestones">
+  <p class="eyebrow">02 — Definition of done</p>
+  <h2>Milestones, in order of value</h2>
+  <p>
+    Do not treat this as one long day that either succeeds or fails. Each milestone is a real result
+    you can stop at, write down, and destroy the machine. A day that ends at M2 is a good day.
+  </p>
+
+  <ul class="checklist">
+    <li><input type="checkbox" id="m0"><label for="m0"><span class="ml-tag">M0</span> &nbsp;<strong>The gate.</strong> <code>/dev/kvm</code> exists and is usable. If this fails, nothing else matters — stop and fix it. <em>~10 min</em></label></li>
+    <li><input type="checkbox" id="m1"><label for="m1"><span class="ml-tag">M1</span> &nbsp;<strong>One device boots.</strong> <code>adb devices</code> lists it and <code>sys.boot_completed</code> is 1. Record the cold-boot seconds. <em>~1–2 h, mostly downloading</em></label></li>
+    <li><input type="checkbox" id="m2"><label for="m2"><span class="ml-tag">M2</span> &nbsp;<strong>Snapshot and restore round-trips</strong> with the SwiftShader flags. This is what the entire reset story depends on. <em>~30 min</em></label></li>
+    <li><input type="checkbox" id="m3"><label for="m3"><span class="ml-tag">M3</span> &nbsp;<strong>A real Appium suite runs green through our hub.</strong> This is the deliverable. <em>~2–3 h</em></label></li>
+    <li><input type="checkbox" id="m4"><label for="m4"><span class="ml-tag">M4</span> &nbsp;<strong>Two devices in parallel</strong>, both allocatable, sharded suite passes. <em>~1 h</em></label></li>
+    <li><input type="checkbox" id="m5"><label for="m5"><span class="ml-tag">M5</span> &nbsp;<strong>The numbers</strong> — spike 1 and spike 2a, with “nested virt” written beside them. Optional; they gate scaling, not shipping. <em>~1–2 h</em></label></li>
+  </ul>
+
+  <div class="panel">
+    <span class="panel-label">Expectation setting</span>
+    <p>
+      <strong>Your first session will probably end at M1, and that is a success.</strong>
+      <code>HANDOFF.md</code> already predicts it: <em>“Real Appium 2 + UiAutomator2 against real
+      Cuttlefish. Expect disagreement.”</em> Known issue&nbsp;1 says our <code>cvd</code> flags are
+      unverified and upstream moves. Finding out exactly how they are wrong <em>is the product of
+      this day</em>. Budget two or three short sessions, not one heroic one.
+    </p>
+  </div>
+</section>
+
+
+<!-- ============================================================================ MONEY -->
+<section class="section-open" id="money">
+  <p class="eyebrow">03 — Before you touch anything</p>
+  <h2>The money rules</h2>
+  <p>
+    Track A cannot cost money. Track B can, if you are careless. Four rules; the third is the one
+    that actually catches people.
+  </p>
+
+  <div class="panel money">
+    <span class="panel-label">Read this twice</span>
+    <ol>
+      <li>
+        <strong>Stay on the free trial. Never click “Activate full account” or “Upgrade”.</strong>
+        While you are on the trial, Google will not charge your card — when the credit or the 90
+        days run out, your resources simply stop. That safety net disappears the moment you upgrade.
+      </li>
+      <li>
+        <strong>The machine costs money only while it is running.</strong> Roughly ₹55–75 an hour for
+        the size we want. An eight-hour session is under ₹600 of a ₹25,000 credit.
+      </li>
+      <li>
+        <strong>Stopping the machine does not stop the disk bill.</strong> This is the classic
+        surprise. A stopped VM bills nothing for CPU and keeps billing for its disk — a 150&nbsp;GB
+        disk is around ₹1,200 a month whether or not anything is running. <strong>Delete, don't
+        stop.</strong> Step B10 shows how to keep your work anyway.
+      </li>
+      <li>
+        <strong>Finish every session with step B11.</strong> Deleting the VM is not enough on its
+        own; you must confirm no disks survived it.
+      </li>
+    </ol>
+  </div>
+
+  <p>
+    Prices move and vary by region. Ignore the numbers above as gospel — the create-instance screen
+    shows a live monthly estimate on the right-hand side, and that estimate is the one to trust.
+  </p>
+</section>
+
+
+<!-- ============================================================================ TRACK A -->
+<section class="section-open" id="a-repo">
+  <p class="eyebrow">Track A · GitHub Actions <span class="chip chip-a">Free · no card</span></p>
+  <h2>The free probe</h2>
+  <p>
+    Goal: answer “do our <code>cvd</code> flags boot a device on a stock Ubuntu machine?” without
+    spending anything or entering a card, and leave behind a job that keeps answering it forever.
+  </p>
+</section>
+
+<div class="step" id="a1">
+  <div class="step-num">A1</div>
+  <div class="step-body">
+    <h2>Make a public probe repository</h2>
+    <p class="step-hint">~5 minutes · github.com</p>
+    <p>
+      On GitHub, create a <strong>public</strong> repository called <code>mfarm-cf-probe</code>.
+      Public is what buys the bigger free runner and unlimited minutes. It will contain only the
+      bootstrap script and a workflow — nothing proprietary, no keys, no control-plane code.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on your Mac</span><button class="copy" type="button">Copy</button></div>
+<pre><code>mkdir -p ~/mfarm-cf-probe && cd ~/mfarm-cf-probe
+git init -b main
+mkdir -p .github/workflows spikes
+
+# the only file we borrow from the private repo
+cp ~/Downloads/MFARM_CLOUD/spikes/bootstrap_cuttlefish.sh spikes/
+chmod +x spikes/bootstrap_cuttlefish.sh
+
+printf '# Cuttlefish boot probe\n\nProves a stock Ubuntu host can boot our Cuttlefish\nconfiguration. Deliberately public so GitHub gives us the\n4-core runner and unlimited minutes.\n' > README.md</code></pre>
+    </div>
+    <p>Then push it — create the repo on github.com first, and copy the URL it gives you.</p>
+    <div class="cmd">
+      <div class="cmd-head"><span>replace YOUR-USERNAME</span><button class="copy" type="button">Copy</button></div>
+<pre><code>git add -A
+git commit -m "Cuttlefish boot probe"
+git remote add origin https://github.com/YOUR-USERNAME/mfarm-cf-probe.git
+git push -u origin main</code></pre>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="a-workflow">
+  <div class="step-num">A2</div>
+  <div class="step-body">
+    <h2>The workflow</h2>
+    <p class="step-hint">~10 minutes · the file that does the work</p>
+    <p>
+      Save this as <code>.github/workflows/cuttlefish-probe.yml</code>. Read the comments — they say
+      what each part is fighting.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>.github/workflows/cuttlefish-probe.yml</span><button class="copy" type="button">Copy</button></div>
+<pre><code>name: Cuttlefish boot probe
+
+# Manual button, plus a weekly run so we hear about upstream drift
+# on a Monday rather than during a demo.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+jobs:
+  boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- THE GATE -------------------------------------------------
+      # If this fails nothing else is worth running. GitHub's Linux
+      # runners do expose /dev/kvm, but say so out loud rather than
+      # letting a later step fail confusingly.
+      - name: Gate — /dev/kvm must exist
+        run: |
+          set -eux
+          ls -l /dev/kvm
+          egrep -c '(vmx|svm)' /proc/cpuinfo
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpu-checker
+          sudo kvm-ok
+
+      # ---- DISK -----------------------------------------------------
+      # The runner has ~14 GB free and the Android image alone is
+      # several GB. Deleting toolchains we do not use buys ~25 GB.
+      # This is the step most likely to decide whether the job fits.
+      - name: Reclaim disk
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+                      /opt/ghc /usr/local/share/boost \
+                      /usr/local/share/powershell /usr/share/swift \
+                      "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          df -h /
+
+      # ---- INSTALL --------------------------------------------------
+      # The bootstrap script ends phase 1 by asking for a reboot,
+      # because group membership (kvm, cvdnetwork, render) does not
+      # apply to a running shell. We cannot reboot a runner, so we let
+      # phase 1 run, then re-enter the shell with the new groups via
+      # `sg` instead of rebooting.
+      - name: Install Cuttlefish (phase 1)
+        run: ./spikes/bootstrap_cuttlefish.sh
+
+      - name: Confirm the packages landed
+        run: |
+          set -eux
+          dpkg -l | grep -i cuttlefish
+          command -v cvd
+
+      # ---- BOOT -----------------------------------------------------
+      # `sg` starts a new shell with the group applied, which is the
+      # reboot-free equivalent of what phase 2 wants. Nested `sg` calls
+      # are ugly and are exactly the part most likely to need fiddling;
+      # if it misbehaves, `sudo chmod 666 /dev/kvm` is the usual
+      # shortcut people reach for in CI.
+      - name: Fetch image and boot one device (phase 2)
+        run: |
+          set -eux
+          sg cvdnetwork -c "sg render -c \"sg kvm -c './spikes/bootstrap_cuttlefish.sh'\""
+
+      # ---- THE REAL QUESTION ----------------------------------------
+      # Snapshot/restore needs these two flags specifically, and the
+      # smoke test in the script does not use them. This step is the
+      # actual reason the probe exists.
+      - name: Boot with the snapshot-capable flags
+        run: |
+          set -eux
+          cd "$HOME/cf/image"
+          sg cvdnetwork -c "sg render -c \"sg kvm -c '
+            cvd start --daemon \
+              --gpu_mode=guest_swiftshader \
+              --enable_virtiofs=false \
+              --report_anonymous_usage_stats=n
+          '\""
+          for i in $(seq 1 300); do
+            if adb -s 0.0.0.0:6520 shell getprop sys.boot_completed 2>/dev/null | grep -q 1; then
+              echo "BOOTED with guest_swiftshader after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "did not reach boot_completed in 300s"; exit 1
+
+      # Always collect the logs — a failed run is the informative one.
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p /tmp/out
+          cp /tmp/cf_*.log /tmp/out/ 2>/dev/null || true
+          cp -r "$HOME"/cf/image/cuttlefish/instances/*/logs /tmp/out/ 2>/dev/null || true
+          df -h / > /tmp/out/disk.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cuttlefish-logs
+          path: /tmp/out</code></pre>
+    </div>
+
+    <div class="panel note">
+      <span class="panel-label">Two honest caveats</span>
+      <p>
+        <strong>The <code>sg</code> nesting is my best guess, not verified.</strong> The bootstrap
+        script was written for a real machine that can reboot. This is the step I expect you to have
+        to adjust, and the probe existing at all is what makes adjusting it free.
+      </p>
+      <p>
+        <strong>Pin third-party actions to a SHA.</strong> Our own <code>ci.yml</code> enforces this
+        and the reasoning applies here too — a tag can be moved to any commit. The two actions above
+        are GitHub's own; if you add <code>mxschmitt/action-tmate</code> for debugging, pin it.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="a-run">
+  <div class="step-num">A3</div>
+  <div class="step-body">
+    <h2>Run it and read the result</h2>
+    <p class="step-hint">~30–60 minutes, unattended</p>
+    <p>
+      Push the workflow, then on GitHub go to <strong>Actions → Cuttlefish boot probe → Run
+      workflow</strong>. Then walk away; it is not interactive.
+    </p>
+    <p>What each outcome means:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Where it stops</th><th>What you have learned</th></tr></thead>
+        <tbody>
+          <tr><td>Gate step</td><td>GitHub changed something fundamental. Unlikely. Go to Track B.</td></tr>
+          <tr><td>Reclaim disk / fetch</td><td>The image does not fit in a free runner. Track A is out for boot testing; it can still lint flags. Go to Track B.</td></tr>
+          <tr><td>Install phase 1</td><td><strong>Genuinely valuable.</strong> Upstream packaging moved — exactly known issue 1. Fix the script here, free, before paying for a box.</td></tr>
+          <tr><td>The <code>sg</code> boot step</td><td>Probably the group workaround, not our config. Try <code>sudo chmod 666 /dev/kvm</code>.</td></tr>
+          <tr><td>SwiftShader boot step</td><td><strong>The finding this probe exists for.</strong> Our snapshot flags do not work as documented. Record the exact error.</td></tr>
+          <tr><td>Green</td><td>Our <code>cvd</code> configuration is sound. Arrive at Track B confident and spend the money on Appium instead.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Download the <strong>cuttlefish-logs</strong> artifact from the run summary either way, and
+      paste the interesting part back to me — the failures are more useful than the passes.
+    </p>
+  </div>
+</div>
+
+
+<!-- ============================================================================ TRACK B -->
+<section class="section-open" id="b-account">
+  <p class="eyebrow">Track B · Google Cloud <span class="chip chip-b">Trial credit</span></p>
+  <h2>The real workbench</h2>
+  <p>
+    Why Google rather than AWS, briefly: the free trial is $300 against roughly $100–200 of AWS
+    credits; the trial <strong>stops</strong> rather than billing your card; nested virtualisation
+    has worked here for years rather than months; and Cuttlefish's own reference environment is
+    Google Compute Engine — AOSP ships a tool specifically for building a GCE host image. For this
+    workload it is the better-trodden path.
+  </p>
+</section>
+
+<div class="step">
+  <div class="step-num">B1</div>
+  <div class="step-body">
+    <h2>Account and project</h2>
+    <p class="step-hint">~10 minutes · one-time</p>
+    <ol>
+      <li>Go to <strong>cloud.google.com</strong> and click <em>Get started for free</em>.</li>
+      <li>Sign in with a Google account and enter a card. <strong>It is used to prove you are a real
+        person and will not be charged</strong> unless you later choose to upgrade.</li>
+      <li>You now have <strong>$300 of credit, valid 90 days</strong>. The console shows the balance
+        and days remaining on its home page — glance at it each session.</li>
+      <li>Create a project named <code>mfarm-lab</code>. A project is a box that holds resources so
+        you can delete all of them together.</li>
+    </ol>
+    <div class="panel stop">
+      <span class="panel-label">Do not click this</span>
+      <p>
+        The console will repeatedly offer <strong>“Activate full account”</strong> or
+        <strong>“Upgrade”</strong>. Do not. It converts you to pay-as-you-go and removes the
+        stop-instead-of-charge protection that makes this exercise free. There is no benefit to you
+        during R&amp;D.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="b-budget">
+  <div class="step-num">B2</div>
+  <div class="step-body">
+    <h2>Set a budget alarm before creating anything</h2>
+    <p class="step-hint">~5 minutes · do this first, not last</p>
+    <p>
+      In the console search bar type <strong>Budgets &amp; alerts</strong>, then
+      <em>Create budget</em>. Scope it to the <code>mfarm-lab</code> project, set the amount to
+      <strong>$20</strong>, and tick alert thresholds at <strong>25%, 50%, 100%</strong>.
+    </p>
+    <div class="panel money">
+      <span class="panel-label">What a budget does and does not do</span>
+      <p>
+        A budget <strong>emails you</strong>. It does not stop anything. Automatically cutting off
+        spending needs extra plumbing that is not worth building for an R&amp;D week. Treat the email
+        as a smoke alarm: it tells you that you forgot to delete something, and step&nbsp;B11 is what
+        actually prevents that.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="b-vm">
+  <div class="step-num">B3</div>
+  <div class="step-body">
+    <h2>Create the box</h2>
+    <p class="step-hint">~5 minutes · the one screen that matters</p>
+    <p>
+      Easiest path: open <strong>Cloud Shell</strong> — the <code>&gt;_</code> icon at the top right
+      of the console. It is a free browser terminal with the <code>gcloud</code> tool already
+      installed, so you install nothing on your Mac. Cloud Shell itself is far too small to run
+      Cuttlefish; it is only where you type commands.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>Cloud Shell</span><button class="copy" type="button">Copy</button></div>
+<pre><code>gcloud config set project mfarm-lab
+gcloud services enable compute.googleapis.com
+
+gcloud compute instances create mfarm-lab \
+  --zone=asia-south1-c \
+  --machine-type=n2-standard-16 \
+  --enable-nested-virtualization \
+  --image-family=ubuntu-2404-lts-amd64 \
+  --image-project=ubuntu-os-cloud \
+  --boot-disk-size=150GB \
+  --boot-disk-type=pd-balanced</code></pre>
+    </div>
+    <p>What each line is choosing, since these are the decisions that matter:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Flag</th><th>Why this value</th></tr></thead>
+        <tbody>
+          <tr><td class="num">asia-south1-c</td><td>Mumbai. Closest to you, so SSH feels responsive.</td></tr>
+          <tr><td class="num">n2-standard-16</td><td>16 cores / 64 GB. SwiftShader renders on the CPU, so cores are the resource that matters. <strong>N2, not E2</strong> — E2 cannot do nested virtualisation at all.</td></tr>
+          <tr><td class="num">--enable-nested-<wbr>virtualization</td><td>The whole ballgame. Cannot be added later.</td></tr>
+          <tr><td class="num">ubuntu-2404-lts</td><td>What the bootstrap script targets.</td></tr>
+          <tr><td class="num">150GB pd-balanced</td><td>The script warns below 60 GB; images plus snapshots plus Docker want room. The main thing you pay for if you forget to delete it.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <span class="panel-label">If it refuses</span>
+      <p>
+        <strong>Quota errors</strong> are the usual first failure — trial accounts get a modest CPU
+        allowance per region. Drop to <code>--machine-type=n2-standard-8</code> and continue; 8 cores
+        is enough for one device, which is all M1 and M2 need. <strong>If the flag itself is
+        rejected</strong>, your <code>gcloud</code> is old — run <code>gcloud components update</code>,
+        or create the VM through the console UI where the setting lives under
+        <em>Advanced options → CPU platform and GPU → Enable nested virtualization</em>.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="b-gate">
+  <div class="step-num">B4</div>
+  <div class="step-body">
+    <h2>Connect, and check the gate</h2>
+    <p class="step-hint">~5 minutes · <span class="chip chip-both">M0</span></p>
+    <p>
+      In the console go to <strong>Compute Engine → VM instances</strong> and click
+      <strong>SSH</strong> next to <code>mfarm-lab</code>. A terminal opens in a browser tab with
+      keys handled for you — nothing to configure.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>ls -l /dev/kvm
+egrep -c '(vmx|svm)' /proc/cpuinfo
+sudo apt-get update -qq && sudo apt-get install -y -qq cpu-checker
+sudo kvm-ok
+nproc && free -g && df -h /</code></pre>
+    </div>
+    <div class="panel stop">
+      <span class="panel-label">Hard stop</span>
+      <p>
+        You need <code>/dev/kvm</code> to exist, the <code>egrep</code> count to be greater than
+        zero, and <code>kvm-ok</code> to say <em>KVM acceleration can be used</em>. If any of those
+        fail, the VM was created without nested virtualisation and <strong>no amount of
+        configuration will fix it</strong>. Delete it (step B11) and recreate it with the flag.
+        Nothing below this line is worth attempting first.
+      </p>
+    </div>
+    <p>That's <strong>M0</strong>. Tick it.</p>
+  </div>
+</div>
+
+<div class="step" id="b-code">
+  <div class="step-num">B5</div>
+  <div class="step-body">
+    <h2>Get the code across</h2>
+    <p class="step-hint">~10 minutes</p>
+    <p>
+      If <code>MFARM_CLOUD</code> is pushed to GitHub, clone it on the VM. If it only exists on your
+      Mac, copy it up from Cloud Shell or your laptop — the second command excludes the things that
+      must not travel.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>option 1 — from GitHub, on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>sudo apt-get install -y git
+git clone https://github.com/YOUR-USERNAME/MFARM_CLOUD.git ~/mfarm
+cd ~/mfarm</code></pre>
+    </div>
+    <div class="cmd">
+      <div class="cmd-head"><span>option 2 — from your Mac</span><button class="copy" type="button">Copy</button></div>
+<pre><code>cd ~/Downloads
+tar --exclude=node_modules --exclude=.git \
+    --exclude=deploy/secrets --exclude=deploy/.env \
+    -czf mfarm.tgz MFARM_CLOUD
+
+gcloud compute scp mfarm.tgz mfarm-lab:~ --zone=asia-south1-c
+gcloud compute ssh mfarm-lab --zone=asia-south1-c \
+  --command 'tar xzf mfarm.tgz && mv MFARM_CLOUD mfarm && ls mfarm'</code></pre>
+    </div>
+    <div class="panel stop">
+      <span class="panel-label">Never copy these</span>
+      <p>
+        <code>deploy/secrets/</code> and <code>deploy/.env</code> are excluded above deliberately.
+        Generate fresh throwaway secrets on the VM. A signing key that has been on a machine you are
+        about to delete should never be the key your real farm uses later.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="b-bootstrap">
+  <div class="step-num">B6</div>
+  <div class="step-body">
+    <h2>Bootstrap Cuttlefish</h2>
+    <p class="step-hint">~1–2 hours, mostly waiting · <span class="chip chip-both">M1</span></p>
+    <p>
+      Our script does the work: installs build dependencies, builds and installs the Cuttlefish
+      Debian packages, adds you to the <code>kvm</code>, <code>cvdnetwork</code> and
+      <code>render</code> groups, downloads a prebuilt Android image, then boots one device as a
+      smoke test. <strong>It runs in two phases with a reboot between them</strong>, because group
+      membership does not apply to a shell that is already running.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM — phase 1</span><button class="copy" type="button">Copy</button></div>
+<pre><code>cd ~/mfarm
+./spikes/bootstrap_cuttlefish.sh
+# it will stop and tell you to reboot
+sudo reboot</code></pre>
+    </div>
+    <p>
+      The browser SSH tab will disconnect. Wait about thirty seconds, reopen it, and run the same
+      command — the script keeps state in <code>~/.mfarm_bootstrap</code> and resumes rather than
+      redoing work.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM — phase 2, after reboot</span><button class="copy" type="button">Copy</button></div>
+<pre><code>cd ~/mfarm
+./spikes/bootstrap_cuttlefish.sh</code></pre>
+    </div>
+    <div class="panel note">
+      <span class="panel-label">Prove the image is real Android 17 later, not now</span>
+      <p>
+        The script defaults to the <code>aosp-main</code> branch. Our plan targets Android 17
+        (<code>android-17.0.0_r1</code>), but do not fight two unknowns at once — get
+        <em>anything</em> booting first. Once it does, re-run pinned to the release branch with
+        <code>BRANCH=... ./spikes/bootstrap_cuttlefish.sh</code>, and confirm with
+        <code>adb -s 0.0.0.0:6520 shell getprop ro.build.version.release</code>.
+      </p>
+    </div>
+    <p>
+      When it prints <strong>READY</strong> with a cold-boot time, that is <strong>M1</strong>.
+      Write the number down — it is the baseline every later reset time is compared against.
+    </p>
+  </div>
+</div>
+
+<div class="step" id="b-snapshot">
+  <div class="step-num">B7</div>
+  <div class="step-body">
+    <h2>Snapshot and restore</h2>
+    <p class="step-hint">~30 minutes · <span class="chip chip-both">M2</span></p>
+    <p>
+      This is the load-bearing one. Our entire reset story — “a released device is restored from a
+      snapshot in about three seconds rather than cold-booted in thirty-five” — depends on it, and it
+      only works with a <strong>software GPU</strong>. Two flags are mandatory and the smoke test
+      above did not use them.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>cd ~/cf/image
+cvd stop || true
+
+# The two flags that buy snapshot support.
+cvd start --daemon \
+  --gpu_mode=guest_swiftshader \
+  --enable_virtiofs=false \
+  --report_anonymous_usage_stats=n
+
+# wait for it, then take a snapshot
+adb -s 0.0.0.0:6520 wait-for-device
+adb -s 0.0.0.0:6520 shell getprop sys.boot_completed
+
+cvd snapshot_take --snapshot_path=$HOME/cf/snap1
+
+# now restore it, and TIME it — this number is the whole point
+cvd stop
+time cvd start --daemon --snapshot_path=$HOME/cf/snap1
+adb -s 0.0.0.0:6520 shell getprop sys.boot_completed</code></pre>
+    </div>
+    <div class="panel">
+      <span class="panel-label">What to record</span>
+      <ul>
+        <li>Did <code>snapshot_take</code> succeed, and how long did it take?</li>
+        <li><strong>How many seconds did the restore take?</strong> Compare with your M1 cold boot.</li>
+        <li>Did the restored device actually work — can <code>adb shell</code> still drive it?</li>
+        <li>Any complaint about the two flags. If snapshot support has moved upstream, this is
+          exactly the known-issue-1 finding, and it is worth the whole day on its own.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="b-appium">
+  <div class="step-num">B8</div>
+  <div class="step-body">
+    <h2>Appium, for real</h2>
+    <p class="step-hint">~2–3 hours · <span class="chip chip-both">M3 — the deliverable</span></p>
+    <p>
+      Everything runs on this one machine: Postgres, the control plane, the worker agent and Appium.
+      That is fine — the production compose stack binds only to loopback, so it all talks to itself.
+    </p>
+
+    <h3>Bring up the control plane</h3>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>cd ~/mfarm
+sudo apt-get install -y docker.io docker-compose-v2 nodejs npm
+sudo usermod -aG docker $USER && newgrp docker
+
+# throwaway secrets — never the ones a real farm would use
+mkdir -p deploy/secrets && chmod 700 deploy/secrets
+openssl genpkey -algorithm ed25519 -out deploy/secrets/session_signing_key.pem
+openssl pkey -in deploy/secrets/session_signing_key.pem -pubout \
+  -out deploy/secrets/session_public_key.pem
+openssl rand -base64 32 | tr -d '/+=' > deploy/secrets/worker_registration_token
+printf '%s' "$(openssl rand -base64 32 | tr -d '/+=')" > deploy/secrets/metrics_token
+printf '%s' "$(openssl rand -base64 24 | tr -d '/+=')" > deploy/secrets/grafana_admin_password
+chmod 600 deploy/secrets/*
+
+cp deploy/.env.example deploy/.env
+nano deploy/.env        # fill POSTGRES_PASSWORD and APP_DB_PASSWORD with anything
+
+docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build
+curl -fsS http://127.0.0.1:3000/health && echo</code></pre>
+    </div>
+    <p>
+      Then make the database agree with the password you chose — the control plane refuses to start
+      against the committed development password, deliberately.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>docker exec -i mfarm-postgres-1 psql -U mfarm -d mfarm \
+  -c "ALTER ROLE mfarm_app WITH PASSWORD '<the APP_DB_PASSWORD you set>'"
+docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env restart api</code></pre>
+    </div>
+
+    <h3>Seed the database, or nothing below will work</h3>
+    <p>
+      A freshly migrated database has the schema and nothing in it. Two things are missing and
+      neither announces itself usefully: the <code>regions</code> table is empty, and
+      <code>hosts.region</code> is a foreign key into it — so worker registration fails on a
+      constraint violation rather than on anything that names the problem. And no tenant API key
+      exists, so every route except the health probes refuses you.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>cd ~/mfarm
+eval "$(DATABASE_URL="postgres://mfarm:$POSTGRES_PASSWORD@127.0.0.1:5432/mfarm" \
+        REGION=lab node apps/api/scripts/seed-lab.mjs)"
+
+echo "$MFARM_API_KEY"     # mfk_… — shown once, only its hash is stored
+echo "$MFARM_REGION"      # lab</code></pre>
+    </div>
+    <div class="panel good">
+      <span class="panel-label">Found before you paid for it</span>
+      <p>
+        <code>seed-lab.mjs</code> did not exist until this runbook was written — the gap was found by
+        checking the commands against the code rather than by discovering it on a metered box. It is
+        idempotent: re-running reuses the region and org and mints an additional key.
+      </p>
+    </div>
+
+    <h3>Start the worker with Appium</h3>
+    <p>
+      Five of these are <strong>required</strong> — the agent throws <code>X is required</code> and
+      exits if any is unset. <code>CF_IMAGE_DIR</code> is where step&nbsp;B6 put the image, and
+      <code>CF_INSTANCES</code> is what makes step&nbsp;B9's two devices happen.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>sudo npm install -g appium
+appium driver install uiautomator2
+
+cd ~/mfarm && npm install
+
+# the device must already be running — see step B7
+CONTROL_PLANE_URL=http://127.0.0.1:3000 \
+WORKER_REGISTRATION_TOKEN="$(cat deploy/secrets/worker_registration_token)" \
+REGION="$MFARM_REGION" \
+PUBLIC_ENDPOINT=ws://127.0.0.1:8080 \
+PUBLIC_HOST=127.0.0.1 \
+CF_IMAGE_DIR="$HOME/cf/image" \
+CF_INSTANCES=1 \
+APPIUM_ENABLED=1 \
+APPIUM_ADVERTISE_HOST=127.0.0.1 \
+BIND_HOST=127.0.0.1 \
+node --experimental-strip-types workers/agent/src/index.ts</code></pre>
+    </div>
+    <div class="panel note">
+      <span class="panel-label">If it says “Cuttlefish unavailable”</span>
+      <p>
+        The agent falls back to the AVD tier and asks for <code>AVD_NAME</code>, which is not what we
+        are testing. That message means <code>CuttlefishDevice.available()</code> said no — check
+        <code>CF_IMAGE_DIR</code> points at the directory containing the unpacked image, and that
+        <code>cvd</code> is on <code>PATH</code> in this shell.
+      </p>
+    </div>
+    <p>
+      In a second SSH tab, confirm the control plane can actually see a device before you try to
+      drive one. <code>$MFARM_API_KEY</code> came from the seed step — re-run the
+      <code>eval</code> line in the new tab to have it there too.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>second tab</span><button class="copy" type="button">Copy</button></div>
+<pre><code>curl -s -H "Authorization: Bearer $MFARM_API_KEY" \
+  http://127.0.0.1:3000/v1/devices | head -40
+
+# and watch the farm's own metrics while you work
+curl -s -H "Authorization: Bearer $(cat ~/mfarm/deploy/secrets/metrics_token)" \
+  http://127.0.0.1:9464/metrics | grep '^mfarm_devices'</code></pre>
+    </div>
+
+    <div class="panel note">
+      <span class="panel-label">This is where disagreement is expected</span>
+      <p>
+        The hub has never spoken to a real Appium server and the supervisor has never supervised one.
+        When something disagrees here, <strong>capture the exact request and response</strong> — that
+        is a repo bug worth fixing properly, not something to work around on the box. The
+        <code>mfarm_devices</code> and <code>mfarm_sessions</code> gauges above tell you what the
+        control plane believes, which is usually the fastest way to see where reality diverged.
+      </p>
+    </div>
+    <p>
+      Then point a real suite at it. If the fleet reports a READY device and one unmodified Appium
+      test goes green through <code>MFARM_WEBDRIVER_URL</code>, that is <strong>M3</strong>, and it
+      is the single most valuable thing this project has ever produced.
+    </p>
+  </div>
+</div>
+
+<div class="step" id="b-two">
+  <div class="step-num">B9</div>
+  <div class="step-body">
+    <h2>Two devices</h2>
+    <p class="step-hint">~1 hour · <span class="chip chip-both">M4</span></p>
+    <div class="cmd">
+      <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
+<pre><code>cd ~/cf/image
+cvd stop || true
+cvd start --daemon --num_instances=2 \
+  --gpu_mode=guest_swiftshader --enable_virtiofs=false \
+  --report_anonymous_usage_stats=n
+
+adb devices        # expect 0.0.0.0:6520 AND 0.0.0.0:6521</code></pre>
+    </div>
+    <p>Then restart the worker with <code>CF_INSTANCES=2</code> so it registers both.</p>
+    <p>
+      Two serials means the worker's per-device <code>systemPort</code> and
+      <code>mjpegServerPort</code> derivation gets its first real test, and the control plane should
+      show two allocatable devices. Run the suite sharded across both. Watch CPU with
+      <code>htop</code> — SwiftShader is CPU-bound and two devices on 16 cores is the first honest
+      look at what this box can hold.
+    </p>
+  </div>
+</div>
+
+<div class="step" id="b-save">
+  <div class="step-num">B10</div>
+  <div class="step-body">
+    <h2>Save the work before you destroy it</h2>
+    <p class="step-hint">~5 minutes · the optimisation that matters</p>
+    <p>
+      Bootstrapping takes one to two hours, almost all of it downloading. Do it <strong>once</strong>.
+      A disk snapshot is compressed, incremental and costs a few rupees a month, and every future
+      session starts from a machine that already has Cuttlefish installed and the image downloaded.
+    </p>
+    <div class="cmd">
+      <div class="cmd-head"><span>Cloud Shell</span><button class="copy" type="button">Copy</button></div>
+<pre><code>gcloud compute disks snapshot mfarm-lab \
+  --zone=asia-south1-c \
+  --snapshot-names=mfarm-cf-ready</code></pre>
+    </div>
+    <p>Next session, recreate from it instead of starting over:</p>
+    <div class="cmd">
+      <div class="cmd-head"><span>Cloud Shell — next time</span><button class="copy" type="button">Copy</button></div>
+<pre><code>gcloud compute disks create mfarm-lab \
+  --source-snapshot=mfarm-cf-ready \
+  --zone=asia-south1-c --type=pd-balanced
+
+gcloud compute instances create mfarm-lab \
+  --zone=asia-south1-c \
+  --machine-type=n2-standard-16 \
+  --enable-nested-virtualization \
+  --disk=name=mfarm-lab,boot=yes,auto-delete=yes</code></pre>
+    </div>
+    <p>Also copy off anything you want to keep — logs, timings, notes:</p>
+    <div class="cmd">
+      <div class="cmd-head"><span>from your Mac or Cloud Shell</span><button class="copy" type="button">Copy</button></div>
+<pre><code>gcloud compute scp --recurse \
+  mfarm-lab:/tmp/cf_start.log mfarm-lab:/tmp/cf_build.log . \
+  --zone=asia-south1-c</code></pre>
+    </div>
+  </div>
+</div>
+
+<div class="step" id="b-destroy">
+  <div class="step-num">B11</div>
+  <div class="step-body">
+    <h2>Destroy everything</h2>
+    <p class="step-hint">~2 minutes · never skip this</p>
+    <div class="cmd">
+      <div class="cmd-head"><span>Cloud Shell</span><button class="copy" type="button">Copy</button></div>
+<pre><code>gcloud compute instances delete mfarm-lab --zone=asia-south1-c --quiet
+
+# the step people forget — a disk can outlive its machine and keeps billing
+gcloud compute disks list
+gcloud compute instances list
+gcloud compute snapshots list      # snapshots are cheap; keep mfarm-cf-ready</code></pre>
+    </div>
+    <div class="panel money">
+      <span class="panel-label">The end-of-session check</span>
+      <p>
+        <code>instances list</code> must be empty. <code>disks list</code> must be empty, or contain
+        only disks you consciously decided to keep. If a disk is listed and you do not know why it is
+        there, delete it: <code>gcloud compute disks delete NAME --zone=asia-south1-c</code>. Keeping
+        <code>mfarm-cf-ready</code> as a snapshot is correct and costs almost nothing.
+      </p>
+    </div>
+    <p>
+      Then look at the credit balance on the console home page. After a full day it should have moved
+      by single-digit dollars. If it moved more, something is still running.
+    </p>
+  </div>
+</div>
+
+
+<!-- ============================================================================ TROUBLESHOOTING -->
+<section class="section-open" id="wrong">
+  <p class="eyebrow">99 — Recovery</p>
+  <h2>When it goes wrong</h2>
+  <p>
+    It will. These are the failures I expect, in the order you are likely to hit them.
+  </p>
+
+  <details>
+    <summary><code>/dev/kvm</code> is missing on the VM</summary>
+    <p>
+      Nested virtualisation was not enabled, or you picked an E2 machine type, or an Arm one. It
+      cannot be turned on afterwards. Delete the instance and recreate it with
+      <code>--enable-nested-virtualization</code> and an N2 machine type.
+    </p>
+  </details>
+
+  <details>
+    <summary>Quota exceeded when creating the instance</summary>
+    <p>
+      Trial accounts get a limited CPU allowance per region. Use
+      <code>--machine-type=n2-standard-8</code>, or try a different zone
+      (<code>asia-south1-a</code>, <code>asia-south1-b</code>). Eight cores is enough for M0 through
+      M3; only M4 and M5 really want sixteen.
+    </p>
+  </details>
+
+  <details>
+    <summary>The bootstrap script dies while building the Debian packages</summary>
+    <p>
+      This is <strong>known issue 1 arriving on schedule</strong> — upstream <code>android-cuttlefish</code>
+      changes its build steps. The script writes the full log to <code>/tmp/cf_build.log</code> and
+      prints the last 25 lines. Send me that, plus the current
+      <a href="https://github.com/google/android-cuttlefish">upstream README</a>, and we fix the
+      script in the repo rather than patching it on a box you are about to delete.
+    </p>
+  </details>
+
+  <details>
+    <summary>“not in group 'kvm' yet”</summary>
+    <p>
+      The reboot did not happen or you reconnected to an old shell. Run <code>sudo reboot</code>,
+      wait thirty seconds, open a fresh SSH tab, and check with <code>id -nG</code>. You need
+      <code>kvm</code>, <code>cvdnetwork</code> and <code>render</code>.
+    </p>
+  </details>
+
+  <details>
+    <summary>The device never reaches <code>boot_completed</code></summary>
+    <p>
+      Read <code>/tmp/cf_start.log</code> and the per-instance logs under
+      <code>~/cf/image/cuttlefish/instances/*/logs/</code>. Common causes: not enough RAM (check
+      <code>free -g</code>), a partly downloaded image (delete <code>~/cf/image</code> and refetch),
+      or a flag upstream no longer accepts. Try booting with no extra flags first to isolate which.
+    </p>
+  </details>
+
+  <details>
+    <summary>Everything works but the control plane shows no devices</summary>
+    <p>
+      That is our bug, not Cuttlefish's, and it is a good find. Check the worker registered
+      (<code>POST /v1/workers/register</code> in its output), then read the metrics endpoint in step
+      B8 — <code>mfarm_devices</code> tells you what the control plane believes and
+      <code>mfarm_hosts</code> whether the worker is heartbeating at all. Capture both and send them.
+    </p>
+  </details>
+
+  <details>
+    <summary>I am out of time / it is going badly</summary>
+    <p>
+      Snapshot the disk (B10), destroy the machine (B11), and stop. The snapshot means the next
+      session resumes rather than restarts. A session that ends at M1 with a clear note about what
+      broke is worth more than a rushed one that ends confused.
+    </p>
+  </details>
+
+  <h3>What to write down, wherever you stop</h3>
+  <p>
+    Add findings to <code>HANDOFF.md</code> and <code>docs/MVP_PLAN.md</code> the same day — the repo
+    is this project's memory, and a fact that lives only in a terminal scrollback is a fact you will
+    pay to rediscover.
+  </p>
+  <ul>
+    <li>The <code>cvd</code> flags that actually worked, verbatim, and any that did not.</li>
+    <li>Cold-boot seconds, and snapshot-restore seconds beside them.</li>
+    <li>Whether <code>guest_swiftshader</code> plus <code>enable_virtiofs=false</code> really gives
+      working snapshots.</li>
+    <li>Every place the real Appium disagreed with our hub or supervisor.</li>
+    <li><strong>“nested virt, n2-standard-16”</strong> written next to any performance number — a
+      future reader must not mistake it for bare-metal.</li>
+  </ul>
+</section>
+
+<footer class="end">
+  <p>
+    <strong>MFARM · Phase 0 hardware day.</strong> Canonical copy lives at
+    <code>docs/HARDWARE_DAY.html</code> in the repo. Track A costs nothing and needs no card; Track B
+    costs a few dollars of a $300 trial credit. Nothing in this document requires spending real money.
+  </p>
+</footer>
+
+</div>
+
+<script>
+  // Copy buttons. The command blocks are the whole point of the page, and retyping a gcloud
+  // invocation by hand is how a zone ends up mismatched between two steps.
+  document.querySelectorAll('.cmd').forEach(function (block) {
+    var btn = block.querySelector('.copy');
+    var pre = block.querySelector('pre');
+    if (!btn || !pre) return;
+    btn.addEventListener('click', function () {
+      navigator.clipboard.writeText(pre.innerText).then(function () {
+        var was = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.classList.add('done');
+        setTimeout(function () { btn.textContent = was; btn.classList.remove('done'); }, 1400);
+      }).catch(function () {
+        btn.textContent = 'Select it';
+      });
+    });
+  });
+
+  // Milestone progress survives a reload, because this is followed across a session in which the
+  // machine — and possibly the browser tab — gets restarted.
+  document.querySelectorAll('.checklist input[type="checkbox"]').forEach(function (box) {
+    var key = 'mfarm-hwday-' + box.id;
+    try {
+      if (localStorage.getItem(key) === '1') box.checked = true;
+      box.addEventListener('change', function () {
+        localStorage.setItem(key, box.checked ? '1' : '0');
+      });
+    } catch (e) { /* private browsing; the checkbox still works, it just will not persist */ }
+  });
+</script>
