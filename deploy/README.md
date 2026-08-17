@@ -74,20 +74,23 @@ alive. It is deliberately not `/ready`, which touches both pools: a database-tou
 turns a brief blip into a restart loop that outlasts the blip. Use `/ready` from your own monitoring,
 where a 503 means "do not send traffic" rather than "kill this container".
 
-### Unverified
+### The image, verified 2026-08-17
 
-The image built and ran in development, and then a `COPY` fix was made — `npm` does not hoist
-`@fastify/rate-limit` to the root `node_modules`, so copying only that directory produced an image
-that built cleanly and died at startup with `ERR_MODULE_NOT_FOUND`. The fix copies the whole
-installed tree. **That rebuild has not been executed**, because registry access was unavailable at
-the time. Run it once before trusting the stack:
+`npm` does not hoist `@fastify/rate-limit` to the root `node_modules` — this lockfile places it under
+`apps/api/node_modules/` — so an earlier `COPY` of the root directory alone produced an image that
+built cleanly and died at startup with `ERR_MODULE_NOT_FOUND`. The fix copies the whole installed
+tree, and **that rebuild has now been executed**: the image builds and exits **78** (`EX_CONFIG`)
+with all three refusals listed, which is the correct answer for no keys and no database.
+
+Re-run it after any dependency change, because this failure is invisible until startup:
 
 ```bash
 docker build -f apps/api/Dockerfile -t mfarm-api:test .
 docker run --rm -e NODE_ENV=production mfarm-api:test; echo "expect 78, got $?"
 ```
 
-Exit **78** is the correct answer there: `EX_CONFIG`, refusing to start with no keys and no database.
+Still unverified: the image has never run **against a real database**, and no worker has ever
+registered with it.
 
 ## What you get, and what you do not
 
