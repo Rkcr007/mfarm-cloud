@@ -225,25 +225,89 @@ c_ok "cvd $(cvd version 2>/dev/null | head -1 || echo present)"
 if ! phase_done image; then
   echo; echo "== phase 2: fetch device image (${BRANCH} / ${CF_TARGET}) =="
   mkdir -p "$WORKDIR/image"; cd "$WORKDIR/image"
+  # `cvd fetch` with a bare branch/target resolves the NEWEST build id and downloads it blindly.
+  # The newest build is frequently not one whose artifacts finished uploading, and the build API
+  # cheerfully mints a signed download URL for an object that was never written — so the download
+  # dies with a bare "File Not Found" that reads like a missing target rather than an unfinished
+  # build. Resolve a build that demonstrably HAS the image, and pin the fetch to it.
+  BUILD_API="https://androidbuildinternal.googleapis.com/android/internal/build/v3"
+  # Artifact is named after the target with the build variant stripped:
+  #   aosp_cf_x86_64_phone-userdebug  ->  aosp_cf_x86_64_phone-img-<id>.zip
+  CF_PRODUCT="${CF_TARGET%-*}"
+
+  # True when the image zip for this build id is actually present in storage. A range request keeps
+  # this to a kilobyte rather than pulling the whole multi-GB object just to test existence; a real
+  # object answers 206, a missing one answers 404 with a NoSuchKey body.
+  build_has_image() {
+    local id=$1 code
+    code=$(curl -sSL --max-time 45 -o /dev/null -r 0-1023 -w '%{http_code}' \
+      "${BUILD_API}/builds/${id}/${CF_TARGET}/attempts/latest/artifacts/${CF_PRODUCT}-img-${id}.zip/url?redirect=true" 2>/dev/null)
+    [ "$code" = 206 ] || [ "$code" = 200 ]
+  }
+
+  resolve_build_id() {
+    local list ids id
+    list=$(curl -sS --max-time 30 \
+      "${BUILD_API}/builds?branch=${BRANCH}&buildType=submitted&target=${CF_TARGET}&maxResults=25&successful=true" 2>/dev/null) || return 1
+    # The legacy v3 API is being retired and throttles anonymous callers hard. Its 403 is not a
+    # missing build, so say so rather than letting it look like one.
+    if printf '%s' "$list" | grep -q rateLimitExceeded; then
+      c_warn "build API is rate-limiting this IP (legacy v3 API); cannot list builds"
+      return 1
+    fi
+    ids=$(printf '%s' "$list" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+for b in d.get("builds", []):
+    if b.get("buildId"): print(b["buildId"])
+' 2>/dev/null) || return 1
+    [ -n "$ids" ] || return 1
+    for id in $ids; do
+      if build_has_image "$id"; then printf '%s' "$id"; return 0; fi
+      c_info "build ${id} has no image zip yet, trying the one before it" >&2
+    done
+    return 1
+  }
+
+  if [ -n "${CF_BUILD_ID:-}" ]; then
+    c_ok "using pinned CF_BUILD_ID=${CF_BUILD_ID}"
+  else
+    c_info "resolving newest build that has a published image"
+    CF_BUILD_ID=$(resolve_build_id) \
+      || die "could not find a build with a published image for ${BRANCH}/${CF_TARGET}.
+
+  Either the build API is throttling this IP, or none of the last 25 successful builds have
+  finished uploading their artifacts.
+
+  Pick a build by hand from https://ci.android.com/builds/branches/${BRANCH}/grid — choose a green
+  one that lists ${CF_PRODUCT}-img-<id>.zip among its artifacts — then re-run pinned to it:
+
+      CF_BUILD_ID=<id> $0"
+    c_ok "build ${CF_BUILD_ID} has a published image"
+  fi
+
   c_info "downloading, this is several GB"
-  fetch_once() { cvd fetch --default_build="${BRANCH}/${CF_TARGET}" >/tmp/cf_fetch.log 2>&1; }
+  fetch_once() { cvd fetch --default_build="${CF_BUILD_ID}/${CF_TARGET}" >/tmp/cf_fetch.log 2>&1; }
   if retry 4 45 "cvd fetch" fetch_once; then
-    c_ok "image fetched via cvd fetch"
+    c_ok "image fetched via cvd fetch (build ${CF_BUILD_ID})"
   else
     c_warn "cvd fetch failed; see /tmp/cf_fetch.log"
     rate_limited /tmp/cf_fetch.log \
       && c_warn "the log shows rate limiting — waiting an hour and re-running is likely enough"
     cat <<EOF
 
-  Manual fallback — from https://ci.android.com/ pick branch ${BRANCH},
-  target ${CF_TARGET}, latest green build, then download into $PWD:
+  Manual fallback. Note that ci.android.com is a JavaScript app: fetching an artifact path with
+  curl returns its HTML shell, not the file. Go through the build API instead, which redirects to
+  real storage:
 
-      aosp_cf_*-img-*.zip      (the device image)
-      cvd-host_package.tar.gz  (the host tools)
-
-  and unpack:
-
-      unzip aosp_cf_*-img-*.zip && tar xzf cvd-host_package.tar.gz
+      cd $PWD
+      B=${CF_BUILD_ID}
+      for A in ${CF_PRODUCT}-img-\$B.zip cvd-host_package.tar.gz; do
+        curl -L -o "\$A" \\
+          "${BUILD_API}/builds/\$B/${CF_TARGET}/attempts/latest/artifacts/\$A/url?redirect=true"
+      done
+      unzip -o ${CF_PRODUCT}-img-\$B.zip && tar xzf cvd-host_package.tar.gz
 
   Then re-run this script.
 EOF
