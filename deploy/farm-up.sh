@@ -167,6 +167,10 @@ fi
 # device (0s), restore a stopped one from its snapshot (8s), or cold boot (38s, first time only,
 # after which it takes the golden snapshot the other two rungs depend on).
 say "Worker"
+# The control plane runs from an image; the worker runs from the checkout, so it needs the workspace
+# dependencies (`ws`, and the @mfarm/protocol workspace link) present on the host. Cheap and
+# idempotent when they already are.
+(cd "$REPO_ROOT" && npm install --silent) || die "npm install failed in $REPO_ROOT"
 command -v tmux >/dev/null || die "tmux not found — apt-get install -y tmux. Running the worker in a foreground SSH shell loses the devices when the tab drops."
 
 if tmux has-session -t mfarm-worker 2>/dev/null; then
