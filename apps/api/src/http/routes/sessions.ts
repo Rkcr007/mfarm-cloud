@@ -162,6 +162,51 @@ export async function sessionRoutes(app: FastifyInstance) {
     return reply.code(status).send(payload);
   }
 
+  /**
+   * Recent sessions for this org, newest first.
+   *
+   * Deliberately NOT paginated by offset. Sessions are append-only and a farm generates them
+   * steadily, so an offset walks a shifting list; a caller who needs more than this asks for a
+   * larger limit or filters by state. `limit` is clamped rather than validated into an error,
+   * because the console asking for too many is not worth a failed page.
+   *
+   * No data-plane token here, unlike GET /sessions/:id. A list is a browsing surface and minting a
+   * live device credential for every row of it would hand out N credentials to answer one question.
+   */
+  app.get<{ Querystring: { limit?: string; state?: string } }>('/sessions', async (req) => {
+    const { orgId } = requireTenant(req);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const state = typeof req.query.state === 'string' ? req.query.state : undefined;
+
+    const rows = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT s.id, s.state, s.device_id, s.region, s.created_at, s.started_at, s.ended_at,
+                s.end_reason, d.local_id AS device_local_id, d.model AS device_model
+           FROM sessions s
+           LEFT JOIN devices d ON d.id = s.device_id
+          WHERE ($1::text IS NULL OR s.state = $1::session_state)
+          ORDER BY s.created_at DESC
+          LIMIT $2`,
+        [state ?? null, limit],
+      );
+      return rows;
+    });
+
+    return {
+      sessions: rows.map((r: Record<string, unknown>) => ({
+        id: r.id,
+        state: r.state,
+        region: r.region,
+        deviceId: r.device_id,
+        device: r.device_local_id ?? r.device_model ?? null,
+        createdAt: r.created_at,
+        startedAt: r.started_at,
+        endedAt: r.ended_at,
+        endReason: r.end_reason,
+      })),
+    };
+  });
+
   app.get<{ Params: { id: string } }>('/sessions/:id', async (req) => {
     const { orgId } = requireTenant(req);
     const row = await withTenant(orgId, async (c) => {

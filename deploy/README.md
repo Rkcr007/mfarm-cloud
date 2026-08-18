@@ -43,6 +43,40 @@ with the reason buried in a compose log), seeds the region and org and mints one
 `deploy/.state/api_key`, then starts the worker in a tmux session named `mfarm-worker` — tmux
 because a dropped SSH tab otherwise takes the devices with it.
 
+### The web console
+
+`farm-up.sh` also creates a console user — `admin@mfarm.local` by default, or `$CONSOLE_EMAIL` — and
+writes a generated password to `deploy/.state/console_password` (mode 600). Open the API's own origin
+in a browser to reach it:
+
+```bash
+cat deploy/.state/console_password        # the password, shown from disk rather than a log
+xdg-open http://<host>:3000/              # the console is served by the API itself
+```
+
+The API port is loopback-bound, so reach it as `http://localhost:3000` through an SSH tunnel, or put
+`tailscale serve` in front for real HTTPS. Both work with the default cookie settings — a browser
+treats `localhost` as a secure context. If you instead re-publish the port and reach it over plain
+HTTP on a tailnet or LAN address, set `SESSION_COOKIE_SECURE=0` in `deploy/.env`, or the browser will
+refuse to store the cookie and signing in will appear to do nothing.
+
+Sign in there to see the fleet, device state and capabilities, recent sessions, and the WebDriver URL
+a suite should point at. It is the same API underneath: the browser holds a session cookie instead of
+an API key, and every unsafe request carries a CSRF header.
+
+Add or reset a user by hand — re-running for an existing email is the password-reset path, and it
+invalidates that person's live sessions:
+
+```bash
+DATABASE_URL=postgres://... node --experimental-strip-types \
+  apps/api/src/bin/create-user.ts someone@example.com '<a long password>' lab admin
+```
+
+Two things the console deliberately does not do yet: **there is no interactive device view**, because
+media needs the TURN relay chosen in ADR-0005 and that is not deployed; and **a session cannot be
+pinned to a specific device**, because the allocator picks one. Both are stated in the UI rather than
+hidden behind a disabled button.
+
 It does **not** do Tailscale, TLS, or the observability stack. Those need a decision from a human
 rather than a default, and they are the sections below.
 

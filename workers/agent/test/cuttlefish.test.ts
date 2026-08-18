@@ -411,7 +411,7 @@ describe('a group that exists but does not work is rebuilt, once', () => {
     await d.start();
 
     const { readdir } = await import('node:fs/promises');
-    assert.equal((await readdir(snapshotDir).catch(() => [])).includes('snapshot.pb'), false);
+    assert.equal((await readdir(snapshotDir).catch(() => [] as string[])).includes('snapshot.pb'), false);
     await callTo('cvd', 'snapshot_take');
   });
 

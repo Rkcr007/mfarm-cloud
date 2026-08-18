@@ -11,7 +11,11 @@ import { withSystem } from './db.ts';
 
 export type Principal =
   | { kind: 'tenant'; orgId: string; keyId: string }
-  | { kind: 'worker'; hostId: string; region: string };
+  | { kind: 'worker'; hostId: string; region: string }
+  // A logged-in person, from `users.ts`. Structurally identical to `SessionPrincipal` there and
+  // restated rather than imported, because users.ts already imports this module and a cycle between
+  // the two would be a worse price than one duplicated shape.
+  | { kind: 'user'; userId: string; orgId: string; role: string; sessionId: string; csrf: string };
 
 const KEY_PREFIX_LEN = 12;
 

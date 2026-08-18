@@ -1,10 +1,14 @@
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
-import { authenticate, type Principal } from '../auth.ts';
+import { timingSafeEqual } from 'node:crypto';
+import { authenticate, sha256, type Principal } from '../auth.ts';
+import { authenticateSession, cookieValue, CSRF_HEADER, SESSION_COOKIE } from '../users.ts';
 import { loadSigningKey, type Keypair } from '../tokens.ts';
 import { ApiError, unauthorized, forbidden } from './errors.ts';
 import { sessionRoutes } from './routes/sessions.ts';
+import { authRoutes } from './routes/auth.ts';
+import { uiRoutes, UI_PATHS } from './routes/ui.ts';
 import { deviceRoutes } from './routes/devices.ts';
 import { workerRoutes } from './routes/workers.ts';
 import { webdriverRoutes } from './routes/webdriver.ts';
@@ -27,6 +31,8 @@ declare module 'fastify' {
   }
   interface FastifyInstance {
     signingKey: Keypair;
+    /** Whether to mark the session cookie `Secure`. See ServerOptions.secureCookies. */
+    secureCookies: boolean;
   }
 }
 
@@ -36,7 +42,18 @@ declare module 'fastify' {
  *  The two WebDriver status paths are here because a client probes them before it has done anything
  *  at all, and they disclose nothing tenant-specific. Both spellings exist because Appium 2 serves
  *  at `/` and Selenium Grid and Appium 1 at `/wd/hub`. */
-const PUBLIC_PATHS = new Set(['/health', '/ready', '/v1/workers/register', '/status', '/wd/hub/status']);
+const PUBLIC_PATHS = new Set([
+  '/health', '/ready', '/v1/workers/register', '/status', '/wd/hub/status',
+  // Signing in cannot require being signed in. This is the one route that takes a password, and it
+  // is rate limited like every other unauthenticated path.
+  '/v1/auth/login',
+  // The console itself: the login page and the shell that renders it. Every byte is identical for an
+  // anonymous visitor, and it receives no fleet data until it presents a cookie to /v1/*.
+  ...UI_PATHS,
+]);
+
+/** Methods that must not change state, and so cannot be worth forging. */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /** Stable `code` values for the client errors the framework raises on our behalf. */
 const CLIENT_ERROR_CODES: Record<number, string> = {
@@ -59,12 +76,37 @@ async function probePool(pool: Pool): Promise<Error | null> {
   }
 }
 
+/**
+ * The caller acts on an org's own data — either an API key issued to that org, or a person logged in
+ * as a member of it.
+ *
+ * Admitting a browser session here is a deliberate widening of the two-principal rule at the top of
+ * `auth.ts`, and the reasoning is that a human member of an org holds exactly the org's authority
+ * already: the alternative is handing them an API key, which is strictly worse because it cannot be
+ * attributed or revoked individually. What must NOT widen is the worker boundary — a person still
+ * cannot register a host, and a worker still cannot read tenant data.
+ *
+ * The new exposure a cookie brings is that the browser attaches it to requests the user did not
+ * make. That is answered by `SameSite=Strict` plus the CSRF check in the auth hook, not here.
+ */
 export function requireTenant(req: FastifyRequest): { orgId: string } {
   if (!req.principal) throw unauthorized();
-  if (req.principal.kind !== 'tenant') {
+  if (req.principal.kind === 'worker') {
     throw forbidden('This endpoint requires a tenant API key, not a worker token.');
   }
   return { orgId: req.principal.orgId };
+}
+
+/** A logged-in person specifically — for anything that is about the human rather than the org. */
+export function requireUser(req: FastifyRequest): {
+  userId: string; orgId: string; role: string; sessionId: string;
+} {
+  if (!req.principal) throw unauthorized();
+  if (req.principal.kind !== 'user') {
+    throw forbidden('This endpoint requires a signed-in user session.');
+  }
+  const { userId, orgId, role, sessionId } = req.principal;
+  return { userId, orgId, role, sessionId };
 }
 
 export function requireWorker(req: FastifyRequest): { hostId: string; region: string } {
@@ -140,6 +182,15 @@ export interface ServerOptions {
    * queued forever and the WebDriver hub's capacity wait can only time out.
    */
   reaperIntervalMs?: number;
+  /**
+   * Mark the browser session cookie `Secure`.
+   *
+   * Passed in rather than derived from the request, because behind a reverse proxy the connection to
+   * this process is plain HTTP even when the browser is on TLS — `req.protocol` would drop the flag
+   * on exactly the deployments that need it. `start()` passes `isProduction`; a plain-HTTP local
+   * farm leaves it off, because a cookie the browser refuses to send looks like a broken login.
+   */
+  secureCookies?: boolean;
 }
 
 export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInstance> {
@@ -159,6 +210,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   });
 
   app.decorate('signingKey', loadSigningKey());
+  app.decorate('secureCookies', opts.secureCookies ?? false);
 
   // Fastify's default JSON parser throws on an empty body when content-type is application/json,
   // which surfaces as a 500. Bodyless POSTs (heartbeat) are a normal shape, and a 500 on routine
@@ -194,7 +246,35 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
 
   app.addHook('onRequest', async (req) => {
     if (isPublic(req)) return;
-    req.principal = (await authenticate(req.headers.authorization)) ?? undefined;
+    // An Authorization header is exclusive: if one is PRESENT, it is the only credential considered,
+    // even when it fails. Falling back to the cookie would mean a request carrying a wrong,
+    // expired or revoked key silently succeeds with whatever authority the browser happened to be
+    // signed in as — the caller asked to act as the key and would be told it worked as someone else.
+    // A cookie is consulted only when no header was offered at all.
+    const authz = req.headers.authorization;
+    req.principal = (authz
+      ? await authenticate(authz)
+      : await authenticateSession(cookieValue(req.headers.cookie, SESSION_COOKIE))
+    ) ?? undefined;
+
+    // CSRF, and only for cookie-borne authority: an API key is never attached automatically, so a
+    // cross-site page cannot cause one to be sent. A session cookie is. `SameSite=Strict` already
+    // stops the browser attaching it to a cross-site request, and this is the second lock — it is
+    // the one that still holds if a future deployment needs to relax SameSite for an embed.
+    //
+    // Safe methods are exempt because they must not change anything; if a GET here mutates, the bug
+    // is the GET.
+    if (req.principal?.kind === 'user' && !SAFE_METHODS.has(req.method)) {
+      const presented = req.headers[CSRF_HEADER];
+      const token = Array.isArray(presented) ? presented[0] : presented;
+      // Compared as digests so the check is constant-time and length-independent.
+      const ok = typeof token === 'string'
+        && timingSafeEqual(
+          Buffer.from(sha256(token), 'hex'),
+          Buffer.from(sha256(req.principal.csrf), 'hex'),
+        );
+      if (!ok) throw forbidden('Missing or invalid CSRF token for a cookie-authenticated request.');
+    }
   });
 
   // --- rate limiting ---------------------------------------------------------------------------
@@ -211,6 +291,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
       const p = (req as FastifyRequest).principal;
       if (p?.kind === 'tenant') return `org:${p.orgId}`;
       if (p?.kind === 'worker') return `host:${p.hostId}`;
+      if (p?.kind === 'user') return `org:${p.orgId}`;
       return `ip:${req.ip}`;
     },
     // Must return an ERROR, not a response body: the plugin `throw`s whatever this returns, so a
@@ -345,6 +426,8 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   });
 
   // --- routes ----------------------------------------------------------------------------------
+  await app.register(uiRoutes);
+  await app.register(authRoutes, { prefix: '/v1' });
   await app.register(sessionRoutes, { prefix: '/v1' });
   await app.register(deviceRoutes, { prefix: '/v1' });
   await app.register(workerRoutes, { prefix: '/v1' });

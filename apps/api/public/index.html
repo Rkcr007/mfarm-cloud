@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MFARM Console</title>
+<link rel="stylesheet" href="/console.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>📱</text></svg>">
+</head>
+<body>
+
+<!-- Sign in ------------------------------------------------------------------------------------->
+<main id="signin" class="signin" hidden>
+  <form class="card signin-card" id="signin-form" autocomplete="on">
+    <div class="brand"><span class="brand-mark">▚</span> MFARM</div>
+    <p class="muted">Android device farm</p>
+
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+    <button type="submit" id="signin-btn">Sign in</button>
+    <p class="error" id="signin-error" role="alert" hidden></p>
+  </form>
+</main>
+
+<!-- Console ------------------------------------------------------------------------------------->
+<div id="console" class="shell" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">▚</span> MFARM</div>
+    <div class="fleet-pill" id="fleet-pill" title="Devices ready to allocate">
+      <span class="dot"></span><span id="fleet-count">—</span> available
+    </div>
+    <div class="spacer"></div>
+    <div class="who">
+      <span id="who-email" class="muted"></span>
+      <span class="sep">·</span>
+      <span id="who-org"></span>
+      <button class="link" id="signout">Sign out</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-view="devices" role="tab">Devices</button>
+    <button class="tab" data-view="runs" role="tab">Test runs</button>
+  </nav>
+
+  <!-- Devices -->
+  <section class="view is-active" id="view-devices">
+    <div class="view-head">
+      <h1>Fleet</h1>
+      <p class="muted" id="devices-sub">Every device this org can reach.</p>
+    </div>
+    <div class="grid" id="device-grid"></div>
+    <p class="empty" id="devices-empty" hidden>
+      No devices are registered in this region yet. Start a worker and it will appear here within a
+      heartbeat.
+    </p>
+  </section>
+
+  <!-- Runs -->
+  <section class="view" id="view-runs">
+    <div class="view-head">
+      <h1>Test runs</h1>
+      <p class="muted">Point a WebDriver suite at the farm, or start one here.</p>
+    </div>
+
+    <div class="card hubcard">
+      <h2>Connect a suite</h2>
+      <p class="muted">
+        Any Appium or Selenium client works unchanged. Use this as the server URL — the key is the
+        credential, so treat it like one.
+      </p>
+      <div class="copyrow">
+        <code id="hub-url">—</code>
+        <button class="ghost" id="copy-hub">Copy</button>
+      </div>
+      <p class="muted small" id="hub-note"></p>
+    </div>
+
+    <table class="table" id="runs-table" hidden>
+      <thead><tr><th>Session</th><th>Device</th><th>State</th><th>Started</th><th>Duration</th></tr></thead>
+      <tbody id="runs-body"></tbody>
+    </table>
+    <p class="empty" id="runs-empty">No sessions yet.</p>
+  </section>
+</div>
+
+<!-- Device drawer ------------------------------------------------------------------------------->
+<aside class="drawer" id="drawer" hidden>
+  <div class="drawer-head">
+    <div>
+      <h2 id="drawer-title">Device</h2>
+      <p class="muted small" id="drawer-sub"></p>
+    </div>
+    <button class="ghost" id="drawer-close" aria-label="Close">✕</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+<div class="scrim" id="scrim" hidden></div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script type="module" src="/console.js"></script>
+</body>
+</html>

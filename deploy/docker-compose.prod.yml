@@ -138,6 +138,16 @@ services:
       # token, which is the point.
       METRICS_HOST: 0.0.0.0
       METRICS_PORT: 9464
+      # The console's session cookie carries `Secure` by default in production, which is right for
+      # both intended routes: `tailscale serve` puts real HTTPS in front, and a tunnel to
+      # http://localhost:3000 is a SECURE CONTEXT as far as every browser is concerned, so the
+      # cookie is stored there too.
+      #
+      # Set this to 0 for the one route that breaks — reaching the API over plain HTTP on a tailnet
+      # or LAN address, which needs the port re-published as well. The failure it causes is quiet
+      # rather than loud: the browser refuses to store the cookie, login returns 200, and the next
+      # request is anonymous, so it looks like signing in does nothing at all.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-1}
     secrets:
       - session_signing_key
       - session_public_key

@@ -206,6 +206,24 @@ else
   note "minted a tenant API key into $STATE_DIR/api_key"
 fi
 
+# The console needs a person, and the schema has had `users` since 001 with no way to authenticate as
+# one. Generated rather than prompted for, and written to a 600 file beside the API key, for the same
+# reason: a farm that waits for a human to invent a password gets a bad one.
+say "Console user"
+CONSOLE_EMAIL="${CONSOLE_EMAIL:-admin@mfarm.local}"
+if [ -s "$STATE_DIR/console_password" ]; then
+  note "reusing the password in $STATE_DIR/console_password (re-running would invalidate live sessions)"
+else
+  CONSOLE_PASSWORD="$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 24)"
+  DATABASE_URL="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:${POSTGRES_PORT:-5432}/$POSTGRES_DB" \
+    node --experimental-strip-types "$REPO_ROOT/apps/api/src/bin/create-user.ts" \
+      "$CONSOLE_EMAIL" "$CONSOLE_PASSWORD" >/dev/null \
+    || die "could not create the console user"
+  printf '%s' "$CONSOLE_PASSWORD" > "$STATE_DIR/console_password"
+  chmod 600 "$STATE_DIR/console_password"
+  note "created $CONSOLE_EMAIL — password in $STATE_DIR/console_password"
+fi
+
 if [ "$WITH_WORKER" = 0 ]; then
   say "Control plane is up (--no-worker)"
   note "export MFARM_API_KEY=\$(cat $STATE_DIR/api_key)"

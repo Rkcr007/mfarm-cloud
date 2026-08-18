@@ -22,3 +22,8 @@ spikes
 **/test
 *.md
 *.html
+
+# …except the console. The `*.html` line above is aimed at the docs and handoff pages at the repo
+# root, and it silently swallowed the web console's shell as well — the image built cleanly and
+# served a 404 for `/`. Negations are evaluated in order, so this must stay BELOW that rule.
+!apps/api/public/*.html

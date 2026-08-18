@@ -718,7 +718,51 @@ before building any viewer**, because it determines whether a browser needs clie
     **The rule this leaves:** a capability is a claim about observed state, and `snapshot-reset` is
     the one capability whose truth can be destroyed by something that never touches the device.
 
-## Rules earned the hard way
+20. **THERE IS A WEB CONSOLE, AND WITH IT THE FIRST WAY FOR A PERSON TO AUTHENTICATE.** 2026-08-19.
+
+    `users` and `memberships` have existed since migration 001 and neither carried a credential, so
+    until now "logging in" meant holding an org-wide API key — a credential that cannot be
+    attributed to a person, cannot be revoked without breaking every other holder, and cannot say
+    that one member is an admin and another is not. Migration 013 adds a scrypt password and a
+    `user_sessions` table.
+
+    Design points that are load-bearing rather than taste:
+
+    - **A session table, not a stateless signed cookie.** A browser credential has to be revocable
+      the instant a password changes or a person leaves; a stateless token stays valid until it
+      expires, wherever it was copied to. Four things end a session on the next request: revocation,
+      expiry, losing the membership, and a `credential_epoch` bump from a password change.
+    - **Scrypt cost is stored inside each digest** (`scrypt$N$r$p$salt$hash`), so N can be raised
+      without a flag day — an old digest verifies under its own parameters and is rewritten on the
+      next successful login.
+    - **`requireTenant` now admits a logged-in member**, which widens the two-principal rule in
+      `auth.ts` deliberately: a human member of an org already holds exactly that org's authority,
+      and the alternative is handing them an API key, which is strictly worse. The WORKER boundary
+      does not widen — a person still cannot register a host.
+    - **An `Authorization` header is exclusive.** If one is present it is the only credential
+      considered, even when it fails. The first implementation fell back to the cookie, which meant
+      a request carrying a wrong or revoked key would silently succeed as whoever the browser
+      happened to be signed in as. Caught by its own test, on the VM.
+    - **CSRF is a double-submit header plus `SameSite=Strict`**, applied to every unsafe request from
+      a cookie principal and to none from an API key — a key is never attached automatically, so
+      there is nothing to forge.
+
+    The console is served by the API itself from `apps/api/public/` through an ALLOWLIST of four
+    paths, not a static-file plugin: there is no path to traverse and no dependency to trust. It
+    ships a CSP with no inline script and no external origin, and nothing from the API is ever
+    rendered with `innerHTML`.
+
+    **A trap worth remembering:** `.dockerignore` excluded `*.html` for the repo's docs, which
+    silently swallowed the console's `index.html`. The image built cleanly and served a 404 for `/`.
+    Fixed with a negation that must stay below the exclusion.
+
+    Two things the console does NOT do, both stated in the UI rather than hidden behind a disabled
+    button: there is no interactive device view (media needs ADR-0005's relay, which is not
+    deployed), and a session cannot be pinned to a specific device (the allocator chooses). App
+    upload and install are not built — `app-install` is an advertised capability with **no
+    implementation anywhere**, and the only APK path today is `appium:app` handed to Appium.
+
+
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.

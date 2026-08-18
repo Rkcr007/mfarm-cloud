@@ -55,6 +55,9 @@ export async function start(cfg: Config): Promise<Service> {
   const app = await buildServer({
     reaperIntervalMs: cfg.reaperIntervalMs,
     rateLimitMax: cfg.rateLimitMax,
+    // Configured, never derived from the request: behind a reverse proxy this process sees plain
+    // HTTP even when the browser is on TLS, and this farm serves plain HTTP in production.
+    secureCookies: cfg.sessionCookieSecure,
   });
 
   // The metrics listener binds BEFORE the API does, and that order is deliberate in both halves.

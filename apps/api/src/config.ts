@@ -60,6 +60,8 @@ export interface Config {
   shutdownGraceMs: number;
   /** Whether to bind the second listener that serves `/metrics`. */
   metricsEnabled: boolean;
+  /** Mark the console session cookie `Secure`. See the parse site for why it is not just isProduction. */
+  sessionCookieSecure: boolean;
   metricsPort: number;
   metricsHost: string;
   /** Whether a scrape credential was supplied. The token itself is deliberately NOT on this object,
@@ -411,6 +413,22 @@ export function parseConfig(env: Env): Config {
 
   // --- metrics ---------------------------------------------------------------------------------
   const metricsEnabled = boolVar(env.METRICS_ENABLED, 'METRICS_ENABLED', true, problems);
+
+  /**
+   * Mark the console's session cookie `Secure`.
+   *
+   * Defaults to ON in production and it must stay overridable, because the two are genuinely
+   * independent: this farm is a production deployment that serves plain HTTP on :3000 and gets its
+   * TLS from `tailscale serve` in front, or from nothing at all on a LAN.
+   *
+   * Get it wrong in either direction and the failure is confusing rather than loud. Set when the
+   * browser is on plain HTTP and the browser REFUSES TO STORE THE COOKIE AT ALL — login returns 200
+   * and the next request is anonymous, which reads as "login silently does nothing". Unset when the
+   * browser is on TLS and the cookie is one downgraded request away from travelling in the clear.
+   */
+  const sessionCookieSecure = boolVar(
+    env.SESSION_COOKIE_SECURE, 'SESSION_COOKIE_SECURE', isProduction, problems,
+  );
   // 0 is allowed and means "let the kernel choose", exactly as it does for PORT. Useless for a
   // deployment — Prometheus has to be told a number — and the only way a test can start the real
   // entrypoint without two children fighting over a fixed port.
@@ -460,6 +478,7 @@ export function parseConfig(env: Env): Config {
     logLevel,
     shutdownGraceMs,
     metricsEnabled,
+    sessionCookieSecure,
     metricsPort,
     metricsHost,
     metricsTokenSource,
@@ -509,6 +528,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     logLevel: c.logLevel,
     shutdownGraceMs: c.shutdownGraceMs,
     metrics: c.metricsEnabled ? `${c.metricsHost}:${c.metricsPort}` : 'disabled',
+    sessionCookie: c.sessionCookieSecure ? 'Secure' : 'not Secure (plain HTTP)',
     metricsTokenSource: c.metricsTokenSource,
   };
 }
