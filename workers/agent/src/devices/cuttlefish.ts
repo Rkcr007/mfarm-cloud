@@ -74,7 +74,10 @@ export interface FleetInstance {
  * An unrecognisable document returns undefined, and the caller cold boots — which is exactly what
  * it did before any of this existed, so a parse miss is never worse than the old behaviour.
  */
-export function findFleetInstance(fleetJson: string, match: { adbSerial: string; localId: string }): FleetInstance | undefined {
+export function findFleetInstance(
+  fleetJson: string,
+  match: { adbSerial: string; localId: string; instanceNum: number },
+): FleetInstance | undefined {
   let doc: unknown;
   try { doc = JSON.parse(fleetJson); } catch { return undefined; }
 
@@ -92,7 +95,15 @@ export function findFleetInstance(fleetJson: string, match: { adbSerial: string;
     const g = typeof obj.group_name === 'string' ? obj.group_name : group;
     const s = typeof obj.status === 'string' ? obj.status : status;
 
-    const identifies = obj.adb_serial === match.adbSerial
+    // Matched on the INSTANCE NUMBER first, because it is the only identifier cvd will not rewrite.
+    // A restored group loses the `--webrtc_device_id` it was created with — after
+    // `start --snapshot_path`, cf-1's group reported `cvd_1-1-1` — and the fleet document carries
+    // `adb_port`, not the `adb_serial` this once matched on. With neither matching, the adopt path
+    // stopped recognising a device that was sitting right there and `cvd create` answered
+    // "New instance conflicts with existing instance". The names are kept as secondary evidence.
+    const identifies = obj.adb_port === 6519 + match.instanceNum
+      || obj.instance_name === String(match.instanceNum)
+      || obj.adb_serial === match.adbSerial
       || obj.webrtc_device_id === match.localId
       || obj.instance_name === match.localId;
     if (identifies) return { group: g, status: s };
@@ -280,7 +291,11 @@ export class CuttlefishDevice implements DeviceControl {
   private async findExisting(): Promise<FleetInstance | undefined> {
     const out = await run('cvd', ['fleet'], this.opts.imageDir, 30_000).catch(() => '');
     if (!out) return undefined;
-    return findFleetInstance(out, { adbSerial: this.adbSerial, localId: this.info.localId });
+    return findFleetInstance(out, {
+      adbSerial: this.adbSerial,
+      localId: this.info.localId,
+      instanceNum: this.opts.instanceNum,
+    });
   }
 
   private async adbAlive(): Promise<boolean> {

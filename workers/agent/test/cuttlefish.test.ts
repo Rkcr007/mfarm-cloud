@@ -134,7 +134,7 @@ describe('findFleetInstance', () => {
         ],
       }],
     });
-    assert.deepEqual(findFleetInstance(json, { adbSerial: '0.0.0.0:6520', localId: 'cf-1' }),
+    assert.deepEqual(findFleetInstance(json, { adbSerial: '0.0.0.0:6520', localId: 'cf-1', instanceNum: 1 }),
       { group: 'cvd_1', status: 'Running' });
   });
 
@@ -142,25 +142,34 @@ describe('findFleetInstance', () => {
     const json = JSON.stringify([
       { webrtc_device_id: 'cf-1', adb_serial: '0.0.0.0:6520', status: 'Starting' },
     ]);
-    assert.deepEqual(findFleetInstance(json, { adbSerial: '0.0.0.0:6520', localId: 'cf-1' }),
+    assert.deepEqual(findFleetInstance(json, { adbSerial: '0.0.0.0:6520', localId: 'cf-1', instanceNum: 1 }),
       { group: undefined, status: 'Starting' });
   });
 
   test('matches on the webrtc device id when the serial differs', () => {
     const json = JSON.stringify({ groups: [{ group_name: 'g', instances: [{ webrtc_device_id: 'cf-1' }] }] });
-    assert.equal(findFleetInstance(json, { adbSerial: 'nope', localId: 'cf-1' })?.group, 'g');
+    assert.equal(findFleetInstance(json, { adbSerial: 'nope', localId: 'cf-1', instanceNum: 1 })?.group, 'g');
   });
 
   test('another device on the same host is not mistaken for this one', () => {
-    const json = JSON.stringify({ groups: [{ group_name: 'g', instances: [{ adb_serial: '0.0.0.0:6521', instance_name: 'cf-2' }] }] });
-    assert.equal(findFleetInstance(json, { adbSerial: '0.0.0.0:6520', localId: 'cf-1' }), undefined);
+    const json = JSON.stringify({ groups: [{ group_name: 'g', instances: [{ adb_port: 6521, adb_serial: '0.0.0.0:6521', instance_name: '2' }] }] });
+    assert.equal(findFleetInstance(json, { adbSerial: '0.0.0.0:6520', localId: 'cf-1', instanceNum: 1 }), undefined);
+  });
+
+  test('matches on the adb port after a restore has rewritten the webrtc device id', () => {
+    // Exactly what a restored group looks like: the id it was created with is gone.
+    const json = JSON.stringify({ groups: [{ group_name: 'cvd_1', instances: [
+      { adb_port: 6520, instance_name: '1', status: 'Running', webrtc_device_id: 'cvd_1-1-1' },
+    ] }] });
+    assert.deepEqual(findFleetInstance(json, { adbSerial: '0.0.0.0:6520', localId: 'cf-1', instanceNum: 1 }),
+      { group: 'cvd_1', status: 'Running' });
   });
 
   test('an unparseable or unrecognised document is undefined, never a throw', () => {
     // The caller cold boots on undefined, which is what it did before any of this existed — so a
     // shape change upstream costs 30 seconds, not a broken worker.
-    assert.equal(findFleetInstance('not json at all', { adbSerial: 's', localId: 'l' }), undefined);
-    assert.equal(findFleetInstance('{"something":"else"}', { adbSerial: 's', localId: 'l' }), undefined);
+    assert.equal(findFleetInstance('not json at all', { adbSerial: 's', localId: 'l', instanceNum: 1 }), undefined);
+    assert.equal(findFleetInstance('{"something":"else"}', { adbSerial: 's', localId: 'l', instanceNum: 1 }), undefined);
   });
 });
 
