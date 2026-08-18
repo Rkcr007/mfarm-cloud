@@ -310,6 +310,24 @@ correct at N=1 and both degrade silently rather than failing. **Before a second 
 for the limiter, and a single owner for the reaper (leader election, advisory lock, or an external
 scheduler).
 
+**6. The media path has no reachability story, and it is not the one ADR-0004 settled.** Raised
+2026-08-18 after the failure in known issue 13. `dataplane.ts` carries control and input; **media is
+not proxied** — the browser negotiates WebRTC straight to Cuttlefish's own server. That works only
+when the client can route to the addresses the host puts in its ICE candidates. On the lab VM it
+could not, and the result was a populated device list over a dead stream.
+
+ADR-0004 rejected a VPN, and that reasoning **does not transfer here**. It rejected a VPN as an
+*authorisation* mechanism for the automation gateway, because a network grants every peer access to
+every device. Media reachability is a *routing* problem, and the signed grant already answers the
+authorisation half. An overlay used purely as a route, with `dataplane.ts` still verifying its token
+offline, does not reopen what ADR-0004 closed. Say so explicitly in whichever ADR settles this, or
+someone will read the two as contradictory.
+
+The realistic options are an overlay (Tailscale, already chosen for `deploy/` ingress) or a TURN
+relay. TURN costs a relay to run and bandwidth to push; an overlay costs client-side enrolment,
+which is fine for a self-hosted farm and probably unacceptable for a public product. **Decide this
+before building any viewer**, because it determines whether a browser needs client software.
+
 ## Known issues and constraints
 
 1. `devices/cuttlefish.ts` `cvd` flags are **unverified against a real install** — upstream moves.
@@ -420,6 +438,61 @@ scheduler).
     **The farm consequence:** every image refresh needs a human, and both devices must stay on one
     pinned build or differences between them become debugging noise. Revisit if upstream opens v4
     or ships an unauthenticated mirror.
+
+13. **An SSH port-forward cannot carry the device stream, and the failure looks like a broken
+    device.** Verified 2026-08-18 on the lab VM. The browser reached the Cuttlefish console over
+    `ssh -L 1443:localhost:1443`, listed the device correctly, and then showed a black screen with
+    *"Connection should have occurred by now"* / *"No connection to the guest device."* Everything
+    on the host was healthy at the same moment:
+
+        cvd fleet          -> "status": "Running"
+        adb ... getprop sys.boot_completed  -> 1
+        pgrep -f webRTC    -> alive, plus operator and adb_connector
+        logs/webrtc.log    -> EMPTY — nothing errored, nothing reached it
+
+    The cause is that WebRTC uses two independent connections and a tunnel only carries one.
+    **Signaling** is TCP to the operator on 1443 — that is what the forward covers, and it is why
+    the device list populates. **Media and input** are a separate peer connection negotiated by
+    exchanging ICE candidates, which are literal addresses: the host offers `10.160.0.2` plus a UDP
+    port range. `ssh -L` terminates on `localhost`, carries no UDP, and cannot rewrite an address
+    embedded in a signaling payload. So signaling succeeds and media never connects.
+
+    The operator states this outright if you ask it. Through the same tunnel, `GET /` returns 200
+    and `GET /devices` returns the device with correct metadata — but:
+
+        GET https://localhost:1443/infra_config
+        -> {"ice_servers":[{"urls":["stun:stun.l.google.com:19302"]}]}
+
+    **STUN only, no TURN.** STUN merely tells a peer its own public address, which helps only when
+    a direct path exists; TURN is the relay used when none does, and Cuttlefish ships without one.
+    On a GCE box with no external IP there is then no candidate pair that can connect at all: the
+    internal address is unroutable from the client, the bridge addresses are host-local, and there
+    is no reflexive candidate to discover. Check `/infra_config` first on any "device listed but
+    black screen" report — it turns a guess into arithmetic.
+
+    Forwarding more ports does not help. The candidate still names an address the client resolves
+    to the wrong machine. **The client needs a genuine route to the worker**, which means either a
+    routable overlay (Tailscale — `deploy/` is already Tailscale-only for ingress, and
+    `dataplane.ts` says "a browser reaches this socket over the tailnet") or a TURN relay both
+    sides can reach. There is no third option and no tunnel-shaped one.
+
+    The diagnostic rule: **an empty `webrtc.log` alongside a device that appears in the UI means a
+    routing problem, not a device problem.** The log is empty because the peer connection never
+    arrived to be logged. Confirm the device separately with `adb ... getprop sys.boot_completed`
+    before touching anything on the host — the temptation is to restart a device that is fine.
+
+    **The farm consequence, and it is a product one:** `tokens.ts` and `dataplane.ts` both specify
+    that the browser connects *directly* to the worker, with the control plane out of the loop.
+    That is the right design for input latency, but "directly" is a network precondition, not a
+    given — behind NAT or over any TCP-only path it fails in exactly the shape above, with a
+    working device list and dead video. Whatever ships must either put clients and workers on one
+    overlay or run a TURN relay, and that decision belongs with the WebDriver blockers, not with
+    deployment.
+
+    Scope note: **this affects interactive viewing only.** Automated runs go
+    `routes/webdriver.ts` -> `appium.ts` -> adb, which is HTTP and TCP end to end and never
+    negotiates ICE. A customer running a suite is unaffected. For local "is this device real"
+    checks, `scrcpy` over an adb forward works fine and needs none of this.
 
 ## Rules earned the hard way
 
