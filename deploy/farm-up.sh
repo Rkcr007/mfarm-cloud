@@ -56,7 +56,12 @@ say "Preflight"
 [ "$(uname -s)" = "Linux" ] || die "Cuttlefish needs Linux; this is $(uname -s). The farm runs on the box, not on a laptop."
 command -v docker >/dev/null || die "docker not found — apt-get install -y docker.io docker-compose-v2"
 docker info >/dev/null 2>&1 || die "cannot talk to the docker daemon (are you in the docker group? try: newgrp docker)"
-node --version >/dev/null 2>&1 || die "node not found; the worker needs >= 22.6 for native TypeScript stripping"
+# Version, not presence. Ubuntu 24.04's `apt-get install nodejs` gives 18.x, which has no native
+# TypeScript stripping — so the worker dies on the first `import … from './agent.ts'` with a syntax
+# error that says nothing about the version. Found on the box, 2026-08-18.
+node --version >/dev/null 2>&1 || die "node not found. Ubuntu's apt gives 18.x and this needs >= 22.6: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"
+node_major="$(node --version | sed 's/^v\([0-9]*\).*/\1/')"
+[ "$node_major" -ge 22 ] 2>/dev/null || die "node $(node --version) is too old; native TypeScript stripping needs >= 22.6 (nodesource setup_22.x)"
 
 if [ "$WITH_WORKER" = 1 ]; then
   [ -e /dev/kvm ] || die "/dev/kvm missing — this host cannot run Cuttlefish at all. Nested virtualisation must be enabled."

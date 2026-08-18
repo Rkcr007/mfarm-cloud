@@ -1177,7 +1177,12 @@ adb -s 0.0.0.0:6520 shell getprop sys.boot_completed</code></pre>
     <div class="cmd">
       <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>
 <pre><code>cd ~/mfarm
-sudo apt-get install -y docker.io docker-compose-v2 nodejs npm
+sudo apt-get install -y docker.io docker-compose-v2 tmux
+
+# Node 22, NOT `apt-get install nodejs` — Ubuntu 24.04 ships 18.x, which has no native TypeScript
+# stripping, and the worker then dies on its first .ts import with an error naming nothing useful.
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
 sudo usermod -aG docker $USER && newgrp docker
 
 # throwaway secrets — never the ones a real farm would use
