@@ -93,7 +93,9 @@ export async function resetComplete(hostId: string, deviceId: string, fence: num
 const IDEMPOTENCY_RETENTION_HOURS = 24;
 
 /** Run on a schedule. Implements "never leave a device permanently locked" as a mechanism. */
-export async function reap(): Promise<{ expired: number; promoted: number; keysPurged: number }> {
+export async function reap(): Promise<{
+  expired: number; promoted: number; keysPurged: number; installsOrphaned: number;
+}> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
     const p = await c.query('SELECT promote_queued($1) AS n', [20]);
@@ -103,10 +105,33 @@ export async function reap(): Promise<{ expired: number; promoted: number; keysP
       'DELETE FROM idempotency_keys WHERE created_at < now() - make_interval(hours => $1)',
       [IDEMPOTENCY_RETENTION_HOURS],
     );
+    /**
+     * Installs whose session ended before a worker ever collected them.
+     *
+     * Without this they sit PENDING forever: the heartbeat query will not offer an install for a
+     * dead session, so nothing finishes it and nothing sweeps it, and a caller polling the install
+     * waits on a job no worker will ever be told about. Ordered AFTER `expire_sessions()` on
+     * purpose — that call is what turns an abandoned session into a finished one, so running the
+     * sweep first would leave every install it just orphaned for the next tick.
+     *
+     * FAILED rather than a state of its own, because that is what happened from the caller's side:
+     * the app was not installed, and the reason says why in words they can act on.
+     */
+    const i = await c.query(
+      `UPDATE app_installs ai
+          SET state = 'FAILED',
+              error = 'The session ended before this install reached the device.',
+              finished_at = now()
+         FROM sessions s
+        WHERE s.id = ai.session_id
+          AND ai.state = 'PENDING'
+          AND s.state NOT IN ('QUEUED','ALLOCATING','ACTIVE')`,
+    );
     return {
       expired: Number(e.rows[0].n),
       promoted: Number(p.rows[0].n),
       keysPurged: g.rowCount ?? 0,
+      installsOrphaned: i.rowCount ?? 0,
     };
   });
 }

@@ -1,4 +1,6 @@
 import { createPrivateKey, createPublicKey, sign, verify, type KeyObject } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * The environment, read and judged once, at startup.
@@ -67,6 +69,10 @@ export interface Config {
   /** Whether a scrape credential was supplied. The token itself is deliberately NOT on this object,
    *  for the same reason the signing key is not: `describeConfig` gets logged. */
   metricsTokenSource: 'environment' | 'none';
+  /** Where uploaded APKs are written. Content-addressed; see `appstore.ts`. */
+  appStoreDir: string;
+  /** Largest upload `POST /v1/apps` will accept, enforced on the stream rather than on a header. */
+  appMaxUploadBytes: number;
 }
 
 // Fields are declared and assigned explicitly rather than through constructor parameter properties:
@@ -460,6 +466,28 @@ export function parseConfig(env: Env): Config {
     );
   }
 
+  // --- app library -----------------------------------------------------------------------------
+  //
+  // The default is a temp directory, and production is REQUIRED to override it. Both halves are
+  // deliberate. A default of nothing means `npm test` and a laptop run work with no setup; a temp
+  // directory in production means the app library survives until the next reboot and then quietly
+  // does not, with a database full of rows pointing at blobs that no longer exist. That failure
+  // appears as "install failed: no such file" days later, on someone else's shift.
+  const appStoreDir = env.APP_STORE_DIR?.trim() || join(tmpdir(), 'mfarm-app-store');
+  if (isProduction && !env.APP_STORE_DIR?.trim()) {
+    problems.push(
+      'APP_STORE_DIR is unset. Uploaded APKs would be written under the system temp directory, ' +
+        'which is cleared on reboot while the app_builds rows naming them survive. Point it at ' +
+        'persistent storage (the compose file uses a named volume).',
+    );
+  }
+
+  // 512 MB. Comfortably past a large debug build with every ABI in it, and far short of a number
+  // that lets one upload fill the disk the snapshots live on.
+  const appMaxUploadBytes = intVar(
+    env.APP_MAX_UPLOAD_BYTES, 'APP_MAX_UPLOAD_BYTES', 512 * 1024 * 1024, 1024, 4 * 1024 * 1024 * 1024, problems,
+  );
+
   if (problems.length > 0) throw new ConfigError(problems);
 
   return Object.freeze({
@@ -482,6 +510,8 @@ export function parseConfig(env: Env): Config {
     metricsPort,
     metricsHost,
     metricsTokenSource,
+    appStoreDir,
+    appMaxUploadBytes,
   });
 }
 
@@ -530,5 +560,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     metrics: c.metricsEnabled ? `${c.metricsHost}:${c.metricsPort}` : 'disabled',
     sessionCookie: c.sessionCookieSecure ? 'Secure' : 'not Secure (plain HTTP)',
     metricsTokenSource: c.metricsTokenSource,
+    appStoreDir: c.appStoreDir,
+    appMaxUploadBytes: c.appMaxUploadBytes,
   };
 }

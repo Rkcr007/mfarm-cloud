@@ -31,6 +31,7 @@ const prod = (overrides: Record<string, string | undefined> = {}) => ({
   APP_DATABASE_URL: 'postgres://mfarm_app:rotated-app-pw@db.internal:5432/mfarm',
   SESSION_SIGNING_KEY: kp.privateKeyPem,
   SESSION_PUBLIC_KEY: kp.publicKeyPem,
+  APP_STORE_DIR: '/var/lib/mfarm/apps',
   ...overrides,
 });
 
@@ -395,6 +396,19 @@ describe('metrics listener configuration', () => {
     assert.equal(c.metricsTokenSource, 'environment');
     const described = JSON.stringify(describeConfig(c));
     assert.ok(!described.includes('super-secret-scrape-token'), 'describeConfig() is logged');
+  });
+
+  test('an unset APP_STORE_DIR is refused in production', () => {
+    // The failure this prevents is delayed and confusing: uploads work, the library fills up, and
+    // the first reboot leaves every app_builds row pointing at a blob under a cleared temp
+    // directory. The refusal is at startup because that is the last moment it is cheap.
+    const problems = refusal(prod({ APP_STORE_DIR: undefined }));
+    assert.ok(mentions(problems, 'APP_STORE_DIR'));
+    assert.ok(mentions(problems, 'reboot'));
+  });
+
+  test('APP_STORE_DIR defaults to a temp directory outside production', () => {
+    assert.match(parseConfig({}).appStoreDir, /mfarm-app-store/);
   });
 
   test('a non-loopback bind with no token is refused in production', () => {

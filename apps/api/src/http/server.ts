@@ -12,6 +12,7 @@ import { uiRoutes, UI_PATHS } from './routes/ui.ts';
 import { deviceRoutes } from './routes/devices.ts';
 import { workerRoutes } from './routes/workers.ts';
 import { webdriverRoutes } from './routes/webdriver.ts';
+import { appRoutes } from './routes/apps.ts';
 import { reap } from '../allocator.ts';
 import {
   httpDuration,
@@ -205,7 +206,8 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
     // rejecting them — so `additionalProperties: false` in a schema silently does nothing. A client
     // that misspells `ttlMinutes` would get the default and never be told. Reject instead.
     ajv: { customOptions: { removeAdditional: false, coerceTypes: true, useDefaults: true } },
-    // Reject oversized bodies before parsing. App uploads go to object storage directly, never here.
+    // Reject oversized bodies before parsing. This is the limit for JSON; `POST /v1/apps` raises
+    // it for itself alone and streams the body to disk rather than buffering it (routes/apps.ts).
     bodyLimit: 1_048_576,
   });
 
@@ -431,6 +433,9 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(sessionRoutes, { prefix: '/v1' });
   await app.register(deviceRoutes, { prefix: '/v1' });
   await app.register(workerRoutes, { prefix: '/v1' });
+  // Registered last of the /v1 group, and in its own encapsulation context so its
+  // stream-through content-type parser for APK uploads cannot affect any route above it.
+  await app.register(appRoutes, { prefix: '/v1' });
 
   // The WebDriver hub, mounted at both spellings the world uses: Appium 2 clients default to `/`,
   // Selenium Grid and Appium 1.x clients to `/wd/hub`. Serving both means the migration is one URL

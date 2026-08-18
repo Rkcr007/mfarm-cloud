@@ -5,7 +5,7 @@ import { generateWorkerToken } from '../../auth.ts';
 import { negotiate, deviceAutomationEndpoint, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
-import { meteringEvents, workerResets } from '../../metrics.ts';
+import { appInstalls, meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
 import { unauthorized, badRequest } from '../errors.ts';
 
@@ -135,10 +135,10 @@ export async function workerRoutes(app: FastifyInstance) {
     });
   });
 
-  /** Liveness. A host that stops heartbeating is a candidate for quarantine. */
+  /** Liveness, and the one regular chance the control plane has to hand a worker work to do. */
   app.post('/workers/heartbeat', async (req) => {
     const { hostId } = requireWorker(req);
-    const { row, resets } = await withSystem(async (c) => {
+    const { row, resets, installs } = await withSystem(async (c) => {
       const { rows } = await c.query(
         `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1 RETURNING state`,
         [hostId],
@@ -156,16 +156,59 @@ export async function workerRoutes(app: FastifyInstance) {
         `SELECT id, fence FROM devices WHERE host_id = $1 AND state = 'CLEANING'`,
         [hostId],
       );
+      /**
+       * App installs waiting for this host's devices (migration 014).
+       *
+       * Four conditions, and dropping any one of them puts a tenant's app on someone else's device:
+       *
+       *   d.host_id = $1        a worker learns about, and can act on, only its own hardware.
+       *   i.state = 'PENDING'   re-offered every beat until it finishes, so a missed or failed
+       *                         install self-heals with no retry logic anywhere.
+       *   s.state live          a session that has ended no longer holds the device; its queued
+       *                         install must never be performed for whoever holds it now.
+       *   d.fence = i.fence     the same guarantee against a device that was reclaimed and
+       *                         reallocated while the install sat here. Fence beats state: the
+       *                         session row can still read ACTIVE for the moment it takes the
+       *                         reaper to notice, and the fence has already moved.
+       *
+       * LIMIT bounds the beat: a tenant that queues fifty installs must not make the heartbeat
+       * response — a liveness signal — grow with its backlog. The rest arrive on the next beat.
+       */
+      const { rows: pending } = await c.query(
+        `SELECT i.id, i.device_id, i.app_id, i.fence,
+                a.sha256, a.size_bytes, a.package_name
+           FROM app_installs i
+           JOIN devices d    ON d.id = i.device_id
+           JOIN sessions s   ON s.id = i.session_id
+           JOIN app_builds a ON a.id = i.app_id
+          WHERE d.host_id = $1
+            AND i.state = 'PENDING'
+            AND s.state IN ('ALLOCATING','ACTIVE')
+            AND d.fence = i.fence
+          ORDER BY i.requested_at
+          LIMIT 10`,
+        [hostId],
+      );
+
       return {
         row: rows[0],
         resets: cleaning.map((d: { id: string; fence: string | number }) => ({
           deviceId: d.id,
           fence: Number(d.fence),
         })),
+        installs: pending.map((i: Record<string, unknown>) => ({
+          installId: i.id as string,
+          deviceId: i.device_id as string,
+          appId: i.app_id as string,
+          sha256: i.sha256 as string,
+          sizeBytes: Number(i.size_bytes),
+          packageName: i.package_name as string,
+          fence: Number(i.fence),
+        })),
       };
     });
     // Told on every beat so a host that was quarantined while partitioned learns it must drain.
-    return { ok: true, hostState: row?.state ?? 'DOWN', resets };
+    return { ok: true, hostState: row?.state ?? 'DOWN', resets, installs };
   });
 
   /**
@@ -183,10 +226,11 @@ export async function workerRoutes(app: FastifyInstance) {
       metering?: Array<{ eventId: string; sessionId?: string | null; deviceId?: string | null;
                          kind: MeterKind; quantity: number; occurredAt: string; orgId?: string }>;
       resets?: Array<{ deviceId: string; fence: number }>;
+      installs?: Array<{ installId: string; ok: boolean; error?: string }>;
     };
   }>('/workers/events', async (req) => {
     const { hostId } = requireWorker(req);
-    const { metering = [], resets = [] } = req.body ?? {};
+    const { metering = [], resets = [], installs = [] } = req.body ?? {};
 
     const meter = await ingest(
       hostId,
@@ -223,11 +267,45 @@ export async function workerRoutes(app: FastifyInstance) {
       resetResults.push({ deviceId: r.deviceId, accepted });
     }
 
+    /**
+     * Install outcomes.
+     *
+     * The `FROM devices` join is the whole security of this statement, and it is the same rule
+     * migration 008 had to retrofit twice: a worker names an install id, and without the join it
+     * could finish — or falsely fail — an install belonging to any host in the fleet. The host id
+     * comes from the authenticated credential, never from the body.
+     *
+     * `state = 'PENDING'` makes it idempotent. A worker whose confirmation was lost re-sends on the
+     * next flush; the second UPDATE matches nothing and reports `accepted: false`, which is the
+     * truthful answer ("already recorded") rather than a second state transition.
+     */
+    const installResults = [];
+    for (const r of installs) {
+      const accepted = await withSystem(async (c) => {
+        const res = await c.query(
+          `UPDATE app_installs i
+              SET state = CASE WHEN $3 THEN 'INSTALLED'::app_install_state ELSE 'FAILED' END,
+                  error = CASE WHEN $3 THEN NULL ELSE $4 END,
+                  finished_at = now()
+             FROM devices d
+            WHERE d.id = i.device_id
+              AND d.host_id = $1
+              AND i.id = $2
+              AND i.state = 'PENDING'`,
+          [hostId, r.installId, r.ok === true, (r.error ?? 'The worker reported a failure with no detail.').slice(0, 2000)],
+        );
+        return (res.rowCount ?? 0) > 0;
+      });
+      appInstalls.inc({ outcome: accepted ? (r.ok ? 'installed' : 'failed') : 'ignored' });
+      installResults.push({ installId: r.installId, accepted });
+    }
+
     return {
       meteringRecorded: meter.recorded,
       meteringDuplicates: meter.duplicates,
       meteringRejected: meter.rejected,
       resets: resetResults,
+      installs: installResults,
     };
   });
 }

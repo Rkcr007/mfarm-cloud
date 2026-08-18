@@ -143,6 +143,54 @@ export interface WorkerHeartbeatResponse {
   hostState: string;
   /** Devices of THIS host sitting in CLEANING, with the fence to confirm against. */
   resets?: Array<{ deviceId: string; fence: number }>;
+  /**
+   * App installs requested for THIS host's devices and not yet performed.
+   *
+   * Rides the beat for exactly the reasons `resets` does, and the reasoning is worth restating
+   * because it is the second feature to reach for it and will not be the last. Traffic between a
+   * worker and the control plane only ever flows one way — the worker dials out, and nothing on the
+   * host listens for the control plane — so a job the control plane wants done has to be *offered*
+   * rather than pushed. The beat already runs every 10s, already carries the worker credential, and
+   * re-sends anything still pending, which makes a missed install self-healing at no cost.
+   *
+   * Like resets, there is no acknowledgement here: the confirmation is `POST /v1/workers/events`
+   * with `installs`, which is scoped to the calling host and idempotent, so re-sending is harmless.
+   */
+  installs?: AppInstallRequest[];
+}
+
+/**
+ * One install for one device, as offered to the worker.
+ *
+ * Carries `sha256` because the worker VERIFIES the blob it downloads before handing it to adb. A
+ * truncated download otherwise reaches `adb install` as a corrupt archive, and the failure it
+ * produces names the app rather than the transfer — so the person reading it goes looking at their
+ * build. The digest is also the cache key: a suite that installs the same build on both devices
+ * downloads it once.
+ */
+export interface AppInstallRequest {
+  installId: string;
+  /** Control-plane uuid, not a local id. The worker maps it through its registration response. */
+  deviceId: string;
+  appId: string;
+  sha256: string;
+  sizeBytes: number;
+  packageName: string;
+  /**
+   * The device fence this install was requested under.
+   *
+   * The control plane already refuses to offer an install whose fence has moved on, so this is the
+   * second lock rather than the first — and it is the one that still holds if a worker acts on a
+   * beat it received before a reallocation it has not heard about yet.
+   */
+  fence: number;
+}
+
+/** What the worker reports back. `ok: false` carries adb's own words in `error`. */
+export interface AppInstallResult {
+  installId: string;
+  ok: boolean;
+  error?: string;
 }
 
 /**

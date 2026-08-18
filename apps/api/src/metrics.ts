@@ -345,6 +345,15 @@ export const workerResets = c(
   ['accepted'],
 );
 
+export const appInstalls = c(
+  'mfarm_app_installs_total',
+  'App installs reported by workers, by outcome. `failed` is the app or the device — the person who ' +
+    'asked for it sees the reason. `ignored` means the install was not this host\'s, or had already ' +
+    'been recorded, and a sustained rate of it is a worker re-sending confirmations it never gets ' +
+    'credit for.',
+  ['outcome'],
+);
+
 export const meteringEvents = c(
   'mfarm_metering_events_total',
   'Metering events by outcome. `rejected` means a host reported usage for a session that is not on ' +
