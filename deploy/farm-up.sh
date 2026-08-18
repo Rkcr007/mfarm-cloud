@@ -242,6 +242,8 @@ else
         BIND_HOST=$bridge_ip \
         APPIUM_ENABLED=1 \
         APPIUM_ADVERTISE_HOST=$bridge_ip \
+        ANDROID_HOME='$ANDROID_HOME' \
+        ANDROID_SDK_ROOT='$ANDROID_HOME' \
         CF_IMAGE_DIR='$CF_IMAGE_DIR' \
         CF_INSTANCES='$CF_INSTANCES' \
         node --experimental-strip-types workers/agent/src/index.ts 2>&1 | tee -a /tmp/mfarm-worker.log"
