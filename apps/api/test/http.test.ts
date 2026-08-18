@@ -179,6 +179,76 @@ describe('principal separation', () => {
     assert.equal(state, 'OFFLINE', 'must not be allocatable — it would leak the previous tenant');
     await withSystem((c) => c.query('DELETE FROM devices WHERE local_id = $1', [localId]));
   });
+
+  test('a device that gains the missing capability is promoted out of OFFLINE', async () => {
+    // Registration deliberately leaves most states alone, which used to mean OFFLINE was a trap: a
+    // device that registered unschedulable stayed that way forever. Observed on the lab VM — cf-2's
+    // first snapshot failed, the next run took one, and the control plane still said OFFLINE.
+    const localId = `promote-${randomUUID()}`;
+    const register = (capabilities: string[]) => app.inject({
+      method: 'POST', url: '/v1/workers/register',
+      headers: { 'x-worker-registration-token': 'test-registration-secret' },
+      payload: {
+        protocolVersion: 1, hostname: 'http-test-host', region: REGION,
+        endpoint: 'wss://worker-1.example:8443', cores: 64, memoryMb: 262144,
+        capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset'],
+        devices: [{ localId, platform: 'android', tier: 'cuttlefish', model: 'cf', osVersion: '15', capabilities }],
+      },
+    });
+    const stateOf = async () => (await withSystem(async (c) =>
+      (await c.query('SELECT state FROM devices WHERE local_id = $1', [localId])).rows[0]))?.state;
+
+    await register(['screen-stream', 'input-datachannel']);
+    assert.equal(await stateOf(), 'OFFLINE');
+
+    const promoted = await register(['screen-stream', 'input-datachannel', 'snapshot-reset']);
+    workerToken = promoted.json().workerToken;
+    assert.equal(await stateOf(), 'READY', 'a device that can now be reset must rejoin the pool');
+
+    // And symmetrically: losing it takes the device back out, exactly as withdrawing an automation
+    // endpoint does. A device that cannot be wiped must not keep taking tenants.
+    const demoted = await register(['screen-stream', 'input-datachannel']);
+    workerToken = demoted.json().workerToken;
+    assert.equal(await stateOf(), 'OFFLINE');
+
+    await withSystem((c) => c.query('DELETE FROM devices WHERE local_id = $1', [localId]));
+  });
+
+  test('registration does not disturb a device that is mid-session', async () => {
+    const localId = `insession-${randomUUID()}`;
+    const reg = await app.inject({
+      method: 'POST', url: '/v1/workers/register',
+      headers: { 'x-worker-registration-token': 'test-registration-secret' },
+      payload: {
+        protocolVersion: 1, hostname: 'http-test-host', region: REGION,
+        endpoint: 'wss://worker-1.example:8443', cores: 64, memoryMb: 262144,
+        capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset'],
+        devices: [{ localId, platform: 'android', tier: 'cuttlefish', model: 'cf', osVersion: '15',
+                    capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset'] }],
+      },
+    });
+    workerToken = reg.json().workerToken;
+    await withSystem((c) => c.query(`UPDATE devices SET state = 'SESSION_ACTIVE' WHERE local_id = $1`, [localId]));
+
+    // An agent restart must not yank a device out from under a running session, nor hand back one
+    // still being cleaned. Only READY <-> OFFLINE is registration's to decide.
+    const again = await app.inject({
+      method: 'POST', url: '/v1/workers/register',
+      headers: { 'x-worker-registration-token': 'test-registration-secret' },
+      payload: {
+        protocolVersion: 1, hostname: 'http-test-host', region: REGION,
+        endpoint: 'wss://worker-1.example:8443', cores: 64, memoryMb: 262144,
+        capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset'],
+        devices: [{ localId, platform: 'android', tier: 'cuttlefish', model: 'cf', osVersion: '15',
+                    capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset'] }],
+      },
+    });
+    workerToken = again.json().workerToken;
+    const state = await withSystem(async (c) =>
+      (await c.query('SELECT state FROM devices WHERE local_id = $1', [localId])).rows[0].state);
+    assert.equal(state, 'SESSION_ACTIVE');
+    await withSystem((c) => c.query('DELETE FROM devices WHERE local_id = $1', [localId]));
+  });
 });
 
 describe('session creation', () => {

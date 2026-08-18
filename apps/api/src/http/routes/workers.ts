@@ -86,6 +86,23 @@ export async function workerRoutes(app: FastifyInstance) {
              adb_serial = EXCLUDED.adb_serial,
              system_port = EXCLUDED.system_port,
              mjpeg_server_port = EXCLUDED.mjpeg_server_port,
+             -- Schedulability is re-asserted, but ONLY between READY and OFFLINE.
+             --
+             -- Registration used to leave the state column alone entirely, which is right for the
+             -- states it must never disturb — a re-registering agent must not yank a device out of
+             -- SESSION_ACTIVE or hand back one still in CLEANING — but it made OFFLINE a trap.
+             -- A device that registers OFFLINE because it is missing a required capability stays
+             -- OFFLINE forever, even after it gains one. Found on the lab VM 2026-08-18: cf-2's
+             -- first snapshot failed, so it registered unschedulable; the next run took the
+             -- snapshot successfully and the control plane went on reporting OFFLINE.
+             --
+             -- The reverse direction matters just as much and is the same rule the automation
+             -- endpoint follows two lines up: a device that has LOST a required capability must
+             -- leave the pool rather than keep taking tenants.
+             state = CASE
+               WHEN devices.state IN ('READY', 'OFFLINE') THEN EXCLUDED.state
+               ELSE devices.state
+             END,
              updated_at = now()
            RETURNING id`,
           [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,
