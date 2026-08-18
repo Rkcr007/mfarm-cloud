@@ -653,6 +653,71 @@ before building any viewer**, because it determines whether a browser needs clie
     The pattern in all three: **a fleet of one hides every bug that is about telling devices apart.**
     Nothing here was findable with `CF_INSTANCES=1`, and nothing here was findable without hardware.
 
+18. **A HOST RESTART BRICKED THE FARM, because cvd's instance database outlives the host.** Found
+    2026-08-19 by stopping and starting the lab VM under a running farm — the first time this
+    project had ever restarted a host that had devices on it.
+
+    After the restart `cvd fleet` still listed both groups, still carrying the `start_time` from
+    before the restart, with `"status": "Unreachable"` and zero `crosvm` processes behind them. The
+    adopt path had nothing to adopt, and the restore path was refused outright with `Selected
+    instance group is already started, use 'cvd create' to create a new one` — so the agent died
+    with `fatal: cvd exited 255` and the farm never came back without a human running `cvd reset`.
+
+    Bring-up is now self-healing: a group that cannot be restarted is discarded with **`cvd rm`
+    scoped to that group** and cold booted. Measured after the fix: both ghosts cleared and rebuilt
+    unattended, 45.6s and 38.3s, fleet back to `available: 2`.
+
+    **`cvd rm`, NOT `cvd reset`**, and the difference is not stylistic:
+    - `cvd reset` is host-wide. On a farm it kills every other tenant's session to fix one device.
+    - `cvd reset` also cleans the instance runtime dirs, which **destroys the snapshots it looks
+      like it is rescuing** (see issue 19). Verified: `create --snapshot_path` afterwards fails on a
+      missing `logs/fetch.log`.
+    - `cvd rm` leaves other groups running and does **not** delete an image supplied via
+      `--host_path` — verified with a second device running throughout, image dir 3.2 GB before and
+      after.
+
+    A second shape of the same bug: **a group that exists is not a group that works.** Snapshot
+    support is a BOOT-TIME property, so a group booted without those flags restarts, boots, and
+    answers adb while being permanently unable to suspend (`cvd suspend` → `LauncherResponse::
+    kError`). Every later agent start found that group and restarted into it again, so the device
+    was unschedulable forever. A failed snapshot on a group this agent did not build now discards it
+    and cold boots **once** — bounded, and never on a group we just created, because a fresh group
+    that cannot snapshot is a host problem and rebuilding it would be a boot loop hiding the cause.
+
+19. **A SNAPSHOT IS ONLY VALID FOR THE GROUP IT WAS TAKEN UNDER, and nothing checked.** Found
+    2026-08-19, immediately after issue 18's fix, which is what made it reachable.
+
+    `snapshot_meta_info.json` records an **absolute HOME** (`/var/tmp/cvd/<uid>/<id>/home`), cvd
+    mints a new `<id>` for every group it creates, and restore copies the snapshot back into the
+    HOME **the file names** rather than the one the running group has. So a snapshot that outlives
+    its group restores into a directory that is gone:
+
+    ```
+    Copy from "/home/…/cf/snapshots/cf-2" to "/var/tmp/cvd/1001/1787069364409736/home/cuttlefish"
+    failed to open …/1787069364409736/home/cuttlefish/instances/cvd-2/logs/fetch.log
+    ```
+
+    The symptom is the dangerous part: bring-up succeeds, the device registers **READY advertising
+    `snapshot-reset`**, the first session runs green, and then every reset fails and the device is
+    parked in CLEANING for good. That is the same one-session-per-device failure as issue 16,
+    arriving through a different door.
+
+    Two defences, because the group can be replaced by something other than this agent:
+    - Discarding a group now discards its snapshot **and drops the `snapshot-reset` capability**,
+      at the one place a group stops being the group its snapshot belongs to.
+    - Every start compares the snapshot's recorded HOME against the group's current `instance_dir`
+      from `cvd fleet`, which catches drift caused by an operator, a `cvd reset`, or an older build
+      — the **adopt** path would otherwise re-advertise a stale snapshot without ever touching it.
+      Unreadable or absent metadata is never treated as stale: a snapshot is ~4 GB and a false
+      positive destroys a good one.
+
+    Proven on the lab VM: the stuck device healed itself with no intervention (the reset request is
+    re-sent every heartbeat, so it succeeded the moment a valid snapshot existed), then three
+    consecutive sessions ran green across both devices with `available: 2` between each.
+
+    **The rule this leaves:** a capability is a claim about observed state, and `snapshot-reset` is
+    the one capability whose truth can be destroyed by something that never touches the device.
+
 ## Rules earned the hard way
 
 Each of these came from a test failure, not from review. They are the ones most likely to be

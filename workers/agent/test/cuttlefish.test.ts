@@ -359,3 +359,166 @@ describe('snapshot take and restore', () => {
     await assert.rejects(d.resetToSnapshot(), /snapshot reset is unavailable/);
   });
 });
+
+/**
+ * cvd's instance database outlives the host, and a group that exists is not a group that works.
+ * Both shapes were found on the lab VM on 2026-08-18, and both left the farm permanently
+ * unschedulable with no human-visible cause beyond "no devices".
+ */
+describe('a group that exists but does not work is rebuilt, once', () => {
+  const countOf = (all: string[], verb: string) =>
+    all.filter((c) => c.startsWith('cvd ') && c.split(/\s+/).includes(verb)).length;
+
+  test('a ghost group left by a host reboot is removed and cold booted', async () => {
+    // What `cvd fleet` actually reports after the host reboots under a running farm: the group is
+    // still recorded, with the start_time from before the reboot, and every process behind it gone.
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [{ group_name: 'cvd_1', instances: [{ adb_port: 6520, instance_name: '1', status: 'Unreachable' }] }],
+    }));
+    // …and cvd refuses the restore path outright, which is what bricked the farm.
+    await fails('cvd', 'start', 'Selected instance group is already started, use `cvd create` to create a new one.');
+    await answer('cvd', 'create', 'group:cvd_9|instance(s):1');
+
+    const d = device();
+    await d.start();
+
+    const all = await calls();
+    assert.equal(countOf(all, 'rm'), 1, `should discard the ghost exactly once:\n${all.join('\n')}`);
+    assert.match(await callTo('cvd', 'rm'), /--group_name=cvd_1 rm/);
+    assert.equal(countOf(all, 'create'), 1, 'and cold boot exactly one replacement');
+  });
+
+  const fleetRunningAt = (instanceDir: string) => JSON.stringify({
+    groups: [{
+      group_name: 'cvd_1',
+      instances: [{ adb_port: 6520, instance_name: '1', status: 'Running', instance_dir: instanceDir }],
+    }],
+  });
+
+  test('an adopted group whose snapshot names a different HOME retakes it', async () => {
+    // The drift this catches: the group was rebuilt while this agent was not running — by an
+    // operator, a `cvd reset`, or an older build — so the adopt path finds a healthy device sitting
+    // beside a snapshot that can no longer restore into it.
+    await answer('cvd', 'fleet', fleetRunningAt('/var/tmp/cvd/1001/NEW/home/cuttlefish/instances/cvd-1'));
+    await mkdir(snapshotDir, { recursive: true });
+    await writeFile(join(snapshotDir, 'snapshot.pb'), 'x');
+    await writeFile(
+      join(snapshotDir, 'snapshot_meta_info.json'),
+      JSON.stringify({ HOME: '/var/tmp/cvd/1001/OLD/home' }),
+    );
+
+    const d = device();
+    await d.start();
+
+    const { readdir } = await import('node:fs/promises');
+    assert.equal((await readdir(snapshotDir).catch(() => [])).includes('snapshot.pb'), false);
+    await callTo('cvd', 'snapshot_take');
+  });
+
+  test('an adopted group whose snapshot matches is left alone', async () => {
+    // The expensive false positive: a snapshot is ~4 GB and a needless retake suspends a device a
+    // tenant could be using.
+    await answer('cvd', 'fleet', fleetRunningAt('/var/tmp/cvd/1001/SAME/home/cuttlefish/instances/cvd-1'));
+    await mkdir(snapshotDir, { recursive: true });
+    await writeFile(join(snapshotDir, 'snapshot.pb'), 'x');
+    await writeFile(
+      join(snapshotDir, 'snapshot_meta_info.json'),
+      JSON.stringify({ HOME: '/var/tmp/cvd/1001/SAME/home' }),
+    );
+
+    const d = device();
+    await d.start();
+
+    const all = await calls();
+    assert.equal(all.some((c) => c.includes('snapshot_take')), false, `must not retake:\n${all.join('\n')}`);
+    assert.equal(d.info.capabilities.includes('snapshot-reset'), true);
+  });
+
+  test('metadata it cannot read is never treated as stale', async () => {
+    // A snapshot is expensive and the shapes have changed across cvd versions; guessing destroys a
+    // good one. Only a HOME actually read and compared may condemn a snapshot.
+    await answer('cvd', 'fleet', fleetRunningAt('/var/tmp/cvd/1001/NEW/home/cuttlefish/instances/cvd-1'));
+    await mkdir(snapshotDir, { recursive: true });
+    await writeFile(join(snapshotDir, 'snapshot.pb'), 'x');
+    await writeFile(join(snapshotDir, 'snapshot_meta_info.json'), 'not json at all');
+
+    const d = device();
+    await d.start();
+
+    const { readdir } = await import('node:fs/promises');
+    assert.equal((await readdir(snapshotDir)).includes('snapshot.pb'), true);
+  });
+
+  test('a ghost group takes its stale snapshot down with it', async () => {
+    // The trap this closes: bring-up succeeds, the device registers READY advertising
+    // `snapshot-reset`, the first session runs green, and then EVERY reset fails, because the
+    // snapshot pins the absolute HOME of the group that no longer exists. Seen on the lab VM.
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [{ group_name: 'cvd_1', instances: [{ adb_port: 6520, instance_name: '1', status: 'Unreachable' }] }],
+    }));
+    await fails('cvd', 'start', 'Selected instance group is already started');
+    await answer('cvd', 'create', 'group:cvd_9|instance(s):1');
+    await mkdir(snapshotDir, { recursive: true });
+    await writeFile(join(snapshotDir, 'snapshot.pb'), 'taken under the group we are about to destroy');
+
+    const d = device();
+    await d.start();
+
+    const { readdir } = await import('node:fs/promises');
+    const left = await readdir(snapshotDir).catch(() => [] as string[]);
+    assert.equal(left.includes('snapshot.pb'), false, 'the stale snapshot must not survive the rebuild');
+    // …and a fresh one is taken against the group that now exists.
+    await callTo('cvd', 'snapshot_take');
+  });
+
+  test('a restarted group that cannot snapshot is discarded and rebuilt', async () => {
+    // Snapshot support is a boot-time property, so a group booted without it restarts, boots, and
+    // answers adb while being permanently unable to suspend.
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [{ group_name: 'cvd_1', instances: [{ adb_port: 6520, instance_name: '1', status: 'Stopped' }] }],
+    }));
+    await fails('cvd', 'suspend', 'LauncherResponse::kError');
+    await answer('cvd', 'create', 'group:cvd_9|instance(s):1');
+
+    const d = device();
+    await d.start();
+
+    const all = await calls();
+    assert.equal(countOf(all, 'rm'), 1, `the unusable group must be discarded:\n${all.join('\n')}`);
+    assert.equal(countOf(all, 'create'), 1, 'and replaced by a cold boot');
+    // Bounded: the rebuild is attempted once, not until the host falls over.
+    assert.equal(countOf(all, 'suspend'), 2, 'one snapshot attempt per group, and no more');
+  });
+
+  test('a freshly created group that cannot snapshot is NOT rebuilt', async () => {
+    // The distinction the retry turns on: a group this agent just built and which still cannot
+    // snapshot is a host problem — kernel, apparmor, disk — and rebuilding it is a boot loop that
+    // hides the real cause.
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+    await fails('cvd', 'suspend', 'LauncherResponse::kError');
+
+    const d = device();
+    await d.start();
+
+    const all = await calls();
+    assert.equal(countOf(all, 'rm'), 0, `nothing to discard on a fresh group:\n${all.join('\n')}`);
+    assert.equal(countOf(all, 'create'), 1, 'and no second cold boot');
+    assert.equal(d.info.capabilities.includes('snapshot-reset'), false, 'and it stays unschedulable');
+  });
+
+  test('a failed take leaves no directory behind to be mistaken for a snapshot', async () => {
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+    await fails('cvd', 'snapshot_take', 'out of disk');
+
+    const d = device();
+    await d.start();
+
+    // `snapshotOnDisk` reads any content as a usable snapshot, so a partial take advertised as
+    // `snapshot-reset` would fail on a tenant's session rather than here.
+    const { readdir } = await import('node:fs/promises');
+    assert.deepEqual(await readdir(snapshotDir).catch(() => []), []);
+    assert.equal(d.info.capabilities.includes('snapshot-reset'), false);
+  });
+});

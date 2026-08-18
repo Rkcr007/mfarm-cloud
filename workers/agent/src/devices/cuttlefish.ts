@@ -55,10 +55,15 @@ export interface CuttlefishOptions {
   bootTimeoutMs?: number;
 }
 
-/** What `cvd fleet` says about one instance, reduced to the two fields the boot decision needs. */
+/** What `cvd fleet` says about one instance, reduced to the fields the boot decision needs. */
 export interface FleetInstance {
   group?: string;
   status?: string;
+  /**
+   * `<HOME>/cuttlefish/instances/cvd-<n>`. Carried because it is the only place the group's HOME
+   * appears, and a snapshot is only valid for the HOME it was taken under — see `snapshotIsStale`.
+   */
+  instanceDir?: string;
 }
 
 /**
@@ -106,7 +111,13 @@ export function findFleetInstance(
       || obj.adb_serial === match.adbSerial
       || obj.webrtc_device_id === match.localId
       || obj.instance_name === match.localId;
-    if (identifies) return { group: g, status: s };
+    if (identifies) {
+      // Returned two ways rather than with an undefined field: a `deepStrictEqual` on the parser's
+      // output counts an explicitly-undefined key as present, and older shapes genuinely lack it.
+      return typeof obj.instance_dir === 'string'
+        ? { group: g, status: s, instanceDir: obj.instance_dir }
+        : { group: g, status: s };
+    }
 
     for (const value of Object.values(obj)) {
       const hit = walk(value, g, s);
@@ -197,19 +208,7 @@ export class CuttlefishDevice implements DeviceControl {
     const avail = await (this.opts.probe ?? CuttlefishDevice.available)();
     if (!avail.ok) throw new Error(`cannot start Cuttlefish: ${avail.reason}`);
 
-    const existing = await this.findExisting();
-    if (existing?.group) {
-      this.groupName = existing.group;
-      if (/running/i.test(existing.status ?? '') && await this.adbAlive()) {
-        console.log(`[cuttlefish] ${this.info.localId}: adopting running group ${existing.group}`);
-      } else {
-        await this.restartExisting();
-        await this.waitForBoot();
-      }
-    } else {
-      await this.coldBoot();
-      await this.waitForBoot();
-    }
+    const route = await this.bringUp();
 
     // THE SELECTOR IS NOT OPTIONAL ONCE THERE IS A SECOND DEVICE, AND ITS ABSENCE IS INVISIBLE
     // UNTIL THEN. `coldBoot` scrapes the group name out of cvd's output, which is a guess about a
@@ -218,21 +217,46 @@ export class CuttlefishDevice implements DeviceControl {
     // is, and cf-2 failed its snapshot with `Multiple groups found. Narrow the selection with
     // selector arguments.` So take the name from `cvd fleet`, which reports structured data and is
     // already parsed for the adopt path, and treat the scrape as nothing more than a fast path.
-    if (!this.groupName) {
-      this.groupName = (await this.findExisting())?.group;
-      if (!this.groupName) {
-        console.error(
-          `[cuttlefish] ${this.info.localId}: cvd did not name its group and fleet does not list this ` +
-          'device — every later cvd command will be unselected, which fails outright on a host with ' +
-          'more than one device.',
-        );
-      }
-    }
+    await this.resolveGroupName();
 
     // Before registration, deliberately: a device with no snapshot is not schedulable, so taking
     // one here is what turns a freshly bootstrapped host into a usable farm without a human running
     // a snapshot command by hand. Costs ~4 GB and a suspend/resume once per device, ever.
-    await this.ensureSnapshot();
+    // A GROUP THAT EXISTS IS NOT THE SAME AS A GROUP THAT WORKS, and until 2026-08-18 nothing here
+    // could tell the two apart. Snapshot support is a BOOT-TIME property: a group booted without
+    // the flags in `coldBoot` can never be suspended, so `cvd suspend` answers
+    // `LauncherResponse::kError` and the device registers unschedulable — permanently, because
+    // every later agent start finds the same group and restarts into it again. Seen on the lab VM
+    // with a group left behind by a failed `create`: it restarted, booted, answered adb, and could
+    // not snapshot, on every attempt.
+    //
+    // So a failed snapshot on a group this agent did not build is treated as evidence the group is
+    // unusable, not as a property of the host: discard it and cold boot once. Bounded to a single
+    // retry, and never attempted when we just created the group — a fresh group that cannot
+    // snapshot is a real host problem (kernel, apparmor, disk) that rebuilding would only hide
+    // behind a boot loop.
+    // Checked on EVERY start, not just after a rebuild this agent did: the adopt path would
+    // otherwise re-advertise a snapshot whose group was replaced while the agent was not running.
+    const seen = await this.findExisting();
+    if (await this.snapshotIsStale(seen?.instanceDir)) {
+      await this.dropSnapshot(`it belongs to a group that no longer exists (${seen?.instanceDir})`);
+    }
+
+    let snapshotted = await this.ensureSnapshot();
+    if (!snapshotted && route !== 'created') {
+      console.warn(
+        `[cuttlefish] ${this.info.localId}: ${route} group ${this.groupName} cannot snapshot — ` +
+        'discarding it and cold booting once, because a group that cannot be reset is not schedulable',
+      );
+      await this.discardGroup();
+      await this.coldBoot();
+      await this.waitForBoot();
+      await this.resolveGroupName();
+      snapshotted = await this.ensureSnapshot();
+    }
+    if (!snapshotted) {
+      console.error(`[cuttlefish] ${this.info.localId}: no snapshot, device will not be schedulable`);
+    }
     await this.refreshResetCapability();
 
     // Cheap, and the control plane surfaces it per session; unknown here would be a silent gap.
@@ -268,6 +292,148 @@ export class CuttlefishDevice implements DeviceControl {
     // that name as a selector, because a host running more than one device has more than one group
     // and the unselected default is whichever cvd picks.
     this.groupName = /group:(\S+?)\|/.exec(out)?.[1];
+  }
+
+  /**
+   * Get the device running by the cheapest correct route, and say which route it took — the caller
+   * needs that to decide whether a later failure is the group's fault or the host's.
+   *
+   * The `restartExisting` failure path is the one worth explaining. cvd's instance database OUTLIVES
+   * THE HOST: after a reboot the groups are still recorded, still carry the `start_time` from before
+   * the reboot, and still count as active, while every process behind them is gone. `cvd fleet` says
+   * `"status": "Unreachable"`, and `cvd start` refuses outright with `Selected instance group is
+   * already started, use 'cvd create' to create a new one` — so the restore path cannot run and the
+   * adopt path has nothing to adopt. Before this, that combination bricked the farm on every host
+   * reboot until a human ran `cvd reset` by hand (verified on the lab VM, 2026-08-18).
+   *
+   * `cvd rm` scoped to the group is the repair, NOT `cvd reset`. Two reasons, both measured:
+   *   * `cvd reset` is host-wide — it stops every device, so on a farm it would kill the tenants'
+   *     sessions on every other device to fix one.
+   *   * `cvd reset` also cleans the instance runtime dirs, and a snapshot pins the absolute HOME it
+   *     was taken under (`snapshot_meta_info.json`). Clean those dirs and `create --snapshot_path`
+   *     fails on a missing `logs/fetch.log`, which is to say the reset destroys the snapshots it was
+   *     meant to rescue.
+   * `cvd rm` leaves other groups running and does NOT delete an image supplied via `--host_path`.
+   */
+  private async bringUp(): Promise<'created' | 'adopted' | 'restarted'> {
+    const existing = await this.findExisting();
+    if (existing?.group) {
+      this.groupName = existing.group;
+      if (/running/i.test(existing.status ?? '') && await this.adbAlive()) {
+        console.log(`[cuttlefish] ${this.info.localId}: adopting running group ${existing.group}`);
+        return 'adopted';
+      }
+      try {
+        await this.restartExisting();
+        await this.waitForBoot();
+        return 'restarted';
+      } catch (e) {
+        console.warn(
+          `[cuttlefish] ${this.info.localId}: cannot restart group ${existing.group} ` +
+          `(${(e as Error).message.split('\n')[0]}) — discarding it and cold booting`,
+        );
+        await this.discardGroup();
+      }
+    }
+    await this.coldBoot();
+    await this.waitForBoot();
+    return 'created';
+  }
+
+  /**
+   * Forget a group entirely, so the next `cvd create` builds a clean one — and throw away its
+   * snapshot, because the snapshot cannot outlive it.
+   *
+   * A SNAPSHOT IS ONLY VALID FOR THE GROUP IT WAS TAKEN UNDER. `snapshot_meta_info.json` records an
+   * absolute `HOME` (`/var/tmp/cvd/<uid>/<id>/home`), cvd generates a new `<id>` for every group it
+   * creates, and restore copies the snapshot back into the HOME the FILE names rather than the one
+   * the running group has. So a snapshot kept across a rebuild restores into a directory that no
+   * longer exists and fails on a missing `logs/fetch.log`.
+   *
+   * Verified on the lab VM 2026-08-18, and the symptom is worth recognising: bring-up succeeds, the
+   * device registers READY advertising `snapshot-reset`, the first session runs green, and then
+   * every reset fails and the device is parked in CLEANING for good. That is the same
+   * one-session-per-device failure as HANDOFF issue 16, arriving through a different door — which is
+   * why the snapshot is dropped HERE, at the one place a group stops being the group its snapshot
+   * belongs to, rather than anywhere it could be forgotten.
+   *
+   * Tolerant of failure on purpose: this only ever runs on a group already known to be unusable, and
+   * the cold boot afterwards is the thing that actually has to work.
+   */
+  private async discardGroup(): Promise<void> {
+    await run('cvd', this.sel('rm'), this.opts.imageDir, 120_000)
+      .catch((e) => console.warn(`[cuttlefish] ${this.info.localId}: rm failed: ${(e as Error).message.split('\n')[0]}`));
+    this.groupName = undefined;
+    await this.dropSnapshot('the group it was taken under has been destroyed');
+  }
+
+  /**
+   * Throw a snapshot away, and stop claiming the capability that depends on it.
+   *
+   * The capability half is not bookkeeping. Between here and the retake the device genuinely cannot
+   * be reset, and a device that advertises `snapshot-reset` it cannot honour is one the control
+   * plane will hand to a tenant and then fail to recycle — which parks it in CLEANING for good.
+   */
+  private async dropSnapshot(why: string): Promise<void> {
+    const dir = this.opts.snapshotDir;
+    if (!dir) return;
+    console.warn(`[cuttlefish] ${this.info.localId}: discarding snapshot — ${why}`);
+    const { rm } = await import('node:fs/promises');
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    this.info.capabilities = this.info.capabilities.filter((c) => c !== 'snapshot-reset');
+  }
+
+  /**
+   * Is the snapshot on disk bound to a HOME the current group does not have?
+   *
+   * `cvd` restores a snapshot into the absolute HOME recorded in its own `snapshot_meta_info.json`,
+   * NOT into the HOME of the group being restored, and it mints a fresh HOME for every group it
+   * creates. So any snapshot that outlives its group restores into a directory that is no longer
+   * there and fails on a missing `logs/fetch.log`.
+   *
+   * `discardGroup` covers the rebuilds this agent performs itself. This covers every other way the
+   * two can drift apart — an operator running `cvd rm`, a `cvd reset`, a group rebuilt by a version
+   * of this agent that did not know to drop it — because the next agent start ADOPTS the running
+   * group and would otherwise re-advertise the stale snapshot without ever touching it.
+   *
+   * Unrecognised or absent metadata returns false. A snapshot is expensive and a false positive
+   * destroys a good one, so this only ever acts on a HOME it has actually read and compared.
+   */
+  private async snapshotIsStale(instanceDir?: string): Promise<boolean> {
+    const dir = this.opts.snapshotDir;
+    if (!dir || !instanceDir) return false;
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const raw = await readFile(join(dir, 'snapshot_meta_info.json'), 'utf8').catch(() => '');
+    if (!raw) return false;
+    let home: unknown;
+    try { home = (JSON.parse(raw) as Record<string, unknown>).HOME; } catch { return false; }
+    if (typeof home !== 'string') return false;
+    // instance_dir is `<HOME>/cuttlefish/instances/cvd-<n>`.
+    const [current] = instanceDir.split('/cuttlefish/instances/');
+    if (!current || current === instanceDir) return false;
+    return current !== home;
+  }
+
+  /**
+   * THE SELECTOR IS NOT OPTIONAL ONCE THERE IS A SECOND DEVICE, AND ITS ABSENCE IS INVISIBLE UNTIL
+   * THEN. `coldBoot` scrapes the group name out of cvd's output, which is a guess about a format —
+   * and on 2026-08-18, running two devices for the first time, it turned out to be the wrong guess:
+   * cf-1 worked all day because with one group cvd falls back to the only one there is, and cf-2
+   * failed its snapshot with `Multiple groups found. Narrow the selection with selector arguments.`
+   * So take the name from `cvd fleet`, which reports structured data and is already parsed for the
+   * adopt path, and treat the scrape as nothing more than a fast path.
+   */
+  private async resolveGroupName(): Promise<void> {
+    if (this.groupName) return;
+    this.groupName = (await this.findExisting())?.group;
+    if (!this.groupName) {
+      console.error(
+        `[cuttlefish] ${this.info.localId}: cvd did not name its group and fleet does not list this ` +
+        'device — every later cvd command will be unselected, which fails outright on a host with ' +
+        'more than one device.',
+      );
+    }
   }
 
   /**
@@ -393,23 +559,33 @@ export class CuttlefishDevice implements DeviceControl {
   /**
    * Take the golden snapshot if this device does not have one yet.
    *
-   * A failure is logged and swallowed on purpose. The consequence is already carried by
+   * A failure is reported, never thrown. The consequence is already carried by
    * `refreshResetCapability` below — no snapshot means no `snapshot-reset`, which means the control
    * plane will not schedule tenant sessions onto this device. Throwing instead would take down a
    * worker that is otherwise fine, and hide a device that is genuinely usable for everything except
-   * multi-tenant recycling.
+   * multi-tenant recycling. The boolean exists so `start` can tell "this group cannot snapshot"
+   * (rebuild it) from "this host cannot snapshot" (rebuilding would be a boot loop).
    */
-  private async ensureSnapshot(): Promise<void> {
+  private async ensureSnapshot(): Promise<boolean> {
     const dir = this.opts.snapshotDir;
-    if (!dir || await this.snapshotOnDisk()) return;
-    const { mkdir } = await import('node:fs/promises');
+    // No snapshot directory configured is a deliberate choice, not a failure: the device simply is
+    // not resettable. Report success so `start` does not rebuild a group over a setting.
+    if (!dir) return true;
+    if (await this.snapshotOnDisk()) return true;
+    const { mkdir, rm } = await import('node:fs/promises');
     const { dirname } = await import('node:path');
     try {
       await mkdir(dirname(dir), { recursive: true });
       console.log(`[cuttlefish] ${this.info.localId}: taking first snapshot into ${dir} (~4 GB, once)`);
       await this.takeSnapshot();
+      return true;
     } catch (e) {
-      console.error(`[cuttlefish] ${this.info.localId}: snapshot failed, device will not be schedulable: ${(e as Error).message}`);
+      console.error(`[cuttlefish] ${this.info.localId}: snapshot failed: ${(e as Error).message.split('\n')[0]}`);
+      // A take that fails partway leaves a NON-EMPTY directory, and `snapshotOnDisk` reads any
+      // content as a usable snapshot. Left in place it would be advertised as `snapshot-reset` and
+      // then fail at the point where the cost is a tenant's session instead of a boot.
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      return false;
     }
   }
 
