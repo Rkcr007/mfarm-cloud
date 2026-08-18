@@ -121,15 +121,34 @@ export async function workerRoutes(app: FastifyInstance) {
   /** Liveness. A host that stops heartbeating is a candidate for quarantine. */
   app.post('/workers/heartbeat', async (req) => {
     const { hostId } = requireWorker(req);
-    const row = await withSystem(async (c) => {
+    const { row, resets } = await withSystem(async (c) => {
       const { rows } = await c.query(
         `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1 RETURNING state`,
         [hostId],
       );
-      return rows[0];
+      // The other half of the reset story. A device is parked in CLEANING when its session ends and
+      // stays unallocatable until a worker confirms the restore — and before this existed, nothing
+      // ever ASKED for one, so `Agent.resetAndRelease()` had no caller and every device left the
+      // fleet after one session (HANDOFF.md issue 16).
+      //
+      // Scoped to the calling host, like every other worker-facing query: a worker must never learn
+      // about, let alone be able to act on, another host's devices (migration 008's rule).
+      // Re-sent on every beat until the state changes, which makes a missed or failed reset
+      // self-healing and costs one indexed read per ten seconds.
+      const { rows: cleaning } = await c.query(
+        `SELECT id, fence FROM devices WHERE host_id = $1 AND state = 'CLEANING'`,
+        [hostId],
+      );
+      return {
+        row: rows[0],
+        resets: cleaning.map((d: { id: string; fence: string | number }) => ({
+          deviceId: d.id,
+          fence: Number(d.fence),
+        })),
+      };
     });
     // Told on every beat so a host that was quarantined while partitioned learns it must drain.
-    return { ok: true, hostState: row?.state ?? 'DOWN' };
+    return { ok: true, hostState: row?.state ?? 'DOWN', resets };
   });
 
   /**

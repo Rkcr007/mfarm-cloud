@@ -5,6 +5,7 @@ import {
   PROTOCOL_VERSION,
   type Capability,
   type RegistrationResponse,
+  type WorkerHeartbeatResponse,
   type WorkerRegistration,
 } from '@mfarm/protocol';
 import { derivePort } from './appium.ts';
@@ -121,6 +122,8 @@ export class Agent {
   private readonly pendingResets: Array<{ deviceId: string; fence: number }> = [];
   /** Per-device high-water mark. See acceptFence. */
   private readonly fenceHighWater = new Map<string, number>();
+  /** Devices currently being restored, so a re-sent heartbeat request cannot start a second one. */
+  private readonly resetsInFlight = new Set<string>();
 
   private readonly opts: AgentOptions;
   /**
@@ -399,12 +402,16 @@ export class Agent {
         }),
       });
       if (!res.ok) return { ok: false };
-      const body = await res.json() as { hostState: string };
+      const body = await res.json() as WorkerHeartbeatResponse;
       // A host quarantined while it was partitioned learns about it here and must drain rather than
       // keep accepting work.
       if (body.hostState === 'QUARANTINED') {
         console.warn('[agent] host is QUARANTINED by the control plane — draining, not accepting sessions');
       }
+      // Deliberately not awaited: a restore takes seconds and the beat must stay a liveness signal.
+      // A slow reset that delayed the heartbeat would look like a dead host and get the whole
+      // machine quarantined, which is the opposite of what a device needing cleaning calls for.
+      void this.runRequestedResets(body.resets ?? []);
       return { ok: true, hostState: body.hostState };
     } catch {
       return { ok: false };
@@ -536,6 +543,56 @@ export class Agent {
     await backend.control.resetToSnapshot();
     this.pendingResets.push({ deviceId, fence });
     await this.flush();
+  }
+
+  /**
+   * Act on the reset requests the control plane attaches to a heartbeat.
+   *
+   * THIS IS THE CALLER `resetAndRelease` NEVER HAD. Until 2026-08-18 the control plane parked a
+   * released device in CLEANING and waited for a confirmation that no code path ever produced, so a
+   * farm served one session per device and then answered `no_capacity` for good (HANDOFF.md issue
+   * 16). Found by running B8, not by review — every test had called `resetAndRelease` directly.
+   *
+   * Three properties worth keeping:
+   *
+   * - **In-flight guard.** The request is re-sent on every beat until the state changes, and a
+   *   restore takes longer than a beat interval. Without the guard a ten-second restore starts a
+   *   second `cvd stop` on a device that is mid-restore.
+   * - **A failure is logged and dropped, not retried here.** The next beat brings the request back
+   *   for free, and a device that cannot be restored must stay in CLEANING — that state is exactly
+   *   what the "reset failure" alert watches for.
+   * - **An unknown device is a warning, never a throw.** A control plane naming a device this
+   *   worker does not have is a bug somewhere, but it must not stop the beat.
+   */
+  private async runRequestedResets(requests: Array<{ deviceId: string; fence: number }>): Promise<void> {
+    for (const { deviceId, fence } of requests) {
+      if (this.resetsInFlight.has(deviceId)) continue;
+      const backend = this.backendForDeviceId(deviceId);
+      if (!backend) {
+        console.warn(`[agent] control plane asked to reset unknown device ${deviceId}`);
+        continue;
+      }
+      this.resetsInFlight.add(deviceId);
+      try {
+        console.log(`[agent] resetting ${backend.control.info.localId} (fence ${fence})`);
+        await this.resetAndRelease(backend, deviceId, fence);
+        console.log(`[agent] ${backend.control.info.localId} restored and released`);
+      } catch (e) {
+        // Stays CLEANING, which is the designed signal for a failed restore — a device that cannot
+        // be cleaned must never go back into the pool carrying the last tenant's state.
+        console.error(`[agent] reset failed for ${backend.control.info.localId}: ${(e as Error).message}`);
+      } finally {
+        this.resetsInFlight.delete(deviceId);
+      }
+    }
+  }
+
+  /** uuid -> backend, via the localId->uuid map registration returned. */
+  private backendForDeviceId(deviceId: string): DeviceBackend | undefined {
+    const ids = this.state?.deviceIds ?? {};
+    const localId = Object.keys(ids).find((k) => ids[k] === deviceId);
+    if (!localId) return undefined;
+    return this.opts.devices.find((b) => b.control.info.localId === localId);
   }
 
   // ---------------------------------------------------------------- fencing

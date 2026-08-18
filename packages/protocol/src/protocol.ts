@@ -124,6 +124,28 @@ export interface RegistrationResponse {
 }
 
 /**
+ * What a heartbeat answers with.
+ *
+ * `resets` is the missing half of the reset story, added 2026-08-18 after B8. A released device is
+ * parked in CLEANING and `allocate_device` will not hand it out again until a worker confirms the
+ * restore — but until this field existed, **nothing ever told the worker to perform one**.
+ * `Agent.resetAndRelease()` was fully implemented and had no caller, so a farm served exactly one
+ * session per device and then reported `no_capacity` forever (HANDOFF.md issue 16).
+ *
+ * It rides the heartbeat rather than getting a route of its own because the beat is already the
+ * control plane's one regular chance to correct a worker's picture of the world, it already carries
+ * the worker credential, and a reset that is missed is retried on the next beat for free. There is
+ * no acknowledgement here: the confirmation is `POST /workers/events` with `resets`, which is
+ * fenced and idempotent, so re-sending the same request is harmless.
+ */
+export interface WorkerHeartbeatResponse {
+  ok: boolean;
+  hostState: string;
+  /** Devices of THIS host sitting in CLEANING, with the fence to confirm against. */
+  resets?: Array<{ deviceId: string; fence: number }>;
+}
+
+/**
  * The automation base url for one device, honouring the v1 fallback.
  *
  * Single reader for the precedence so the control plane and the worker cannot disagree about it:

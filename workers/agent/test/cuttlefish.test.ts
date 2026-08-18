@@ -234,6 +234,32 @@ describe('start() picks the cheapest correct route', () => {
     await callTo('cvd', 'start');
   });
 
+  test('falls back to cvd fleet when create does not name the group', async () => {
+    // cf-1 worked all day with an unparsed group name, because with one group cvd falls back to the
+    // only one there is. cf-2 then failed its snapshot with "Multiple groups found". So a scrape
+    // that comes back empty must be repaired before any later command needs a selector.
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [
+        { group_name: 'cvd_1', instances: [{ adb_serial: '0.0.0.0:6520' }] },
+        { group_name: 'cvd_2', instances: [{ adb_serial: '0.0.0.0:6521', webrtc_device_id: 'cf-2' }] },
+      ],
+    }));
+    await answer('cvd', 'create', 'nothing here matches the expected format');
+    await mkdir(snapshotDir.replace('cf-1', 'cf-2'), { recursive: true });
+
+    const d = new CuttlefishDevice({
+      localId: 'cf-2', instanceNum: 2, imageDir,
+      snapshotDir: snapshotDir.replace('cf-1', 'cf-2'),
+      probe: ok, bootTimeoutMs: 2_000,
+    });
+    await d.start();
+    await d.takeSnapshot();
+
+    // Without the fallback this is a bare `cvd snapshot_take`, which cvd refuses outright on a host
+    // running two groups.
+    assert.match(await callTo('cvd', 'snapshot_take'), /^cvd --group_name=cvd_2 snapshot_take/);
+  });
+
   test('refuses to start when the environment probe says no', async () => {
     const d = device({ probe: async () => ({ ok: false, reason: 'no /dev/kvm' }) });
     await assert.rejects(d.start(), /no \/dev\/kvm/);

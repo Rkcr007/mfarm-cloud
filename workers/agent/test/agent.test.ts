@@ -316,6 +316,68 @@ describe('reset and release', () => {
     assert.equal(state, 'CLEANING', 'a device that could not be wiped must stay out of the pool');
     await agent.shutdown();
   });
+
+  /**
+   * The gap B8 found: everything above called `resetAndRelease` directly, and NOTHING IN THE WORKER
+   * DID. The control plane parked a released device in CLEANING and waited for a confirmation no
+   * code path produced, so a farm served one session per device and then answered `no_capacity`
+   * for good (HANDOFF.md issue 16). These two tests are the ones that would have caught it.
+   */
+  test('a heartbeat carries the reset request, and the agent acts on it', async () => {
+    const b = fakeBackend(`hb-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b], `hbreset-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId];
+    assert.ok(deviceId, 'registration must return the device uuid, or nothing can be matched to a backend');
+
+    // Exactly what releasing a session does: CLEANING, with the fence the allocation carried.
+    await withSystem(async (c) =>
+      c.query(`UPDATE devices SET state = 'CLEANING', fence = 1 WHERE id = $1`, [deviceId]));
+
+    assert.equal((await agent.heartbeat()).ok, true);
+
+    // The reset is deliberately not awaited inside the beat — a slow restore must not make a live
+    // host look dead — so poll the OUTCOME rather than the call log. The device is only back in the
+    // pool once the confirmation has been flushed, which is a step later than the restore itself.
+    let state = '';
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && state !== 'READY') {
+      state = await withSystem(async (c) =>
+        (await c.query('SELECT state FROM devices WHERE id = $1', [deviceId])).rows[0].state);
+      if (state !== 'READY') await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(b.control.calls.includes('reset'), 'the heartbeat request never reached the device');
+    assert.equal(state, 'READY', 'the restore was confirmed and the device went back into the pool');
+    await agent.shutdown();
+  });
+
+  test('a re-sent request does not start a second restore on a device already being restored', async () => {
+    const b = fakeBackend(`hb2-${randomUUID().slice(0, 8)}`);
+    // Longer than the gap between the two beats below, which is the situation the guard exists for:
+    // the control plane re-sends every beat until the state changes, and a restore outlives a beat.
+    b.control.resetDurationMs = 300;
+    const agent = makeAgent([b], `hbdupe-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId];
+    await withSystem(async (c) =>
+      c.query(`UPDATE devices SET state = 'CLEANING', fence = 1 WHERE id = $1`, [deviceId]));
+
+    await agent.heartbeat();
+    await new Promise((r) => setTimeout(r, 50));
+    await agent.heartbeat();
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !b.control.calls.includes('reset')) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    assert.deepEqual(
+      b.control.calls.filter((c) => c === 'reset'),
+      ['reset'],
+      'a second cvd stop on a device that is mid-restore',
+    );
+    await agent.shutdown();
+  });
 });
 
 describe('fencing', () => {

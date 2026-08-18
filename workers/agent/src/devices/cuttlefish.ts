@@ -200,6 +200,24 @@ export class CuttlefishDevice implements DeviceControl {
       await this.waitForBoot();
     }
 
+    // THE SELECTOR IS NOT OPTIONAL ONCE THERE IS A SECOND DEVICE, AND ITS ABSENCE IS INVISIBLE
+    // UNTIL THEN. `coldBoot` scrapes the group name out of cvd's output, which is a guess about a
+    // format — and on 2026-08-18, running two devices for the first time, it turned out to be the
+    // wrong guess: cf-1 worked all day because with one group cvd falls back to the only one there
+    // is, and cf-2 failed its snapshot with `Multiple groups found. Narrow the selection with
+    // selector arguments.` So take the name from `cvd fleet`, which reports structured data and is
+    // already parsed for the adopt path, and treat the scrape as nothing more than a fast path.
+    if (!this.groupName) {
+      this.groupName = (await this.findExisting())?.group;
+      if (!this.groupName) {
+        console.error(
+          `[cuttlefish] ${this.info.localId}: cvd did not name its group and fleet does not list this ` +
+          'device — every later cvd command will be unselected, which fails outright on a host with ' +
+          'more than one device.',
+        );
+      }
+    }
+
     // Before registration, deliberately: a device with no snapshot is not schedulable, so taking
     // one here is what turns a freshly bootstrapped host into a usable farm without a human running
     // a snapshot command by hand. Costs ~4 GB and a suspend/resume once per device, ever.
