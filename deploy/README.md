@@ -61,7 +61,14 @@ openssl pkey -in deploy/secrets/session_signing_key.pem -pubout \
 openssl rand -base64 32 | tr -d '/+=' > deploy/secrets/worker_registration_token
 printf '%s' "$(openssl rand -base64 32 | tr -d '/+=')" > deploy/secrets/metrics_token
 printf '%s' "$(openssl rand -base64 24 | tr -d '/+=')" > deploy/secrets/grafana_admin_password
-chmod 600 deploy/secrets/*
+# NOT 600, and not owned by you. Compose bind-mounts file secrets with the HOST file's ownership
+# and mode, and silently ignores the uid/gid/mode fields (they are swarm-only — verified ignored on
+# compose 2.40.3). The API runs as `node` inside the image, so the files must be readable by that
+# uid or the container restart-loops on
+#   cat: can't open '/run/secrets/session_signing_key': Permission denied
+# with a perfectly healthy database beside it. deploy/farm-up.sh does this for you.
+sudo chown "$(docker run --rm --entrypoint id mfarm-api:latest -u)":"$(id -g)" deploy/secrets/*
+sudo chmod 640 deploy/secrets/*
 
 # Both files declare `name: mfarm`, so the second one joins the same project and network. Drop the
 # obs file to run the farm without Prometheus and Grafana.

@@ -1193,7 +1193,10 @@ openssl pkey -in deploy/secrets/session_signing_key.pem -pubout \
 openssl rand -base64 32 | tr -d '/+=' > deploy/secrets/worker_registration_token
 printf '%s' "$(openssl rand -base64 32 | tr -d '/+=')" > deploy/secrets/metrics_token
 printf '%s' "$(openssl rand -base64 24 | tr -d '/+=')" > deploy/secrets/grafana_admin_password
-chmod 600 deploy/secrets/*
+# NOT 600 — compose mounts file secrets with the host file&#39;s ownership and ignores the
+# uid/gid/mode fields, so the API (running as `node`) cannot read a secret you own at 600.
+sudo chown &quot;$(docker run --rm --entrypoint id mfarm-api:latest -u)&quot;:&quot;$(id -g)&quot; deploy/secrets/*
+sudo chmod 640 deploy/secrets/*
 
 cp deploy/.env.example deploy/.env
 nano deploy/.env        # fill POSTGRES_PASSWORD and APP_DB_PASSWORD with anything
