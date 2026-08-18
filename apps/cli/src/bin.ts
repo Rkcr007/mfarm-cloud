@@ -1,9 +1,9 @@
 #!/usr/bin/env -S node --experimental-strip-types --disable-warning=ExperimentalWarning
 import { parseArgs } from 'node:util';
 import { readFile } from 'node:fs/promises';
-import { ControlPlaneClient, describe } from './client.ts';
+import { ControlPlaneClient, describe, sleep } from './client.ts';
 import { run, EXIT_FAILURE } from './run.ts';
-import type { DataPlaneCoordinates, DeviceSummary, SessionSummary } from './client.ts';
+import type { AppSummary, DataPlaneCoordinates, DeviceSummary, SessionSummary } from './client.ts';
 
 /**
  * `mfarm` entry point: parse, dispatch, and make sure nothing escapes without an exit code.
@@ -21,6 +21,10 @@ const DEFAULT_API_URL = 'https://api.mfarm.dev';
 const DEFAULT_TTL_MINUTES = 30;
 const DEFAULT_WAIT_SECONDS = 300;
 const MAX_TTL_MINUTES = 240;
+/** An install is a transfer plus a dexopt pass. Long enough for a large build on a busy device. */
+const DEFAULT_INSTALL_WAIT_SECONDS = 300;
+/** Poll interval while waiting. The worker collects the job on a 10s heartbeat, so faster is noise. */
+const INSTALL_POLL_MS = 2_000;
 
 /** A mistake the user can fix by re-reading `--help`; never a reason to print a stack trace. */
 class UsageError extends Error {}
@@ -32,6 +36,9 @@ USAGE
   mfarm devices [options]                      list devices visible to your organisation
   mfarm session get <id> [options]             inspect one session
   mfarm session rm <id> [options]              force-release a session
+  mfarm app upload <file.apk>                  add a build to your organisation's library
+  mfarm app list [--package <name>]            list builds
+  mfarm app install <app-id> --session <id>    install a build onto the device that session holds
   mfarm --version | --help
 
 GLOBAL OPTIONS
@@ -51,6 +58,12 @@ RUN OPTIONS
 
 DEVICES OPTIONS
   --region <r>  --platform <android|ios>  --state <s>   filters, all optional
+
+APP OPTIONS
+  --session <id>    which session's device to install onto (app install; required)
+  --package <name>  filter the library to one package        (app list)
+  --wait <seconds>  wait for the install to finish, 0 to return as soon as it is queued
+                    (app install, default ${DEFAULT_INSTALL_WAIT_SECONDS})
 
 ENVIRONMENT GIVEN TO THE CHILD
   MFARM_SESSION_ID  MFARM_DEVICE_ID  MFARM_REGION
@@ -79,6 +92,8 @@ const OPTIONS = {
   wait: { type: 'string' },
   'no-webdriver': { type: 'boolean', default: false },
   state: { type: 'string' },
+  session: { type: 'string' },
+  package: { type: 'string' },
   help: { type: 'boolean', short: 'h', default: false },
   version: { type: 'boolean', short: 'v', default: false },
 } as const;
@@ -103,6 +118,8 @@ interface Flags {
   wait?: string;
   'no-webdriver'?: boolean;
   state?: string;
+  session?: string;
+  package?: string;
   help?: boolean;
   version?: boolean;
 }
@@ -143,6 +160,8 @@ async function main(): Promise<number> {
       return devicesCommand(flags);
     case 'session':
       return sessionCommand(flags, rest);
+    case 'app':
+      return appCommand(flags, rest);
     default:
       throw new UsageError(`Unknown command "${command}". Run "mfarm --help".`);
   }
@@ -269,6 +288,87 @@ async function sessionCommand(flags: Flags, rest: string[]): Promise<number> {
   if (g.json) process.stdout.write(`${JSON.stringify({ sessionId: id, released })}\n`);
   else process.stderr.write(`mfarm: ${released ? `released ${id}` : `${id} was already released`}\n`);
   return 0;
+}
+
+async function appCommand(flags: Flags, rest: string[]): Promise<number> {
+  const [sub, target] = rest;
+  const g = globals(flags);
+  const c = client(g);
+
+  if (sub === 'upload') {
+    if (!target) throw new UsageError('mfarm app upload needs a path to an .apk file.');
+    if (!g.quiet) process.stderr.write(`mfarm: uploading ${target}…\n`);
+    const { app, deduplicated } = await c.uploadApp(target);
+    if (g.json) process.stdout.write(`${JSON.stringify({ app, deduplicated })}\n`);
+    else process.stdout.write(`${app.id}\n`);
+    if (!g.quiet) {
+      // Said out loud because it is the difference between "my upload did nothing" and "the server
+      // already had these exact bytes", and the second one is the good outcome.
+      process.stderr.write(
+        deduplicated
+          ? `mfarm: already in the library — ${app.packageName} ${app.versionName ?? '?'}\n`
+          : `mfarm: uploaded ${app.packageName} ${app.versionName ?? '?'} (${app.sizeBytes} bytes)\n`,
+      );
+    }
+    return 0;
+  }
+
+  if (sub === 'list') {
+    const apps = await c.listApps(text(flags.package));
+    if (g.json) { process.stdout.write(`${JSON.stringify({ apps })}\n`); return 0; }
+    if (apps.length === 0) { process.stderr.write('mfarm: the library is empty.\n'); return 0; }
+    for (const a of apps) process.stdout.write(`${appLine(a)}\n`);
+    return 0;
+  }
+
+  if (sub === 'install') {
+    if (!target) throw new UsageError('mfarm app install needs an app id. Get one from `mfarm app list`.');
+    const sessionId = text(flags.session, process.env.MFARM_SESSION_ID);
+    if (!sessionId) {
+      throw new UsageError('No session. Pass --session <id>, or set MFARM_SESSION_ID — an install needs a device you already hold.');
+    }
+    const waitSeconds = integer('--wait', text(flags.wait), DEFAULT_INSTALL_WAIT_SECONDS, 0, 3_600);
+
+    let install = await c.requestInstall(sessionId, target);
+    if (!g.quiet) process.stderr.write(`mfarm: queued install ${install.id}\n`);
+
+    if (waitSeconds > 0) {
+      const deadline = Date.now() + waitSeconds * 1000;
+      while (install.state === 'PENDING' && Date.now() < deadline) {
+        await sleep(INSTALL_POLL_MS);
+        install = await c.getInstall(install.id);
+      }
+    }
+
+    if (g.json) process.stdout.write(`${JSON.stringify({ install })}\n`);
+    else process.stdout.write(`${install.state}\n`);
+
+    // Exit code carries the outcome, because this is a thing scripts branch on. A still-PENDING
+    // install is not a failure of the install — it is this command giving up waiting — so it is
+    // reported as its own case rather than folded into either success or failure.
+    if (install.state === 'INSTALLED') return 0;
+    if (install.state === 'FAILED') {
+      process.stderr.write(`mfarm: install failed: ${install.error ?? 'no reason reported'}\n`);
+      return EXIT_FAILURE;
+    }
+    if (!g.quiet) {
+      process.stderr.write(`mfarm: install ${install.id} is still pending after ${waitSeconds}s. Poll it with \`mfarm app install\`'s id.\n`);
+    }
+    return waitSeconds === 0 ? 0 : EXIT_FAILURE;
+  }
+
+  throw new UsageError('Usage: mfarm app upload <file.apk> | mfarm app list | mfarm app install <app-id> --session <id>');
+}
+
+function appLine(a: AppSummary): string {
+  return [
+    a.id.padEnd(38),
+    a.packageName.padEnd(34),
+    (a.versionName ?? '?').padEnd(12),
+    (a.versionCode === null ? '?' : String(a.versionCode)).padEnd(8),
+    `${Math.round(a.sizeBytes / 1024)}K`.padStart(8),
+    a.sha256.slice(0, 12),
+  ].join(' ').trimEnd();
 }
 
 function deviceLine(d: DeviceSummary): string {

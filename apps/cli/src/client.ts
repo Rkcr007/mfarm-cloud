@@ -1,3 +1,8 @@
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { basename } from 'node:path';
+import { Readable } from 'node:stream';
+
 /**
  * Control-plane client.
  *
@@ -71,6 +76,36 @@ export interface DeviceFilter {
   region?: string;
   platform?: string;
   state?: string;
+}
+
+export interface AppSummary {
+  id: string;
+  packageName: string;
+  versionName: string | null;
+  versionCode: number | null;
+  label: string | null;
+  minSdk: number | null;
+  sha256: string;
+  sizeBytes: number;
+  filename: string | null;
+  createdAt?: string;
+}
+
+export interface UploadResult {
+  app: AppSummary;
+  /** True when this org had already uploaded these exact bytes. The upload is keyed on the digest. */
+  deduplicated: boolean;
+}
+
+export interface InstallSummary {
+  id: string;
+  appId: string;
+  sessionId: string;
+  deviceId: string;
+  state: 'PENDING' | 'INSTALLED' | 'FAILED' | string;
+  error: string | null;
+  requestedAt?: string;
+  finishedAt?: string | null;
 }
 
 /**
@@ -229,6 +264,104 @@ export class ControlPlaneClient {
     const res = await this.request('GET', `/v1/devices${suffix}`);
     const payload = res.body as DeviceListResult | undefined;
     return { devices: payload?.devices ?? [], available: payload?.available ?? 0 };
+  }
+
+  /**
+   * Upload an APK.
+   *
+   * Streamed from disk, never read into memory: this is the one call in the CLI whose payload is
+   * measured in hundreds of megabytes, and `readFile` on a 400 MB build is a 400 MB allocation on a
+   * CI runner that has other things to do.
+   *
+   * Retried like everything else, and safe to retry for a reason the generic path cannot rely on:
+   * the server keys an upload on the file's own digest, so a second attempt after a lost response
+   * returns the same build rather than creating a duplicate. The stream is reopened per attempt —
+   * a consumed one cannot be replayed, which is exactly the trap that makes most upload retries
+   * silently send an empty body.
+   */
+  async uploadApp(filePath: string, signal?: AbortSignal): Promise<UploadResult> {
+    // Checked before the loop, because a path that does not exist is not a transport failure and
+    // must not be retried three times with backoff before saying so. `createReadStream` fails
+    // asynchronously, inside `fetch`, where it is indistinguishable from a dropped connection.
+    const info = await stat(filePath).catch(() => null);
+    if (!info?.isFile()) throw new Error(`Not a file: ${filePath}`);
+
+    const url = `${this.baseUrl}/v1/apps?filename=${encodeURIComponent(basename(filePath))}`;
+    let lastTransport = '';
+
+    for (let attempt = 0; ; attempt++) {
+      // No per-attempt timeout here, unlike `request`. A large upload over a slow link legitimately
+      // exceeds 30s, and aborting it would make the CLI unable to upload exactly the builds people
+      // most want a farm for. The caller's own signal still cancels.
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.apiKey}`,
+            accept: 'application/json',
+            'content-type': 'application/vnd.android.package-archive',
+          },
+          body: Readable.toWeb(createReadStream(filePath)) as ReadableStream,
+          // Required by fetch for a streaming request body: we send before the response arrives.
+          duplex: 'half',
+          signal,
+        } as RequestInit & { duplex: 'half' });
+      } catch (err) {
+        lastTransport = describe(err);
+        if (signal?.aborted) throw new TransportError('The upload was cancelled by the caller.', attempt + 1);
+        if (attempt >= this.retries) {
+          throw new TransportError(`Uploading ${filePath} failed after ${attempt + 1} attempt(s): ${lastTransport}`, attempt + 1);
+        }
+        await sleep(this.backoffFor(attempt));
+        continue;
+      }
+
+      if (res.status >= 500 && attempt < this.retries && !signal?.aborted) {
+        await res.text().catch(() => '');
+        await sleep(this.backoffFor(attempt));
+        continue;
+      }
+
+      const text = await res.text().catch(() => '');
+      const body = parseJson(text);
+      if (!res.ok) throw toApiError(res.status, body, text);
+      const payload = body as { app?: AppSummary; deduplicated?: boolean };
+      if (!payload?.app?.id) {
+        throw new TransportError(`The control plane answered ${res.status} without an app. Body: ${snippet(text)}`, attempt + 1);
+      }
+      return { app: payload.app, deduplicated: payload.deduplicated === true };
+    }
+  }
+
+  async listApps(packageName?: string): Promise<AppSummary[]> {
+    const suffix = packageName ? `?package=${encodeURIComponent(packageName)}` : '';
+    const res = await this.request('GET', `/v1/apps${suffix}`);
+    return (res.body as { apps?: AppSummary[] })?.apps ?? [];
+  }
+
+  /**
+   * Ask for a build to be installed onto the device a session holds.
+   *
+   * Returns as soon as the job exists, which is the honest shape: nothing has reached the device
+   * yet. The worker collects it on its next heartbeat — poll `getInstall` for the outcome.
+   */
+  async requestInstall(sessionId: string, appId: string): Promise<InstallSummary> {
+    const res = await this.request('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/installs`, {
+      body: { appId },
+    });
+    const payload = res.body as { install?: InstallSummary };
+    if (!payload?.install?.id) {
+      throw new TransportError(`Malformed install response: ${snippet(res.text)}`, 1);
+    }
+    return payload.install;
+  }
+
+  async getInstall(installId: string): Promise<InstallSummary> {
+    const res = await this.request('GET', `/v1/installs/${encodeURIComponent(installId)}`);
+    const payload = res.body as { install?: InstallSummary };
+    if (!payload?.install?.id) throw new TransportError(`Malformed install response: ${snippet(res.text)}`, 1);
+    return payload.install;
   }
 
   private async request(

@@ -20,6 +20,8 @@ export interface RecordedRequest {
   path: string;
   headers: Record<string, string>;
   body: unknown;
+  /** Byte count as it arrived. An APK upload is binary, so `body` is not a useful record of it. */
+  bodyBytes: number;
 }
 
 export interface FakeSession {
@@ -44,6 +46,12 @@ export interface FakeControlPlaneOptions {
   /** Answer GET without a data-plane block, as a control plane older than the known-issue-9 fix
    *  does. The CLI must degrade rather than crash. */
   omitPolledDataPlane?: boolean;
+  /** States returned by GET /v1/installs/:id, consumed in order; the last one repeats. */
+  installStates?: string[];
+  /** Error text attached to a FAILED install, as a worker would have reported it. */
+  installError?: string;
+  /** Answer POST /v1/apps with this status instead of 201. 200 means "already in the library". */
+  uploadStatus?: number;
 }
 
 export interface FakeControlPlane {
@@ -55,6 +63,9 @@ export interface FakeControlPlane {
 
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 const DEVICE_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+export const APP_ID = '99999999-8888-7777-6666-555555555555';
+export const INSTALL_ID = '12121212-3434-5656-7878-909090909090';
+export { SESSION_ID };
 
 /** Deliberately different from the values POST hands back, so a test can tell WHICH response the
  *  child's environment actually came from. */
@@ -65,16 +76,18 @@ export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Pro
   const createStatuses = [...(opts.createStatuses ?? [201])];
   const pollStates = [...(opts.pollStates ?? ['ACTIVE'])];
   const region = opts.region ?? 'us-east';
+  const installStates = [...(opts.installStates ?? ['INSTALLED'])];
   const requests: RecordedRequest[] = [];
 
   const server: Server = createServer((req, res) => {
-    collect(req).then((body) => {
+    collect(req).then(({ body, bytes }) => {
       const path = req.url ?? '';
       requests.push({
         method: req.method ?? '',
         path,
         headers: req.headers as Record<string, string>,
         body,
+        bodyBytes: bytes,
       });
 
       if (req.method === 'POST' && path === '/v1/sessions') {
@@ -120,6 +133,47 @@ export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Pro
         }
         return answer();
       }
+      // --- app library ---------------------------------------------------------------------
+      if (req.method === 'POST' && path.startsWith('/v1/apps')) {
+        const status = opts.uploadStatus ?? 201;
+        return json(res, status, {
+          app: {
+            id: APP_ID, packageName: 'dev.mfarm.example', versionName: '1.4.2', versionCode: 42,
+            label: 'Example', minSdk: 26, sha256: 'a'.repeat(64), sizeBytes: 4096,
+            filename: 'example.apk', platform: 'android', createdAt: '2026-08-19T00:00:00.000Z',
+          },
+          deduplicated: status === 200,
+        });
+      }
+      if (req.method === 'GET' && path.startsWith('/v1/apps')) {
+        return json(res, 200, {
+          apps: [{
+            id: APP_ID, packageName: 'dev.mfarm.example', versionName: '1.4.2', versionCode: 42,
+            label: 'Example', minSdk: 26, sha256: 'a'.repeat(64), sizeBytes: 4096,
+            filename: 'example.apk', platform: 'android', createdAt: '2026-08-19T00:00:00.000Z',
+          }],
+        });
+      }
+      if (req.method === 'POST' && /^\/v1\/sessions\/[^/]+\/installs$/.test(path)) {
+        return json(res, 202, {
+          install: {
+            id: INSTALL_ID, appId: APP_ID, sessionId: SESSION_ID, deviceId: DEVICE_ID,
+            state: 'PENDING', error: null,
+          },
+          message: 'Queued.',
+        });
+      }
+      if (req.method === 'GET' && path.startsWith('/v1/installs/')) {
+        const state = installStates.length > 1 ? installStates.shift()! : installStates[0]!;
+        return json(res, 200, {
+          install: {
+            id: INSTALL_ID, appId: APP_ID, sessionId: SESSION_ID, deviceId: DEVICE_ID,
+            state,
+            error: state === 'FAILED' ? (opts.installError ?? 'adb: Failure [INSTALL_FAILED_OLDER_SDK]') : null,
+          },
+        });
+      }
+
       if (req.method === 'GET' && path.startsWith('/v1/devices')) {
         return json(res, 200, {
           devices: [{
@@ -182,17 +236,19 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
-function collect(req: IncomingMessage): Promise<unknown> {
+function collect(req: IncomingMessage): Promise<{ body: unknown; bytes: number }> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8');
-      if (!raw) return resolve(null);
+      const buf = Buffer.concat(chunks);
+      const raw = buf.toString('utf8');
+      if (!raw) return resolve({ body: null, bytes: 0 });
       try {
-        resolve(JSON.parse(raw));
+        resolve({ body: JSON.parse(raw), bytes: buf.length });
       } catch {
-        resolve(raw);
+        // An APK, or anything else that is not JSON. The byte count is the useful record.
+        resolve({ body: raw, bytes: buf.length });
       }
     });
   });
