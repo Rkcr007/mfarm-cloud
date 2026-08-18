@@ -272,7 +272,10 @@ for i in $(seq 1 600); do
   # `|| true` is load-bearing: grep exits 1 when it matches nothing, and `set -o pipefail` turns
   # that into a failed assignment, which `set -e` turns into a silent exit 1 from this script — with
   # the farm perfectly healthy behind it. That is exactly what happened on the first run.
-  count="$(printf '%s' "$devices" | grep -c '"localId"' || true)"
+  # `"tier"`, not `"localId"`: GET /v1/devices returns the device's uuid as `id` and does not
+  # publish the worker-side local id at all. Grepping for a field the API never sends meant this
+  # loop waited the full ten minutes with a healthy registered device sitting in front of it.
+  count="$(printf '%s' "$devices" | grep -c '"tier"' || true)"
   [ -n "$count" ] || count=0
   if [ "$count" -ge "$CF_INSTANCES" ]; then note "$count device(s) registered after ${i}s"; break; fi
   if [ "$i" = 600 ]; then

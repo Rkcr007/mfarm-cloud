@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-18. Read this first in a new session.
+Last updated 2026-08-18 (M3 reached — see known issue 15). Read this first in a new session.
 
 ## SCOPE CHANGE 2026-08-17 — read `docs/MVP_PLAN.md` next
 
@@ -551,6 +551,78 @@ before building any viewer**, because it determines whether a browser needs clie
     and it is deliberately not taken: every `cvd` verb mutates one shared instance database and
     nothing here has verified that concurrent invocations are safe against it. The cost was never
     the serialisation — it was cold booting when a restore would do.
+
+15. **M3 IS DONE. A real WebDriver session drove a real Cuttlefish device end to end on
+    2026-08-18** — the first time any part of this project spoke to something that was not a fake.
+    `deploy/verify-webdriver.mjs` reproduces it, with no client library, printing the whole exchange
+    on failure.
+
+        [1/5] create session      3713ms   udid 0.0.0.0:6520, android 17
+        [2/5] page source         2799ms   14591 bytes, com.android.launcher3
+        [3/5] screenshot           830ms   709116 bytes, valid PNG
+        [4/5] press HOME          1314ms
+        [5/5] delete session       353ms
+        total 9.0s
+
+    The path was hub -> Ed25519 grant -> worker automation gateway -> real Appium 2 -> UiAutomator2
+    -> adb -> Android 17. **B3 holds against a real driver**: `appium:udid` arrived as
+    `0.0.0.0:6520`, the actual adb serial, not the local id.
+
+    Four things were wrong, and none of them were findable without hardware. All are fixed:
+
+    - **Compose ignores `uid`/`gid`/`mode` on file secrets.** Those fields are swarm-only; outside
+      swarm they parse, validate and do nothing (verified on compose 2.40.3 by declaring them and
+      watching the container fail identically). A secret written by the operator at mode 600 is
+      unreadable to the API, which runs as `node` (uid 1000), and the only symptom is
+      `cat: can't open '/run/secrets/session_signing_key': Permission denied` on a restart loop
+      beside a healthy database. `farm-up.sh` now chowns them to the uid it reads back out of the
+      image. **Both the README and the runbook had told you to `chmod 600`.**
+    - **The containerised hub cannot reach the worker on the host's loopback.** `127.0.0.1` inside
+      the API container is the container. A worker advertising
+      `http://127.0.0.1:8090/automation/cf-1` stores an address the hub can never dial, and the
+      session fails `automation_unreachable: fetch failed` — which reads like a dead Appium. Both
+      sides share the compose network's gateway (172.18.0.1 here): the host, as seen from inside the
+      containers, and still a host-local interface, so nothing becomes externally reachable and
+      Appium keeps loopback with the gateway as its only door.
+    - **UiAutomator2 refuses every session without `ANDROID_HOME`/`ANDROID_SDK_ROOT`**, and it
+      locates adb through the SDK *layout*, not through PATH. The supervisor was never at fault —
+      `ANDROID_` is already an allowed prefix in `appium.ts` — nothing ever set the variable.
+      cuttlefish-common ships a real layout at `/usr/lib/android-sdk`, and every adb on the host is
+      the same 1.0.41, which matters because two adb versions kill each other's servers.
+    - **Ubuntu 24.04's `apt-get install nodejs` gives 18.x**, which has no TypeScript stripping, so
+      the worker dies on its first `.ts` import. The runbook had told you to install exactly that.
+
+16. **NOTHING EVER TRIGGERS A DEVICE RESET. `resetAndRelease()` has no caller.** Found 2026-08-18
+    while running B8, and it is the largest hole left in the reset story.
+
+    The control plane half is complete and correct: releasing a device puts it in CLEANING, and
+    `allocate_device` will not hand out a CLEANING device until a worker confirms the restore
+    through `device_reset_complete` (reported via `POST /v1/workers/events` with `resets:[…]`). The
+    worker half exists too — `Agent.resetAndRelease()` restores the snapshot and queues the
+    confirmation.
+
+    **The two are not connected.** `grep -rn resetAndRelease workers/agent/src` finds the definition
+    and nothing else. No heartbeat response, no data-plane event and no route tells a worker that
+    one of its devices is now CLEANING, so the restore is never started and the confirmation is
+    never sent. Every session therefore takes its device out of the fleet permanently: the farm
+    works exactly `N` times, where `N` is the number of devices, and then reports `no_capacity`
+    forever. Observed three times in a row on the lab VM during B8.
+
+    Symptom to recognise: `no_capacity` with `available: 0`, and `select local_id,state from devices`
+    showing CLEANING with a healthy worker attached. The manual unstick — which is also the shape of
+    the fix — is to report the reset as the worker would:
+
+        curl -X POST http://127.0.0.1:3000/v1/workers/events \
+          -H "Authorization: Bearer $(worker token from ~/.mfarm/agent-state.json)" \
+          -d '{"resets":[{"deviceId":"<uuid>","fence":<n>}]}'
+
+    Note this is also why known issue 14's fix could not have been caught by running the farm: the
+    snapshot restore is unreachable from the product for a *second*, independent reason. Both had to
+    be fixed for a device to ever be recycled.
+
+    **The fix belongs in the protocol**: the heartbeat response should carry the caller's devices
+    that are in CLEANING with their fences, and the agent should restore and confirm each. That is a
+    protocol version bump, an API change and an agent change, and it is the next thing to build.
 
 ## Rules earned the hard way
 
