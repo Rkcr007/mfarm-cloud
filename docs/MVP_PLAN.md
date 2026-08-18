@@ -179,10 +179,12 @@ and the latency/density numbers exist.
 - ~~Snapshot take + restore round-trips.~~ **DONE (B7): 8s restore vs 38s cold boot, 4.0 GB.**
   Wiring it into the agent was a separate fix — see known issue 14; the measurement existed for a
   day while the product still could not reach it.
-- **Two devices in parallel: not yet** (B9).
+- ~~Two devices in parallel.~~ **DONE (B9)**: both adopt in 0.1s, three consecutive WebDriver
+  sessions green, fleet self-heals to `available: 2` between them. Running a second device found
+  three defects a fleet of one structurally cannot show — see HANDOFF.md issue 17.
+- ~~Take the disk snapshot (B10).~~ **DONE**: `mfarm-cf-ready` and `mfarm-farm-ready`. Restore the
+  latter and `deploy/farm-up.sh` brings the farm up without reinstalling anything.
 - **Spikes 1 and 2a: not yet.** Still gating *scaling*, not shipping.
-- **Take the disk snapshot (B10) first thing on the next session.** There is none as of 2026-08-18,
-  so the whole bootstrap lives on one disk billing ~₹42/day while stopped.
 
 ### Phase 1 — Make automation actually work end to end
 
@@ -202,6 +204,14 @@ The critical path. Nothing here is optional and none of it is currently proven a
 
 Exit: an existing Appium suite, unmodified except for one URL, runs green from a laptop over
 Tailscale against both devices in parallel.
+
+**Status 2026-08-18: the transport half is proven, the suite half is not.** A real W3C session drove
+a real device end to end (M3) and repeated three times across two devices with automatic snapshot
+reset in between — so hub, grant, gateway, Appium, UiAutomator2 and adb all agree. What remains is
+running a *real suite* rather than `deploy/verify-webdriver.mjs`, and doing it **from a laptop over
+Tailscale** rather than from the box: the worker currently binds to the docker bridge address so the
+containerised hub can reach it, which is right for automation on one host and is not yet the answer
+for a remote client. See HANDOFF.md issues 15 and 17.
 
 ### Phase 2 — Production host
 

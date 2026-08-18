@@ -75,12 +75,12 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**352 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**358 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
-apps/api/         control plane, entrypoint, metrics   211 tests
+apps/api/         control plane, entrypoint, metrics   213 tests
 apps/cli/         mfarm CLI                             50 tests
-workers/agent/    worker agent, Appium supervisor,      91 tests
+workers/agent/    worker agent, Appium supervisor,      95 tests
                   automation gateway, Cuttlefish backend
 packages/protocol shared contract
 docs/adrs/        architecture decision records
@@ -624,6 +624,35 @@ before building any viewer**, because it determines whether a browser needs clie
     that are in CLEANING with their fences, and the agent should restore and confirm each. That is a
     protocol version bump, an API change and an agent change, and it is the next thing to build.
 
+17. **B9 IS DONE: two devices, three consecutive sessions, no human in the loop.** 2026-08-18,
+    after issue 16 was fixed. Both devices adopted in **0.1s** each, three `verify-webdriver.mjs`
+    runs went green back to back (10.3s, 9.2s, 8.4s), and the fleet returned to `available: 2`
+    between each one on its own. That is the first time this project has behaved like a farm rather
+    than like a demo.
+
+    Running a *second* device found three more defects that one device could never have shown:
+
+    - **`cvd create`'s group name was scraped out of its output, and the scrape was wrong.**
+      Invisible with one device, because an unselected cvd command falls back to the only group
+      there is — cf-1 worked all day. cf-2's snapshot then failed with `Multiple groups found.
+      Narrow the selection with selector arguments.` The name now comes from `cvd fleet`.
+    - **A restored group loses its `--webrtc_device_id`.** After `start --snapshot_path`, cf-1's
+      group reported `cvd_1-1-1`, and the fleet document carries `adb_port` rather than the
+      `adb_serial` the matcher used — so after the first restore the adopt path stopped recognising
+      a running device, cold booted, and cvd answered `New instance conflicts with existing
+      instance: cvd_1/1 with id 1`. Devices are now identified by **instance number**, the one
+      identifier cvd does not rewrite.
+    - **OFFLINE was a one-way door.** Registration deliberately left device state alone — correct
+      for SESSION_ACTIVE and CLEANING, which an agent restart must never disturb — but it meant a
+      device that registered unschedulable stayed that way forever. cf-2 registered OFFLINE when its
+      first snapshot failed, took a good snapshot on the next run, and the control plane went on
+      reporting OFFLINE with a healthy device attached. State is now re-asserted, but **only between
+      READY and OFFLINE**; the demotion direction matters as much, since a device that has lost
+      `snapshot-reset` must leave the pool.
+
+    The pattern in all three: **a fleet of one hides every bug that is about telling devices apart.**
+    Nothing here was findable with `CF_INSTANCES=1`, and nothing here was findable without hardware.
+
 ## Rules earned the hard way
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
@@ -717,17 +746,22 @@ agent running a DB-backed suite will corrupt the first's run.
 Blockers 1, 2 and 3 are closed; the `cvd` flags and snapshot/restore are verified (B7). What is
 left, in this order:
 
-1. **Start the lab VM and take the disk snapshot immediately** — runbook step B10, five minutes.
-   As of 2026-08-18 `gcloud compute snapshots list` is empty, so the one-to-two hours of Cuttlefish
-   bootstrap and the pinned device image exist on exactly one 150 GB disk that bills ~₹42/day. That
-   is one accidental delete away from being redone, and `cvd fetch` can no longer find a build
-   without a human at a browser (issue 10).
-2. **B8 — real Appium against a real device.** The milestone the whole exercise exists for, and
-   still not attempted. `deploy/farm-up.sh` should get the host from cold to a registered device
-   without typing the runbook out. The hub has only ever spoken to a stub and the supervisor has
-   only ever supervised a fake; **expect a real driver to disagree about something**, and capture
-   the exact request and response when it does rather than working around it on a metered box.
-3. **B9 — two devices**, which is the first honest look at what the box holds under SwiftShader.
-4. **Settle blocker 6 (media routing) in an ADR before any viewer work.** It decides whether a
+**B8 and B9 are done (issues 15 and 17), and the automation path is proven end to end.** The lab VM
+is TERMINATED. Two disk snapshots exist: `mfarm-cf-ready` (Cuttlefish + image) and
+`mfarm-farm-ready` (that plus node 22, docker, appium, and both device snapshots — restore this one
+and `deploy/farm-up.sh` brings the farm to `available: 2`).
+
+What is left, in this order:
+
+1. **Settle blocker 6 (media routing) in an ADR before any viewer work.** It decides whether a
    browser needs client software, and no code written before that decision is safe from it.
    Interactive video is the *only* thing it blocks — automation is HTTP and TCP end to end.
+   Tailscale is already installed on the lab VM, unconfigured, which is most of the legwork.
+   **Note the data plane is currently bound to the docker bridge address** so the hub could reach
+   the automation gateway (issue 15); a browser cannot reach that, and fixing it properly is part of
+   this decision, not a separate task.
+2. **Run a real Appium suite**, not just `verify-webdriver.mjs` — the Kotlin one and the Flutter/RN
+   one, sharded across both devices. That is Phase 1's exit and the first honest look at what
+   SwiftShader costs a rendering-heavy app.
+3. **Spikes 1 and 2a**, which still gate *scaling* rather than shipping.
+4. **Phase 3** — artifacts, logcat, video — all buildable for ₹0 against the snapshots above.
