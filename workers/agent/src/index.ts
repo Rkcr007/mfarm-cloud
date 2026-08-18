@@ -1,4 +1,5 @@
 import { cpus, hostname as osHostname, totalmem } from 'node:os';
+import { join } from 'node:path';
 import { automationPath } from '@mfarm/protocol';
 import { Agent } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
@@ -35,12 +36,24 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
 
   if (avail.ok) {
     const count = Number(process.env.CF_INSTANCES ?? 1);
-    console.log(`[agent] Cuttlefish available — starting ${count} instance(s)`);
+    const imageDir = env('CF_IMAGE_DIR');
+    // One directory PER DEVICE, and a default rather than a required variable.
+    //
+    // Both halves are load-bearing. A shared directory means device 2 restores device 1's state,
+    // which is the tenant leak snapshot-reset exists to prevent. And an unset variable used to mean
+    // no snapshot at all: `snapshotDir` was optional, nothing ever passed it, so every reset threw
+    // and left the device stuck in CLEANING. Defaulting beside the image dir (`~/cf/image` ->
+    // `~/cf/snapshots`) keeps a farm working without a fifth required variable; beside rather than
+    // inside because bootstrap_cuttlefish.sh locates the image roots by searching for
+    // `bin/launch_cvd` and `super.img`, and a 4 GB snapshot under imageDir would confuse that.
+    const snapshotRoot = process.env.CF_SNAPSHOT_DIR ?? join(imageDir, '..', 'snapshots');
+    console.log(`[agent] Cuttlefish available — starting ${count} instance(s), snapshots under ${snapshotRoot}`);
     return Array.from({ length: count }, (_, i) =>
       createCuttlefishBackend({
         localId: `cf-${i + 1}`,
         instanceNum: i + 1,
-        imageDir: env('CF_IMAGE_DIR'),
+        imageDir,
+        snapshotDir: join(snapshotRoot, `cf-${i + 1}`),
         publicHost: process.env.PUBLIC_HOST,
         gpuMode: process.env.GPU_MODE === 'none' ? 'none' : 'guest_swiftshader',
       }),
@@ -203,7 +216,17 @@ async function main(): Promise<void> {
 
   // Devices come up before registration so the control plane never sees a host advertising
   // capacity it cannot actually serve.
-  for (const b of backends) await b.control.start();
+  //
+  // SERIAL ON PURPOSE. Booting two devices at once is the obvious optimisation and it is not taken:
+  // every `cvd` verb here mutates one shared instance database, and nothing in this project has
+  // verified that concurrent invocations are safe against it. The real cost was never the
+  // serialisation anyway — it was cold booting when a snapshot restore would do, which start() now
+  // handles (38s -> 8s, and 0s when the device is already up). Revisit only with a measurement.
+  for (const b of backends) {
+    const t0 = Date.now();
+    await b.control.start();
+    console.log(`[agent] ${b.control.info.localId} ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  }
 
   // Rebound once shutdown() exists below. Until then a give-up can only be reported, because there
   // is nothing registered yet to drain.

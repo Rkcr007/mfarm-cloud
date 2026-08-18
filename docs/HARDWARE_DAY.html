@@ -1158,6 +1158,21 @@ adb -s 0.0.0.0:6520 shell getprop sys.boot_completed</code></pre>
       That is fine — the production compose stack binds only to loopback, so it all talks to itself.
     </p>
 
+    <div class="panel good">
+      <span class="panel-label">Since 2026-08-18 this is one command</span>
+      <p>
+        <code>deploy/farm-up.sh</code> does everything in this step — preflight, secrets, compose,
+        the password reconcile, the seed, and the worker in tmux — and is idempotent, so re-running
+        is the normal way to use it. Prerequisites are the same: docker, node, and step B6 already
+        done. Use <code>CF_INSTANCES=2</code> for B9.
+      </p>
+      <p>
+        The blocks below are what it does, and they stay here because when something disagrees you
+        need to run the pieces by hand. The script was written after this runbook, precisely because
+        typing these out on a box billing ~₹65/hour is the wrong place to be careful.
+      </p>
+    </div>
+
     <h3>Bring up the control plane</h3>
     <div class="cmd">
       <div class="cmd-head"><span>on the VM</span><button class="copy" type="button">Copy</button></div>

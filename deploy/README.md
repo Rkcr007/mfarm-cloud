@@ -29,6 +29,25 @@ Nothing is published beyond loopback. Reachability is Tailscale's job.
 
 ## Standing it up
 
+### The short way — `deploy/farm-up.sh`
+
+```bash
+deploy/farm-up.sh                 # everything: secrets, database, API, seed, devices, worker
+CF_INSTANCES=2 deploy/farm-up.sh  # …with two devices
+deploy/farm-up.sh --no-worker     # control plane only
+```
+
+Idempotent — re-running is the normal way to use it. It generates any missing secret and password,
+brings up the prod stack, **reconciles the `mfarm_app` password** (without which the API exits 78
+with the reason buried in a compose log), seeds the region and org and mints one tenant key into
+`deploy/.state/api_key`, then starts the worker in a tmux session named `mfarm-worker` — tmux
+because a dropped SSH tab otherwise takes the devices with it.
+
+It does **not** do Tailscale, TLS, or the observability stack. Those need a decision from a human
+rather than a default, and they are the sections below.
+
+The long way is worth reading once anyway, because it is what the script does:
+
 ```bash
 cp deploy/.env.example deploy/.env
 $EDITOR deploy/.env                      # every password; none may be blank

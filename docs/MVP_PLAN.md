@@ -169,6 +169,21 @@ and 2a while the box is fresh — they cost hours, not days, and never get cheap
 Exit: two Android 17 devices running, `adb devices` shows both, snapshot take + restore round-trips,
 and the latency/density numbers exist.
 
+**Status 2026-08-18 — partly done, on a GCP nested-virt VM rather than bare metal.**
+
+- ~~KVM present, Cuttlefish installed, one device boots and tears down cleanly.~~ **DONE** (M0, M1).
+  Cost: an evening to AppArmor (known issue 12) and a morning to the retired build API (issue 10).
+- ~~Verify the `cvd` flags (known issue 1).~~ **DONE, and they were wrong** — `create` not `start`,
+  mandatory `--host_path`/`--product_path`, selectors before the verb (issue 11). Now encoded and
+  covered by `workers/agent/test/cuttlefish.test.ts`.
+- ~~Snapshot take + restore round-trips.~~ **DONE (B7): 8s restore vs 38s cold boot, 4.0 GB.**
+  Wiring it into the agent was a separate fix — see known issue 14; the measurement existed for a
+  day while the product still could not reach it.
+- **Two devices in parallel: not yet** (B9).
+- **Spikes 1 and 2a: not yet.** Still gating *scaling*, not shipping.
+- **Take the disk snapshot (B10) first thing on the next session.** There is none as of 2026-08-18,
+  so the whole bootstrap lives on one disk billing ~₹42/day while stopped.
+
 ### Phase 1 — Make automation actually work end to end
 
 The critical path. Nothing here is optional and none of it is currently proven against real hardware.

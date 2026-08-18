@@ -14,3 +14,7 @@ deploy/backups/
 
 # Production secret material (deploy/secrets/). Never committed.
 deploy/secrets/
+
+# deploy/farm-up.sh state. Holds the minted tenant API key so a re-run does not mint another —
+# a live credential, and never a build input.
+deploy/.state/

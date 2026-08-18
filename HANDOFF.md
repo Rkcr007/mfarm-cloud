@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-17. Read this first in a new session.
+Last updated 2026-08-18. Read this first in a new session.
 
 ## SCOPE CHANGE 2026-08-17 — read `docs/MVP_PLAN.md` next
 
@@ -75,13 +75,13 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**333 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**352 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
 
 ```
 apps/api/         control plane, entrypoint, metrics   211 tests
 apps/cli/         mfarm CLI                             50 tests
-workers/agent/    worker agent, Appium supervisor,      72 tests
-                  automation gateway
+workers/agent/    worker agent, Appium supervisor,      91 tests
+                  automation gateway, Cuttlefish backend
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
@@ -208,6 +208,20 @@ Registration with credential persistence, heartbeat, deterministic-id metering, 
 the WebSocket data plane the browser connects to. Two device tiers: Cuttlefish (target, Linux+KVM)
 and AVD (fallback, runs on macOS, cannot meet the latency target and says so).
 
+`CuttlefishDevice.start()` picks the cheapest correct route — adopt a running group (0s), restore a
+stopped one from its snapshot (8s), cold boot (38s) — takes the golden snapshot itself on first
+boot, and advertises `snapshot-reset` only once that snapshot exists. See known issue 14 for what
+this replaced and why the honesty matters more than the speed.
+
+### Bring-up — `deploy/farm-up.sh`
+
+One command for the whole host: preflight, secrets, compose, the `mfarm_app` password reconcile,
+seed, and the worker in tmux. Idempotent, and it re-runs as the normal way to use it. It exists
+because the sequence previously lived only as seven copy-paste blocks in the runbook, on a box
+billing ~₹65/hour, with three steps that fail silently hours later (empty `regions` table,
+unrotated password, device with no snapshot). It deliberately does **not** do Tailscale, TLS, or the
+observability stack — each needs a decision from a human, and `deploy/README.md` has them.
+
 ### Appium supervisor — `workers/agent/src/appium.ts` (ADR-0003)
 
 Supervises an Appium 2 process per device: spawn, `/status` readiness (not spawn-readiness — Appium
@@ -330,8 +344,12 @@ before building any viewer**, because it determines whether a browser needs clie
 
 ## Known issues and constraints
 
-1. `devices/cuttlefish.ts` `cvd` flags are **unverified against a real install** — upstream moves.
-   Check them against whatever `bootstrap_cuttlefish.sh` installs.
+1. ~~`devices/cuttlefish.ts` `cvd` flags are **unverified against a real install**.~~ **VERIFIED
+   2026-08-18** against cvd 1.55.1 on the lab VM (B7), and encoded. Issues 11 and 12 below are what
+   that cost. The flags are now also covered by `workers/agent/test/cuttlefish.test.ts`, which runs
+   real fake `cvd`/`adb` binaries on a temporary PATH and asserts the exact argv — including that
+   selectors come *before* the verb. That test cannot tell you cvd agrees; it can only stop the
+   verified invocations drifting.
 2. The WebDriver hub has never spoken to a real Appium server, and the Appium supervisor has never
    supervised one. Both are tested against fakes that answer correctly; a real driver will disagree
    about something. The supervisor also detects **process death only** — a wedged-but-alive Appium
@@ -494,6 +512,46 @@ before building any viewer**, because it determines whether a browser needs clie
     negotiates ICE. A customer running a suite is unaffected. For local "is this device real"
     checks, `scrcpy` over an adb forward works fine and needs none of this.
 
+14. **The snapshot path was dead code in the real agent, and the whole farm would have stalled after
+    one session.** Found and fixed 2026-08-18, before the next metered day rather than on it.
+
+    `CuttlefishOptions.snapshotDir` was optional and **nothing ever passed it** — not `index.ts`,
+    not `createCuttlefishBackend`. So `snapshotPath()` threw `no snapshotDir configured` on every
+    call, which means `resetToSnapshot()` threw, which means `resetAndRelease()` in `agent.ts` never
+    reached `device_reset_complete` — and a device whose restore never completes stays in CLEANING
+    **by design**. First session on the box: one device permanently unavailable. Two devices, two
+    sessions: an empty fleet. The B7 measurement (8s restore vs 38s cold boot) was real and
+    unreachable from the product.
+
+    Three fixes, and the second is the one worth remembering:
+
+    - `index.ts` now derives a snapshot directory **per device** (`<CF_IMAGE_DIR>/../snapshots/cf-N`,
+      overridable with `CF_SNAPSHOT_DIR`) rather than requiring a fifth environment variable. Per
+      device, never shared: two devices pointed at one path restore each other's state, which is the
+      tenant leak `snapshot-reset` exists to prevent.
+    - **`snapshot-reset` is no longer advertised at construction.** It is added by `start()` only
+      once a snapshot actually exists on disk, and an *empty* snapshot directory does not count —
+      `cvd snapshot_take` creates the directory before it fills it, so an empty one is the signature
+      of a take that failed. This is the `AUTOMATION_ENDPOINT` rule again: a capability is a claim
+      about observed state. Consequence to know: `snapshot-reset` is in `REQUIRED_FOR_TENANT_USE`,
+      so a device without a snapshot registers and is **not schedulable**. That is the correct
+      failure — the alternative is handing a tenant a device carrying the previous one's data.
+    - `start()` takes the golden snapshot itself on first boot, so a bootstrapped host becomes a
+      usable farm with no manual snapshot step. A failed take is logged and swallowed: the device
+      stays up and unschedulable, rather than taking the worker down with it.
+
+    `start()` also now picks the cheapest correct route — **adopt a running group (0s), restore a
+    stopped one (8s), cold boot (38s)** — via a tolerant `cvd fleet` parse. Before this, an agent
+    restart ran `cvd create` against a host whose device was already up and built a *second* group,
+    because `groupName` only ever lived in the process that created it. An unparseable fleet
+    document falls back to cold boot, which is exactly the old behaviour, so a shape change upstream
+    costs 30 seconds rather than a broken worker.
+
+    **Device boot stays serial** (`index.ts`). Booting two at once is the obvious next optimisation
+    and it is deliberately not taken: every `cvd` verb mutates one shared instance database and
+    nothing here has verified that concurrent invocations are safe against it. The cost was never
+    the serialisation — it was cold booting when a restore would do.
+
 ## Rules earned the hard way
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
@@ -584,11 +642,20 @@ agent running a DB-backed suite will corrupt the first's run.
 
 ## Suggested next step
 
-Blockers 1, 2 and 3 are closed. What is left, in this order:
+Blockers 1, 2 and 3 are closed; the `cvd` flags and snapshot/restore are verified (B7). What is
+left, in this order:
 
-1. **A metered day on nested-virt hardware** (see `docs/MVP_PLAN.md` Tier 1). Verify the `cvd` flags,
-   prove snapshot/restore under `guest_swiftshader`, run spikes 1 and 2a, and finally point a real
-   Appium 2 at a real Cuttlefish instance. The gateway and the supervisor have only ever spoken to
-   fakes that answer correctly; a real driver will disagree about something.
-2. **Phase 2 onward** in `docs/MVP_PLAN.md` — durable Postgres before anything else, since
-   `docker-compose.yml` still mounts data on tmpfs.
+1. **Start the lab VM and take the disk snapshot immediately** — runbook step B10, five minutes.
+   As of 2026-08-18 `gcloud compute snapshots list` is empty, so the one-to-two hours of Cuttlefish
+   bootstrap and the pinned device image exist on exactly one 150 GB disk that bills ~₹42/day. That
+   is one accidental delete away from being redone, and `cvd fetch` can no longer find a build
+   without a human at a browser (issue 10).
+2. **B8 — real Appium against a real device.** The milestone the whole exercise exists for, and
+   still not attempted. `deploy/farm-up.sh` should get the host from cold to a registered device
+   without typing the runbook out. The hub has only ever spoken to a stub and the supervisor has
+   only ever supervised a fake; **expect a real driver to disagree about something**, and capture
+   the exact request and response when it does rather than working around it on a metered box.
+3. **B9 — two devices**, which is the first honest look at what the box holds under SwiftShader.
+4. **Settle blocker 6 (media routing) in an ADR before any viewer work.** It decides whether a
+   browser needs client software, and no code written before that decision is safe from it.
+   Interactive video is the *only* thing it blocks — automation is HTTP and TCP end to end.
