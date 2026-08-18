@@ -66,6 +66,23 @@ export interface DeviceControl {
    */
   resetToSnapshot(): Promise<void>;
 
+  /**
+   * Install an APK that is already on THIS host's disk.
+   *
+   * OPTIONAL, and that is the interface decision this file exists to make (v2 decision 4). An iOS
+   * simulator does not take an APK, a physical device behind a lab firewall may not accept a
+   * sideload at all, and the alternative — a required method every backend implements as
+   * `throw new NotSupported()` — is exactly the fat interface the class comment above rejects.
+   *
+   * A backend that implements it declares `app-install`; a backend that does not, does not, and the
+   * control plane refuses the install request rather than queueing a job nobody can run.
+   *
+   * Takes a PATH, never bytes. The agent has already downloaded and verified the blob, and an
+   * `installApp(Buffer)` would put a 200 MB APK through the agent's heap on the way to a tool that
+   * only wanted a filename.
+   */
+  installApp?(apkPath: string): Promise<void>;
+
   tap(x: number, y: number): Promise<void>;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
   key(name: 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'): Promise<void>;

@@ -141,6 +141,15 @@ function run(bin: string, args: string[], cwd: string, timeoutMs = 300_000): Pro
   });
 }
 
+/**
+ * How long one `adb install` may take before it is killed.
+ *
+ * Generous on purpose. A 100 MB APK onto a SwiftShader Cuttlefish is a slow push followed by a
+ * dexopt pass that is entirely CPU-bound on the same cores doing the rendering, and a timeout that
+ * fires mid-install leaves a half-installed package the next attempt has to reinstall anyway.
+ */
+const INSTALL_TIMEOUT_MS = 600_000;
+
 export class CuttlefishDevice implements DeviceControl {
   readonly info: DeviceInfo;
   private readonly opts: Required<Pick<CuttlefishOptions, 'webrtcPort' | 'gpuMode'>> & CuttlefishOptions;
@@ -595,6 +604,31 @@ export class CuttlefishDevice implements DeviceControl {
     const listed = this.info.capabilities.includes('snapshot-reset');
     if (has && !listed) this.info.capabilities = [...this.info.capabilities, 'snapshot-reset'];
     if (!has && listed) this.info.capabilities = this.info.capabilities.filter((c) => c !== 'snapshot-reset');
+  }
+
+  /**
+   * `adb install` the file at `apkPath`, which the agent has already downloaded and checksummed.
+   *
+   * `-r` so reinstalling a build over itself keeps data instead of failing with
+   * INSTALL_FAILED_ALREADY_EXISTS — the control plane re-offers a pending install on every
+   * heartbeat, so an install that succeeded and lost its confirmation WILL be run twice, and the
+   * second attempt has to be a no-op rather than an error.
+   *
+   * Deliberately NOT `-g`. Granting every runtime permission up front makes the app behave unlike
+   * it does on a user's phone, and the permission dialog someone is trying to reproduce is exactly
+   * the thing it would silently remove. A future `installApp(path, { grantPermissions: true })` can
+   * offer it as a choice; defaulting to it would make the farm quietly unrepresentative.
+   *
+   * adb exits non-zero on a failed install, which `run` turns into a throw — but it has also
+   * historically exited 0 while printing `Failure [INSTALL_FAILED_…]`, so the output is checked too.
+   * The message the tenant reads is adb's own words; a category ("install failed") would send them
+   * to us instead of to the reason.
+   */
+  async installApp(apkPath: string): Promise<void> {
+    const out = await run('adb', ['-s', this.adbSerial, 'install', '-r', apkPath], process.cwd(), INSTALL_TIMEOUT_MS);
+    if (/^\s*(Failure|Error)/im.test(out)) {
+      throw new Error(`adb install failed on ${this.info.localId}: ${out.trim().split('\n').slice(-3).join(' ')}`);
+    }
   }
 
   /**

@@ -1,8 +1,13 @@
-import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { readFile, writeFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import {
   PROTOCOL_VERSION,
+  type AppInstallRequest,
+  type AppInstallResult,
   type Capability,
   type RegistrationResponse,
   type WorkerHeartbeatResponse,
@@ -61,6 +66,14 @@ export interface AgentOptions {
   memoryMb?: number;
   /** Cap on unflushed metering events. Exceeding it is a loud failure, never a silent drop. */
   maxBufferedEvents?: number;
+  /**
+   * Where downloaded APKs are cached, keyed by their sha256.
+   *
+   * Content-addressed like the control plane's own store, so installing the same build on both
+   * devices of this host downloads it once, and a re-offered install after a restart downloads it
+   * not at all. Nothing prunes it yet — see the note in `fetchApk`.
+   */
+  appCacheDir?: string;
 }
 
 export interface AgentState {
@@ -113,6 +126,13 @@ export function deterministicUuid(key: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** sha256 of a file, streamed — the APKs this hashes are hundreds of megabytes. */
+async function digestOf(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  await pipeline(createReadStream(path), hash);
+  return hash.digest('hex');
+}
+
 export class Agent {
   private state?: AgentState;
   private heartbeatTimer?: NodeJS.Timeout;
@@ -124,6 +144,10 @@ export class Agent {
   private readonly fenceHighWater = new Map<string, number>();
   /** Devices currently being restored, so a re-sent heartbeat request cannot start a second one. */
   private readonly resetsInFlight = new Set<string>();
+  /** Same guard, same reason: the beat re-offers an install that is still running. */
+  private readonly installsInFlight = new Set<string>();
+  /** Outcomes waiting to be reported. Flushed alongside metering and resets. */
+  private readonly pendingInstalls: AppInstallResult[] = [];
 
   private readonly opts: AgentOptions;
   /**
@@ -210,7 +234,13 @@ export class Agent {
    */
   private capabilities(): Capability[] {
     const automation: Capability[] = this.automation.size > 0 ? ['webdriver'] : [];
-    return ['screen-stream', 'input-datachannel', 'snapshot-reset', ...automation];
+    // An ANY, like `webdriver` beside it: the host can install apps if at least one of its devices
+    // can. Which ones is said per-device, from each backend's own capability list — a host that
+    // claimed it while no device implemented `installApp` would collect install jobs it must then
+    // fail one at a time.
+    const install: Capability[] = this.opts.devices.some((d) => typeof d.control.installApp === 'function')
+      ? ['app-install'] : [];
+    return ['screen-stream', 'input-datachannel', 'snapshot-reset', ...install, ...automation];
   }
   get sessionPublicKey(): string | undefined { return this.state?.sessionPublicKey; }
   get bufferedEventCount(): number { return this.buffer.size; }
@@ -412,6 +442,10 @@ export class Agent {
       // A slow reset that delayed the heartbeat would look like a dead host and get the whole
       // machine quarantined, which is the opposite of what a device needing cleaning calls for.
       void this.runRequestedResets(body.resets ?? []);
+      // Not awaited for the same reason, and more so: an install is a download plus a dexopt pass,
+      // which is minutes, not seconds. The in-flight guard is what makes re-offering it every beat
+      // harmless in the meantime.
+      void this.runRequestedInstalls(body.installs ?? []);
       return { ok: true, hostState: body.hostState };
     } catch {
       return { ok: false };
@@ -475,22 +509,26 @@ export class Agent {
   /** Called on a timer; also safe to call directly. Buffered events survive a failed flush. */
   async flush(): Promise<{ recorded: number; ok: boolean }> {
     for (const s of this.active.values()) this.emitTick(s, Date.now());
-    if (this.buffer.size === 0 && this.pendingResets.length === 0) return { recorded: 0, ok: true };
+    if (this.buffer.size === 0 && this.pendingResets.length === 0 && this.pendingInstalls.length === 0) {
+      return { recorded: 0, ok: true };
+    }
     if (!this.state) return { recorded: 0, ok: false };
 
     const metering = [...this.buffer.values()];
     const resets = [...this.pendingResets];
+    const installs = [...this.pendingInstalls];
 
     try {
       const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/events`, {
         method: 'POST',
         headers: { authorization: `Bearer ${this.state.workerToken}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ metering, resets }),
+        body: JSON.stringify({ metering, resets, installs }),
       });
       if (!res.ok) return { recorded: 0, ok: false };
       const body = await res.json() as {
         meteringRecorded: number; meteringRejected?: number;
         resets: Array<{ deviceId: string; accepted: boolean }>;
+        installs?: Array<{ installId: string; accepted: boolean }>;
       };
 
       // Only clear what we actually sent — anything added while the request was in flight stays.
@@ -498,6 +536,13 @@ export class Agent {
       for (const r of resets) {
         const i = this.pendingResets.findIndex((p) => p.deviceId === r.deviceId && p.fence === r.fence);
         if (i >= 0) this.pendingResets.splice(i, 1);
+      }
+      // Dropped whether or not the control plane accepted them: a rejected outcome means the
+      // install was already recorded or is not ours, and re-sending gets the same answer forever.
+      // The install itself is not lost by this — it stays PENDING there and comes back on a beat.
+      for (const r of installs) {
+        const i = this.pendingInstalls.findIndex((p) => p.installId === r.installId);
+        if (i >= 0) this.pendingInstalls.splice(i, 1);
       }
       for (const r of body.resets ?? []) {
         if (!r.accepted) {
@@ -584,6 +629,134 @@ export class Agent {
       } finally {
         this.resetsInFlight.delete(deviceId);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------- app install
+
+  private appCacheDir(): string {
+    return this.opts.appCacheDir ?? `${process.env.HOME}/.mfarm/apps`;
+  }
+
+  /**
+   * Perform the installs the control plane attached to a heartbeat.
+   *
+   * Same three properties as `runRequestedResets`, for the same reasons — an in-flight guard
+   * because the request is re-offered every beat and an install outlives one, a failure that is
+   * REPORTED rather than retried here, and an unknown device that warns instead of throwing.
+   *
+   * The difference is what a failure means. A reset that fails must leave the device stuck in
+   * CLEANING, because a device that cannot be cleaned must never go back into the pool. An install
+   * that fails is a fact about the tenant's APK — a bad signature, a wrong ABI, not enough space —
+   * and the person who asked for it is waiting for exactly that sentence. So it is recorded as
+   * FAILED with adb's own words rather than left pending for a retry that would fail identically.
+   */
+  private async runRequestedInstalls(requests: AppInstallRequest[]): Promise<void> {
+    for (const r of requests) {
+      if (this.installsInFlight.has(r.installId)) continue;
+      if (this.pendingInstalls.some((p) => p.installId === r.installId)) continue; // done, awaiting flush
+
+      const backend = this.backendForDeviceId(r.deviceId);
+      if (!backend) {
+        // Delivery is host-scoped, so this should be unreachable. Warn rather than report a
+        // failure: claiming an outcome for a device we do not own is the one answer that is worse
+        // than silence.
+        console.warn(`[agent] control plane asked to install on unknown device ${r.deviceId}`);
+        continue;
+      }
+      const control = backend.control;
+      if (!control.installApp) {
+        this.pendingInstalls.push({
+          installId: r.installId, ok: false,
+          error: `${control.info.localId} cannot install apps: this device tier has no install path.`,
+        });
+        await this.flush();
+        continue;
+      }
+      // Second lock on a device that has been reallocated since this beat was built. The control
+      // plane already refuses to offer a stale install; this one still holds if the beat was in
+      // flight while the device changed hands.
+      if (!this.acceptFence(r.deviceId, r.fence)) {
+        this.pendingInstalls.push({
+          installId: r.installId, ok: false,
+          error: 'Stale fence: this device was reallocated before the install ran.',
+        });
+        await this.flush();
+        continue;
+      }
+
+      this.installsInFlight.add(r.installId);
+      try {
+        console.log(`[agent] installing ${r.packageName} (${r.sha256.slice(0, 12)}) on ${control.info.localId}`);
+        const apkPath = await this.fetchApk(r);
+        await control.installApp(apkPath);
+        console.log(`[agent] installed ${r.packageName} on ${control.info.localId}`);
+        this.pendingInstalls.push({ installId: r.installId, ok: true });
+      } catch (e) {
+        const error = (e as Error).message;
+        console.error(`[agent] install of ${r.packageName} on ${control.info.localId} failed: ${error}`);
+        this.pendingInstalls.push({ installId: r.installId, ok: false, error });
+      } finally {
+        this.installsInFlight.delete(r.installId);
+      }
+      // Reported immediately rather than on the metering timer: someone is watching this install
+      // in a UI or a CLI poll, and a 15s wait to learn it finished is most of a short install.
+      await this.flush();
+    }
+  }
+
+  /**
+   * The APK on local disk, downloaded if it is not cached, and VERIFIED either way.
+   *
+   * The digest is checked on both paths, and neither check is paranoia:
+   *
+   *   after a download, because a truncated transfer reaches `adb install` as a corrupt archive and
+   *   the error it produces names the app, sending whoever reads it to look at their own build;
+   *
+   *   on a cache hit, because this file is written by a previous process that may have been killed
+   *   mid-write, and because the cache directory is ordinary disk that anything on the host can
+   *   write to. Re-hashing a cached 100 MB APK costs a few hundred milliseconds against an install
+   *   measured in tens of seconds.
+   *
+   * Nothing prunes this cache yet. At two devices and a handful of builds that is a few gigabytes
+   * and not a problem; it becomes one on a long-lived host, and the fix is a sweep by last-access,
+   * not a smaller cache.
+   */
+  private async fetchApk(r: AppInstallRequest): Promise<string> {
+    const dir = this.appCacheDir();
+    await mkdir(dir, { recursive: true });
+    const finalPath = join(dir, `${r.sha256}.apk`);
+
+    if (await stat(finalPath).then(() => true).catch(() => false)) {
+      if (await digestOf(finalPath) === r.sha256) return finalPath;
+      console.warn(`[agent] cached ${r.sha256.slice(0, 12)} does not match its digest; re-downloading`);
+      await unlink(finalPath).catch(() => {});
+    }
+
+    if (!this.state) throw new Error('not registered: cannot download an app');
+    // The install id is the authorization, not the worker token alone — the control plane will only
+    // serve a build this host is currently holding an install for.
+    const url = `${this.opts.controlPlaneUrl}/v1/apps/${encodeURIComponent(r.appId)}/blob`
+      + `?installId=${encodeURIComponent(r.installId)}`;
+    const res = await fetch(url, { headers: { authorization: `Bearer ${this.state.workerToken}` } });
+    if (!res.ok || !res.body) {
+      throw new Error(`downloading the app failed: ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    }
+
+    // Written to a temp name and renamed, so a crash mid-download cannot leave a truncated file
+    // sitting at the name of its own digest — the one file nothing would think to re-verify.
+    const tmp = join(dir, `${randomUUID()}.part`);
+    try {
+      await pipeline(Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(tmp));
+      const actual = await digestOf(tmp);
+      if (actual !== r.sha256) {
+        throw new Error(`downloaded app digest ${actual.slice(0, 12)} does not match the expected ${r.sha256.slice(0, 12)}`);
+      }
+      await rename(tmp, finalPath);
+      return finalPath;
+    } catch (e) {
+      await unlink(tmp).catch(() => {});
+      throw e;
     }
   }
 

@@ -52,6 +52,15 @@ function run(bin: string, args: string[], timeoutMs = 30_000): Promise<string> {
   });
 }
 
+/**
+ * How long one `adb install` may take before it is killed.
+ *
+ * Generous on purpose. A 100 MB APK onto a SwiftShader Cuttlefish is a slow push followed by a
+ * dexopt pass that is entirely CPU-bound on the same cores doing the rendering, and a timeout that
+ * fires mid-install leaves a half-installed package the next attempt has to reinstall anyway.
+ */
+const INSTALL_TIMEOUT_MS = 600_000;
+
 export class AvdDevice implements DeviceControl {
   readonly info: DeviceInfo;
   private readonly serial: string;
@@ -180,6 +189,20 @@ export class AvdDevice implements DeviceControl {
     } catch {
       await this.stop();
       await this.start();
+    }
+  }
+
+  /**
+   * `adb install -r`, through the emulator's own adb rather than the held shell.
+   *
+   * The held shell exists to keep per-event latency down and cannot carry a file; installing is a
+   * transfer, so it takes the slow path and does not care. See the Cuttlefish backend for why `-r`
+   * is required (re-offered installs) and why `-g` is not passed.
+   */
+  async installApp(apkPath: string): Promise<void> {
+    const out = await this.adb(['install', '-r', apkPath], INSTALL_TIMEOUT_MS);
+    if (/^\s*(Failure|Error)/im.test(out)) {
+      throw new Error(`adb install failed on ${this.info.localId}: ${out.trim().split('\n').slice(-3).join(' ')}`);
     }
   }
 
