@@ -136,9 +136,14 @@ had done nothing, during exactly the fleet churn that makes expiry interesting
 | `POST /v1/sessions` | tenant | 201 allocated, 202 queued. Honours `Idempotency-Key` |
 | `GET /v1/sessions/:id` | tenant | |
 | `DELETE /v1/sessions/:id` | tenant | |
+| `POST /v1/apps` | tenant | APK upload, streamed to disk. 201 new, 200 already in the library |
+| `GET /v1/apps`, `/v1/apps/:id` | tenant | the org's build library |
+| `GET /v1/apps/:id/blob` | worker | **only** with an `installId` this host is holding |
+| `POST /v1/sessions/:id/installs` | tenant | 202 — queues an install for the session's device |
+| `GET /v1/sessions/:id/installs`, `/v1/installs/:id` | tenant | outcome, with the worker's own error text |
 | `POST /v1/workers/register` | registration token | issues the worker credential |
-| `POST /v1/workers/heartbeat` | worker | |
-| `POST /v1/workers/events` | worker | batched metering + reset reports |
+| `POST /v1/workers/heartbeat` | worker | also carries down pending resets and app installs |
+| `POST /v1/workers/events` | worker | batched metering + reset + install reports |
 | `GET /wd/hub/status` | none | WebDriver readiness probe |
 | `POST /wd/hub/session` | tenant | W3C or JSONWP new session |
 | `GET /wd/hub/sessions` | tenant | this org's live WebDriver sessions |
@@ -164,6 +169,33 @@ a 409 `idempotency_in_flight` instead of a second device; a failed request relea
 Reusing a key with a different body is a 409 rather than a silent replay of the wrong thing. Keys are
 scoped per org, so two tenants using the same key value do not collide, and the reaper drops them
 after 24 hours.
+
+## The app library
+
+Upload a build once, install it onto a device a session holds — outside Appium, so the interactive
+path can get an app onto a phone without a test suite (MVP plan flow 5).
+
+**A build is its digest.** `POST /v1/apps` streams the body to a content-addressed store under
+`APP_STORE_DIR` and answers 200 rather than 201 when the org already had those exact bytes, so a CI
+job that uploads on every run costs one row and one copy. The package name, version and label are
+parsed out of the APK's own binary `AndroidManifest.xml` (`src/apk.ts`) rather than taken from the
+client — everything downstream acts on the package name, so a caller that could set it could claim
+someone else's package.
+
+**An install is a job, not a call.** The control plane cannot dial a worker; traffic only ever goes
+the other way. So `POST /v1/sessions/:id/installs` returns **202** and writes an `app_installs` row,
+the next heartbeat carries it down to the host that owns the device, and the worker confirms through
+`POST /v1/workers/events` — the same shape resets use, which makes a missed install self-healing and
+bounds the delay at one beat (10s).
+
+**The install id is the worker's authorization.** `GET /v1/apps/:id/blob` refuses without one, and
+the query behind it requires an unfinished install of that exact build on a device belonging to the
+calling host. There is no route by which a worker can enumerate or fetch an org's builds.
+
+Three states, and no `INSTALLING`: a worker reports the outcome, never the start, so a worker that
+dies mid-install leaves the row `PENDING` and the next beat re-delivers it (`adb install -r` is
+repeatable). An install whose session ends before delivery is swept to `FAILED` by the reaper, so
+nothing polls a job that will never run.
 
 ## The WebDriver hub
 
@@ -234,8 +266,10 @@ region alone, so a queued Android session could be promoted onto an iOS device.
 
 ## Not yet built
 
-Artifacts, app install/launch outside Appium, and logcat streaming. Rate limiting is in-memory, so
-limits are per API instance — moving to Redis is required before running more than one.
+Artifacts and logcat streaming. App **launch** and **uninstall** outside Appium are not here either —
+only upload and install are — and the device-side seam for them is the same optional-method pattern
+`installApp` uses. Rate limiting is in-memory, so limits are per API instance; moving to Redis is
+required before running more than one.
 
 ## Running it
 

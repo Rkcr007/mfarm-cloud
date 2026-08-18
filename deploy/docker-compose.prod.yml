@@ -148,6 +148,14 @@ services:
       # rather than loud: the browser refuses to store the cookie, login returns 200, and the next
       # request is anonymous, so it looks like signing in does nothing at all.
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-1}
+      # Uploaded APKs. A NAMED VOLUME, not a temp directory and not the container filesystem: the
+      # app_builds rows outlive any container, so blobs stored anywhere ephemeral leave a library
+      # full of entries whose bytes are gone — discovered days later as "install failed: no such
+      # file". `config.ts` refuses to start in production if this is unset, for that reason.
+      APP_STORE_DIR: /var/lib/mfarm/apps
+      APP_MAX_UPLOAD_BYTES: ${APP_MAX_UPLOAD_BYTES:-536870912}
+    volumes:
+      - appstore:/var/lib/mfarm/apps
     secrets:
       - session_signing_key
       - session_public_key
@@ -209,3 +217,10 @@ volumes:
     # that flag is what the test stack uses on purpose, and it is the one command to keep away from
     # this file.
     name: mfarm_pgdata
+  appstore:
+    # Uploaded APKs, addressed by their sha256. NOT covered by the backup sidecar, and that is a
+    # decision rather than an oversight: the sidecar dumps Postgres, and putting hundreds of
+    # megabytes of build artifacts into a 6-hourly archive would trade a small, fast, verifiable
+    # backup for a large slow one. Losing this volume loses uploads, which are reproducible from CI;
+    # losing pgdata loses the fleet. `deploy/README.md` says so under Known gaps.
+    name: mfarm_appstore

@@ -324,6 +324,12 @@ Stated rather than implied, because each of these looks covered from the dashboa
 - **No worker-side metrics.** cvd instance health, adb responsiveness and Appium wedging are
   invisible except through their effect on device state — and a wedged-but-alive Appium answers
   `/status` 200 forever (known issue 2).
+- **The app library's blobs are not backed up.** `mfarm_appstore` holds every uploaded APK and the
+  6-hourly sidecar dumps Postgres only. That is deliberate — hundreds of megabytes of build
+  artifacts would trade a small, fast, verifiable backup for a large slow one — but it means losing
+  that volume loses every upload, and the `app_builds` rows survive pointing at bytes that are gone.
+  The first symptom is `install failed: Blob … is missing from the app store`. Uploads are
+  reproducible from CI, which is why this is a gap and not a defect; re-upload rather than hunt.
 - Grafana's own database is a named volume that nothing backs up. Everything in it is provisioned
   from files in this repo, which is why that is acceptable — do not hand-edit dashboards in the UI
   and expect them to survive.

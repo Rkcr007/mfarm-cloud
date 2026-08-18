@@ -268,7 +268,15 @@ delivered to a person. Closing that is Phase 0's metered day, not more building.
 
 ### Phase 3 — Artifacts and observability
 
-- APK upload, install, launch, and uninstall outside Appium.
+- ~~APK upload and install outside Appium.~~ **DONE 2026-08-19** — migration 014, `POST /v1/apps`
+  (content-addressed, streamed to `APP_STORE_DIR`, metadata parsed from the APK's own binary
+  manifest rather than trusted from the client), and installs delivered as JOBS over the heartbeat
+  in exactly the shape resets use, because the control plane cannot dial a worker. `mfarm app
+  upload | list | install` covers the CLI half; the console's one-click install now has an API to
+  call. Verified against a fake device only — no `adb install` has ever run from this code path, so
+  the first real APK on the lab box is the test that matters.
+- **Launch and uninstall** outside Appium. Same seam (`DeviceControl.installApp` is optional and
+  capability-gated); neither is built.
 - Logcat capture per session, streamed and stored.
 - Video recording per session; screenshots on demand and on failure.
 - Artifact store — MinIO on the same box, S3 API, retention policy.

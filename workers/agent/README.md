@@ -111,6 +111,27 @@ level with a count, never silently evicted.
 entry would return a device still carrying the previous tenant's accounts, keychain and caches. A
 failed restore leaves the device `CLEANING` — out of the pool — which is the safe direction.
 
+## App install
+
+The other half of the heartbeat's job. A beat can carry down `installs` as well as `resets`, and the
+agent handles them the same way and for the same reasons — an in-flight guard, because the request is
+re-offered every beat and an install outlives one; not awaited inside the beat, because an install is
+a download plus a dexopt pass and a beat that waited for it would look like a dead host.
+
+The one difference is what a failure means. A failed reset must leave the device stuck in `CLEANING`,
+because a device that cannot be cleaned must never rejoin the pool. A failed install is a fact about
+the tenant's APK — wrong ABI, bad signature, no space — so it is reported as `FAILED` with adb's own
+words, which is what the person waiting on it needs to read.
+
+**The digest is checked on both paths.** The agent caches APKs by sha256 under `appCacheDir`, so
+installing one build on both devices downloads it once; it re-hashes a cache hit anyway, because
+that file was written by a process that may have been killed mid-write and lives in a directory
+anything on the host can write to. A mismatch re-downloads rather than installs.
+
+`installApp` is an **optional** method on `DeviceControl`. A tier that cannot sideload does not
+define it, rather than defining one that throws — the capability is what the control plane schedules
+on, and `app-install` is advertised from whether the method exists.
+
 ## Bugs the tests caught
 
 **Empty body with a JSON content-type returned 500.** The agent's heartbeat sends no body, and
@@ -188,7 +209,8 @@ unverified until there is hardware.
 
 ## Not yet built
 
-App install/launch, logcat streaming, and video recording. `resolveDeviceIds`
+App **launch** and **uninstall** (install is done — see above), logcat streaming, and video
+recording. `resolveDeviceIds`
 returns an empty map — the agent currently learns a device's control-plane uuid from the signed token
 that arrives for it, which is authenticated and therefore trustworthy, but a future protocol revision
 should return the mapping at registration.

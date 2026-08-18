@@ -150,7 +150,7 @@ jobs:
 
             -- ENABLE alone is not enough. Without FORCE, the table OWNER skips every policy, which
             -- is exactly how people end up believing RLS is on when it is not (see 002_rls.sql).
-            FOREACH t IN ARRAY ARRAY['orgs','memberships','api_keys','devices','sessions','metering_events']
+            FOREACH t IN ARRAY ARRAY['orgs','memberships','api_keys','devices','sessions','metering_events','app_builds','app_installs']
             LOOP
               SELECT relrowsecurity, relforcerowsecurity
                 INTO rs, fs
@@ -161,7 +161,19 @@ jobs:
               IF NOT fs THEN RAISE EXCEPTION 'table % does not have FORCE ROW LEVEL SECURITY', t; END IF;
             END LOOP;
 
-            RAISE NOTICE 'mfarm_app: no superuser, no bypassrls; 6 tenant tables ENABLE+FORCE RLS';
+            -- The app role must not be able to WRITE THE OUTCOME of an install. RLS keeps a tenant
+            -- inside its own org and says nothing about which columns it may change, so without a
+            -- REVOKE any API key could mark its own install INSTALLED or rewrite the error a failed
+            -- one reported. This is not hypothetical: 001's ALTER DEFAULT PRIVILEGES grants the
+            -- full set on every table the owner creates from then on, so migration 014 arrived with
+            -- exactly that privilege until it revoked it. Silent, and invisible in the policy list.
+            IF has_table_privilege('mfarm_app', 'app_installs', 'UPDATE')
+               OR has_table_privilege('mfarm_app', 'app_installs', 'DELETE') THEN
+              RAISE EXCEPTION
+                'mfarm_app can UPDATE or DELETE app_installs. Install outcomes are written by the worker path on the owner pool only; revoke it (see 014_app_library.sql).';
+            END IF;
+
+            RAISE NOTICE 'mfarm_app: no superuser, no bypassrls; 8 tenant tables ENABLE+FORCE RLS; install outcomes not tenant-writable';
           END $$;
           SQL
 

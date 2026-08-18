@@ -758,9 +758,57 @@ before building any viewer**, because it determines whether a browser needs clie
 
     Two things the console does NOT do, both stated in the UI rather than hidden behind a disabled
     button: there is no interactive device view (media needs ADR-0005's relay, which is not
-    deployed), and a session cannot be pinned to a specific device (the allocator chooses). App
-    upload and install are not built — `app-install` is an advertised capability with **no
-    implementation anywhere**, and the only APK path today is `appium:app` handed to Appium.
+    deployed), and a session cannot be pinned to a specific device (the allocator chooses). ~~App
+    upload and install are not built.~~ **Built 2026-08-19 — see issue 21**; the console still has
+    no button for it, but the API it would call now exists.
+
+21. **THE APP LIBRARY EXISTS: UPLOAD A BUILD, INSTALL IT ON A DEVICE YOU HOLD.** 2026-08-19,
+    migration 014. Phase 3's first bullet, minus launch and uninstall.
+
+    Three decisions carry the design, and each one had an obvious alternative that is worse:
+
+    - **An install is a JOB, not a call.** The control plane cannot dial a worker — traffic only ever
+      flows outward from the host, which is what lets the farm sit behind a tailnet with nothing
+      listening. So `POST /v1/sessions/:id/installs` writes a row and answers **202**, the heartbeat
+      carries it down, and `POST /v1/workers/events` carries the outcome up. This is the same shape
+      `resets` took in issue 16, and reusing it means a missed install self-heals on the next beat
+      with no retry logic anywhere. The cost is one beat of latency (10s) against an install that
+      takes tens of seconds anyway.
+    - **The install id is the worker's authorization, not its token.** `GET /v1/apps/:id/blob` needs
+      an `installId`, and the query behind it demands an unfinished install of that exact build on a
+      device belonging to the calling host. Without that the only question the route could ask is
+      "is this a valid worker", and the answer would let any host in the fleet download any org's
+      builds. A worker has no route that enumerates or fetches an org's apps.
+    - **A build IS its sha256.** Uploading the same file twice is one blob, one row, and a 200
+      instead of a 201 — so a CI job can upload unconditionally. The worker verifies the digest
+      after downloading AND on a cache hit, because a truncated transfer reaches `adb install` as a
+      corrupt archive and the error it produces names the app, sending whoever reads it to look at
+      their own build.
+
+    Two traps found while building it, both of the "the default is against you" kind:
+
+    - **001's `ALTER DEFAULT PRIVILEGES` grants `mfarm_app` UPDATE on every future table.** So the
+      new tables arrived with a grant that would have let any tenant mark its own install
+      `INSTALLED`, or rewrite the error a failed one reported. 014 REVOKEs first and then grants
+      exactly `SELECT, INSERT`. Same class as the PUBLIC EXECUTE default migration 012 had to undo,
+      and there is now a test that asserts the UPDATE is refused.
+    - **A named volume mounted on a path that does not exist in the image is created root-owned**,
+      and the API runs as `node`. The Dockerfile creates `/var/lib/mfarm/apps` and chowns it so the
+      volume inherits that ownership; without it every upload fails with EACCES on a deployment
+      that looked fine until someone used it.
+
+    APK metadata (package, version, minSdk, label) is parsed out of the binary
+    `AndroidManifest.xml` by hand — `apps/api/src/apk.ts`, a zip central-directory read plus an AXML
+    parse — rather than trusted from the client or shelled out to `aapt2`, which the control plane
+    does not have and should not grow. The fixture generator in `apps/api/test/fixtures/apk.ts`
+    writes the same two formats, so both encodings, both compression methods and resource-id-only
+    attributes are covered without a megabyte of opaque binary in the repo.
+
+    **NOTHING HERE HAS EVER RUN `adb install`.** The device side is two lines per backend and the
+    tests drive a fake, so the first real APK on the lab box is the test that matters — expect the
+    usual disagreements about exit codes and `Failure [...]` text. The blob store is also a plain
+    directory on the API host, not MinIO, and `mfarm_appstore` is NOT covered by the backup sidecar
+    (`deploy/README.md`, Known gaps).
 
 
 
@@ -874,3 +922,5 @@ What is left, in this order:
    SwiftShader costs a rendering-heavy app.
 3. **Spikes 1 and 2a**, which still gate *scaling* rather than shipping.
 4. **Phase 3** — artifacts, logcat, video — all buildable for ₹0 against the snapshots above.
+   App upload and install landed 2026-08-19 (issue 21); the first thing to do with a live box is
+   push a real APK through it, because that path has only ever met a fake device.

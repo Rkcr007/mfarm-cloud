@@ -32,6 +32,9 @@ mfarm run [options] -- <command> [args...]   allocate a device, run the command,
 mfarm devices [options]                      list devices visible to your organisation
 mfarm session get <id>                       inspect one session
 mfarm session rm <id>                        force-release a session
+mfarm app upload <file.apk>                  add a build to your organisation's library
+mfarm app list [--package <name>]            list builds
+mfarm app install <app-id> --session <id>    install a build onto the device that session holds
 mfarm --version | --help
 ```
 
@@ -47,6 +50,25 @@ mfarm --version | --help
 | `--ttl <minutes>` | `MFARM_TTL` | 30 |
 | `--wait <seconds>` | `MFARM_WAIT` | 300 (`0` fails immediately instead of queueing) |
 | `--no-webdriver` | | off — by default `run` allocates a device that can serve Appium, because `MFARM_WEBDRIVER_URL` needs one. Pass this for commands that only speak the raw data plane. |
+| `--session <id>` | `MFARM_SESSION_ID` | required for `app install` |
+| `--package <name>` | | filter for `app list` |
+
+### `mfarm app`
+
+An upload is keyed on the file's own sha256, so re-uploading a build you already have is a no-op
+that returns the same id — safe to run on every CI build, and safe to retry.
+
+An install is asynchronous by nature: the control plane cannot dial a worker, so the request queues
+a job the host performs on its next heartbeat. `app install` waits for the outcome by default
+(`--wait`, 300s) and its exit code is the answer:
+
+| exit | meaning |
+|---|---|
+| 0 | the device has it — or `--wait 0`, where queueing is all you asked for |
+| 1 | the install failed on the device (the worker's own error text is on stderr), or the wait ran out |
+
+Inside `mfarm run`, `MFARM_SESSION_ID` is already in the environment, so `mfarm app install <id>`
+installs onto the device the run is holding with no further arguments.
 
 Prefer the environment variables in CI: an API key on a command line is visible to every other
 process on the runner via `ps`, and shells with `set -x` echo it into the build log.

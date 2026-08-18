@@ -48,8 +48,15 @@ COPY --from=deps /app ./
 COPY packages/protocol ./packages/protocol
 COPY apps/api ./apps/api
 
-# Runs as the image's built-in unprivileged user. The control plane never writes to disk — it holds
-# no state that is not in Postgres — so nothing here needs to be writable.
+# The app library's blobs (migration 014). Created in the image, owned by `node`, and that
+# ownership is the entire reason this line exists: Docker seeds a fresh named volume from the image
+# directory it is mounted over, and a mount point that does not exist in the image gets a
+# root-owned volume instead — so an unprivileged process cannot write to it and every upload fails
+# with EACCES on a deployment that looked fine until someone uploaded something.
+RUN mkdir -p /var/lib/mfarm/apps && chown -R node:node /var/lib/mfarm
+
+# Runs as the image's built-in unprivileged user. The one path it writes to is APP_STORE_DIR above,
+# which is a mounted volume; everything else this process knows is in Postgres.
 USER node
 
 EXPOSE 3000
