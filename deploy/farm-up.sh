@@ -210,6 +210,26 @@ fi
 say "Worker"
 command -v tmux >/dev/null || die "tmux not found — apt-get install -y tmux. Running the worker in a foreground SSH shell loses the devices when the tab drops."
 
+# THE CONTROL PLANE IS IN A CONTAINER AND THE WORKER IS NOT, SO THEY DO NOT SHARE A LOOPBACK.
+#
+# `127.0.0.1` inside the API container is the container. A worker that binds its automation gateway
+# to the host's loopback and advertises `http://127.0.0.1:8090/automation/cf-1` therefore stores an
+# address the hub can never reach, and the first session fails with
+# `automation_unreachable: fetch failed` — which reads like a dead Appium and is not. Found on the
+# lab VM, 2026-08-18, on the first real WebDriver session this project has ever attempted.
+#
+# The address both sides share is the compose network's gateway: the host, as seen from inside the
+# containers. It is a host-local interface, so this is not a step back from BIND_HOST's purpose —
+# nothing here becomes reachable from outside the box, and Appium itself stays on 127.0.0.1 with the
+# gateway as its only door (ADR-0004).
+#
+# The data plane inherits the same binding, and for it this is a KNOWN LIMITATION rather than a fix:
+# a browser on the tailnet cannot reach 172.x either. That path is blocked on the media routing
+# decision anyway (HANDOFF.md blocker 6), and automation does not touch it.
+bridge_ip="$(docker network inspect mfarm_default -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+[ -n "$bridge_ip" ] || die "could not read the compose network's gateway address; is the stack up?"
+note "worker binds to $bridge_ip (the host, as the API container sees it)"
+
 if tmux has-session -t mfarm-worker 2>/dev/null; then
   note "session 'mfarm-worker' already running — leaving it alone (tmux kill-session -t mfarm-worker to replace it)"
 else
@@ -217,11 +237,11 @@ else
     "env CONTROL_PLANE_URL=http://127.0.0.1:$API_PORT \
         WORKER_REGISTRATION_TOKEN='$(cat "$SECRETS_DIR/worker_registration_token")' \
         REGION='$REGION' \
-        PUBLIC_ENDPOINT=ws://127.0.0.1:8080 \
-        PUBLIC_HOST=127.0.0.1 \
-        BIND_HOST=127.0.0.1 \
+        PUBLIC_ENDPOINT=ws://$bridge_ip:8080 \
+        PUBLIC_HOST=$bridge_ip \
+        BIND_HOST=$bridge_ip \
         APPIUM_ENABLED=1 \
-        APPIUM_ADVERTISE_HOST=127.0.0.1 \
+        APPIUM_ADVERTISE_HOST=$bridge_ip \
         CF_IMAGE_DIR='$CF_IMAGE_DIR' \
         CF_INSTANCES='$CF_INSTANCES' \
         node --experimental-strip-types workers/agent/src/index.ts 2>&1 | tee -a /tmp/mfarm-worker.log"
@@ -234,7 +254,11 @@ fi
 say "Waiting for devices to register"
 for i in $(seq 1 600); do
   devices="$(curl -fsS -H "Authorization: Bearer $MFARM_API_KEY" "http://127.0.0.1:$API_PORT/v1/devices" 2>/dev/null || echo '')"
-  count="$(printf '%s' "$devices" | grep -o '"localId"' | wc -l | tr -d ' ')"
+  # `|| true` is load-bearing: grep exits 1 when it matches nothing, and `set -o pipefail` turns
+  # that into a failed assignment, which `set -e` turns into a silent exit 1 from this script — with
+  # the farm perfectly healthy behind it. That is exactly what happened on the first run.
+  count="$(printf '%s' "$devices" | grep -c '"localId"' || true)"
+  [ -n "$count" ] || count=0
   if [ "$count" -ge "$CF_INSTANCES" ]; then note "$count device(s) registered after ${i}s"; break; fi
   if [ "$i" = 600 ]; then
     printf '\n\033[31mNo devices after 10 minutes.\033[0m Diagnose in this order:\n' >&2
