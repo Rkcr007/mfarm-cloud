@@ -69,6 +69,19 @@ if [ "$WITH_WORKER" = 1 ]; then
   [ -d "$CF_IMAGE_DIR" ] || die "CF_IMAGE_DIR=$CF_IMAGE_DIR does not exist; point it at the unpacked device image"
   userns="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
   [ "$userns" = "0" ] || die "kernel.apparmor_restrict_unprivileged_userns=$userns will kill crosvm with no log naming the cause. Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+  # UiAutomator2 refuses to start a session without ANDROID_HOME or ANDROID_SDK_ROOT, and says so
+  # from inside the driver — the hub surfaces it as `upstream_rejected`, several hops from the cause.
+  # It locates adb through the SDK LAYOUT rather than through PATH, so an adb on PATH is not enough.
+  # This is what stopped the first end-to-end session on 2026-08-18.
+  #
+  # The supervisor was never the problem: `ANDROID_` is already an allowed prefix in appium.ts, so
+  # the variable passes through to the driver. Nothing ever set it. cuttlefish-common pulls in a real
+  # SDK layout at /usr/lib/android-sdk, and every adb on this host is the same 1.0.41 — which matters,
+  # because two adb versions on one machine kill each other's servers.
+  ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/lib/android-sdk}}"
+  [ -x "$ANDROID_HOME/platform-tools/adb" ] \
+    || die "no Android SDK at $ANDROID_HOME (need platform-tools/adb). apt-get install -y adb, or set ANDROID_HOME."
+  note "android sdk $ANDROID_HOME ($("$ANDROID_HOME/platform-tools/adb" version | head -1))"
   command -v appium >/dev/null || note "appium not on PATH — the worker will start without WebDriver. Install: sudo npm install -g appium && appium driver install uiautomator2"
 fi
 note "ok"
