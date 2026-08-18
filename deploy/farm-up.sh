@@ -166,13 +166,28 @@ curl -fsS "http://127.0.0.1:$API_PORT/ready" >/dev/null || die "/ready is failin
 # is a foreign key into it, so worker registration fails on a constraint that names nothing; and no
 # tenant key exists, so every route but the probes refuses you. Both were found by checking the
 # runbook against the code rather than on a metered box.
+# The control plane runs from an image, so compose covers it. Everything run from the checkout — the
+# seed script (`pg`) and the worker (`ws`, plus the @mfarm/protocol workspace link) — needs the
+# workspace installed on the host. BEFORE the seed, not after: the first run of this script got
+# `Cannot find package 'pg'` and reported it as "produced no API key", because the install was
+# sitting in the worker section below.
+say "Dependencies"
+(cd "$REPO_ROOT" && npm install --silent) || die "npm install failed in $REPO_ROOT"
+note "ok"
+
 say "Seeding"
 if [ -s "$STATE_DIR/api_key" ]; then
   MFARM_API_KEY="$(cat "$STATE_DIR/api_key")"
   note "reusing the key in $STATE_DIR/api_key (a key is only ever shown once; only its hash is stored)"
 else
-  eval "$(DATABASE_URL="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:${POSTGRES_PORT:-5432}/$POSTGRES_DB" \
-    REGION="$REGION" node "$REPO_ROOT/apps/api/scripts/seed-lab.mjs")"
+  # stderr to a file rather than into the eval: the script's stdout is shell to execute, and the one
+  # thing worse than a failed seed is eval'ing a stack trace.
+  seed_err="$(mktemp)"
+  seed_out="$(DATABASE_URL="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:${POSTGRES_PORT:-5432}/$POSTGRES_DB" \
+    REGION="$REGION" node "$REPO_ROOT/apps/api/scripts/seed-lab.mjs" 2>"$seed_err")" \
+    || { cat "$seed_err" >&2; rm -f "$seed_err"; die "seed-lab.mjs failed — its output is above"; }
+  rm -f "$seed_err"
+  eval "$seed_out"
   [ -n "${MFARM_API_KEY:-}" ] || die "seed-lab.mjs produced no API key"
   printf '%s' "$MFARM_API_KEY" > "$STATE_DIR/api_key"; chmod 600 "$STATE_DIR/api_key"
   note "minted a tenant API key into $STATE_DIR/api_key"
@@ -193,10 +208,6 @@ fi
 # device (0s), restore a stopped one from its snapshot (8s), or cold boot (38s, first time only,
 # after which it takes the golden snapshot the other two rungs depend on).
 say "Worker"
-# The control plane runs from an image; the worker runs from the checkout, so it needs the workspace
-# dependencies (`ws`, and the @mfarm/protocol workspace link) present on the host. Cheap and
-# idempotent when they already are.
-(cd "$REPO_ROOT" && npm install --silent) || die "npm install failed in $REPO_ROOT"
 command -v tmux >/dev/null || die "tmux not found — apt-get install -y tmux. Running the worker in a foreground SSH shell loses the devices when the tab drops."
 
 if tmux has-session -t mfarm-worker 2>/dev/null; then
