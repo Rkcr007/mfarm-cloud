@@ -93,8 +93,44 @@ export async function resetComplete(hostId: string, deviceId: string, fence: num
 const IDEMPOTENCY_RETENTION_HOURS = 24;
 
 /** Run on a schedule. Implements "never leave a device permanently locked" as a mechanism. */
+/**
+ * How long a host may go silent before its devices leave the pool.
+ *
+ * Nine missed beats at the default 10s interval. Generous on purpose: quarantining costs the farm
+ * capacity and un-quarantining needs the worker to come back and re-register, so a flap should not
+ * trigger it — but a worker that has said nothing for a minute and a half is not one whose devices
+ * should still be handed to a tenant.
+ */
+function hostSilenceMs(): number {
+  return Number(process.env.HOST_SILENCE_TIMEOUT_MS ?? 90_000);
+}
+
+/**
+ * How often the host sweep actually runs, regardless of how often the reaper ticks.
+ *
+ * The reaper's other three jobs are per-tick by nature — a session expires the moment its clock
+ * runs out. "Has a host been quiet for 90 seconds" cannot change meaningfully between two ticks a
+ * few seconds apart, and it is the only FLEET-WIDE WRITE in the sweep, so running it on every tick
+ * spends a query and a possible mass state change to answer a question whose answer is still being
+ * computed. `REAPER_INTERVAL_MS` is deployment-chosen and may be small; this is not.
+ */
+function hostSweepMinIntervalMs(): number {
+  return Number(process.env.HOST_SWEEP_MIN_INTERVAL_MS ?? 15_000);
+}
+
+/**
+ * Module-level: one reaper per process, and it is the only caller.
+ *
+ * Both knobs above are read INSIDE the sweep rather than at module scope, and that is not style.
+ * ES imports are hoisted, so a test that sets `process.env.X` in its first statement has already
+ * missed a module-scope read — which is exactly how the first version of this shipped green and
+ * then failed the moment a suite tried to configure it.
+ */
+let lastHostSweepAt = 0;
+
 export async function reap(): Promise<{
   expired: number; promoted: number; keysPurged: number; installsOrphaned: number;
+  hostsQuarantined: number;
 }> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
@@ -106,10 +142,10 @@ export async function reap(): Promise<{
       [IDEMPOTENCY_RETENTION_HOURS],
     );
     /**
-     * Installs whose session ended before a worker ever collected them.
+     * App actions whose session ended before a worker ever collected them.
      *
-     * Without this they sit PENDING forever: the heartbeat query will not offer an install for a
-     * dead session, so nothing finishes it and nothing sweeps it, and a caller polling the install
+     * Without this they sit PENDING forever: the heartbeat query will not offer an action for a
+     * dead session, so nothing finishes it and nothing sweeps it, and a caller polling the action
      * waits on a job no worker will ever be told about. Ordered AFTER `expire_sessions()` on
      * purpose — that call is what turns an abandoned session into a finished one, so running the
      * sweep first would leave every install it just orphaned for the next tick.
@@ -118,20 +154,52 @@ export async function reap(): Promise<{
      * the app was not installed, and the reason says why in words they can act on.
      */
     const i = await c.query(
-      `UPDATE app_installs ai
+      `UPDATE app_actions ai
           SET state = 'FAILED',
-              error = 'The session ended before this install reached the device.',
+              error = 'The session ended before this action reached the device.',
               finished_at = now()
          FROM sessions s
         WHERE s.id = ai.session_id
           AND ai.state = 'PENDING'
           AND s.state NOT IN ('QUEUED','ALLOCATING','ACTIVE')`,
     );
+    /**
+     * Hosts that have gone silent, and the devices they were holding open.
+     *
+     * `quarantine_host` has existed since migration 003 and NOTHING HAS EVER CALLED IT. The effect
+     * on a two-device farm is not subtle: kill a worker and its devices stay READY forever, so the
+     * allocator keeps handing them out and every session on them fails at connect time — the farm
+     * reports full capacity while serving none of it. Found by killing the fake worker and watching
+     * the allocator pick one of its devices a minute later.
+     *
+     * Quarantining is the honest state: the device is not gone (the host may come back), it is not
+     * schedulable, and it is visible as a problem rather than as capacity. Recovery is registration
+     * — a returning worker re-asserts its devices, which is why `workers.ts` had to learn to promote
+     * a device OUT of QUARANTINED as well as into it.
+     */
+    const dueForSweep = Date.now() - lastHostSweepAt >= hostSweepMinIntervalMs();
+    if (dueForSweep) lastHostSweepAt = Date.now();
+    const q = dueForSweep
+      ? await c.query<{ id: string; hostname: string }>(
+          `SELECT id, hostname FROM hosts
+            WHERE state = 'UP'
+              AND (last_heartbeat_at IS NULL OR last_heartbeat_at < now() - make_interval(secs => $1))`,
+          [hostSilenceMs() / 1000],
+        )
+      : { rows: [] as Array<{ id: string; hostname: string }> };
+    for (const host of q.rows) {
+      await c.query('SELECT quarantine_host($1, $2)', [
+        host.id, `no heartbeat for ${Math.round(hostSilenceMs() / 1000)}s`,
+      ]);
+      console.warn(`[reaper] quarantined host ${host.hostname}: silent for over ${Math.round(hostSilenceMs() / 1000)}s`);
+    }
+
     return {
       expired: Number(e.rows[0].n),
       promoted: Number(p.rows[0].n),
       keysPurged: g.rowCount ?? 0,
       installsOrphaned: i.rowCount ?? 0,
+      hostsQuarantined: q.rows.length,
     };
   });
 }

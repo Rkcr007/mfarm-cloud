@@ -56,8 +56,8 @@ before(async () => {
     orgB = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent)
                            VALUES ('http-b','B',50) RETURNING id`)).rows[0].id;
     hostId = (await c.query(
-      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint)
-       VALUES ($1,'http-test-host','UP',1,64,262144,'wss://worker-1.example:8443') RETURNING id`,
+      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint,last_heartbeat_at)
+       VALUES ($1,'http-test-host','UP',1,64,262144,'wss://worker-1.example:8443', now()) RETURNING id`,
       [REGION])).rows[0].id;
   });
   keyA = (await createApiKey(orgA)).plaintext;
@@ -378,8 +378,8 @@ describe('idempotency', () => {
     await clearDevices();
     const brokenHost = await withSystem(async (c) => {
       const { rows } = await c.query(
-        `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb)
-         VALUES ($1,'no-endpoint-host','UP',1,4,4096) RETURNING id`, [REGION]);
+        `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,last_heartbeat_at)
+         VALUES ($1,'no-endpoint-host','UP',1,4,4096, now()) RETURNING id`, [REGION]);
       await c.query(
         `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities, local_id)
          VALUES ($1,$2,'android','cuttlefish','cf','15','READY','[]'::jsonb,$3)`,

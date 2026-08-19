@@ -53,8 +53,12 @@ before(async () => {
     const b = await c.query(
       `INSERT INTO orgs (slug, name, max_concurrent) VALUES ('org-b','B',100) RETURNING id`);
     const h = await c.query(
-      `INSERT INTO hosts (region, hostname, state, protocol_version, cores, memory_mb)
-       VALUES ($1, 'test-host-1', 'UP', 1, 64, 262144) RETURNING id`, [REGION]);
+      // `last_heartbeat_at` is set because a REAL host always has one — registration writes it —
+      // and because the reaper now quarantines a host that has gone silent. A fixture that skips it
+      // is a host the fleet has never heard from, and the sweep is right to take its devices out of
+      // the pool; leaving it NULL made this suite's devices vanish mid-test.
+      `INSERT INTO hosts (region, hostname, state, protocol_version, cores, memory_mb, last_heartbeat_at)
+       VALUES ($1, 'test-host-1', 'UP', 1, 64, 262144, now()) RETURNING id`, [REGION]);
     orgA = a.rows[0].id; orgB = b.rows[0].id; host = h.rows[0].id;
   });
 });
@@ -304,8 +308,8 @@ describe('metering', () => {
 
     const other = await withSystem(async (c) =>
       (await c.query(
-        `INSERT INTO hosts (region, hostname, state, protocol_version)
-         VALUES ($1, $2, 'UP', 1) RETURNING id`,
+        `INSERT INTO hosts (region, hostname, state, protocol_version, last_heartbeat_at)
+         VALUES ($1, $2, 'UP', 1, now()) RETURNING id`,
         [REGION, `impostor-${crypto.randomUUID().slice(0, 8)}`])).rows[0].id as string);
 
     try {
@@ -358,8 +362,8 @@ describe('device reset scoping', () => {
 
     const other = await withSystem(async (c) =>
       (await c.query(
-        `INSERT INTO hosts (region, hostname, state, protocol_version)
-         VALUES ($1, $2, 'UP', 1) RETURNING id`,
+        `INSERT INTO hosts (region, hostname, state, protocol_version, last_heartbeat_at)
+         VALUES ($1, $2, 'UP', 1, now()) RETURNING id`,
         [REGION, `impostor-${crypto.randomUUID().slice(0, 8)}`])).rows[0].id as string);
 
     try {

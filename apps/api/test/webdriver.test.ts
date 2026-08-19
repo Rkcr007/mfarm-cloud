@@ -144,8 +144,8 @@ before(async () => {
     orgB = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent)
                            VALUES ('wd-b','B',50) RETURNING id`)).rows[0].id;
     hostId = (await c.query(
-      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint,automation_endpoint)
-       VALUES ($1,'wd-test-host','UP',1,64,262144,'wss://wd-worker.example:8443',$2) RETURNING id`,
+      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint,automation_endpoint,last_heartbeat_at)
+       VALUES ($1,'wd-test-host','UP',1,64,262144,'wss://wd-worker.example:8443',$2, now()) RETURNING id`,
       [REGION, upstreamUrl])).rows[0].id;
   });
   keyA = (await createApiKey(orgA)).plaintext;
