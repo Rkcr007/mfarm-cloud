@@ -261,6 +261,20 @@ bridge_ip="$(docker network inspect mfarm_default -f '{{range .IPAM.Config}}{{.G
 [ -n "$bridge_ip" ] || die "could not read the compose network's gateway address; is the stack up?"
 note "worker binds to $bridge_ip (the host, as the API container sees it)"
 
+# A CONTROL PLANE HAS NO DEVICES, AND SHOULD NOT PRETEND OTHERWISE.
+#
+# Since the split (ADR-0006) this script runs on two different kinds of machine. On the control
+# plane there is no /dev/kvm, no cvd and no device image — starting a worker there would cold-boot
+# nothing, register a host with no devices, and leave a confusing empty fleet next to the real one.
+# The device host runs deploy/install-worker-service.sh instead, which needs CONTROL_PLANE_URL
+# because the control plane is no longer on localhost.
+if [ ! -e /dev/kvm ]; then
+  say "No /dev/kvm — this is a control-plane host"
+  note "the fleet comes from a device host running deploy/install-worker-service.sh"
+  note "console: whatever hostname Caddy serves; devices: start the device host and install the unit"
+  exit 0
+fi
+
 # SYSTEMD WINS IF IT IS INSTALLED. `deploy/install-worker-service.sh` moves the agent out of tmux and
 # under the machine's own supervision, which is what makes it survive a reboot and a closed ssh
 # session. Starting a second copy here would put two agents on one set of devices and one set of
