@@ -63,16 +63,22 @@ jobs:
           # The SHA tag is the one deployments name. `latest` exists for a human typing a command by
           # hand and is never what a deploy script should resolve — "latest" is not a version, it is
           # a race.
+          # LOWERCASE, LITERALLY. The owner login is `Rkcr007`, and GHCR rejects a namespace with a
+          # capital in it — `invalid tag: repository name must be lowercase`, raised at push time,
+          # after the whole image has been built. Written out rather than lowercased with an
+          # expression so this string is greppably identical to the one in
+          # `deploy/docker-compose.prod.yml` and `deploy/mfarm-deploy.sh`; three places naming one
+          # image is already one too many, and a computed name in only one of them is how they drift.
           tags: |
-            ghcr.io/${{ github.repository_owner }}/mfarm-api:${{ github.event.workflow_run.head_sha }}
-            ghcr.io/${{ github.repository_owner }}/mfarm-api:latest
+            ghcr.io/rkcr007/mfarm-api:${{ github.event.workflow_run.head_sha }}
+            ghcr.io/rkcr007/mfarm-api:latest
           build-args: |
             GIT_SHA=${{ github.event.workflow_run.head_sha }}
             BUILT_AT=${{ github.event.workflow_run.updated_at }}
           # The registry doubles as the layer cache, so a one-line change rebuilds the last layer
           # and reuses `npm ci`.
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/mfarm-api:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/mfarm-api:buildcache,mode=max
+          cache-from: type=registry,ref=ghcr.io/rkcr007/mfarm-api:buildcache
+          cache-to: type=registry,ref=ghcr.io/rkcr007/mfarm-api:buildcache,mode=max
 
       - name: Say what is now deployable
         run: |
