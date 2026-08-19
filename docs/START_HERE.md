@@ -170,5 +170,21 @@ needed: the disks, the snapshots and the console's reserved IP all survive.
 | Login does nothing | The session cookie needs a secure context. Over the public HTTPS name it is fine; over a plain-HTTP address the browser silently refuses it. |
 | A deploy "worked" but the console is unchanged | `docker compose up -d api` reverts to the `:latest` image. Only `deploy/mfarm-deploy.sh <sha>` deploys a commit, and it verifies the running sha afterwards. |
 
+## Shipping a change while the farm is up
+
+```bash
+git push origin main                      # CI + Release build ghcr.io/rkcr007/mfarm-api:<sha>
+gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \
+  --command 'cd ~/mfarm && git pull && bash deploy/mfarm-deploy.sh HEAD'
+```
+
+`mfarm-deploy.sh` pulls the image CI built, runs migrations, restarts only the API, and then **asks
+the running process which commit it is** — every deployment mechanism that has bitten this project
+bit it by succeeding quietly while changing nothing. The console header shows the same sha, so
+"is my fix live?" is a browser refresh.
+
+Worker changes need `sudo systemctl restart mfarm-worker` on `mfarm-lab` instead; the agent is not
+containerised.
+
 Deeper detail lives in `HANDOFF.md` (state of play and every known issue), `docs/adrs/` (why things
 are the way they are), and `deploy/README.md` (what the scripts do the long way).
