@@ -93,12 +93,21 @@ disk snapshots survive and are the whole difference between an afternoon and a w
 Requirement is x86_64 with a real `/dev/kvm`. Arm is out permanently — snapshot/restore is x86_64
 only. **This is a spend decision and it is yours** (§5, §6).
 
-### BLOCKING — 2. The console is designed for a tailnet, and you want it on the internet
+### ~~BLOCKING — 2. The console is designed for a tailnet, and you want it on the internet~~
 
-Every `ports:` entry in `deploy/docker-compose.prod.yml` is `127.0.0.1:`-prefixed on purpose, and
-`deploy/README.md` documents Tailscale as the only ingress. "Hosted so the user can access it"
-inverts that assumption. It is not a large amount of work, but it is a security-posture change that
-must be made deliberately, not by deleting a bind address (§M2).
+**Largely closed 2026-08-19 (`83cf311`).** `deploy/setup-ingress.sh` puts Caddy in front with
+Let's Encrypt over sslip.io, HSTS included; the API keeps its loopback bind; `TRUST_PROXY` gives the
+rate limiter the real client address, and login is limited harder than everything else. All of it
+was driven by a finding from the live box rather than from reasoning: behind the proxy every
+anonymous caller on the internet arrived as `172.18.0.1`, so the whole world shared one 120/minute
+bucket and any one caller could 429 everybody's login.
+
+What remains of §M2 is the part that is not code: a real hostname instead of sslip.io, and the
+external port scan that verifies the claim from outside rather than from `ss -tlnp` on the box.
+
+Every `ports:` entry in `deploy/docker-compose.prod.yml` is still `127.0.0.1:`-prefixed on purpose,
+which is what makes the proxy the only way in — a security posture to preserve deliberately, not to
+undo by deleting a bind address.
 
 ### NOT BLOCKING, but must be known
 
