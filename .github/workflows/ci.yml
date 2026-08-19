@@ -150,7 +150,7 @@ jobs:
 
             -- ENABLE alone is not enough. Without FORCE, the table OWNER skips every policy, which
             -- is exactly how people end up believing RLS is on when it is not (see 002_rls.sql).
-            FOREACH t IN ARRAY ARRAY['orgs','memberships','api_keys','devices','sessions','metering_events','app_builds','app_installs']
+            FOREACH t IN ARRAY ARRAY['orgs','memberships','api_keys','devices','sessions','metering_events','app_builds','app_actions']
             LOOP
               SELECT relrowsecurity, relforcerowsecurity
                 INTO rs, fs
@@ -167,10 +167,10 @@ jobs:
             -- one reported. This is not hypothetical: 001's ALTER DEFAULT PRIVILEGES grants the
             -- full set on every table the owner creates from then on, so migration 014 arrived with
             -- exactly that privilege until it revoked it. Silent, and invisible in the policy list.
-            IF has_table_privilege('mfarm_app', 'app_installs', 'UPDATE')
-               OR has_table_privilege('mfarm_app', 'app_installs', 'DELETE') THEN
+            IF has_table_privilege('mfarm_app', 'app_actions', 'UPDATE')
+               OR has_table_privilege('mfarm_app', 'app_actions', 'DELETE') THEN
               RAISE EXCEPTION
-                'mfarm_app can UPDATE or DELETE app_installs. Install outcomes are written by the worker path on the owner pool only; revoke it (see 014_app_library.sql).';
+                'mfarm_app can UPDATE or DELETE app_actions. Action outcomes are written by the worker path on the owner pool only; revoke it (see 014_app_library.sql and 015_app_actions.sql).';
             END IF;
 
             RAISE NOTICE 'mfarm_app: no superuser, no bypassrls; 8 tenant tables ENABLE+FORCE RLS; install outcomes not tenant-writable';
