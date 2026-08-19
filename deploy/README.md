@@ -497,6 +497,19 @@ DATA_PLANE_PORT=8080 AUTOMATION_GATEWAY_PORT=8090 node workers/agent/src/index.t
 defaults to **loopback** rather than all interfaces when neither is set — the safe default for a
 worker fronted by a proxy, and a change from the previous "all interfaces" behaviour.
 
+**`CF_RESET_MODE` decides whether this farm has a live view at all.** Measured on the lab box: a
+snapshot-restored Cuttlefish publishes no display, so the WebRTC negotiation completes, audio
+arrives, and no video ever does. A cold-booted one streams at ~50 fps.
+
+| `CF_RESET_MODE` | Recycle between tenants | Live view |
+|---|---|---|
+| `snapshot` (default) | ~10s | **none** |
+| `powerwash` | ~40–80s | works |
+
+An interactive farm sets `powerwash`; a farm used only for Appium keeps the default and its fast
+recycle. Nothing else changes — the device is still returned to a clean state for the next tenant,
+and still declares `snapshot-reset`.
+
 A third variable belongs with them: `CF_OPERATOR_URL` (default `http://127.0.0.1:1080`) names cvd's
 WebRTC operator, which the worker relays signalling to on a viewer's behalf. **It must stay on
 loopback.** The operator is unauthenticated device control — see the Cuttlefish port table below.
