@@ -1,7 +1,8 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-19 (issues 24 and 25 — a restored disk image does not restore the snapshot
-fast path, and a rebooted host could not get back into the fleet). Read this first in a new session.
+Last updated 2026-08-19. **Deploys go through a pipeline now — `deploy/README.md` "Shipping a
+change", and known issue 26.** The console is permanently at https://34-100-138-213.sslip.io and its
+header shows the commit it is running. Read this file first in a new session.
 
 **2026-08-19 — `docs/E2E_MVP_PLAN.md` is the ordered plan from here to a teammate using this.** It
 audits what the console actually calls (all real endpoints; no mock data anywhere in `public/`),
@@ -991,6 +992,55 @@ before building any viewer**, because it determines whether a browser needs clie
     - **A capability fingerprint answers "has anything changed?", not "does the control plane still
       agree with me?"** Issue 22 fixed the first question; this was the second one, unasked. Any
       cache of "I already told them" should be checked against what they say back.
+
+26. **THERE IS A DEPLOY PIPELINE NOW, AND THE FIRST THING IT FOUND WAS THAT CI HAD BEEN RED FOR TWO
+    DAYS.** 2026-08-19.
+
+    The problem it solves is not deployment speed, it is **identity**. Deploying used to mean
+    getting source onto the box somehow and running `docker compose build`, so nothing tied a
+    running container to a commit and "is my fix live?" could only be answered by reading a git log
+    over ssh. Two sessions a day apart could not establish whether they were looking at the same
+    system, which is most of why this file kept drifting from reality.
+
+        push to main -> CI -> (green) Release builds ghcr.io/rkcr007/mfarm-api:<sha>
+                                   -> deploy/mfarm-deploy.sh <sha> on the box
+                                   -> migrate, restart api only, then ASK IT WHAT IT IS
+
+    **`/v1/version` is the piece that matters.** It reports the commit baked into the image at build
+    time, when it was built, when the process started, and the last migration applied; the console
+    shows the short sha in its header. The sha is baked in rather than read from a checkout, because
+    a process reporting the git state of the directory it happens to run in reports the deployer's
+    intent, not its own contents. The process start time is there because a redeploy that lands the
+    same commit is otherwise invisible.
+
+    **The verify step is not ceremony.** Every deployment mechanism that has bitten this project bit
+    it by succeeding quietly while changing nothing — issue 14's dead snapshot path, issue 16's
+    absent reset caller, issue 25's quarantine. A deploy that cannot confirm its own sha now fails.
+
+    **What running it found, immediately:** CI had been failing on every push since migration 015,
+    because the role-verification step still named `app_installs` and 015 renamed it to
+    `app_actions`. Two days of the strongest guard in this repo — the one proving RLS is enforced and
+    that the app role cannot write action outcomes — checking nothing, unnoticed because nothing
+    consumed the result. **A gate nobody reads is not a gate**, and the fix is not vigilance, it is
+    making something depend on the answer: `release.yml` builds only on green, so a red CI now means
+    nothing is deployable.
+
+    Three supporting changes, each closing a way the farm used to lose its own state:
+
+    - **The worker is a systemd unit**, not a tmux window. It died with whoever started it and never
+      came back after a reboot, so a farm could be healthy at the cvd layer with nothing registering
+      it. `journalctl -u mfarm-worker -f` replaces "attach to my tmux".
+    - **The box has a read-only deploy key**, so `git pull` works there. It had no GitHub credential
+      at all, which is why code used to arrive by `git archive | scp` and why the checkout on the
+      box was seven commits behind the branch someone thought they were running.
+    - **The address is reserved.** Under sslip.io the hostname IS the IP, so an ephemeral address
+      expired the console URL and its certificate together on every stop/start.
+
+    **Not automated on purpose.** Deployment is one command a person runs, because the value of the
+    manual step is that somebody decides when the farm changes underneath a running session.
+    Rollback needs no plan — images are immutable and tagged by commit, so it is the same command
+    with an older sha — but **migrations do not roll back**, and moving code back past one it depends
+    on is a decision rather than a command.
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.
