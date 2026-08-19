@@ -49,6 +49,15 @@ export interface CuttlefishOptions {
    * anywhere a browser could reach it directly.
    */
   operatorUrl?: string;
+  /**
+   * How a device is returned to a clean state between tenants.
+   *
+   * `snapshot` (the default) restores in ~10s and is what makes per-second billing and fast
+   * recycling work. `powerwash` returns the device to first boot in ~80s and is THE ONLY MODE WITH A
+   * WORKING LIVE VIEW on this cvd build — see `powerwash()` for the measurement. A farm used
+   * interactively wants powerwash; one used only for automation wants snapshot.
+   */
+  resetMode?: 'snapshot' | 'powerwash';
   publicHost?: string;
   osVersion?: string;
   gpuMode?: 'guest_swiftshader' | 'none';
@@ -284,6 +293,16 @@ export class CuttlefishDevice implements DeviceControl {
     const seen = await this.findExisting();
     if (await this.snapshotIsStale(seen?.instanceDir)) {
       await this.dropSnapshot(`it belongs to a group that no longer exists (${seen?.instanceDir})`);
+    }
+
+    // In powerwash mode there is nothing to take and nothing to be stale: the reset is a first-boot
+    // restore, so the whole snapshot apparatus below is skipped rather than kept warm for a path
+    // that will never run. It also skips ~4 GB of disk and a minute of boot per device.
+    if (this.opts.resetMode === 'powerwash') {
+      await this.refreshResetCapability();
+      this.info.osVersion = await run('adb', ['-s', this.adbSerial, 'shell', 'getprop', 'ro.build.version.release'], process.cwd(), 10_000)
+        .catch(() => this.opts.osVersion ?? 'unknown');
+      return;
     }
 
     let snapshotted = await this.ensureSnapshot();
@@ -607,10 +626,35 @@ export class CuttlefishDevice implements DeviceControl {
    * of the snapshot, and passing them again is a good way to get a confusing failure.
    */
   async resetToSnapshot(): Promise<void> {
+    if (this.opts.resetMode === 'powerwash') return this.powerwash();
     const path = this.snapshotPath();
     await run('cvd', this.sel('stop'), this.opts.imageDir, 60_000).catch(() => { /* already stopped */ });
     await run('cvd', this.sel('start', `--snapshot_path=${path}`, '--daemon'), this.opts.imageDir, 120_000);
     await this.waitForBoot(60_000);
+  }
+
+  /**
+   * Reset by returning the device to first-boot state, instead of restoring a snapshot.
+   *
+   * SLOWER AND THE ONLY OPTION FOR A LIVE VIEW, which is the whole reason it exists. Measured on the
+   * lab box 2026-08-19: a snapshot-restored Cuttlefish completes the WebRTC negotiation, sends an
+   * audio track, and publishes NO DISPLAY — so there is no video at all. A cold-booted one streams
+   * at ~49 fps over the same path. Re-taking the snapshot from a device whose display was working
+   * did not help; the restore itself is what loses it. So the two headline properties of this tier —
+   * a 10s recycle and a live screen — cannot both be had from a restore on this cvd build.
+   *
+   * `cvd powerwash` is documented as "functionally equivalent to removing the device and creating it
+   * again, but more efficient", and it leaves the group intact — which matters, because rebuilding a
+   * group invalidates its snapshot (that path is a boot loop, not a reset).
+   *
+   * The tenant guarantee is unchanged and is the reason this still counts as `snapshot-reset`: the
+   * next tenant gets first-boot state, with the previous tenant's apps, accounts and data gone.
+   */
+  private async powerwash(): Promise<void> {
+    // Generous, and matched to cvd's own default: this is a full boot, not a restore. The device is
+    // already out of the schedulable pool while it runs, so the cost of waiting is bounded.
+    await run('cvd', this.sel('powerwash'), this.opts.imageDir, 600_000);
+    await this.waitForBoot(120_000);
   }
 
   private snapshotPath(): string {
@@ -668,9 +712,16 @@ export class CuttlefishDevice implements DeviceControl {
     }
   }
 
-  /** Advertise `snapshot-reset` when, and only when, a snapshot exists to reset to. */
+  /**
+   * Advertise `snapshot-reset` when, and only when, there is a way to reset to a clean state.
+   *
+   * The capability's NAME says snapshot and its MEANING is "this device can be handed to a second
+   * tenant" — `REQUIRED_FOR_TENANT_USE` is what reads it. Powerwash satisfies that meaning exactly:
+   * the next tenant gets first-boot state. Withholding the capability in powerwash mode would make
+   * every device unschedulable for the sake of a word.
+   */
   private async refreshResetCapability(): Promise<void> {
-    const has = Boolean(await this.snapshotOnDisk());
+    const has = this.opts.resetMode === 'powerwash' || Boolean(await this.snapshotOnDisk());
     const listed = this.info.capabilities.includes('snapshot-reset');
     if (has && !listed) this.info.capabilities = [...this.info.capabilities, 'snapshot-reset'];
     if (!has && listed) this.info.capabilities = this.info.capabilities.filter((c) => c !== 'snapshot-reset');

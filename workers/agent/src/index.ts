@@ -58,6 +58,11 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
         // Loopback unless told otherwise. The operator is unauthenticated device control, so the
         // only reason to override this is an unusual cvd layout, never a remote host.
         operatorUrl: process.env.CF_OPERATOR_URL,
+        // `powerwash` is what a farm used INTERACTIVELY needs: a snapshot-restored Cuttlefish
+        // publishes no display, so there is no live view at all (see `powerwash()`). It costs ~80s
+        // per reset instead of ~10s. Default stays `snapshot` so an automation-only farm is not
+        // silently slowed down.
+        resetMode: process.env.CF_RESET_MODE === 'powerwash' ? 'powerwash' : 'snapshot',
         gpuMode: process.env.GPU_MODE === 'none' ? 'none' : 'guest_swiftshader',
       }),
     );

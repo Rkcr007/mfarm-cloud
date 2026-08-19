@@ -361,6 +361,43 @@ describe('snapshot take and restore', () => {
 });
 
 /**
+ * Powerwash mode (ADR-0007).
+ *
+ * The reason this mode exists is a measurement, not a preference: a snapshot-restored Cuttlefish
+ * publishes no display, so a farm that recycles by restore has no live view at all. These tests
+ * pin the two things that would silently undo that — resetting the wrong way, and dropping the
+ * capability that keeps a device schedulable.
+ */
+describe('powerwash is a reset, and keeps the device schedulable', () => {
+  test('reset powerwashes instead of restoring, and never touches the snapshot', async () => {
+    const d = device({ resetMode: 'powerwash' });
+    await d.resetToSnapshot();
+
+    await callTo('cvd', 'powerwash');
+    const verbs = (await calls()).filter((c) => c.startsWith('cvd ')).map((c) => c.split(/\s+/).find((a) => !a.startsWith('--') && a !== 'cvd'));
+    assert.ok(!verbs.includes('start'), 'a powerwash is not a stop-and-start from a snapshot');
+    assert.ok(!verbs.includes('snapshot_take'), 'nothing is snapshotted in this mode');
+  });
+
+  test('a device with NO snapshot on disk still declares snapshot-reset', async () => {
+    // The capability's name says snapshot; what reads it (REQUIRED_FOR_TENANT_USE) means "can be
+    // handed to a second tenant". Powerwash satisfies that, and withholding the capability would
+    // make every device in this mode unschedulable for the sake of a word.
+    const d = device({ resetMode: 'powerwash', snapshotDir: undefined });
+    await d.start();
+    assert.ok(d.info.capabilities.includes('snapshot-reset'));
+  });
+
+  test('start does no snapshot work at all in powerwash mode', async () => {
+    const d = device({ resetMode: 'powerwash' });
+    await d.start();
+    const verbs = (await calls()).filter((c) => c.startsWith('cvd ')).map((c) => c.split(/\s+/).find((a) => !a.startsWith('--') && a !== 'cvd'));
+    assert.ok(!verbs.includes('snapshot_take'), 'no 4 GB snapshot is taken for a path that never restores');
+    assert.ok(!verbs.includes('suspend'), 'and the device is never suspended to take one');
+  });
+});
+
+/**
  * cvd's instance database outlives the host, and a group that exists is not a group that works.
  * Both shapes were found on the lab VM on 2026-08-18, and both left the farm permanently
  * unschedulable with no human-visible cause beyond "no devices".
