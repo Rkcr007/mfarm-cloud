@@ -1311,11 +1311,12 @@ function bringupSteps(sess) {
     attachFailed ? state.liveDetail : null));
 
   if (canStream) {
+    const noVideo = state.liveState === 'nostream' || state.liveState === 'nodisplay';
     steps.push(bringupStep('stream', 'Connecting the live view',
       state.liveState === 'streaming' ? 'done'
-        : (attachFailed || state.liveState === 'nostream') ? 'failed'
+        : (attachFailed || noVideo) ? 'failed'
         : sess?.deviceId ? 'active' : 'pending',
-      state.liveState === 'nostream' ? state.liveDetail : null));
+      noVideo ? state.liveDetail : null));
   } else {
     steps.push(bringupStep('stream', 'Live view', 'skipped',
       'This device does not declare screen-stream — everything else still works'));
@@ -1374,6 +1375,8 @@ function bringupDone(sess) {
   // A streamable device gets a little longer: 'negotiating' means frames are seconds away, and
   // arriving mid-negotiation shows a ring in the cockpit rather than a screen.
   if (canStream && state.liveState === 'negotiating') return false;
+  // `nodisplay` is settled, not pending: the negotiation finished and the answer was "no video".
+  // Waiting past it strands someone on the bring-up screen holding a device that works.
   return true;
 }
 
@@ -1574,6 +1577,20 @@ function stageContent(sess, live, canStream) {
       // `tabindex` so the element can hold keyboard focus: without it, typing goes to the page and
       // the device never sees a keystroke.
       return h('video', { id: 'device-video', class: 'device-video', autoplay: true, playsinline: true, tabindex: '0' });
+
+    case 'nodisplay': {
+      // Connected, no video, and the device can still be photographed — so this offers the thing
+      // that DOES work rather than a retry that cannot help.
+      const device = deviceById(sess.deviceId);
+      const canShoot = (device?.capabilities || []).includes('screenshot');
+      return h('div', { class: 'stack tight' },
+        h('p', { class: 'micro warn-text', text: 'Connected, but no display' }),
+        h('p', { class: 'help', text: state.liveDetail || 'The device is not publishing a display.' }),
+        canShoot
+          ? h('div', { class: 'row tight mt-sm' }, btn('Take a screenshot', 'primary', () => takeScreenshot()))
+          : null,
+      );
+    }
 
     case 'nostream':
       // The device is attached and driveable; only the video is missing. Said plainly, and WITHOUT a

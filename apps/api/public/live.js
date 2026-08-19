@@ -28,10 +28,28 @@
  * `failed` was the first thing tried and it took the working half of the connection down with the
  * missing half: a device with no live view lost its log pane too.
  */
-export const STATES = ['idle', 'connecting', 'authenticated', 'negotiating', 'streaming', 'nostream', 'closed', 'failed'];
+export const STATES = [
+  'idle', 'connecting', 'authenticated', 'negotiating', 'streaming', 'nostream', 'nodisplay',
+  'closed', 'failed',
+];
 
 /** States in which the socket is up and the device is reachable, whatever the video is doing. */
-export const ATTACHED = new Set(['authenticated', 'negotiating', 'streaming', 'nostream']);
+export const ATTACHED = new Set(['authenticated', 'negotiating', 'streaming', 'nostream', 'nodisplay']);
+
+/**
+ * How long a CONNECTED peer connection may go without offering a display before we say so.
+ *
+ * This is not a guess at network latency — by the time it starts, ICE has completed and media is
+ * already flowing. It is the window in which a device that is going to publish a display has
+ * published one.
+ *
+ * OBSERVED ON REAL HARDWARE, which is why it exists: a Cuttlefish host whose webRTC process
+ * registers `displays: []` completes the whole negotiation, sends an audio track, and never sends
+ * video. Without this the viewer sits on "Negotiating…" forever — a populated device list over a
+ * dead stream, with nothing in any log, which is the exact failure shape ADR-0005 was written
+ * about. The guest is fine in that state: `adb screencap` returns a real frame.
+ */
+const DISPLAY_GRACE_MS = 9_000;
 
 /**
  * Cuttlefish's own scaling rule, kept verbatim.
@@ -79,6 +97,7 @@ export class LiveSession {
     this.pending = new Map();
     this.stats = { fps: 0, kbps: 0, rtt: null, ice: null };
     this.statsTimer = null;
+    this.displayTimer = null;
     this.activePointers = new Set();
   }
 
@@ -110,6 +129,7 @@ export class LiveSession {
 
   close() {
     this.closedByUs = true;
+    clearTimeout(this.displayTimer);
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = null;
     try { this.pc?.close(); } catch { /* already closed */ }
@@ -217,6 +237,7 @@ export class LiveSession {
       // show a black rectangle.
       if (!stream.id.startsWith('display_')) return;
       this.label = stream.id;
+      clearTimeout(this.displayTimer);
       this.o.onStream?.(stream, stream.id);
       this.#state('streaming');
       this.#watchStats();
@@ -231,6 +252,18 @@ export class LiveSession {
 
     pc.onconnectionstatechange = () => {
       if (pc !== this.pc) return;
+      if (pc.connectionState === 'connected' && this.state !== 'streaming') {
+        // Connected, but nothing has arrived on `ontrack` with a display stream yet. Give it a
+        // moment, then stop pretending the negotiation is still in progress — it finished.
+        clearTimeout(this.displayTimer);
+        this.displayTimer = setTimeout(() => {
+          if (this.state === 'streaming' || !this.pc) return;
+          this.#state('nodisplay',
+            'The device connected and is sending audio, but it is not publishing a display, so there '
+            + 'is no video to show. On a Cuttlefish host this means its webRTC process registered no '
+            + 'displays — the device itself is fine, and a screenshot still works.');
+        }, DISPLAY_GRACE_MS);
+      }
       if (pc.connectionState === 'failed') {
         this.#state('failed',
           iceServers.length
