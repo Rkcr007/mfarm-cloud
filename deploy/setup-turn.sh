@@ -56,6 +56,12 @@ fi
 SECRET=$(cat "$SECRET_FILE")
 
 say "Writing /etc/turnserver.conf"
+# NOTE THE ESCAPED BACKTICKS BELOW. This heredoc is deliberately UNQUOTED, because it has to
+# interpolate $PUBLIC_IP, $SECRET and $REALM — which also means the shell performs command
+# substitution on anything in backticks. Two prose comments containing `use-auth-secret` and a
+# filename were executed as commands on the first real run, printing "Permission denied" from a
+# script whose output otherwise read as success. The config values were fine; the comments were
+# silently blanked. Escape every backtick here, or use none.
 sudo tee /etc/turnserver.conf >/dev/null <<EOF
 # MFARM media relay. Managed by setup-turn.sh — edit there, not here.
 
@@ -69,7 +75,7 @@ relay-ip=0.0.0.0
 
 # Time-limited credentials (RFC 5766 / the TURN REST draft): the username is an expiry timestamp and
 # the password is HMAC-SHA1 of it under this secret. Nothing is provisioned, nothing is revoked, and
-# a credential a viewer keeps is worthless once it expires. `apps/api/src/turn.ts` mints them.
+# a credential a viewer keeps is worthless once it expires. apps/api/src/turn.ts mints them.
 use-auth-secret
 static-auth-secret=$SECRET
 realm=$REALM
@@ -77,7 +83,8 @@ realm=$REALM
 # NOT a general-purpose relay. Without these, anyone who finds this port gets free bandwidth to
 # anywhere, and the loopback rules matter more than they look: a relay that will forward to
 # 127.0.0.1 lets a stranger reach every service on this box that is bound to loopback precisely
-# because it is not meant to be public — the API, the automation gateway, the operator UI.
+# because it is not meant to be public — the API, the automation gateway, and the operator, which
+# is unauthenticated device control.
 no-loopback-peers
 no-multicast-peers
 denied-peer-ip=0.0.0.0-0.255.255.255
