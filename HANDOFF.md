@@ -2,6 +2,11 @@
 
 Last updated 2026-08-18 (M3 reached — see known issue 15). Read this first in a new session.
 
+**2026-08-19 — `docs/E2E_MVP_PLAN.md` is the ordered plan from here to a teammate using this.** It
+audits what the console actually calls (all real endpoints; no mock data anywhere in `public/`),
+names the two blocking prerequisites — there is no host, and the console is built for a tailnet
+rather than the internet — and sequences the six milestones left. Read it after `docs/MVP_PLAN.md`.
+
 ## SCOPE CHANGE 2026-08-17 — read `docs/MVP_PLAN.md` next
 
 The target is now a **self-hosted 2-device Android farm** (Cuttlefish on rented Indian bare metal,
@@ -872,6 +877,23 @@ before building any viewer**, because it determines whether a browser needs clie
     decision is built: no coturn, no per-session relay credential, and the data plane still binds the
     docker bridge, which no browser can reach. That, and the fact that no `adb install` has still
     ever run from this code path, are the two gaps between this and a farm a teammate can use.
+
+23. **`logcat` AND `recording` ARE ADVERTISED CAPABILITIES WITH NO IMPLEMENTATION.** Found by audit,
+    2026-08-19, while writing `docs/E2E_MVP_PLAN.md`.
+
+    `devices/cuttlefish.ts:177` declares `'logcat'` and `'recording'` in its capability list.
+    `DeviceControl` in `workers/agent/src/device.ts` has **no method for either** — there is no
+    `captureLogcat`, no `startRecording`, no `screenshot` — and nothing in `agent.ts` collects or
+    uploads anything of the kind. `avd.ts` declares `'logcat'` too, with the same nothing behind it.
+
+    This is the one place the codebase breaks its own ADR-0003 rule: a capability is a claim about
+    observed state, and these two are configuration. Nothing consumes them yet, so nothing is
+    currently broken by it — the console offers no logcat or video control because neither has an
+    endpoint. But the failure mode if something starts trusting them is the same one issue 13
+    produced for media: a populated UI over a path that does not exist.
+
+    **Either implement them (M3 of `docs/E2E_MVP_PLAN.md`) or stop declaring them.** Do not leave a
+    third state where the list is aspirational.
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.
