@@ -105,7 +105,7 @@ anything is built on top. This is the first hour of Phase 0.
 
 ## How the flow works today
 
-What exists and is tested (267 tests, real PostgreSQL 16, no mocks where it matters):
+What exists and is tested (445 tests as of 2026-08-19, real PostgreSQL 16, no mocks where it matters):
 
 ```
 1. REGISTER    worker agent boots → POST /v1/workers → credentials persisted
@@ -183,7 +183,9 @@ and the latency/density numbers exist.
   sessions green, fleet self-heals to `available: 2` between them. Running a second device found
   three defects a fleet of one structurally cannot show — see HANDOFF.md issue 17.
 - ~~Take the disk snapshot (B10).~~ **DONE**: `mfarm-cf-ready` and `mfarm-farm-ready`. Restore the
-  latter and `deploy/farm-up.sh` brings the farm up without reinstalling anything.
+  latter and `deploy/farm-up.sh` brings the farm up without reinstalling anything. It does **not**
+  bring it up quickly: restoring an image is a host boot, so the device snapshots baked into it are
+  discarded and both devices cold boot and re-snapshot first (HANDOFF.md issue 24).
 - **Spikes 1 and 2a: not yet.** Still gating *scaling*, not shipping.
 
 ### Phase 1 — Make automation actually work end to end
@@ -375,7 +377,7 @@ workload. So:
 
 **Tier 0 — ₹0, start immediately.** Most of the remaining work needs no device at all. The control
 plane, WebDriver hub, ADR-0004 gateway, the B2 protocol change, artifacts plumbing, auth, and the
-entire web UI are substrate-agnostic and already develop against fakes — that is how 267 tests run
+entire web UI are substrate-agnostic and already develop against fakes — that is how 445 tests run
 today. Build all of it on the Mac for nothing.
 
 Local limits worth knowing (M1, 8 cores, **8 GB RAM, 11 GB free disk** as of 2026-08-17): one AVD is

@@ -74,14 +74,21 @@ That is the real gap, and it is not a UI gap. The honest statement of the remain
 
 Six things. Two are blocking, four are not.
 
-### BLOCKING — 1. There is no host. The lab VM is terminated.
+### BLOCKING — 1. There is no *permanent* host. ~~The lab VM is terminated.~~
+
+**Unblocked for now, 2026-08-19: `mfarm-lab` is restored from `mfarm-farm-ready` and running, fleet
+`available: 2`.** It bills by the hour, so it answers M1 and M2 and settles nothing about where this
+lives permanently — that is still the spend decision below.
 
 Nothing can be "working end to end with no mock data" without a machine running Cuttlefish. Two GCP
 disk snapshots survive and are the whole difference between an afternoon and a week:
 
 - `mfarm-cf-ready` — Cuttlefish + Android 17 system image
 - `mfarm-farm-ready` — the above plus node 22, docker, Appium, and **both device snapshots**; restore
-  this one and `deploy/farm-up.sh` brings the farm to `available: 2` without reinstalling anything
+  this one and `deploy/farm-up.sh` brings the farm to `available: 2` without reinstalling anything.
+  **Not quickly**: restoring an image is a host boot, and a host boot discards the device snapshots
+  baked into it (HANDOFF.md issue 24), so both devices cold boot and re-snapshot before they are
+  schedulable. The image saves the fetch, the build and the install — a day — not the boot.
 
 Requirement is x86_64 with a real `/dev/kvm`. Arm is out permanently — snapshot/restore is x86_64
 only. **This is a spend decision and it is yours** (§5, §6).

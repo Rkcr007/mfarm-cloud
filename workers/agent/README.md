@@ -4,7 +4,7 @@ Runs on a device host. Registers with the control plane, serves the data plane t
 to, meters usage, and returns devices to the pool after a snapshot reset.
 
 ```bash
-npm test          # 22 tests, against a real control plane on a real port
+npm test          # 115 tests, against a real control plane on a real port
 npm start         # requires the env below
 ```
 

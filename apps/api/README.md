@@ -13,26 +13,24 @@ Requires Node ≥ 22.6 (native TypeScript stripping — no build step) and Docke
 
 ## Status
 
-All 116 tests pass against a live PostgreSQL 16.
+**267 tests pass against a live PostgreSQL 16** (2026-08-19, at migration 016). The workspace total
+is 445; the rest are in `apps/cli` and `workers/agent`.
 
-| Suite | Tests | Covers |
-|---|---:|---|
-| allocator under concurrency | 6 | v2 decisions 3 and 5 |
-| tenant isolation (SQL) | 3 | v2 decision 1 |
-| reaper | 3 | "never leave a device permanently locked" |
-| metering | 1 | v2 decision 6 |
-| worker protocol | 5 | v2 decisions 4 and 7 |
-| auth boundary | 6 | credential handling |
-| principal separation | 4 | tenant vs worker |
-| session creation | 6 | v2 decision 2 |
-| idempotency | 6 | retry safety |
-| tenant isolation (HTTP) | 2 | v2 decision 1 |
-| rate limiting | 4 | abuse and error shape |
-| worker events | 3 | metering + reset reporting |
-| capability negotiation | 7 | v2 decision 10 |
-| WebDriver hub | 24 | v2 decision 10 |
-| configuration | 27 | what production refuses to start on |
-| lifecycle | 9 | probes, reaper scheduling, graceful shutdown |
+The map is by file rather than by suite, and carries no per-file counts on purpose: a number per row
+is a number that is wrong by the next commit, and the table this replaces had been claiming 116.
+Run the suite for the count.
+
+| File | Covers |
+|---|---|
+| `allocator.test.ts` | allocation under concurrency, tenant isolation in SQL, the reaper, metering, reset scoping, capability negotiation |
+| `apps.test.ts` | APK metadata parsing, the blob store, upload idempotency, the install/launch/uninstall pipeline, quarantine and recovery |
+| `auth-login.test.ts` | password hashing, sign-in, the session cookie as authority, CSRF, login rate limiting |
+| `config.test.ts` | what production refuses to start on, redaction, malformed values |
+| `entrypoint.test.ts` | the entrypoint guard and exit codes |
+| `http.test.ts` | the auth boundary, principal separation, session creation, idempotency, tenant isolation over HTTP, rate limiting, worker events and heartbeat |
+| `lifecycle.test.ts` | probes, reaper scheduling, graceful shutdown, the RLS boundary against a live server |
+| `metrics.test.ts` | exposition format, fleet collectors, the second listener |
+| `webdriver.test.ts` | the hub end to end, session binding, credentials, the automation grant |
 
 `npm run typecheck` runs `tsc --noEmit` over the workspace. Node strips types at runtime and never
 checks them, so without it nothing here is type-checked at all.

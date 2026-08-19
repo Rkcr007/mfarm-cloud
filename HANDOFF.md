@@ -1,6 +1,7 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-18 (M3 reached — see known issue 15). Read this first in a new session.
+Last updated 2026-08-19 (issue 24 — a restored disk image does not restore the snapshot fast
+path). Read this first in a new session.
 
 **2026-08-19 — `docs/E2E_MVP_PLAN.md` is the ordered plan from here to a teammate using this.** It
 audits what the console actually calls (all real endpoints; no mock data anywhere in `public/`),
@@ -80,13 +81,17 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**358 tests pass, 0 fail**, against a real PostgreSQL 16. No mocks for anything that matters.
+**445 tests pass, 0 fail** (2026-08-19, at migration 016), against a real PostgreSQL 16. No mocks for
+anything that matters.
 
 ```
-apps/api/         control plane, entrypoint, metrics   213 tests
-apps/cli/         mfarm CLI                             50 tests
-workers/agent/    worker agent, Appium supervisor,      95 tests
+apps/api/         control plane, app library, console,  267 tests
+                  entrypoint, metrics
+apps/cli/         mfarm CLI                              63 tests
+workers/agent/    worker agent, Appium supervisor,      115 tests
                   automation gateway, Cuttlefish backend
+apps/api/public/  the web console (served by the API at /)
+apps/api/migrations/  016 of them; 016 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
@@ -264,8 +269,13 @@ without one rather than advertise `127.0.0.1` to the fleet.
 ## What is NOT built
 
 - Blocker 5 below (multi-instance).
-- App install / launch outside Appium, logcat streaming, video recording, artifacts
-- Web UI (deliberately last — it is the demo surface, not the product)
+- ~~App install / launch outside Appium~~ — **built 2026-08-19** (issues 21 and 22): upload, install,
+  launch, uninstall, over the heartbeat, from the CLI or the console. Never yet run against adb.
+- Logcat streaming, video recording, artifacts. **Both `logcat` and `recording` are nevertheless
+  advertised as capabilities** — see issue 23, which is the one place this codebase breaks its own
+  ADR-0003 rule.
+- ~~Web UI~~ — **built 2026-08-19** (issue 20 and the v2 design): sign-in, devices, sessions, queue,
+  apps, health. No interactive device view; that is ADR-0005's, and none of it is built.
 - Publishing. Every package is `"private": true`, so `npx mfarm` does not work yet and the Action's
   `npx --yes mfarm@latest` has nothing to resolve.
 - Observability gaps, all of which look covered from the dashboard and are not: **no
@@ -273,8 +283,10 @@ without one rather than advertise `127.0.0.1` to the fleet.
   six weeks without a page), **no host metrics** (a full disk takes the database and the backups
   down and nothing here says so first), and **no worker-side metrics** (cvd health, adb
   responsiveness and a wedged-but-alive Appium are invisible except through device state).
-- Nothing in Phase 2 has run on real hardware. The images have never been pulled on a box,
-  `tailscale serve` has never been run, and no alert has ever been delivered to a person.
+- Phase 2 is **partly** proven on hardware now. `deploy/docker-compose.prod.yml` runs on the lab box
+  (api, postgres and the backup sidecar), which `deploy/farm-up.sh` brings up in one command. Still
+  never run anywhere: the observability stack (`docker-compose.obs.yml`), `tailscale serve`, and any
+  alert delivered to an actual person.
 
 ## BLOCKERS — decide these before the hardware session
 
@@ -329,10 +341,14 @@ correct at N=1 and both degrade silently rather than failing. **Before a second 
 for the limiter, and a single owner for the reaper (leader election, advisory lock, or an external
 scheduler).
 
-**6. The media path has no reachability story, and it is not the one ADR-0004 settled.** Raised
-2026-08-18 after the failure in known issue 13. `dataplane.ts` carries control and input; **media is
-not proxied** — the browser negotiates WebRTC straight to Cuttlefish's own server. That works only
-when the client can route to the addresses the host puts in its ICE candidates. On the lab VM it
+**~~6. The media path has no reachability story, and it is not the one ADR-0004 settled.~~ DECIDED
+2026-08-19 — ADR-0005: media reaches the browser through a coturn TURN relay with per-session
+credentials, and the data plane moves off the docker bridge. No client software, no overlay; the
+signed grant stays the authorisation. Nothing is built yet.**
+
+Raised 2026-08-18 after the failure in known issue 13. `dataplane.ts` carries control and input;
+**media is not proxied** — the browser negotiates WebRTC straight to Cuttlefish's own server. That
+works only when the client can route to the addresses the host puts in its ICE candidates. On the lab VM it
 could not, and the result was a populated device list over a dead stream.
 
 ADR-0004 rejected a VPN, and that reasoning **does not transfer here**. It rejected a VPN as an
@@ -895,6 +911,33 @@ before building any viewer**, because it determines whether a browser needs clie
     **Either implement them (M3 of `docs/E2E_MVP_PLAN.md`) or stop declaring them.** Do not leave a
     third state where the list is aspirational.
 
+24. **THE DISK SNAPSHOT IS NOT A FAST FARM START, BECAUSE RESTORING IT IS A HOST REBOOT.** Found
+    2026-08-19, bringing `mfarm-farm-ready` back up for the first time since it was taken.
+
+    `mfarm-farm-ready` contains both device snapshots, ~4 GB each, which is what made the claim
+    below this — restore it and `farm-up.sh` brings the farm to `available: 2` — sound like seconds.
+    It cannot be. **Restoring a disk image boots a host, and issue 18 is what cvd reports after a
+    host boots:** both groups still recorded, `"status": "Unreachable"`, `start` refused with
+    `Selected instance group is already started`. Bring-up then does exactly what issues 18 and 19
+    taught it to do — `cvd rm` the ghost, and `discardGroup`
+    (`workers/agent/src/devices/cuttlefish.ts:370`) deletes the snapshot with it, because a snapshot
+    pins the absolute HOME of a group that no longer exists. So **both baked-in snapshots are
+    deleted unread**, and every device pays a 38s cold boot plus a ~4 GB re-snapshot before it is
+    schedulable.
+
+    No step in that chain is wrong; each is the correct repair for issues 18 and 19. What was wrong
+    is the expectation. **The fast path is per-boot state, not per-image state.** What the image
+    genuinely saves is the image fetch, the Cuttlefish build and the host install — everything a
+    human would otherwise sit through — and that is still most of a day. It does not save the boot.
+
+    **Untested, and worth ten minutes on the next live box:** the only thing tying a snapshot to its
+    group is one absolute path in `snapshot_meta_info.json`. If restore just copies the tree into
+    the HOME that file names, rewriting that string to the new group's HOME before
+    `start --snapshot_path` would make snapshots survive a rebuild — which turns every host reboot
+    back into the 8s path and makes the snapshots in the image worth their 8 GB. **Do not build on
+    it before it is observed.** A false positive destroys a good snapshot, which is the same reason
+    `snapshotIsStale` (`cuttlefish.ts:411`) refuses to act on metadata it has not read and compared.
+
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.
 
@@ -986,20 +1029,20 @@ agent running a DB-backed suite will corrupt the first's run.
 Blockers 1, 2 and 3 are closed; the `cvd` flags and snapshot/restore are verified (B7). What is
 left, in this order:
 
-**B8 and B9 are done (issues 15 and 17), and the automation path is proven end to end.** The lab VM
-is TERMINATED. Two disk snapshots exist: `mfarm-cf-ready` (Cuttlefish + image) and
-`mfarm-farm-ready` (that plus node 22, docker, appium, and both device snapshots — restore this one
-and `deploy/farm-up.sh` brings the farm to `available: 2`).
+**B8 and B9 are done (issues 15 and 17), and the automation path is proven end to end.** Two disk
+snapshots exist: `mfarm-cf-ready` (Cuttlefish + image) and `mfarm-farm-ready` (that plus node 22,
+docker, appium, and both device snapshots). Restore the latter and `deploy/farm-up.sh` brings the
+farm to `available: 2` **without reinstalling anything — but not quickly.** Restoring an image is a
+host boot, so the baked-in device snapshots are discarded on the way up and both devices cold boot
+and re-snapshot first; budget minutes, not seconds, and read issue 24 before planning a metered
+session around it.
 
 What is left, in this order:
 
-1. **Settle blocker 6 (media routing) in an ADR before any viewer work.** It decides whether a
-   browser needs client software, and no code written before that decision is safe from it.
-   Interactive video is the *only* thing it blocks — automation is HTTP and TCP end to end.
-   Tailscale is already installed on the lab VM, unconfigured, which is most of the legwork.
-   **Note the data plane is currently bound to the docker bridge address** so the hub could reach
-   the automation gateway (issue 15); a browser cannot reach that, and fixing it properly is part of
-   this decision, not a separate task.
+1. ~~**Settle blocker 6 (media routing) in an ADR before any viewer work.**~~ **DONE 2026-08-19 —
+   ADR-0005.** A coturn relay with per-session credentials, no client software, and the data plane
+   moving off the docker bridge address it was bound to for issue 15. Decided only; the viewer work
+   it unblocks is item 5 below, and M4 of `docs/E2E_MVP_PLAN.md`.
 2. **Run a real Appium suite**, not just `verify-webdriver.mjs` — the Kotlin one and the Flutter/RN
    one, sharded across both devices. That is Phase 1's exit and the first honest look at what
    SwiftShader costs a rendering-heavy app.
