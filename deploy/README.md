@@ -72,10 +72,14 @@ DATABASE_URL=postgres://... node --experimental-strip-types \
   apps/api/src/bin/create-user.ts someone@example.com '<a long password>' lab admin
 ```
 
-Two things the console deliberately does not do yet: **there is no interactive device view**, because
-media needs the TURN relay chosen in ADR-0005 and that is not deployed; and **a session cannot be
-pinned to a specific device**, because the allocator picks one. Both are stated in the UI rather than
-hidden behind a disabled button.
+**The interactive device view works** as of ADR-0007 — live video, touch, a control toolbar, logcat
+and screenshots — but only on a farm running `CF_RESET_MODE=powerwash`, for the reason in the table
+further down: a snapshot-restored Cuttlefish publishes no display.
+
+One thing the console deliberately does not do: **a session cannot be pinned to a specific device**,
+because `POST /v1/sessions` names a region, platform and tier and the allocator chooses. The Launch
+screen offers device *profiles* rather than individual devices, which is what the API actually
+accepts — stated in the UI rather than hidden behind a disabled button.
 
 It does **not** do Tailscale, TLS, or the observability stack. Those need a decision from a human
 rather than a default, and they are the sections below.

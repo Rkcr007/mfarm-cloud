@@ -1,8 +1,19 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-19. **Two machines now (ADR-0006): `mfarm-cp` always-on holds the control
-plane and console at https://34-100-138-213.sslip.io; `mfarm-lab` holds the devices and is started
-when needed.** Deploys go through a pipeline — `deploy/README.md` "Shipping a change", and known
+Last updated 2026-08-19. **New here? Read `docs/START_HERE.md` — closed laptop to a device you can
+tap, in seven steps.** This file is the state of play and every known issue; that one is the path.
+
+**Two machines (ADR-0006): `mfarm-cp` holds the control plane and console at
+https://34-100-138-213.sslip.io; `mfarm-lab` holds the devices. Both are stopped between sessions;
+`./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
+
+**2026-08-19 — the interactive device view is BUILT AND VERIFIED ON HARDWARE** (issue 28, ADR-0007):
+a Launch flow, a live device-mirroring cockpit at ~50 fps, touch, logcat and screenshots, plus a
+real APK installed and launched from a browser. One constraint came with it and it is a product
+decision rather than a bug: a snapshot-restored Cuttlefish publishes no display, so `CF_RESET_MODE`
+chooses between a ~10s recycle and a live view.
+
+ Deploys go through a pipeline — `deploy/README.md` "Shipping a change", and known
 issue 26. The console header shows the commit it is running. Read this file first in a new session.
 
 **2026-08-19 — `docs/E2E_MVP_PLAN.md` is the ordered plan from here to a teammate using this.** It
@@ -786,10 +797,11 @@ before building any viewer**, because it determines whether a browser needs clie
     Fixed with a negation that must stay below the exclusion.
 
     Two things the console does NOT do, both stated in the UI rather than hidden behind a disabled
-    button: there is no interactive device view (media needs ADR-0005's relay, which is not
-    deployed), and a session cannot be pinned to a specific device (the allocator chooses). ~~App
-    upload and install are not built.~~ **Built, and the console drives them — see issues 21 and
-    22.**
+    button: ~~there is no interactive device view (media needs ADR-0005's relay, which is not
+    deployed)~~ **— built and verified on hardware, issue 28** — and a session cannot be pinned to a
+    specific device (the allocator chooses; the Launch screen offers device *profiles*, which is
+    what the API accepts). ~~App upload and install are not built.~~ **Built, and the console drives
+    them — see issues 21 and 22.**
 
 21. **THE APP LIBRARY EXISTS: UPLOAD A BUILD, INSTALL IT ON A DEVICE YOU HOLD.** 2026-08-19,
     migration 014. Phase 3's first bullet, minus launch and uninstall.
@@ -896,14 +908,20 @@ before building any viewer**, because it determines whether a browser needs clie
     `replaceChildren` throws the node away, so the first version could not survive long enough to be
     confirmed. **Anything a user is halfway through has to live somewhere the poll cannot replace.**
 
-    **Still no interactive device view.** ADR-0005 decided the routing (a TURN relay, not an overlay,
-    because end users cannot be asked to join the operator's tailnet) and nothing downstream of that
-    decision is built: no coturn, no per-session relay credential, and the data plane still binds the
-    docker bridge, which no browser can reach. That, and the fact that no `adb install` has still
-    ever run from this code path, are the two gaps between this and a farm a teammate can use.
+    ~~**Still no interactive device view.**~~ **BUILT 2026-08-19 — see issue 28 and ADR-0007.** What
+    this paragraph described as missing now exists and has run on hardware: coturn with per-session
+    credentials, the split bind, a signalling relay, and a browser driving a real Android 17 device
+    at ~50 fps. `adb install` has also met a real device. Kept as written because it is what was
+    true here, and because the second gap it names is the one that turned out to matter least — the
+    install path worked first time; the live view is what found four silent defects.
 
 23. **`logcat` AND `recording` ARE ADVERTISED CAPABILITIES WITH NO IMPLEMENTATION.** Found by audit,
-    2026-08-19, while writing `docs/E2E_MVP_PLAN.md`.
+    2026-08-19, while writing `docs/E2E_MVP_PLAN.md`. **CLOSED the same day by ADR-0007, both
+    halves:** `logcat` is implemented (`captureLogcat`, streamed live to the console) and so is
+    `screenshot`; `recording` was DELETED from the declaration rather than implemented, which is the
+    half that actually restores ADR-0003's rule. `avd.ts` had the same false claim and got the same
+    implementation, because it is eight identical lines and it is what makes the console's log dock
+    work for anyone developing against an AVD on a laptop.
 
     `devices/cuttlefish.ts:177` declares `'logcat'` and `'recording'` in its capability list.
     `DeviceControl` in `workers/agent/src/device.ts` has **no method for either** — there is no

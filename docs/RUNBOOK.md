@@ -1,5 +1,8 @@
 # Runbook — start it, ship to it, stop it
 
+> **Just want it running?** `docs/START_HERE.md` is the seven-step path from a closed laptop to a
+> device you can tap. This file is the reference underneath it.
+
 Two machines (ADR-0006). The **control plane** stays on; the **device host** is the expensive half
 and is off unless someone is using devices.
 

@@ -210,10 +210,13 @@ Tailscale against both devices in parallel.
 **Status 2026-08-18: the transport half is proven, the suite half is not.** A real W3C session drove
 a real device end to end (M3) and repeated three times across two devices with automatic snapshot
 reset in between — so hub, grant, gateway, Appium, UiAutomator2 and adb all agree. What remains is
-running a *real suite* rather than `deploy/verify-webdriver.mjs`, and doing it **from a laptop over
-Tailscale** rather than from the box: the worker currently binds to the docker bridge address so the
-containerised hub can reach it, which is right for automation on one host and is not yet the answer
-for a remote client. See HANDOFF.md issues 15 and 17.
+running a *real suite* rather than `deploy/verify-webdriver.mjs`, and doing it from a laptop rather
+than from the box. See HANDOFF.md issues 15 and 17.
+
+**Updated 2026-08-19 (ADR-0006, ADR-0007):** the bind question is settled. The two listeners are
+separate now — `AUTOMATION_BIND_HOST` keeps the gateway where the hub needs it, `DATA_PLANE_BIND_HOST`
+puts the data plane where the console's ingress can reach it — and the worker is on its own host
+anyway.
 
 ### Phase 2 — Production host
 
@@ -309,15 +312,24 @@ Deliberately last, and still the thing that makes it feel like a product.
   only while its session is alive, and hiding that would make "where did my app go" inexplicable.
 - ~~Session list.~~ **DONE**, with full copyable session ids — truncated ones were useless, since
   that id is what `mfarm app install --session` and the WebDriver URL both take.
-- **Live interactive view: NOT BUILT.** ADR-0005 settled the routing question (a TURN relay, not an
-  overlay, because end users cannot be asked to join the operator's tailnet) and nothing downstream
-  of that decision exists: no coturn, no per-session relay credential, and the data plane still
-  binds the docker bridge, which no browser can reach. This is the largest remaining gap between the
-  farm and "a product a teammate can use".
+- ~~**Live interactive view: NOT BUILT.**~~ **BUILT AND VERIFIED ON HARDWARE 2026-08-19** (ADR-0007,
+  HANDOFF issue 28). A Launch flow, a bring-up checklist driven by real state, and a
+  device-mirroring cockpit: live video at ~50 fps, touch, a control toolbar, logcat and screenshots.
+  Signalling rides the data-plane socket and the worker relays it to cvd's operator on loopback;
+  media negotiates directly, through coturn where no direct path exists. Everything ADR-0005 named
+  now exists — the relay, per-session credentials, and the split bind.
+
+  **With one constraint that is a product decision, not a bug.** A snapshot-restored Cuttlefish
+  publishes no display, so `CF_RESET_MODE` chooses: `snapshot` gives a ~10s recycle and no live view,
+  `powerwash` gives a live view and a ~40–80s recycle. An interactive farm wants the second.
 - Session detail with artifacts inline; queue visibility. Not built.
 
 **Testing without hardware.** `workers/agent/scripts/fake-farm.ts` registers two devices that record
-what they were asked to do, so the console, the library and the whole job pipeline can be exercised
+what they were asked to do — and since ADR-0007 runs the REAL data plane behind them, so the viewer's
+whole protocol (grant, fence, signalling, logcat, screenshots) is exercisable on a laptop too. It
+declares no `screen-stream` and refuses `signal-open` with a reason, because a fake with no media
+source must not pretend otherwise. The console, the library and the whole job pipeline can be
+exercised
 on a laptop. It declares no `screen-stream` and no `webdriver` and calls itself `FAKE (no Android)`,
 because a fake that claimed either would let someone demonstrate a feature that does not work.
 
