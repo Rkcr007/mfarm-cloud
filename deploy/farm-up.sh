@@ -104,6 +104,12 @@ rand() { openssl rand -base64 32 | tr -d '/+=' | head -c 40; }
 for f in worker_registration_token metrics_token grafana_admin_password; do
   [ -f "$SECRETS_DIR/$f" ] || { printf '%s' "$(rand)" > "$SECRETS_DIR/$f"; note "generated $f"; }
 done
+# EMPTY, not generated. This one is coturn's, so it has to match a value that lives on the relay's
+# host — inventing one here would produce a control plane minting credentials the relay rejects,
+# and the only symptom is ICE failing with nothing in any log. `deploy/setup-turn.sh` generates the
+# real secret where coturn runs; copy it here. The file must EXIST either way, because compose
+# refuses to start when a declared secret has no file.
+[ -f "$SECRETS_DIR/turn_secret" ] || { : > "$SECRETS_DIR/turn_secret"; note "created an empty turn_secret (no media relay configured)"; }
 
 if [ ! -f "$ENV_FILE" ]; then
   cp "$DEPLOY_DIR/.env.example" "$ENV_FILE"
