@@ -489,11 +489,46 @@ export class CuttlefishDevice implements DeviceControl {
     while (Date.now() < deadline) {
       try {
         const out = await run('adb', ['-s', this.adbSerial, 'shell', 'getprop', 'sys.boot_completed'], process.cwd(), 5_000);
-        if (out === '1') return;
+        if (out === '1') { await this.makeUsable(); return; }
       } catch { /* not up yet */ }
       await sleep(1000);
     }
     throw new Error(`instance ${this.opts.instanceNum} did not boot within ${timeoutMs}ms`);
+  }
+
+  /**
+   * Leave a freshly booted device on its launcher rather than on the keyguard.
+   *
+   * FOUND ON REAL HARDWARE, 2026-08-19, and only by looking at a screenshot. A cold-booted
+   * Cuttlefish device sits on the lock screen. `launch` still reported DONE — `monkey` resolves the
+   * launcher activity, injects the intent and exits 0, and the activity genuinely does start behind
+   * the keyguard — so the control plane was telling the truth about what it did while the user saw a
+   * clock. That is the exact failure shape this codebase treats as a lie: an action that confirms
+   * while nothing observable happened.
+   *
+   * It is not specific to `launch`. A screenshot, a video, the future live view and any Appium
+   * session that does not itself dismiss the keyguard all see the same lock screen, which is why
+   * this lives in the one place every bring-up path funnels through rather than in `launchApp`.
+   *
+   * `stayon true` is the half that keeps it fixed: dismissing once is undone by the next screen
+   * timeout, and a device that re-locks after ten minutes of a long suite is worse than one that was
+   * never unlocked, because the failure moves around.
+   *
+   * BEST EFFORT, DELIBERATELY. Every command here is cosmetic relative to "did this device boot",
+   * and none of them may turn a booted device into a failed one — a farm of two cannot afford to
+   * lose a device to a keyevent. AOSP Cuttlefish has no lock credential set, so `dismiss-keyguard`
+   * is a swipe rather than an unlock; a device that ever gets a real PIN needs a different answer.
+   */
+  private async makeUsable(): Promise<void> {
+    const attempts: string[][] = [
+      ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'],
+      ['shell', 'wm', 'dismiss-keyguard'],
+      ['shell', 'svc', 'power', 'stayon', 'true'],
+    ];
+    for (const args of attempts) {
+      await run('adb', ['-s', this.adbSerial, ...args], process.cwd(), 10_000)
+        .catch(() => { /* cosmetic; a booted device stays booted */ });
+    }
   }
 
   async stop(): Promise<void> {
