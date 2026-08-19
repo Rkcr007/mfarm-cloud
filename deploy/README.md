@@ -497,6 +497,24 @@ published by adding it.
 - **The WebDriver hub is now internet-facing.** It is built for that — Basic auth carries an API key
   and every proxied hop needs a signed grant — but it is worth knowing that it changed audience.
 
+### Cuttlefish binds all interfaces, and only the firewall is stopping it
+
+Worth knowing before publishing anything on this box. A running Cuttlefish instance leaves several
+listeners on `0.0.0.0`, none of which are ours to move:
+
+| Port | Process | What it is |
+|------|---------|------------|
+| 6520, 6521 | `socket_vsock_proxy` | **adb**, one per device — unauthenticated device control |
+| 1080, 1443 | `operator` | the Cuttlefish web UI |
+| 7200, 7201 | `gnss_grpc_proxy` | GNSS |
+| 7500, 7501 | `netsimd` | radio simulation |
+
+None of these are reachable from the internet on the lab box — verified below, not assumed — and the
+only reason is the cloud firewall allowing exactly 22, 80 and 443. Nothing about the bind addresses
+is protecting them. So: adding a permissive firewall rule, or moving this to a host without an
+equivalent one, publishes adb to the internet. That is the same failure `tailscale funnel` is warned
+about above, arrived at by a different route.
+
 ### Verify
 
 ```bash
@@ -504,6 +522,18 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://<your-host>/health     # 200
 sudo ss -tlnp | grep -E ':(80|443) '                                     # caddy, and only caddy
 sudo ss -tlnp | grep -E ':(9464|3000) '                                  # both still 127.0.0.1
 ```
+
+Then from a machine that is **not** the box, because binding and reachability are different
+questions and the table above is exactly why:
+
+```bash
+for p in 22 80 443 1080 1443 3000 5432 6520 6521 9464; do
+  nc -z -G 4 -w 4 <your-host> $p 2>/dev/null && echo "OPEN $p" || echo "closed $p"
+done
+```
+
+Only 22, 80 and 443 may come back OPEN. A `6520` in that list is unauthenticated adb on the public
+internet; treat it as an incident, not a to-do.
 
 Then check the API agrees about who is calling. Sign in from off the box and look at the log line:
 `remoteAddress` should be your real address, not `172.18.0.1`. If it is the bridge address,
