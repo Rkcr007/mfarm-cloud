@@ -356,3 +356,41 @@ button.link:hover { color: var(--ink); text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------------------------------------------------------------- apps */
+
+/* The held-device strip. Visually first and visually distinct because it is a PRECONDITION for
+   every button below it, not a status line — an app exists on a device only while the session
+   holding that device is alive. */
+.holdcard { margin-bottom: 1.5rem; }
+.hold-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.hold-row h2 { font-size: 1rem; margin: 0 0 .25rem; }
+.hold-row .actions { margin-top: 0; }
+
+.upload h2 { font-size: 1rem; margin: 0 0 .75rem; }
+
+.section-head { font-size: 1rem; margin: 2rem 0 .75rem; }
+
+.table td.right, .table th.right { text-align: right; }
+.rowactions { display: inline-flex; gap: .4rem; justify-content: flex-end; }
+/* Buttons in a table row are secondary to the row itself: full-size ones turn a library into a
+   wall of chrome. */
+.rowactions button { padding: .3rem .6rem; font-size: .82rem; }
+.rowactions button:disabled { opacity: .45; cursor: not-allowed; }
+
+.ok-text { color: var(--ok); }
+.bad-text { color: var(--bad); }
+
+/* The session id, in full. Truncating it made the console unable to hand anyone the one value the
+   CLI and the WebDriver URL both need. */
+.idcell { display: flex; align-items: center; gap: .4rem; }
+.idcell code { font-size: .8rem; color: var(--muted); }
+.copyid {
+  background: none; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 5px; padding: .1rem .35rem; font-size: .72rem; cursor: pointer;
+}
+.copyid:hover { color: var(--ink); border-color: var(--accent); }
+
+/* An armed destructive button. Red, wider, and unmistakably not the thing you meant to click twice
+   by accident. */
+.is-armed { border-color: rgba(255, 107, 107, .6) !important; color: #ffd4d4 !important; }
