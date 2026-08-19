@@ -163,7 +163,7 @@ say "Point the control plane at it"
 cat <<EOF
 Add to the API's environment (deploy/.env on the control plane) and restart it:
 
-    TURN_URLS=turn:$PUBLIC_IP:3478,turn:$PUBLIC_IP:3478?transport=tcp
+    TURN_URLS=turn:${_turn_host:-$PUBLIC_IP}:3478,turn:${_turn_host:-$PUBLIC_IP}:3478?transport=tcp
     TURN_SECRET=$SECRET
 
 Then open the cloud firewall for 3478/udp, 3478/tcp and 49152-65535/udp to this host — the same
