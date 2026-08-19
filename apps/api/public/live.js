@@ -397,6 +397,26 @@ export class LiveSession {
     }
   }
 
+  /**
+   * Send a raw data-plane message — volume, rotate, and anything else the worker adds later.
+   *
+   * These do NOT go over the WebRTC control channel, and the reason is that Cuttlefish's control
+   * channel has no command for them: its panel exposes power, home, menu and back, and everything
+   * else a device toolbar offers is done on the host with adb. So they take the slower path
+   * deliberately, and they are the reason `DeviceControl.key` and `rotate` exist.
+   */
+  sendControl(msg) {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    // `seq` because the data plane's input gate drops anything not newer than the last one it saw.
+    this.#send({ ...msg, seq: this.#nextSeq() });
+    return true;
+  }
+
+  #nextSeq() {
+    this.seq = (this.seq || 0) + 1;
+    return this.seq;
+  }
+
   /** A hardware button: home, back, menu, power. Sent as a press and a release, like a real one. */
   pressButton(command) {
     if (this.control?.readyState !== 'open') return false;

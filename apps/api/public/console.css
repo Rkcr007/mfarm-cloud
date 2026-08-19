@@ -875,18 +875,102 @@ kbd {
 
 /* The frame grows, and the old `.phone-screen { height: 330px }` override above no longer applies to
    it — `.big` is the sized-for-a-device variant and the plain one keeps its statement size. */
-.phone.big { padding: 8px; }
-.phone.big .phone-screen {
-  width: 288px;
-  /* 2:1 is the closest common ratio to Cuttlefish's default 720x1280 without hard-coding a panel
-     that a `--display` flag can change. The video letterboxes inside it either way. */
-  height: 576px;
-  padding: 0;
-  overflow: hidden;
-  position: relative;
+/* ====================================================================== the device panel
+   Modelled on a device-mirroring panel rather than on a picture of a phone: the screen is the
+   subject, it scales to the space available, and the controls sit in a toolbar beside it instead of
+   being decoration around a small rectangle.
+
+   The panel is also the one part of this console that is NOT rebuilt on every poll — see
+   `stagePanel` in console.js. The CSS below is written so that a state change is a class or a
+   custom property, never a re-layout of the video. */
+
+.devpanel {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: "bar stage" "bar caption";
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0 14px;
+  background: #08080A;
+  border: 1px solid var(--b-card, #1F1F22);
+  border-radius: 3px;
+  padding: 14px;
+  min-height: 520px;
 }
 
-.device-video {
+/* -------------------------------------------------------------------- toolbar */
+
+.devbar {
+  grid-area: bar;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-content: start;
+  padding: 4px;
+  background: var(--s-nav, #0A0A0C);
+  border: 1px solid var(--b-row, #151517);
+  border-radius: 3px;
+  align-self: start;
+}
+.devbtn {
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--t-secondary, #C4C4C4);
+  cursor: pointer;
+  padding: 0;
+}
+.devbtn:hover:not(:disabled) {
+  background: var(--s-btn, #131315);
+  border-color: var(--b-btn, #2B2B2E);
+  color: var(--t-primary, #F1F1F1);
+}
+.devbtn:active:not(:disabled) { background: var(--mf-accent-soft, rgba(117, 94, 184, .16)); }
+/* Disabled is genuinely unavailable here, never "you lack permission": the control is wired to a
+   channel that is not open. It reads as inert rather than as forbidden. */
+.devbtn:disabled { opacity: .28; cursor: default; }
+.devbar-sep { height: 1px; margin: 5px 4px; background: var(--b-row, #151517); }
+
+/* -------------------------------------------------------------------- the screen */
+
+.dev-stage {
+  grid-area: stage;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  min-width: 0;
+  /* A subtle grid, so an all-black device screen is still distinguishable from an empty panel. */
+  background:
+    radial-gradient(circle at 50% 40%, rgba(117, 94, 184, .05), transparent 60%),
+    #060607;
+  border-radius: 2px;
+  overflow: auto;
+  padding: 12px;
+}
+.dev-fit { display: grid; place-items: center; }
+
+.dev-frame {
+  position: relative;
+  /* Sized from the device's own reported panel, and from nothing else. `--dev-aspect` and
+     `--dev-zoom` are written by `paintFrame`; changing zoom is one property, not a re-render. */
+  aspect-ratio: var(--dev-aspect, 0.5625);
+  height: calc(min(68vh, 760px) * var(--dev-zoom, 1));
+  max-width: 100%;
+  background: #000;
+  border-radius: 10px;
+  /* A thin bezel, not a phone illustration. Enough to separate the screen from the panel and to
+     make a black frame legible; no speaker grille, no camera dot, no chrome pretending to be
+     hardware this farm does not have. */
+  box-shadow:
+    0 0 0 1px #2A2A2E,
+    0 0 0 8px #101012,
+    0 0 0 9px #2A2A2E,
+    0 24px 60px rgba(0, 0, 0, .6);
+  overflow: hidden;
+}
+
+.dev-video {
   width: 100%; height: 100%;
   object-fit: contain;
   display: block;
@@ -900,25 +984,35 @@ kbd {
   user-select: none;
   touch-action: none;
 }
-.device-video:focus-visible { box-shadow: inset 0 0 0 1px var(--mf-accent-line, rgba(117, 94, 184, .42)); }
+.dev-video:focus-visible { box-shadow: inset 0 0 0 2px var(--mf-accent, #755EB8); }
+/* The video is present from the first render and simply has nothing to show until it does. Hiding
+   it rather than removing it is what keeps the element — and its stream — alive across renders. */
+.devpanel[data-live="off"] .dev-video { visibility: hidden; }
 
-.stage-body { display: flex; gap: 18px; align-items: flex-start; justify-content: center; flex-wrap: wrap; }
-.stage-phone { display: grid; justify-items: center; gap: 10px; }
-
-/* The control rail: a column of 32px squares beside the phone, as in the design. */
-.rail-controls { display: grid; gap: 7px; align-content: start; }
-.railbtn {
-  width: 34px; height: 34px;
-  display: grid; place-items: center;
-  background: var(--s-btn, #131315);
-  border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 3px;
-  color: var(--t-secondary, #C4C4C4);
-  cursor: pointer;
+.dev-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  background: var(--s-inset, #050506);
 }
-.railbtn:hover:not(:disabled) { border-color: var(--mf-accent-line, rgba(117, 94, 184, .42)); color: var(--t-primary, #F1F1F1); }
-.railbtn:disabled { opacity: .38; cursor: not-allowed; }
-.railbtn .glyph { font-size: 14px; line-height: 1; }
+
+.dev-caption {
+  grid-area: caption;
+  padding-top: 10px;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .devpanel { grid-template-columns: 1fr; grid-template-areas: "stage" "bar" "caption"; }
+  .devbar { flex-direction: row; flex-wrap: wrap; justify-content: center; }
+  .devbar-sep { height: 22px; width: 1px; margin: 4px 5px; }
+  .dev-frame { height: calc(min(52vh, 560px) * var(--dev-zoom, 1)); }
+}
 
 /* Screen-reader-only label. The rail is glyphs, and a glyph is not a name. */
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

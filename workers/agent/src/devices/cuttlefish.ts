@@ -799,8 +799,30 @@ export class CuttlefishDevice implements DeviceControl {
     const codes: Record<string, string> = {
       home: 'KEYCODE_HOME', back: 'KEYCODE_BACK', recents: 'KEYCODE_APP_SWITCH',
       power: 'KEYCODE_POWER', enter: 'KEYCODE_ENTER', backspace: 'KEYCODE_DEL',
+      volume_up: 'KEYCODE_VOLUME_UP', volume_down: 'KEYCODE_VOLUME_DOWN',
     };
     await run('adb', ['-s', this.adbSerial, 'shell', 'input', 'keyevent', codes[name] ?? name], process.cwd(), 10_000);
+  }
+
+  /**
+   * Rotate by lying to the accelerometer, which is the only thing Android listens to.
+   *
+   * `cuttlefish_sensor_injection` ships in the guest image for exactly this. Turning the display
+   * instead — `cvd display` or a WM override — moves the pixels and leaves every orientation-aware
+   * app believing the device is still upright, which is worse than not offering the button.
+   *
+   * The argument is an absolute orientation (0 portrait, 1 landscape), not a delta, so "left" and
+   * "right" are the two states rather than a running total. A device that has no such binary is
+   * reported as a failure rather than silently doing nothing.
+   */
+  async rotate(direction: 'left' | 'right'): Promise<void> {
+    const out = await run('adb', [
+      '-s', this.adbSerial, 'shell', '/vendor/bin/cuttlefish_sensor_injection',
+      'rotate', direction === 'left' ? '1' : '0',
+    ], process.cwd(), 15_000);
+    if (/not found|No such file|Error/i.test(out)) {
+      throw new Error(`this image has no sensor injection binary, so it cannot be rotated: ${out.trim().split('\n').slice(-1)[0]}`);
+    }
   }
 
   async text(value: string): Promise<void> {

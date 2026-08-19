@@ -97,6 +97,11 @@ const state = {
   log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 },
   /** Screenshots taken this session. Data urls, in memory only — nothing persists them yet. */
   shots: [],
+  /**
+   * The device panel's live DOM, kept across renders so the <video> is never destroyed.
+   * See `stagePanel`. Cleared only when the viewer closes.
+   */
+  stage: null,
 
   /** What the launch screen has selected, kept across re-renders and across a queued wait. */
   launch: { appId: null, deviceId: null, ttlMinutes: 60, launchAfterInstall: true },
@@ -979,6 +984,9 @@ function closeLive() {
   state.liveDetail = null;
   state.log = { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 };
   state.shots = [];
+  // The panel goes with the connection. Keeping it would re-show the last frame of a device
+  // somebody else now holds, which is a stale screen presented as a live one.
+  state.stage = null;
   if (state.liveStatsTimer) clearInterval(state.liveStatsTimer);
   state.liveStatsTimer = null;
 }
@@ -991,7 +999,7 @@ function closeLive() {
  * expressed in the element builder.
  */
 function attachVideo() {
-  const video = $('device-video');
+  const video = state.stage?.video;
   if (!video || !state.liveStream) return;
   if (video.srcObject !== state.liveStream) {
     // A property, not an attribute. Autoplay of a stream with an audio track is blocked unless the
@@ -1408,8 +1416,10 @@ function screenLaunching(id) {
             // The video is mounted from the first moment there is a session, not once every step is
             // green: the frames start arriving before the install does, and watching the app appear
             // on the device is the most convincing thing this screen can show.
-            state.liveState === 'streaming'
-              ? h('video', { id: 'device-video', class: 'device-video', autoplay: true, playsinline: true, muted: true, tabindex: '0' })
+            // The same persistent element the cockpit uses, so arriving at the cockpit does not
+            // restart the stream that is already playing here.
+            state.liveState === 'streaming' && state.stage?.video
+              ? state.stage.video
               : progressRing(pct),
           ),
         ),
@@ -1515,102 +1525,223 @@ async function loadSessionDetail(id) {
   }
 }
 
+/* ------------------------------------------------------------------ the device panel */
+
 /**
- * The stage — the live device, its control rail, and what it is doing right now.
+ * SVG, built through the DOM rather than from a string.
  *
- * Every control here is gated on the DEVICE declaring the capability behind it, not on the session
- * being live: a device that cannot stream shows a sentence instead of a black rectangle, and a
- * device with no `screenshot` capability shows no screenshot button rather than a disabled one. The
- * rule is unchanged from when none of this existed — only the answers changed.
+ * The console's CSP has no `unsafe-inline` and `h()` refuses an `html` prop, so every icon here is
+ * constructed element by element. That is not a workaround — it is what keeps rule 1 structural:
+ * there is no path by which a string from anywhere becomes markup on this page.
+ */
+function svgEl(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, String(v));
+  return el;
+}
+
+/**
+ * The toolbar icon set, drawn to read at 20px.
+ *
+ * Back, home and overview are deliberately Android's own shapes — triangle, circle, square — rather
+ * than invented glyphs, because a person coming from a device toolbar already knows them and any
+ * cleverness here costs recognition for nothing.
+ */
+const ICONS = {
+  power: (g) => { g.appendChild(svgEl('path', { d: 'M12 3v9', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M6.6 6.6a7.5 7.5 0 1 0 10.8 0', 'stroke-linecap': 'round' })); },
+  volup: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M18.5 6.5a8 8 0 0 1 0 11', 'stroke-linecap': 'round' })); },
+  voldown: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); },
+  rotl: (g) => { g.appendChild(svgEl('path', { d: 'M4 12a8 8 0 1 1 2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M4 6.5V12h5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  rotr: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 0-2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 6.5V12h-5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  back: (g) => { const p = svgEl('path', { d: 'M15 5 7 12l8 7z', 'stroke-linejoin': 'round' }); p.setAttribute('fill', 'currentColor'); g.appendChild(p); },
+  home: (g) => { const c = svgEl('circle', { cx: 12, cy: 12, r: 7 }); c.setAttribute('fill', 'currentColor'); g.appendChild(c); },
+  overview: (g) => { const r = svgEl('rect', { x: 5.5, y: 5.5, width: 13, height: 13, rx: 1.5 }); r.setAttribute('fill', 'currentColor'); g.appendChild(r); },
+  camera: (g) => { g.appendChild(svgEl('path', { d: 'M3 8.5h3.5L8 6h8l1.5 2.5H21v11H3z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('circle', { cx: 12, cy: 13.5, r: 3.5 })); },
+  refresh: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 1-2.4-5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 4v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  zoomin: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5M11 8.5v5', 'stroke-linecap': 'round' })); },
+  zoomout: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5', 'stroke-linecap': 'round' })); },
+  fit: (g) => { g.appendChild(svgEl('path', { d: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+};
+
+function icon(name) {
+  const s = svgEl('svg', { viewBox: '0 0 24 24', width: 20, height: 20, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'aria-hidden': 'true' });
+  (ICONS[name] || ICONS.fit)(s);
+  return s;
+}
+
+/**
+ * One toolbar button. `enabled` is passed rather than inferred, because every control on this bar
+ * is gated on something different — a capability, an open data channel, a live session — and a
+ * button that looks available and does nothing is the thing this console refuses to ship.
+ */
+function toolBtn(name, label, enabled, onclick, opts = {}) {
+  return h('button', {
+    class: `devbtn${opts.active ? ' on' : ''}`,
+    title: label + (opts.kbd ? ` (${opts.kbd})` : ''),
+    disabled: !enabled,
+    onclick,
+  }, icon(name), h('span', { class: 'sr', text: label }));
+}
+
+/**
+ * The device panel, kept ALIVE across renders.
+ *
+ * This is the one part of the console that is not rebuilt on every poll, and the reason is
+ * measurable rather than stylistic: `render()` replaces the whole page every five seconds, and a
+ * `<video>` element that is destroyed and recreated drops its stream, re-attaches `srcObject` and
+ * re-decodes — a visible stutter twice a minute on the one surface where smoothness is the product.
+ *
+ * So the root node, the frame and the video are created once and cached on `state.stage`. Renders
+ * re-append the same node and repaint only the parts that actually changed: the toolbar's disabled
+ * states, the overlay, and the caption. Moving a live `<video>` between parents keeps its stream.
  */
 function stagePanel(sess, live) {
   const device = deviceById(sess.deviceId);
   const caps = device?.capabilities || [];
-  const canStream = caps.includes('screen-stream');
-  const connected = state.liveState === 'streaming';
 
-  return h('div', { class: 'stage' },
-    h('div', { class: 'stage-body' },
-      controlRail(sess, live, connected),
-      h('div', { class: 'stage-phone' },
-        h('div', { class: 'phone big' },
-          h('div', { class: 'phone-screen' }, stageContent(sess, live, canStream)),
-        ),
-        h('p', { class: 'caption' },
-          // The panel size comes from the DATA PLANE's `ready` message, not from `/v1/devices` —
-          // that endpoint does not carry `screen`, so reading it there printed "— × —" for every
-          // device. The device's own report is also the more truthful one: a display resized at
-          // boot is what input gets scaled against.
-          device
-            ? `${device.model}${screenOf(device)} · Android ${device.osVersion}`
-            : 'no device',
-          connected ? ' · live view, software rendered, low frame rate' : '',
-        ),
-      ),
-    ),
+  if (!state.stage) {
+    const video = h('video', {
+      id: 'device-video', class: 'dev-video',
+      autoplay: true, playsinline: true, tabindex: '0',
+    });
+    const overlay = h('div', { class: 'dev-overlay' });
+    const frame = h('div', { class: 'dev-frame' }, video, overlay);
+    const screenWrap = h('div', { class: 'dev-fit' }, frame);
+    const toolbar = h('div', { class: 'devbar' });
+    const caption = h('p', { class: 'caption dev-caption' });
+    const root = h('div', { class: 'devpanel' },
+      toolbar,
+      h('div', { class: 'dev-stage' }, screenWrap),
+    );
+    state.stage = { root, video, overlay, frame, toolbar, caption, zoom: 1 };
+    root.appendChild(caption);
+  }
+
+  const st = state.stage;
+  paintToolbar(sess, live, caps);
+  paintOverlay(sess, live, caps);
+  paintFrame(device);
+
+  st.caption.textContent = device
+    ? `${device.model}${screenOf(device)} · Android ${device.osVersion} · ${sess.region || 'lab'}`
+    : 'no device';
+  return st.root;
+}
+
+/** Aspect ratio and zoom, written as CSS custom properties so resizing costs no layout thrash. */
+function paintFrame(device) {
+  const st = state.stage;
+  const s = state.live?.screen || device?.screen;
+  const ratio = s?.width && s?.height ? s.width / s.height : 0.5625;
+  st.frame.style.setProperty('--dev-aspect', String(ratio));
+  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+}
+
+function setZoom(z) {
+  const st = state.stage;
+  if (!st) return;
+  st.zoom = Math.min(2.5, Math.max(0.4, Number(z.toFixed(2))));
+  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+  paintToolbar(state.detail, true, deviceById(state.detail?.deviceId)?.capabilities || []);
+}
+
+/**
+ * The control bar, in Android's own order: system buttons together, hardware keys above them.
+ *
+ * Every entry is present only where it can work. `power`, `back`, `home` and `overview` ride the
+ * WebRTC `device-control` channel, so they need an open peer connection; volume and rotate go
+ * through the data plane because Cuttlefish exposes no control-channel command for them; screenshot
+ * needs the capability. Nothing here is rendered disabled-with-a-tooltip as a stand-in for a
+ * feature that does not exist.
+ */
+function paintToolbar(sess, live, caps) {
+  const st = state.stage;
+  if (!st) return;
+  const streaming = state.liveState === 'streaming';
+  const attached = ATTACHED.has(state.liveState);
+  const ctrl = streaming && state.live?.control?.readyState === 'open';
+
+  const press = (cmd) => () => {
+    if (!state.live?.pressButton(cmd)) toast('Not connected', 'The device control channel is not open yet.', 'warn');
+  };
+  const send = (msg) => () => state.live?.sendControl(msg);
+
+  st.toolbar.replaceChildren(
+    toolBtn('power', 'Power', ctrl, press('power')),
+    toolBtn('volup', 'Volume up', attached, send({ t: 'key', name: 'volume_up' })),
+    toolBtn('voldown', 'Volume down', attached, send({ t: 'key', name: 'volume_down' })),
+    h('span', { class: 'devbar-sep' }),
+    toolBtn('rotl', 'Rotate left', attached, send({ t: 'rotate', dir: 'left' })),
+    toolBtn('rotr', 'Rotate right', attached, send({ t: 'rotate', dir: 'right' })),
+    h('span', { class: 'devbar-sep' }),
+    toolBtn('back', 'Back', ctrl, press('back')),
+    toolBtn('home', 'Home', ctrl, press('home')),
+    toolBtn('overview', 'Overview', ctrl, press('menu')),
+    h('span', { class: 'devbar-sep' }),
+    caps.includes('screenshot')
+      ? toolBtn('camera', 'Screenshot', Boolean(live), () => void takeScreenshot(), { kbd: 'S' })
+      : null,
+    toolBtn('refresh', 'Reconnect', Boolean(live), () => reconnectLive()),
+    h('span', { class: 'devbar-sep' }),
+    toolBtn('zoomin', 'Zoom in', streaming, () => setZoom(st.zoom + 0.15)),
+    toolBtn('zoomout', 'Zoom out', streaming, () => setZoom(st.zoom - 0.15)),
+    toolBtn('fit', 'Fit to panel', streaming, () => setZoom(1)),
   );
 }
 
-/** ` · 720 × 1280`, or nothing at all when neither side has reported a panel size. */
-function screenOf(device) {
-  const s = state.live?.screen || device?.screen;
-  return s?.width ? ` · ${s.width} × ${s.height}` : '';
-}
+/**
+ * Whatever is covering the screen right now — a progress ring, a reason, or nothing.
+ *
+ * Separate from the video so that reaching `streaming` is one class change rather than a rebuild.
+ */
+function paintOverlay(sess, live, caps) {
+  const st = state.stage;
+  const canStream = caps.includes('screen-stream');
+  const show = (...kids) => { st.overlay.replaceChildren(...kids.filter(Boolean)); st.overlay.hidden = false; st.root.dataset.live = 'off'; };
 
-function stageContent(sess, live, canStream) {
+  if (state.liveState === 'streaming') {
+    st.overlay.replaceChildren();
+    st.overlay.hidden = true;
+    st.root.dataset.live = 'on';
+    return;
+  }
+
   if (!live) {
-    return h('div', { class: 'stack tight' },
+    return show(
       h('p', { class: 'micro', text: 'Session ended' }),
-      h('p', { class: 'help', text: 'This device was released and restored to its clean snapshot. Nothing streams from it now.' }),
-      h('p', { class: 'caption', text: 'The action log below is what outlived the session.' }),
+      h('p', { class: 'help', text: 'This device was released and restored to its clean snapshot.' }),
     );
   }
   if (!canStream) {
-    return h('div', { class: 'stack tight' },
+    return show(
       h('p', { class: 'micro', text: 'No live view' }),
-      h('p', { class: 'help', text: 'This device does not declare screen-stream, so there is nothing to show. It can still be driven with WebDriver and have builds installed.' }),
+      h('p', { class: 'help', text: 'This device does not declare screen-stream. WebDriver and installs still work.' }),
     );
   }
 
   switch (state.liveState) {
-    case 'streaming':
-      // `tabindex` so the element can hold keyboard focus: without it, typing goes to the page and
-      // the device never sees a keystroke.
-      return h('video', { id: 'device-video', class: 'device-video', autoplay: true, playsinline: true, tabindex: '0' });
-
-    case 'nodisplay': {
-      // Connected, no video, and the device can still be photographed — so this offers the thing
-      // that DOES work rather than a retry that cannot help.
-      const device = deviceById(sess.deviceId);
-      const canShoot = (device?.capabilities || []).includes('screenshot');
-      return h('div', { class: 'stack tight' },
+    case 'nodisplay':
+      return show(
         h('p', { class: 'micro warn-text', text: 'Connected, but no display' }),
         h('p', { class: 'help', text: state.liveDetail || 'The device is not publishing a display.' }),
-        canShoot
+        caps.includes('screenshot')
           ? h('div', { class: 'row tight mt-sm' }, btn('Take a screenshot', 'primary', () => takeScreenshot()))
           : null,
       );
-    }
-
     case 'nostream':
-      // The device is attached and driveable; only the video is missing. Said plainly, and WITHOUT a
-      // retry button, because retrying cannot produce a stream that does not exist.
-      return h('div', { class: 'stack tight' },
+      return show(
         h('p', { class: 'micro', text: 'No live view' }),
-        h('p', { class: 'help', text: state.liveDetail || 'This device does not negotiate a media stream.' }),
-        h('p', { class: 'caption', text: 'The device is attached: logcat, screenshots and WebDriver all still work.' }),
+        h('p', { class: 'help', text: state.liveDetail || 'This device tier does not negotiate a media stream.' }),
       );
-
     case 'failed':
     case 'unrouted':
-      return h('div', { class: 'stack tight' },
+      return show(
         h('p', { class: 'micro bad-text', text: 'The live view did not connect' }),
         h('p', { class: 'help', text: state.liveDetail || 'No reason was reported.' }),
         h('div', { class: 'row tight mt-sm' }, btn('Try again', 'primary', () => reconnectLive())),
       );
-
     default:
-      return h('div', { class: 'stack tight center' },
+      return show(
         progressRing(state.liveState === 'connecting' ? 25 : state.liveState === 'authenticated' ? 55 : 80),
         h('p', { class: 'caption', text:
           state.liveState === 'connecting' ? 'Opening the data plane'
@@ -1620,54 +1751,23 @@ function stageContent(sess, live, canStream) {
   }
 }
 
+/** ` · 720 × 1280`, or nothing at all when neither side has reported a panel size. */
+function screenOf(device) {
+  const s = state.live?.screen || device?.screen;
+  return s?.width ? ` · ${s.width} × ${s.height}` : '';
+}
+
 function reconnectLive() {
   closeLive();
   render();
   loadSessionDetail(state.route.id).then(() => { ensureLive(state.detail); render(); });
 }
 
-/**
- * The control rail.
- *
- * Home, back and recents go over the WebRTC `device-control` channel — the same one Cuttlefish's own
- * client uses — so they cost no adb round trip. They are hidden entirely when that channel is not
- * open, because a hardware button that silently does nothing is worse than a missing one.
- */
-function controlRail(sess, live, connected) {
-  const device = deviceById(sess.deviceId);
-  const caps = device?.capabilities || [];
-  const key = (label, glyph, command, title) => h('button', {
-    class: 'railbtn', title, disabled: !connected,
-    onclick: () => {
-      if (!state.live?.pressButton(command)) {
-        toast('Not connected', 'The device control channel is not open yet.', 'warn');
-      }
-    },
-  }, h('span', { class: 'glyph', text: glyph }), h('span', { class: 'sr', text: label }));
-
-  return h('div', { class: 'rail-controls' },
-    key('Home', '⌂', 'home', 'Home'),
-    key('Back', '‹', 'back', 'Back'),
-    key('Recents', '▤', 'menu', 'Recent apps'),
-    key('Power', '⏻', 'power', 'Power'),
-    caps.includes('screenshot')
-      ? h('button', {
-          class: 'railbtn', title: 'Screenshot (S)', disabled: !live,
-          onclick: () => takeScreenshot(),
-        }, h('span', { class: 'glyph', text: '⧉' }), h('span', { class: 'sr', text: 'Screenshot' }))
-      : null,
-    h('button', {
-      class: 'railbtn', title: 'Reconnect the live view', disabled: !live,
-      onclick: () => reconnectLive(),
-    }, h('span', { class: 'glyph', text: '↻' }), h('span', { class: 'sr', text: 'Reconnect' })),
-  );
-}
-
 async function takeScreenshot() {
   if (!state.live) { toast('Not connected', 'Open the live view first.', 'warn'); return; }
   try {
     await state.live.screenshot();
-    toast('Screenshot taken', 'It is in “Captured this session”, below the tools.', 'ok');
+    toast('Screenshot taken', 'It is in “Captured this session”, in the panel on the right.', 'ok');
   } catch (err) {
     toast('Screenshot failed', err.message, 'bad');
   }
@@ -1788,7 +1888,11 @@ function vitalsCard() {
     row('Bitrate', 'vit-kbps'),
     row('Round trip', 'vit-rtt'),
     row('Path', 'vit-path'),
-    h('p', { class: 'caption mt-sm', text: 'Software rendering is forced by snapshot-restore, so single-digit frame rates are the expected result rather than a fault.' }),
+    // MEASURED, and it corrected an assumption this project had carried for months. The plan said
+    // to expect single digits because snapshot-restore forces SwiftShader; a cold-booted Cuttlefish
+    // on an n2-standard-16 actually streams at ~49 fps over a direct path. Say what the numbers are
+    // for, not what they were predicted to be.
+    h('p', { class: 'caption mt-sm', text: 'Rendering is software (SwiftShader), so frame rate depends on how busy the host is. `relayed (TURN)` means media is going through the relay, which costs egress; `direct` means it is not.' }),
   );
 }
 

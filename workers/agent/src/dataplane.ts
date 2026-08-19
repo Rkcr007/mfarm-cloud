@@ -2,7 +2,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { createServer, type Server } from 'node:http';
 import { verifySessionToken, type SessionClaims } from '@mfarm/protocol';
 import type { Agent } from './agent.ts';
-import type { DeviceBackend, LogcatHandle, SignalChannel } from './device.ts';
+import type { DeviceBackend, KeyName, LogcatHandle, SignalChannel } from './device.ts';
 
 /**
  * The data plane — what the browser actually connects to (v2 decision 2).
@@ -25,15 +25,16 @@ type ClientMessage =
   | { t: 'hello'; token: string }
   | { t: 'tap'; x: number; y: number; seq: number }
   | { t: 'swipe'; x1: number; y1: number; x2: number; y2: number; durationMs: number; seq: number }
-  | { t: 'key'; name: 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'; seq: number }
+  | { t: 'key'; name: KeyName; seq: number }
   | { t: 'text'; value: string; seq: number }
+  | { t: 'rotate'; dir: 'left' | 'right'; seq: number }
   | { t: 'signal-open' }
   | { t: 'signal'; payload: unknown }
   | { t: 'logcat'; action: 'start' | 'stop' }
   | { t: 'screenshot'; id?: string };
 
 /** Input verbs, and the only messages the coalesce/queue machinery below applies to. */
-const INPUT = new Set(['tap', 'swipe', 'key', 'text']);
+const INPUT = new Set(['tap', 'swipe', 'key', 'text', 'rotate']);
 
 interface Conn {
   claims?: SessionClaims;
@@ -400,6 +401,11 @@ export class DataPlane {
       case 'swipe': return c.swipe(msg.x1, msg.y1, msg.x2, msg.y2, msg.durationMs);
       case 'key':   return c.key(msg.name);
       case 'text':  return c.text(msg.value);
+      case 'rotate':
+        // Discrete and slow: a sensor injection, not a display flip. Queued behind whatever is in
+        // flight rather than coalesced, because two rotations are two distinct intentions.
+        if (!c.rotate) throw new Error('This device cannot be rotated: it exposes no sensor injection.');
+        return c.rotate(msg.dir);
       default:      return;
     }
   }

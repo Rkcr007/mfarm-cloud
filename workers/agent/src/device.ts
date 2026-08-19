@@ -44,6 +44,17 @@ export interface DeviceInfo {
   adbSerial?: string;
 }
 
+/**
+ * The keys a device can be asked to press.
+ *
+ * Volume joined this list with the device toolbar (ADR-0007): Cuttlefish's WebRTC control channel
+ * carries power, home, menu and back and nothing else, so every other button a real device toolbar
+ * has must come down this path instead.
+ */
+export type KeyName =
+  | 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'
+  | 'volume_up' | 'volume_down';
+
 export type DeviceHealth =
   | { status: 'healthy'; inputLatencyMs: number }
   | { status: 'degraded'; reason: string; inputLatencyMs?: number }
@@ -110,6 +121,15 @@ export interface DeviceControl {
   captureLogcat?(onLine: (line: string) => void): Promise<LogcatHandle>;
 
   /**
+   * Turn the device, the way a person turns a phone.
+   *
+   * OPTIONAL, and on Cuttlefish it is a sensor injection rather than a display command — the guest
+   * has to believe gravity moved, or Android rotates nothing. A backend with no accelerometer to
+   * lie to does not implement it, and the toolbar does not offer it.
+   */
+  rotate?(direction: 'left' | 'right'): Promise<void>;
+
+  /**
    * One frame, right now, as encoded image bytes.
    *
    * Deliberately NOT a way to build a video: it shells out, it costs a round trip and an encode,
@@ -121,7 +141,7 @@ export interface DeviceControl {
 
   tap(x: number, y: number): Promise<void>;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
-  key(name: 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'): Promise<void>;
+  key(name: KeyName): Promise<void>;
   text(value: string): Promise<void>;
 
   health(): Promise<DeviceHealth>;
