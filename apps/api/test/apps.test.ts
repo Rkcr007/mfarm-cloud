@@ -13,6 +13,10 @@
  */
 process.env.RATE_LIMIT_MAX = '10000';
 process.env.WORKER_REGISTRATION_TOKEN = 'apps-test-registration-secret';
+// The host sweep is throttled in production so a fleet-wide write does not ride every reaper tick.
+// This suite calls `reap()` directly and asserts on the sweep, so it opts out of the throttle
+// rather than sleeping fifteen seconds to observe it.
+process.env.HOST_SWEEP_MIN_INTERVAL_MS = '0';
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -67,8 +71,8 @@ async function seedHost(hostname: string): Promise<{ hostId: string; token: stri
   const hostId = await withSystem(async (c) => {
     const { rows } = await c.query(
       `INSERT INTO hosts (region, hostname, state, protocol_version, cores, memory_mb, endpoint,
-                          token_prefix, token_hash)
-       VALUES ($1,$2,'UP',2,16,65536,'wss://apps-test.example:8443',$3,$4) RETURNING id`,
+                          token_prefix, token_hash, last_heartbeat_at)
+       VALUES ($1,$2,'UP',2,16,65536,'wss://apps-test.example:8443',$3,$4, now()) RETURNING id`,
       [REGION, hostname, token.prefix, token.hash],
     );
     return rows[0].id;
@@ -100,7 +104,7 @@ async function uploadApk(key: string, apk: Buffer, filename = 'app.apk') {
 }
 
 const clearFleet = () => withSystem(async (c) => {
-  await c.query('DELETE FROM app_installs');
+  await c.query('DELETE FROM app_actions');
   await c.query('DELETE FROM idempotency_keys');
   await c.query('DELETE FROM metering_events');
   await c.query('DELETE FROM sessions');
@@ -126,7 +130,7 @@ before(async () => {
 after(async () => {
   await app.close();
   await withSystem(async (c) => {
-    await c.query('DELETE FROM app_installs');
+    await c.query('DELETE FROM app_actions');
     await c.query('DELETE FROM app_builds WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM metering_events');
     await c.query('DELETE FROM sessions');
@@ -344,37 +348,39 @@ describe('install', () => {
     const { sessionId } = await liveSession(keyA, deviceA);
 
     const res = await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`,
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`,
       headers: auth(keyA), payload: { appId },
     });
     // 202, not 201: nothing has touched the device yet, and saying "created" would imply it had.
     assert.equal(res.statusCode, 202, res.body);
-    const install = res.json().install;
-    assert.equal(install.state, 'PENDING');
-    assert.equal(install.deviceId, deviceA);
+    const action = res.json().action;
+    assert.equal(action.state, 'PENDING');
+    assert.equal(action.kind, 'install');
+    assert.equal(action.deviceId, deviceA);
 
     const beatA = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerA) });
-    const offered = beatA.json().installs;
+    const offered = beatA.json().actions;
     assert.equal(offered.length, 1);
-    assert.equal(offered[0].installId, install.id);
+    assert.equal(offered[0].actionId, action.id);
+    assert.equal(offered[0].kind, 'install');
     assert.equal(offered[0].sha256, sha(apk));
     assert.equal(offered[0].packageName, 'dev.mfarm.installable');
 
     // The other host is told nothing at all. A worker must never learn about, let alone act on,
     // another host's devices.
     const beatB = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerB) });
-    assert.deepEqual(beatB.json().installs, []);
+    assert.deepEqual(beatB.json().actions, []);
   });
 
   test('a worker downloads the blob only for an install it holds', async () => {
     await clearFleet();
     const { sessionId } = await liveSession(keyA, deviceA);
-    const installId = (await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
-    })).json().install.id;
+    const actionId = (await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
+    })).json().action.id;
 
     const ok = await app.inject({
-      method: 'GET', url: `/v1/apps/${appId}/blob?installId=${installId}`, headers: auth(workerA),
+      method: 'GET', url: `/v1/apps/${appId}/blob?actionId=${actionId}`, headers: auth(workerA),
     });
     assert.equal(ok.statusCode, 200);
     assert.equal(ok.headers['content-type'], APK_TYPE);
@@ -387,13 +393,13 @@ describe('install', () => {
 
     // A different host holding a valid worker token: the install is not for its hardware.
     const wrongHost = await app.inject({
-      method: 'GET', url: `/v1/apps/${appId}/blob?installId=${installId}`, headers: auth(workerB),
+      method: 'GET', url: `/v1/apps/${appId}/blob?actionId=${actionId}`, headers: auth(workerB),
     });
     assert.equal(wrongHost.statusCode, 404);
 
     // And a tenant key, which is the credential most likely to be tried here by mistake.
     const tenant = await app.inject({
-      method: 'GET', url: `/v1/apps/${appId}/blob?installId=${installId}`, headers: auth(keyA),
+      method: 'GET', url: `/v1/apps/${appId}/blob?actionId=${actionId}`, headers: auth(keyA),
     });
     assert.equal(tenant.statusCode, 403);
   });
@@ -401,41 +407,41 @@ describe('install', () => {
   test('the worker reports the outcome, and only the owning host can', async () => {
     await clearFleet();
     const { sessionId } = await liveSession(keyA, deviceA);
-    const installId = (await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
-    })).json().install.id;
+    const actionId = (await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
+    })).json().action.id;
 
     // Another host claiming this install is refused, and told nothing about why.
     const impostor = await app.inject({
       method: 'POST', url: '/v1/workers/events', headers: auth(workerB),
-      payload: { installs: [{ installId, ok: true }] },
+      payload: { actions: [{ actionId, ok: true }] },
     });
-    assert.deepEqual(impostor.json().installs, [{ installId, accepted: false }]);
-    const stillPending = await app.inject({ method: 'GET', url: `/v1/installs/${installId}`, headers: auth(keyA) });
-    assert.equal(stillPending.json().install.state, 'PENDING');
+    assert.deepEqual(impostor.json().actions, [{ actionId, accepted: false }]);
+    const stillPending = await app.inject({ method: 'GET', url: `/v1/app-actions/${actionId}`, headers: auth(keyA) });
+    assert.equal(stillPending.json().action.state, 'PENDING');
 
     const real = await app.inject({
       method: 'POST', url: '/v1/workers/events', headers: auth(workerA),
-      payload: { installs: [{ installId, ok: true }] },
+      payload: { actions: [{ actionId, ok: true }] },
     });
-    assert.deepEqual(real.json().installs, [{ installId, accepted: true }]);
-    const done = await app.inject({ method: 'GET', url: `/v1/installs/${installId}`, headers: auth(keyA) });
-    assert.equal(done.json().install.state, 'INSTALLED');
-    assert.equal(done.json().install.error, null);
+    assert.deepEqual(real.json().actions, [{ actionId, accepted: true }]);
+    const done = await app.inject({ method: 'GET', url: `/v1/app-actions/${actionId}`, headers: auth(keyA) });
+    assert.equal(done.json().action.state, 'DONE');
+    assert.equal(done.json().action.error, null);
 
     // A re-sent confirmation — the shape a worker produces when its flush response was lost — is
     // absorbed rather than applied twice.
     const replay = await app.inject({
       method: 'POST', url: '/v1/workers/events', headers: auth(workerA),
-      payload: { installs: [{ installId, ok: false, error: 'nonsense' }] },
+      payload: { actions: [{ actionId, ok: false, error: 'nonsense' }] },
     });
-    assert.deepEqual(replay.json().installs, [{ installId, accepted: false }]);
-    const unchanged = await app.inject({ method: 'GET', url: `/v1/installs/${installId}`, headers: auth(keyA) });
-    assert.equal(unchanged.json().install.state, 'INSTALLED');
+    assert.deepEqual(replay.json().actions, [{ actionId, accepted: false }]);
+    const unchanged = await app.inject({ method: 'GET', url: `/v1/app-actions/${actionId}`, headers: auth(keyA) });
+    assert.equal(unchanged.json().action.state, 'DONE');
 
     // Finished, so the blob is no longer readable by the host that just installed it.
     const after = await app.inject({
-      method: 'GET', url: `/v1/apps/${appId}/blob?installId=${installId}`, headers: auth(workerA),
+      method: 'GET', url: `/v1/apps/${appId}/blob?actionId=${actionId}`, headers: auth(workerA),
     });
     assert.equal(after.statusCode, 404);
   });
@@ -443,17 +449,17 @@ describe('install', () => {
   test('a failure is recorded with the reason the tenant needs to read', async () => {
     await clearFleet();
     const { sessionId } = await liveSession(keyA, deviceA);
-    const installId = (await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
-    })).json().install.id;
+    const actionId = (await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
+    })).json().action.id;
 
     await app.inject({
       method: 'POST', url: '/v1/workers/events', headers: auth(workerA),
-      payload: { installs: [{ installId, ok: false, error: 'adb: Failure [INSTALL_FAILED_NO_MATCHING_ABIS]' }] },
+      payload: { actions: [{ actionId, ok: false, error: 'adb: Failure [INSTALL_FAILED_NO_MATCHING_ABIS]' }] },
     });
-    const res = await app.inject({ method: 'GET', url: `/v1/installs/${installId}`, headers: auth(keyA) });
-    assert.equal(res.json().install.state, 'FAILED');
-    assert.match(res.json().install.error, /INSTALL_FAILED_NO_MATCHING_ABIS/);
+    const res = await app.inject({ method: 'GET', url: `/v1/app-actions/${actionId}`, headers: auth(keyA) });
+    assert.equal(res.json().action.state, 'FAILED');
+    assert.match(res.json().action.error, /INSTALL_FAILED_NO_MATCHING_ABIS/);
   });
 
   test('installing another org\'s build is a 404', async () => {
@@ -461,7 +467,7 @@ describe('install', () => {
     const { sessionId } = await liveSession(keyA, deviceA);
     const theirs = (await uploadApk(keyB, buildApk({ packageName: 'dev.mfarm.theirs' }))).json().app.id;
     const res = await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId: theirs },
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId: theirs },
     });
     assert.equal(res.statusCode, 404);
   });
@@ -471,7 +477,7 @@ describe('install', () => {
     const { sessionId } = await liveSession(keyA, deviceA);
     // orgB holds no session at all; RLS makes orgA's look like it does not exist.
     const res = await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyB), payload: { appId },
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyB), payload: { appId },
     });
     assert.equal(res.statusCode, 404);
   });
@@ -482,7 +488,7 @@ describe('install', () => {
     await app.inject({ method: 'DELETE', url: `/v1/sessions/${sessionId}`, headers: auth(keyA) });
 
     const res = await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
     });
     assert.equal(res.statusCode, 409);
     assert.match(res.json().error.message, /holds no device/);
@@ -496,7 +502,7 @@ describe('install', () => {
     try {
       const { sessionId } = await liveSession(keyA, dumb);
       const res = await app.inject({
-        method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
+        method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
       });
       assert.equal(res.statusCode, 409);
       assert.match(res.json().error.message, /app-install/);
@@ -509,24 +515,24 @@ describe('install', () => {
   test('an install for a reallocated device is never offered', async () => {
     await clearFleet();
     const { sessionId } = await liveSession(keyA, deviceA);
-    const installId = (await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
-    })).json().install.id;
+    const actionId = (await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
+    })).json().action.id;
 
     // The fence moves when the device is handed to someone else. The session row may still read
     // ACTIVE for as long as it takes the reaper to notice, so the fence is the check that holds.
     await withSystem((c) => c.query('UPDATE devices SET fence = fence + 1 WHERE id = $1', [deviceA]));
 
     const beat = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerA) });
-    assert.deepEqual(beat.json().installs.map((i: { installId: string }) => i.installId).filter((i: string) => i === installId), []);
+    assert.deepEqual(beat.json().actions.map((i: { actionId: string }) => i.actionId).filter((i: string) => i === actionId), []);
   });
 
   test('the reaper fails installs the session left behind', async () => {
     await clearFleet();
     const { sessionId } = await liveSession(keyA, deviceA);
-    const installId = (await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
-    })).json().install.id;
+    const actionId = (await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
+    })).json().action.id;
     await app.inject({ method: 'DELETE', url: `/v1/sessions/${sessionId}`, headers: auth(keyA) });
 
     // Without this sweep the row sits PENDING forever: the heartbeat will not offer an install for
@@ -534,23 +540,71 @@ describe('install', () => {
     // ever hear about.
     const { installsOrphaned } = await reap();
     assert.ok(installsOrphaned >= 1);
-    const res = await app.inject({ method: 'GET', url: `/v1/installs/${installId}`, headers: auth(keyA) });
-    assert.equal(res.json().install.state, 'FAILED');
-    assert.match(res.json().install.error, /session ended/i);
+    const res = await app.inject({ method: 'GET', url: `/v1/app-actions/${actionId}`, headers: auth(keyA) });
+    assert.equal(res.json().action.state, 'FAILED');
+    assert.match(res.json().action.error, /session ended/i);
   });
 
-  test('a tenant cannot mark its own install INSTALLED', async () => {
+  test('a silent host is quarantined, and re-registering brings its devices back', async () => {
+    await clearFleet();
+    // The failure this closes: `quarantine_host` has existed since migration 003 with no caller, so
+    // a worker that died left its devices READY and the allocator kept handing them out. On a farm
+    // of two that is half the capacity turned into a trap.
+    await withSystem((c) =>
+      c.query(`UPDATE hosts SET last_heartbeat_at = now() - interval '10 minutes' WHERE id = $1`, [hostA]));
+
+    const { hostsQuarantined } = await reap();
+    assert.ok(hostsQuarantined >= 1);
+
+    const after = await withSystem(async (c) => (await c.query(
+      'SELECT h.state AS host, d.state AS device FROM hosts h JOIN devices d ON d.host_id = h.id WHERE h.id = $1',
+      [hostA],
+    )).rows[0]);
+    assert.equal(after.host, 'QUARANTINED');
+    assert.equal(after.device, 'QUARANTINED');
+
+    // And the recovery, which is the half that makes the sweep safe rather than a one-way door: the
+    // worker comes back and re-registers, and its devices must be schedulable again.
+    const reg = await app.inject({
+      method: 'POST', url: '/v1/workers/register',
+      headers: { 'x-worker-registration-token': 'apps-test-registration-secret' },
+      payload: {
+        protocolVersion: 2, hostname: 'apps-test-host-a', region: REGION,
+        endpoint: 'wss://apps-test.example:8443', cores: 16, memoryMb: 65536,
+        capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install'],
+        devices: [{
+          localId: (await withSystem(async (c) => (await c.query(
+            'SELECT local_id FROM devices WHERE host_id = $1 LIMIT 1', [hostA])).rows[0].local_id)),
+          platform: 'android', tier: 'cuttlefish', model: 'cf_x86_64', osVersion: '17',
+          capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install'],
+          adbSerial: '0.0.0.0:6520',
+        }],
+      },
+    });
+    assert.equal(reg.statusCode, 201, reg.body);
+    const recovered = await withSystem(async (c) => (await c.query(
+      'SELECT state FROM devices WHERE host_id = $1 LIMIT 1', [hostA])).rows[0].state);
+    assert.equal(recovered, 'READY');
+
+    // Registration ISSUES A NEW CREDENTIAL, so the fixture's token is now stale. Adopted here
+    // rather than left for a later test to fail on with a puzzling 401.
+    workerA = reg.json().workerToken;
+    await withSystem((c) => c.query(
+      `UPDATE hosts SET last_heartbeat_at = now() WHERE region = $1`, [REGION]));
+  });
+
+  test('a tenant cannot mark its own action DONE', async () => {
     await clearFleet();
     const { sessionId } = await liveSession(keyA, deviceA);
-    const installId = (await app.inject({
-      method: 'POST', url: `/v1/sessions/${sessionId}/installs`, headers: auth(keyA), payload: { appId },
-    })).json().install.id;
+    const actionId = (await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`, headers: auth(keyA), payload: { appId },
+    })).json().action.id;
 
     // There is no route that does this, so the test goes at the grant directly. 001 grants
-    // UPDATE on every future table by default, which would have made "install succeeded" a thing
-    // any API key could assert about its own device.
+    // UPDATE on every future table by default, which would have made "the install succeeded" a
+    // thing any API key could assert about its own device.
     await assert.rejects(
-      withTenant(orgA, (c) => c.query(`UPDATE app_installs SET state = 'INSTALLED' WHERE id = $1`, [installId])),
+      withTenant(orgA, (c) => c.query(`UPDATE app_actions SET state = 'DONE' WHERE id = $1`, [actionId])),
       /permission denied/i,
     );
   });

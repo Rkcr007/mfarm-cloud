@@ -1,5 +1,6 @@
 import { open, type FileHandle } from 'node:fs/promises';
 import { inflateRawSync } from 'node:zlib';
+import { isValidPackageName } from '@mfarm/protocol';
 
 /**
  * Read an APK's identity out of the file itself.
@@ -334,6 +335,14 @@ function fromManifestElement(attrs: RawAttribute[], pool: StringPool): ApkMetada
   const packageName = pkgAttr ? stringOf(pkgAttr, pool) : null;
   if (!packageName) {
     throw new ApkParseError('AndroidManifest.xml declares no package name.');
+  }
+  // Validated at the DOOR, because this string comes out of a file a stranger uploaded and then
+  // travels to an adb argument, a database column and a UI. Nothing downstream builds a shell
+  // command — every adb call passes argv — so this is not the thing standing between us and
+  // injection; it is the thing that keeps a value which is not a package name from being treated
+  // as one three layers away, where the check would have to be repeated or assumed.
+  if (!isValidPackageName(packageName)) {
+    throw new ApkParseError(`"${packageName.slice(0, 64)}" is not a valid Android package name.`);
   }
 
   const codeAttr = pick(attrs, 'versionCode', ATTR_VERSION_CODE);

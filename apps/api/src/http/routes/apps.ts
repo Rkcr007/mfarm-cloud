@@ -5,6 +5,7 @@ import { withTenant, withSystem } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import { appStore, BlobTooLargeError } from '../../appstore.ts';
 import { ApkParseError, readApkMetadata } from '../../apk.ts';
+import type { AppActionKind } from '@mfarm/protocol';
 import { requireTenant, requireWorker } from '../server.ts';
 import { badRequest, notFound, conflict } from '../errors.ts';
 
@@ -63,8 +64,9 @@ function appJson(r: AppRow) {
   };
 }
 
-interface InstallRow {
+interface ActionRow {
   id: string;
+  kind: string;
   app_id: string;
   session_id: string;
   device_id: string;
@@ -74,9 +76,10 @@ interface InstallRow {
   finished_at: Date | null;
 }
 
-function installJson(r: InstallRow) {
+function actionJson(r: ActionRow) {
   return {
     id: r.id,
+    kind: r.kind,
     appId: r.app_id,
     sessionId: r.session_id,
     deviceId: r.device_id,
@@ -241,34 +244,39 @@ export async function appRoutes(app: FastifyInstance) {
   /**
    * The bytes, for a WORKER that has been offered an install of them.
    *
-   * The `installId` is not a convenience — it is the entire authorization. Without it the only
+   * The `actionId` is not a convenience — it is the entire authorization. Without it the only
    * question this route could ask is "is this a valid worker token", and the answer would let any
    * host in the fleet download any org's builds. With it, the query below has to find an unfinished
-   * install of THIS app, on a device belonging to THIS host, before a single byte is served.
+   * INSTALL of THIS app, on a device belonging to THIS host, before a single byte is served.
+   *
+   * `kind = 'install'` is part of that and not a tidiness clause: launch and uninstall carry a
+   * package name and move no bytes, so a pending launch must not become a licence to read the
+   * build's contents.
    *
    * Runs on the owner pool because none of that is tenant-scoped — a worker has no org and must
    * never acquire one. The org never enters the decision; the join does all of the work.
    */
-  app.get<{ Params: { id: string }; Querystring: { installId?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { actionId?: string } }>(
     '/apps/:id/blob',
     async (req, reply) => {
       const { hostId } = requireWorker(req);
-      const installId = req.query.installId;
-      if (!installId) throw badRequest('installId is required: a worker may read a build only for an install it is holding.');
+      const actionId = req.query.actionId;
+      if (!actionId) throw badRequest('actionId is required: a worker may read a build only for an install it is holding.');
 
       const row = await withSystem(async (c) => {
         const { rows } = await c.query<{ sha256: string; size_bytes: string; filename: string | null }>(
           `SELECT a.sha256, a.size_bytes, a.filename
-             FROM app_installs i
+             FROM app_actions i
              JOIN devices d    ON d.id = i.device_id
              JOIN app_builds a ON a.id = i.app_id
-            WHERE i.id = $1 AND i.app_id = $2 AND d.host_id = $3 AND i.state = 'PENDING'`,
-          [installId, req.params.id, hostId],
+            WHERE i.id = $1 AND i.app_id = $2 AND d.host_id = $3
+              AND i.state = 'PENDING' AND i.kind = 'install'`,
+          [actionId, req.params.id, hostId],
         );
         return rows[0];
       });
-      // One answer for "no such install", "not your install", "already finished" and "wrong app".
-      // Distinguishing them would let a worker probe the fleet for install ids it does not hold.
+      // One answer for "no such action", "not your action", "already finished", "wrong app" and
+      // "that is a launch, not an install". Distinguishing them would let a worker probe the fleet.
       if (!row) throw notFound('Pending install for this build on this host');
 
       const size = await store.size(row.sha256);
@@ -287,31 +295,34 @@ export async function appRoutes(app: FastifyInstance) {
   );
 
   /**
-   * Request an install: put build X on the device session Y is holding.
+   * Request an app action: install, launch or uninstall build X on the device session Y holds.
    *
    * Returns 202, and the verb matters. Nothing here reaches a device — the control plane cannot
    * dial a worker — so this creates a job the next heartbeat carries down, and answering 201 would
    * imply the app is on the device when the worker has not even been told yet. Poll the returned
-   * install, or read `GET /v1/sessions/:id/installs`.
+   * action, or read `GET /v1/sessions/:id/app-actions`.
    *
    * Everything that makes this safe is in the INSERT's SELECT, running under the tenant's own RLS:
    * the session must be this org's and live, the build must be this org's, and the device is taken
    * from the session rather than from the request — so there is no field a caller could set to aim
-   * an install at hardware it does not hold.
+   * an action at hardware it does not hold.
    */
-  app.post<{ Params: { id: string }; Body: { appId: string } }>(
-    '/sessions/:id/installs',
+  app.post<{ Params: { id: string }; Body: { appId: string; kind?: AppActionKind } }>(
+    '/sessions/:id/app-actions',
     {
       schema: {
         body: {
           type: 'object', required: ['appId'], additionalProperties: false,
-          // `pattern`, not `format: 'uuid'` — nothing else in this API relies on ajv-formats being
-          // registered, and a schema that silently accepts anything is worse than no schema.
           properties: {
+            // `pattern`, not `format: 'uuid'` — nothing else in this API relies on ajv-formats being
+            // registered, and a schema that silently accepts anything is worse than no schema.
             appId: {
               type: 'string',
               pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
             },
+            // Defaulted rather than required, so the shape that existed before launch and uninstall
+            // did keeps working and reads the same.
+            kind: { type: 'string', enum: ['install', 'launch', 'uninstall'], default: 'install' },
           },
         },
       },
@@ -320,6 +331,7 @@ export async function appRoutes(app: FastifyInstance) {
       const { orgId } = requireTenant(req);
       const sessionId = req.params.id;
       const { appId } = req.body;
+      const kind: AppActionKind = req.body.kind ?? 'install';
 
       const row = await withTenant(orgId, async (c) => {
         // Checked first, and separately from the INSERT, purely so the caller learns WHICH
@@ -334,7 +346,7 @@ export async function appRoutes(app: FastifyInstance) {
         );
         if (!pre[0]) throw notFound('Session');
         if (!LIVE_SESSION_STATES.includes(pre[0].state) || !pre[0].device_id) {
-          throw conflict('session_not_live', `Session ${sessionId} is ${pre[0].state} and holds no device. Installs need a live session.`);
+          throw conflict('session_not_live', `Session ${sessionId} is ${pre[0].state} and holds no device. App actions need a live session.`);
         }
         if (pre[0].can_install !== true) {
           throw conflict(
@@ -343,15 +355,15 @@ export async function appRoutes(app: FastifyInstance) {
           );
         }
 
-        const { rows } = await c.query<InstallRow>(
-          `INSERT INTO app_installs (org_id, app_id, session_id, device_id, fence)
-           SELECT s.org_id, a.id, s.id, s.device_id, s.fence
+        const { rows } = await c.query<ActionRow>(
+          `INSERT INTO app_actions (org_id, app_id, session_id, device_id, fence, kind)
+           SELECT s.org_id, a.id, s.id, s.device_id, s.fence, $4::app_action_kind
              FROM sessions s, app_builds a
             WHERE s.id = $1 AND a.id = $2
               AND s.state = ANY($3::session_state[])
               AND s.device_id IS NOT NULL AND s.fence IS NOT NULL
            RETURNING *`,
-          [sessionId, appId, LIVE_SESSION_STATES],
+          [sessionId, appId, LIVE_SESSION_STATES, kind],
         );
         // The session passed its checks a statement ago, so the only row the SELECT can be missing
         // now is the build — which RLS hides when it belongs to another org.
@@ -360,33 +372,51 @@ export async function appRoutes(app: FastifyInstance) {
       });
 
       return reply.code(202).send({
-        install: installJson(row),
-        message: 'Queued. The worker holding this device performs it on its next heartbeat.',
+        action: actionJson(row),
+        message: `Queued. The worker holding this device performs the ${kind} on its next heartbeat.`,
       });
     },
   );
 
-  /** Every install requested against one session, newest first. */
-  app.get<{ Params: { id: string } }>('/sessions/:id/installs', async (req) => {
+  /** Every app action requested against one session, newest first. */
+  app.get<{ Params: { id: string } }>('/sessions/:id/app-actions', async (req) => {
     const { orgId } = requireTenant(req);
     const rows = await withTenant(orgId, async (c) => {
-      const { rows } = await c.query<InstallRow>(
-        `SELECT * FROM app_installs WHERE session_id = $1 ORDER BY requested_at DESC LIMIT 100`,
+      const { rows } = await c.query<ActionRow>(
+        `SELECT * FROM app_actions WHERE session_id = $1 ORDER BY requested_at DESC LIMIT 100`,
         [req.params.id],
       );
       return rows;
     });
-    return { installs: rows.map(installJson) };
+    return { actions: rows.map(actionJson) };
   });
 
-  /** One install, for polling. */
-  app.get<{ Params: { id: string } }>('/installs/:id', async (req) => {
+  /**
+   * The org's recent app actions across every session — what the console's library rows show.
+   *
+   * Capped and newest-first for the same reason the session list is: this is a browsing surface, and
+   * a farm generates these steadily.
+   */
+  app.get<{ Querystring: { limit?: string } }>('/app-actions', async (req) => {
+    const { orgId } = requireTenant(req);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const rows = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query<ActionRow>(
+        'SELECT * FROM app_actions ORDER BY requested_at DESC LIMIT $1', [limit],
+      );
+      return rows;
+    });
+    return { actions: rows.map(actionJson) };
+  });
+
+  /** One action, for polling. */
+  app.get<{ Params: { id: string } }>('/app-actions/:id', async (req) => {
     const { orgId } = requireTenant(req);
     const row = await withTenant(orgId, async (c) => {
-      const { rows } = await c.query<InstallRow>('SELECT * FROM app_installs WHERE id = $1', [req.params.id]);
+      const { rows } = await c.query<ActionRow>('SELECT * FROM app_actions WHERE id = $1', [req.params.id]);
       return rows[0];
     });
-    if (!row) throw notFound('Install');
-    return { install: installJson(row) };
+    if (!row) throw notFound('App action');
+    return { action: actionJson(row) };
   });
 }

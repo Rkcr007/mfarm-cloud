@@ -144,7 +144,7 @@ export interface WorkerHeartbeatResponse {
   /** Devices of THIS host sitting in CLEANING, with the fence to confirm against. */
   resets?: Array<{ deviceId: string; fence: number }>;
   /**
-   * App installs requested for THIS host's devices and not yet performed.
+   * App actions requested for THIS host's devices and not yet performed.
    *
    * Rides the beat for exactly the reasons `resets` does, and the reasoning is worth restating
    * because it is the second feature to reach for it and will not be the last. Traffic between a
@@ -154,13 +154,22 @@ export interface WorkerHeartbeatResponse {
    * re-sends anything still pending, which makes a missed install self-healing at no cost.
    *
    * Like resets, there is no acknowledgement here: the confirmation is `POST /v1/workers/events`
-   * with `installs`, which is scoped to the calling host and idempotent, so re-sending is harmless.
+   * with `actions`, which is scoped to the calling host and idempotent, so re-sending is harmless.
    */
-  installs?: AppInstallRequest[];
+  actions?: AppActionRequest[];
 }
 
 /**
- * One install for one device, as offered to the worker.
+ * What a worker may be asked to do to an app on one of its devices.
+ *
+ * One pipeline for three verbs, because each is a job the control plane cannot push and therefore
+ * needs the same delivery, the same host scoping, the same fence check and the same sweep. Only
+ * `install` moves bytes, and that is the single place the three diverge.
+ */
+export type AppActionKind = 'install' | 'launch' | 'uninstall';
+
+/**
+ * One app action for one device, as offered to the worker.
  *
  * Carries `sha256` because the worker VERIFIES the blob it downloads before handing it to adb. A
  * truncated download otherwise reaches `adb install` as a corrupt archive, and the failure it
@@ -168,14 +177,20 @@ export interface WorkerHeartbeatResponse {
  * build. The digest is also the cache key: a suite that installs the same build on both devices
  * downloads it once.
  */
-export interface AppInstallRequest {
-  installId: string;
+export interface AppActionRequest {
+  actionId: string;
+  kind: AppActionKind;
   /** Control-plane uuid, not a local id. The worker maps it through its registration response. */
   deviceId: string;
   appId: string;
-  sha256: string;
-  sizeBytes: number;
+  /**
+   * Present for every kind, and the ONLY thing `launch` and `uninstall` need — neither moves bytes,
+   * so neither downloads anything and neither is authorised to.
+   */
   packageName: string;
+  /** Install only: the digest the worker verifies before handing the file to adb. */
+  sha256?: string;
+  sizeBytes?: number;
   /**
    * The device fence this install was requested under.
    *
@@ -187,10 +202,25 @@ export interface AppInstallRequest {
 }
 
 /** What the worker reports back. `ok: false` carries adb's own words in `error`. */
-export interface AppInstallResult {
-  installId: string;
+export interface AppActionResult {
+  actionId: string;
   ok: boolean;
   error?: string;
+}
+
+/**
+ * A syntactically valid Android package name.
+ *
+ * Applied where a package name is READ OUT OF AN APK, which is a file a stranger uploaded. Nothing
+ * downstream builds a shell command — every adb call passes argv, so there is no injection to
+ * perform — but a package name is a well-defined thing and something that is not one has no
+ * business reaching a device command, a database column or a UI. Rejecting it at the door is
+ * cheaper than reasoning about every place it later travels to.
+ */
+export const PACKAGE_NAME = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/;
+
+export function isValidPackageName(value: string): boolean {
+  return value.length <= 255 && PACKAGE_NAME.test(value);
 }
 
 /**

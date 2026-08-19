@@ -2,10 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { withSystem } from '../../db.ts';
 import { generateWorkerToken } from '../../auth.ts';
-import { negotiate, deviceAutomationEndpoint, type WorkerRegistration } from '@mfarm/protocol';
+import { negotiate, deviceAutomationEndpoint, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
-import { appInstalls, meteringEvents, workerResets } from '../../metrics.ts';
+import { appActions, meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
 import { unauthorized, badRequest } from '../errors.ts';
 
@@ -99,8 +99,15 @@ export async function workerRoutes(app: FastifyInstance) {
              -- The reverse direction matters just as much and is the same rule the automation
              -- endpoint follows two lines up: a device that has LOST a required capability must
              -- leave the pool rather than keep taking tenants.
+             --
+             -- QUARANTINED joins the recoverable set for exactly the reason OFFLINE did. The
+             -- reaper now quarantines a host that stops beating, which is right — its devices must
+             -- leave the pool — but without this line that is a ONE-WAY DOOR: the host comes back,
+             -- re-registers, the host row returns to UP, and every device it owns stays
+             -- QUARANTINED for the life of the database. A worker re-registering is the fleet's
+             -- only evidence that a device is healthy again, so it has to be allowed to say so.
              state = CASE
-               WHEN devices.state IN ('READY', 'OFFLINE') THEN EXCLUDED.state
+               WHEN devices.state IN ('READY', 'OFFLINE', 'QUARANTINED') THEN EXCLUDED.state
                ELSE devices.state
              END,
              updated_at = now()
@@ -138,7 +145,7 @@ export async function workerRoutes(app: FastifyInstance) {
   /** Liveness, and the one regular chance the control plane has to hand a worker work to do. */
   app.post('/workers/heartbeat', async (req) => {
     const { hostId } = requireWorker(req);
-    const { row, resets, installs } = await withSystem(async (c) => {
+    const { row, resets, actions } = await withSystem(async (c) => {
       const { rows } = await c.query(
         `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1 RETURNING state`,
         [hostId],
@@ -157,7 +164,7 @@ export async function workerRoutes(app: FastifyInstance) {
         [hostId],
       );
       /**
-       * App installs waiting for this host's devices (migration 014).
+       * App actions waiting for this host's devices (migrations 014 and 015).
        *
        * Four conditions, and dropping any one of them puts a tenant's app on someone else's device:
        *
@@ -175,9 +182,9 @@ export async function workerRoutes(app: FastifyInstance) {
        * response — a liveness signal — grow with its backlog. The rest arrive on the next beat.
        */
       const { rows: pending } = await c.query(
-        `SELECT i.id, i.device_id, i.app_id, i.fence,
+        `SELECT i.id, i.kind::text AS kind, i.device_id, i.app_id, i.fence,
                 a.sha256, a.size_bytes, a.package_name
-           FROM app_installs i
+           FROM app_actions i
            JOIN devices d    ON d.id = i.device_id
            JOIN sessions s   ON s.id = i.session_id
            JOIN app_builds a ON a.id = i.app_id
@@ -196,19 +203,23 @@ export async function workerRoutes(app: FastifyInstance) {
           deviceId: d.id,
           fence: Number(d.fence),
         })),
-        installs: pending.map((i: Record<string, unknown>) => ({
-          installId: i.id as string,
+        actions: pending.map((i: Record<string, unknown>) => ({
+          actionId: i.id as string,
+          kind: i.kind as AppActionKind,
           deviceId: i.device_id as string,
           appId: i.app_id as string,
-          sha256: i.sha256 as string,
-          sizeBytes: Number(i.size_bytes),
           packageName: i.package_name as string,
           fence: Number(i.fence),
+          // Install only. Sent for every kind would be harmless, but a launch that carries a digest
+          // invites a worker to think it may fetch one.
+          ...(i.kind === 'install'
+            ? { sha256: i.sha256 as string, sizeBytes: Number(i.size_bytes) }
+            : {}),
         })),
       };
     });
     // Told on every beat so a host that was quarantined while partitioned learns it must drain.
-    return { ok: true, hostState: row?.state ?? 'DOWN', resets, installs };
+    return { ok: true, hostState: row?.state ?? 'DOWN', resets, actions };
   });
 
   /**
@@ -226,11 +237,11 @@ export async function workerRoutes(app: FastifyInstance) {
       metering?: Array<{ eventId: string; sessionId?: string | null; deviceId?: string | null;
                          kind: MeterKind; quantity: number; occurredAt: string; orgId?: string }>;
       resets?: Array<{ deviceId: string; fence: number }>;
-      installs?: Array<{ installId: string; ok: boolean; error?: string }>;
+      actions?: Array<{ actionId: string; ok: boolean; error?: string }>;
     };
   }>('/workers/events', async (req) => {
     const { hostId } = requireWorker(req);
-    const { metering = [], resets = [], installs = [] } = req.body ?? {};
+    const { metering = [], resets = [], actions = [] } = req.body ?? {};
 
     const meter = await ingest(
       hostId,
@@ -268,7 +279,7 @@ export async function workerRoutes(app: FastifyInstance) {
     }
 
     /**
-     * Install outcomes.
+     * App action outcomes.
      *
      * The `FROM devices` join is the whole security of this statement, and it is the same rule
      * migration 008 had to retrofit twice: a worker names an install id, and without the join it
@@ -279,12 +290,12 @@ export async function workerRoutes(app: FastifyInstance) {
      * next flush; the second UPDATE matches nothing and reports `accepted: false`, which is the
      * truthful answer ("already recorded") rather than a second state transition.
      */
-    const installResults = [];
-    for (const r of installs) {
+    const actionResults = [];
+    for (const r of actions) {
       const accepted = await withSystem(async (c) => {
         const res = await c.query(
-          `UPDATE app_installs i
-              SET state = CASE WHEN $3 THEN 'INSTALLED'::app_install_state ELSE 'FAILED' END,
+          `UPDATE app_actions i
+              SET state = CASE WHEN $3 THEN 'DONE'::app_action_state ELSE 'FAILED' END,
                   error = CASE WHEN $3 THEN NULL ELSE $4 END,
                   finished_at = now()
              FROM devices d
@@ -292,12 +303,12 @@ export async function workerRoutes(app: FastifyInstance) {
               AND d.host_id = $1
               AND i.id = $2
               AND i.state = 'PENDING'`,
-          [hostId, r.installId, r.ok === true, (r.error ?? 'The worker reported a failure with no detail.').slice(0, 2000)],
+          [hostId, r.actionId, r.ok === true, (r.error ?? 'The worker reported a failure with no detail.').slice(0, 2000)],
         );
         return (res.rowCount ?? 0) > 0;
       });
-      appInstalls.inc({ outcome: accepted ? (r.ok ? 'installed' : 'failed') : 'ignored' });
-      installResults.push({ installId: r.installId, accepted });
+      appActions.inc({ outcome: accepted ? (r.ok ? 'done' : 'failed') : 'ignored' });
+      actionResults.push({ actionId: r.actionId, accepted });
     }
 
     return {
@@ -305,7 +316,7 @@ export async function workerRoutes(app: FastifyInstance) {
       meteringDuplicates: meter.duplicates,
       meteringRejected: meter.rejected,
       resets: resetResults,
-      installs: installResults,
+      actions: actionResults,
     };
   });
 }
