@@ -672,6 +672,12 @@ export class CuttlefishDevice implements DeviceControl {
    * where the failure costs a tenant's session rather than here.
    */
   private async snapshotOnDisk(): Promise<string | undefined> {
+    // POWERWASH MODE IGNORES SNAPSHOTS ENTIRELY, and this one line is what makes that true rather
+    // than aspirational. Without it `CF_RESET_MODE=powerwash` changed only how a device is RESET
+    // and left `restartExisting()` free to boot from a snapshot still sitting on disk from before
+    // the mode was set — so the farm came up restored, published no display, and the live view was
+    // gone for exactly the reason the mode exists to avoid. Caught on the box, not in review.
+    if (this.opts.resetMode === 'powerwash') return undefined;
     const dir = this.opts.snapshotDir;
     if (!dir) return undefined;
     const { readdir } = await import('node:fs/promises');

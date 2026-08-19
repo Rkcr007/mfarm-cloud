@@ -388,6 +388,23 @@ describe('powerwash is a reset, and keeps the device schedulable', () => {
     assert.ok(d.info.capabilities.includes('snapshot-reset'));
   });
 
+  test('a snapshot left on disk is IGNORED — the device cold boots instead of restoring', async () => {
+    // The bug this pins: powerwash mode changed how a device is RESET and not how it BOOTS, so a
+    // snapshot from before the mode was set was still restored on startup. The farm came up
+    // restored, published no display, and the live view was gone — which is the one thing this
+    // mode exists to prevent.
+    await mkdir(snapshotDir, { recursive: true });
+    await writeFile(join(snapshotDir, 'snapshot.pb'), 'x');
+
+    const d = device({ resetMode: 'powerwash' });
+    await d.start();
+
+    const started = (await calls()).filter((c) => c.startsWith('cvd ') && c.includes(' start'));
+    for (const c of started) {
+      assert.ok(!c.includes('--snapshot_path'), `booted from a snapshot in powerwash mode: ${c}`);
+    }
+  });
+
   test('start does no snapshot work at all in powerwash mode', async () => {
     const d = device({ resetMode: 'powerwash' });
     await d.start();
