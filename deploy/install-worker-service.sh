@@ -22,6 +22,10 @@ die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 BRIDGE_IP="$(docker network inspect "$(docker network ls --filter name=mfarm --format '{{.Name}}' | head -1)" \
   --format '{{ (index .IPAM.Config 0).Gateway }}' 2>/dev/null || echo 172.18.0.1)"
 CF_IMAGE_DIR="${CF_IMAGE_DIR:-$HOME/cf/image}"
+# The same default farm-up.sh uses, and it must stay the same: `~/android-sdk` does not exist on the
+# lab box, and an agent started with a bogus ANDROID_HOME advertises `webdriver` and then fails every
+# Appium session with a driver that cannot find adb.
+ANDROID_HOME_RESOLVED="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/lib/android-sdk}}"
 CF_INSTANCES="${CF_INSTANCES:-2}"
 REGION="${REGION:-lab}"
 API_PORT="${API_PORT:-3000}"
@@ -37,8 +41,8 @@ PUBLIC_HOST=$BRIDGE_IP
 BIND_HOST=$BRIDGE_IP
 APPIUM_ENABLED=1
 APPIUM_ADVERTISE_HOST=$BRIDGE_IP
-ANDROID_HOME=${ANDROID_HOME:-$HOME/android-sdk}
-ANDROID_SDK_ROOT=${ANDROID_HOME:-$HOME/android-sdk}
+ANDROID_HOME=$ANDROID_HOME_RESOLVED
+ANDROID_SDK_ROOT=$ANDROID_HOME_RESOLVED
 CF_IMAGE_DIR=$CF_IMAGE_DIR
 CF_INSTANCES=$CF_INSTANCES
 ENV
