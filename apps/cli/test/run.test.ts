@@ -137,11 +137,27 @@ describe('mfarm run', () => {
     const api = await startControlPlane({ deleteDelayMs: 30_000 });
     const started = Date.now();
     try {
+      let signalled = false;
       const r = await runCli(
         ['run', '--api', api.url, '--region', REGION, '--', ...child('process.exit(6)')],
         {
           onStderr(chunk, kill) {
-            if (chunk.includes('releasing session')) kill('SIGINT');
+            if (signalled || !chunk.includes('releasing session')) return;
+            signalled = true;
+            // WAIT FOR THE DELETE TO LAND BEFORE SIGNALLING, rather than signalling on the line that
+            // announces it. "releasing session" is printed BEFORE the request is dispatched, so on a
+            // loaded runner the signal beat the socket, no DELETE was ever recorded, and the last
+            // assertion below failed with 0 — a flake in CI that never reproduced on a laptop.
+            //
+            // This does not weaken the test. The fake holds the DELETE open for 30s, so the signal
+            // still arrives squarely inside the release window; it just arrives inside a window that
+            // has demonstrably opened.
+            void (async () => {
+              for (let i = 0; i < 200 && api.of('DELETE', '/v1/sessions/').length === 0; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              kill('SIGINT');
+            })();
           },
         },
       );
