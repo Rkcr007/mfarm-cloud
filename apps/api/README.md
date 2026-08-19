@@ -139,11 +139,11 @@ had done nothing, during exactly the fleet churn that makes expiry interesting
 | `POST /v1/apps` | tenant | APK upload, streamed to disk. 201 new, 200 already in the library |
 | `GET /v1/apps`, `/v1/apps/:id` | tenant | the org's build library |
 | `GET /v1/apps/:id/blob` | worker | **only** with an `installId` this host is holding |
-| `POST /v1/sessions/:id/installs` | tenant | 202 — queues an install for the session's device |
-| `GET /v1/sessions/:id/installs`, `/v1/installs/:id` | tenant | outcome, with the worker's own error text |
+| `POST /v1/sessions/:id/app-actions` | tenant | 202 — queues an install, launch or uninstall |
+| `GET /v1/sessions/:id/app-actions`, `/v1/app-actions`, `/v1/app-actions/:id` | tenant | outcome, with the worker's own error text |
 | `POST /v1/workers/register` | registration token | issues the worker credential |
-| `POST /v1/workers/heartbeat` | worker | also carries down pending resets and app installs |
-| `POST /v1/workers/events` | worker | batched metering + reset + install reports |
+| `POST /v1/workers/heartbeat` | worker | also carries down pending resets and app actions |
+| `POST /v1/workers/events` | worker | batched metering + reset + app-action reports |
 | `GET /wd/hub/status` | none | WebDriver readiness probe |
 | `POST /wd/hub/session` | tenant | W3C or JSONWP new session |
 | `GET /wd/hub/sessions` | tenant | this org's live WebDriver sessions |
@@ -182,20 +182,33 @@ parsed out of the APK's own binary `AndroidManifest.xml` (`src/apk.ts`) rather t
 client — everything downstream acts on the package name, so a caller that could set it could claim
 someone else's package.
 
-**An install is a job, not a call.** The control plane cannot dial a worker; traffic only ever goes
-the other way. So `POST /v1/sessions/:id/installs` returns **202** and writes an `app_installs` row,
-the next heartbeat carries it down to the host that owns the device, and the worker confirms through
-`POST /v1/workers/events` — the same shape resets use, which makes a missed install self-healing and
-bounds the delay at one beat (10s).
+**An action is a job, not a call.** The control plane cannot dial a worker; traffic only ever goes
+the other way. So `POST /v1/sessions/:id/app-actions` returns **202** and writes an `app_actions`
+row, the next heartbeat carries it down to the host that owns the device, and the worker confirms
+through `POST /v1/workers/events` — the same shape resets use, which makes a missed action
+self-healing and bounds the delay at one beat (10s).
 
-**The install id is the worker's authorization.** `GET /v1/apps/:id/blob` refuses without one, and
-the query behind it requires an unfinished install of that exact build on a device belonging to the
-calling host. There is no route by which a worker can enumerate or fetch an org's builds.
+**Three verbs, one pipeline.** `install`, `launch` and `uninstall` (migration 015) share delivery,
+host scoping, the fence check and the reaper sweep, because each is a job the control plane cannot
+push and building that twice would be the same code with different table names and its own bugs.
+Exactly one thing differs: only `install` moves bytes, which is why the blob route below demands
+`kind = 'install'` — a queued launch carries a package name and must not widen into read access to
+the build.
 
-Three states, and no `INSTALLING`: a worker reports the outcome, never the start, so a worker that
-dies mid-install leaves the row `PENDING` and the next beat re-delivers it (`adb install -r` is
-repeatable). An install whose session ends before delivery is swept to `FAILED` by the reaper, so
-nothing polls a job that will never run.
+**The action id is the worker's authorization.** `GET /v1/apps/:id/blob` refuses without one, and
+the query behind it requires an unfinished **install** of that exact build on a device belonging to
+the calling host. There is no route by which a worker can enumerate or fetch an org's builds.
+
+Three states — `PENDING`, `DONE`, `FAILED` — and no `INSTALLING`: a worker reports the outcome,
+never the start, so a worker that dies mid-action leaves the row `PENDING` and the next beat
+re-delivers it (`adb install -r` is repeatable). An action whose session ends before delivery is
+swept to `FAILED` by the reaper, so nothing polls a job that will never run.
+
+**A launch is not an install that went further.** It fails for its own reasons — a service-only or
+test APK has no launcher activity — and `monkey` reports that on stdout **with a zero exit code**,
+so the worker reads its output rather than its status. The verb travels all the way to the error
+message, because "install failed" against a build that installed perfectly well sends the reader to
+the wrong place.
 
 ## The WebDriver hub
 
@@ -264,12 +277,29 @@ a host advertises by registering an `automationEndpoint`. The constraints are re
 (`sessions.constraints`) so `promote_queued()` re-applies the same ones — previously it matched on
 region alone, so a queued Android session could be promoted onto an iOS device.
 
+## The console
+
+Served by this process from `public/` through an allowlist of four paths (`routes/ui.ts`), so there
+is no path to traverse and no static-file dependency to trust. Sign-in, the fleet, the app library
+and the session list. Three tabs:
+
+- **Devices** — the fleet grid; a drawer allocates a session on a tier.
+- **Apps** — drag-and-drop upload with progress, the library, and Install / Launch / Uninstall per
+  build. The **held-device strip** sits above it and is the feature rather than decoration:
+  releasing a device snapshot-restores it, so an app exists on a device only while the session
+  holding it is alive, and every action button is disabled without one.
+- **Test runs** — the hub URL to paste into a suite, and sessions with their **full** ids. Truncated
+  to eight characters they were useless: that id is what `mfarm app install --session` takes and what
+  the WebDriver URL carries, and neither accepts a prefix.
+
+There is no interactive device view. ADR-0005 settled how media would reach a browser (a TURN relay,
+not an overlay) and **none of it is built** — no coturn, no per-session relay credential, and the
+data plane still binds the docker bridge, which no client can reach.
+
 ## Not yet built
 
-Artifacts and logcat streaming. App **launch** and **uninstall** outside Appium are not here either —
-only upload and install are — and the device-side seam for them is the same optional-method pattern
-`installApp` uses. Rate limiting is in-memory, so limits are per API instance; moving to Redis is
-required before running more than one.
+Artifacts, logcat streaming, video, and the interactive viewer above. Rate limiting is in-memory, so
+limits are per API instance; moving to Redis is required before running more than one.
 
 ## Running it
 

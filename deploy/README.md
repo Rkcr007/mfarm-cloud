@@ -311,6 +311,20 @@ docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.ym
 An alerting path that has never delivered a message is an alerting path that does not work. This is
 the single most common way monitoring is "set up" and useless.
 
+### Reaper knobs worth knowing
+
+| variable | default | what it decides |
+|---|---|---|
+| `REAPER_INTERVAL_MS` | 30000 | how often sessions expire, queued sessions promote, and keys are purged |
+| `HOST_SILENCE_TIMEOUT_MS` | 90000 | how long a host may go silent before its devices are QUARANTINED out of the pool |
+| `HOST_SWEEP_MIN_INTERVAL_MS` | 15000 | floor on how often that host sweep runs, regardless of the reaper's tick |
+| `APP_STORE_DIR` | *(required in production)* | where uploaded APKs live |
+| `APP_MAX_UPLOAD_BYTES` | 536870912 | largest APK accepted, enforced on the stream |
+
+A quarantined host recovers by **re-registering** — the worker coming back is the fleet's only
+evidence that its devices are healthy again. Nothing else clears it, so a host stuck QUARANTINED
+with a live worker means the worker is not managing to register, and that is the thing to look at.
+
 ### Known gaps
 
 Stated rather than implied, because each of these looks covered from the dashboard:

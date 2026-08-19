@@ -111,10 +111,10 @@ level with a count, never silently evicted.
 entry would return a device still carrying the previous tenant's accounts, keychain and caches. A
 failed restore leaves the device `CLEANING` — out of the pool — which is the safe direction.
 
-## App install
+## App actions
 
-The other half of the heartbeat's job. A beat can carry down `installs` as well as `resets`, and the
-agent handles them the same way and for the same reasons — an in-flight guard, because the request is
+The other half of the heartbeat's job. A beat can carry down `actions` — install, launch or
+uninstall — as well as `resets`, and the agent handles them the same way and for the same reasons — an in-flight guard, because the request is
 re-offered every beat and an install outlives one; not awaited inside the beat, because an install is
 a download plus a dexopt pass and a beat that waited for it would look like a dead host.
 
@@ -128,9 +128,46 @@ installing one build on both devices downloads it once; it re-hashes a cache hit
 that file was written by a process that may have been killed mid-write and lives in a directory
 anything on the host can write to. A mismatch re-downloads rather than installs.
 
-`installApp` is an **optional** method on `DeviceControl`. A tier that cannot sideload does not
-define it, rather than defining one that throws — the capability is what the control plane schedules
-on, and `app-install` is advertised from whether the method exists.
+`installApp`, `launchApp` and `uninstallApp` are **optional** methods on `DeviceControl`. A tier that
+cannot sideload does not define them, rather than defining ones that throw — the capability is what
+the control plane schedules on, and `app-install` is advertised from whether `installApp` exists.
+`performAction` checks per METHOD, so a tier that gains one verb and not another gets a named
+failure for the missing one instead of a silent success.
+
+**`monkey` exits 0 when a launch fails.** `** No activities found to run, monkey aborted.` arrives on
+stdout with a success code, which is the normal way a service-only or test APK reaches it — so the
+output check is the only signal there is, not belt-and-braces.
+
+A verb this build has never heard of is reported as a failure rather than ignored: ignoring it
+leaves the row PENDING and re-offered on every beat for the life of the farm.
+
+## Running it without Android
+
+`scripts/fake-farm.ts` registers a host with two devices that record what they were asked to do:
+
+    node --experimental-strip-types workers/agent/scripts/fake-farm.ts
+
+Cuttlefish needs Linux and `/dev/kvm`; the AVD tier needs an Android SDK and several gigabytes. The
+control plane, console, app library and job pipeline need none of that, so testing a console button
+was costing an hour of setup. This makes the whole loop exercisable on a laptop — and it is how the
+first-heartbeat bug below was found.
+
+**It is not a device.** Nothing runs an APK. It declares no `screen-stream` and no `webdriver`,
+because there is nothing to stream and no Appium, and its model reads `FAKE (no Android)` so a
+screenshot of it is not mistaken for the farm.
+
+## Bugs running it caught
+
+**Work offered on the FIRST heartbeat of a restart was silently dropped.** `start()` heartbeated and
+only then assigned `this.state`, so while that first response was being handled the localId->uuid map
+was empty and every reset or app action it carried was discarded with "unknown device" — for devices
+sitting right there. It self-healed on the next beat, which is exactly why it survived review: a
+restart during a restore just left the device CLEANING for another ten seconds. The regression test
+went from a ten-second timeout to 103ms.
+
+**A dead worker kept its devices in the allocatable pool.** Not an agent bug, but found the same way:
+`quarantine_host` had existed since migration 003 with no caller anywhere, so killing this script left
+its devices READY and the allocator kept handing them out. The reaper sweeps for it now.
 
 ## Bugs the tests caught
 
@@ -209,8 +246,8 @@ unverified until there is hardware.
 
 ## Not yet built
 
-App **launch** and **uninstall** (install is done — see above), logcat streaming, and video
-recording. `resolveDeviceIds`
+Logcat streaming and video recording — install, launch and uninstall are done, see above.
+`resolveDeviceIds`
 returns an empty map — the agent currently learns a device's control-plane uuid from the signed token
 that arrives for it, which is authenticated and therefore trustworthy, but a future protocol revision
 should return the mapping at registration.

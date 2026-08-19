@@ -759,11 +759,15 @@ before building any viewer**, because it determines whether a browser needs clie
     Two things the console does NOT do, both stated in the UI rather than hidden behind a disabled
     button: there is no interactive device view (media needs ADR-0005's relay, which is not
     deployed), and a session cannot be pinned to a specific device (the allocator chooses). ~~App
-    upload and install are not built.~~ **Built 2026-08-19 — see issue 21**; the console still has
-    no button for it, but the API it would call now exists.
+    upload and install are not built.~~ **Built, and the console drives them — see issues 21 and
+    22.**
 
 21. **THE APP LIBRARY EXISTS: UPLOAD A BUILD, INSTALL IT ON A DEVICE YOU HOLD.** 2026-08-19,
     migration 014. Phase 3's first bullet, minus launch and uninstall.
+
+    **Names below are superseded by issue 22, one day later**: the table is `app_actions`, the
+    endpoint is `POST /v1/sessions/:id/app-actions`, and the success state is `DONE`. The reasoning
+    is unchanged and is the reason this entry stays as written.
 
     Three decisions carry the design, and each one had an obvious alternative that is worse:
 
@@ -811,6 +815,63 @@ before building any viewer**, because it determines whether a browser needs clie
     (`deploy/README.md`, Known gaps).
 
 
+
+22. **THREE VERBS, A CONSOLE THAT CAN USE THEM, AND THREE BUGS THAT ONLY RUNNING IT FOUND.**
+    2026-08-19, migration 015.
+
+    `app_installs` became `app_actions` with a `kind` of install, launch or uninstall, and
+    `INSTALLED` became `DONE`. Renaming a table a day after shipping it is only available because 014
+    had never been deployed anywhere — that window closes the first time it runs on the box, and it
+    was worth spending: a row reading `kind = 'uninstall'` in a table called app_installs, or a
+    console showing "INSTALLED" against a Launch button, is the kind of thing that reads fine to
+    whoever wrote it and confuses everyone after.
+
+    One pipeline for all three, because each is a job the control plane cannot push, so each needs
+    the same delivery, host scoping, fence check and sweep. **Exactly one thing differs and it is
+    load-bearing:** only `install` moves bytes, so `GET /apps/:id/blob` demands `kind = 'install'`
+    alongside everything else. Without that clause a queued LAUNCH — a job carrying a package name
+    and nothing else — widens into read access to the build's contents. There is a test that asks
+    with a real worker credential and a real pending launch, and expects 404.
+
+    The console got the Apps tab: upload with progress, the library, and the three verbs per build.
+    The **held-device strip** above it is the part that matters. Releasing a device snapshot-restores
+    it, so an app exists on a device only while the session holding it is alive; "where did my app
+    go" and "which device am I holding" are the same question, and showing only the second would make
+    the first inexplicable.
+
+    **`workers/agent/scripts/fake-farm.ts` is why the rest of this entry exists.** It registers two
+    devices that record what they were asked to do, so the console and the whole job pipeline run on
+    a laptop with no Android anywhere. Everything below was found by clicking through it against a
+    real control plane, and none of it was found by 441 passing tests:
+
+    - **Work offered on the FIRST heartbeat of a restart was silently dropped.** `start()`
+      heartbeated and only then assigned `this.state`, so the localId->uuid map was empty while that
+      response was handled and every reset or action it carried was discarded with "unknown device" —
+      for devices sitting right there. It self-healed on the next beat, which is exactly why it
+      survived: a restart during a restore just left a device CLEANING ten seconds longer. The
+      regression test went from a ten-second timeout to 103ms.
+    - **`quarantine_host` had existed since migration 003 WITH NO CALLER ANYWHERE.** Kill a worker
+      and its devices stayed READY forever, so the allocator kept handing them out and every session
+      on them failed at connect time — the farm reporting full capacity while serving none of it. On
+      two devices that is half the fleet turned into a trap. The reaper sweeps for it now, throttled
+      to 15s because it is the only fleet-wide WRITE the reaper performs; recovery is registration,
+      which is why the device state machine had to learn to leave QUARANTINED as well as enter it.
+    - **A UI that had been lying quietly.** `POST /v1/sessions` answers `{session: {...}}` and the
+      Devices drawer read id, state and deviceId off the top level, so its toast said
+      "Session undefine on  is undefined". Pre-existing; nobody had read it closely.
+
+    Two console lessons worth keeping. Upload goes through XMLHttpRequest because **fetch cannot
+    report upload progress**, and a button that goes quiet for two minutes on a 200 MB APK is
+    indistinguishable from a broken one. And the two-step Release confirmation keeps its armed state
+    in `state`, not on the button: the view re-renders every five seconds from the poll and
+    `replaceChildren` throws the node away, so the first version could not survive long enough to be
+    confirmed. **Anything a user is halfway through has to live somewhere the poll cannot replace.**
+
+    **Still no interactive device view.** ADR-0005 decided the routing (a TURN relay, not an overlay,
+    because end users cannot be asked to join the operator's tailnet) and nothing downstream of that
+    decision is built: no coturn, no per-session relay credential, and the data plane still binds the
+    docker bridge, which no browser can reach. That, and the fact that no `adb install` has still
+    ever run from this code path, are the two gaps between this and a farm a teammate can use.
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.
@@ -922,5 +983,9 @@ What is left, in this order:
    SwiftShader costs a rendering-heavy app.
 3. **Spikes 1 and 2a**, which still gate *scaling* rather than shipping.
 4. **Phase 3** — artifacts, logcat, video — all buildable for ₹0 against the snapshots above.
-   App upload and install landed 2026-08-19 (issue 21); the first thing to do with a live box is
-   push a real APK through it, because that path has only ever met a fake device.
+   App upload, install, launch and uninstall landed 2026-08-19 (issues 21 and 22), and the console
+   can drive all of them. The first thing to do with a live box is push a real APK through it: that
+   path has only ever met a fake device, and `adb install` has never run from this code.
+5. **The interactive viewer**, which is the last thing standing between this and something a
+   teammate uses without being taught. ADR-0005 already decided how (coturn, per-session
+   credentials, and the data plane moving off the docker bridge); none of it is built.

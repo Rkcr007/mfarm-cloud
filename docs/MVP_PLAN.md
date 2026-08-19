@@ -275,8 +275,11 @@ delivered to a person. Closing that is Phase 0's metered day, not more building.
   upload | list | install` covers the CLI half; the console's one-click install now has an API to
   call. Verified against a fake device only — no `adb install` has ever run from this code path, so
   the first real APK on the lab box is the test that matters.
-- **Launch and uninstall** outside Appium. Same seam (`DeviceControl.installApp` is optional and
-  capability-gated); neither is built.
+- ~~**Launch and uninstall** outside Appium.~~ **DONE 2026-08-19** — migration 015 generalised the
+  install job into an `app_actions` row with a `kind`, so all three verbs share one pipeline:
+  heartbeat delivery, host-scoped confirmation, fence check, reaper sweep. Only `install` moves
+  bytes, and the blob route demands `kind = 'install'` so a queued launch cannot widen into read
+  access to the build. `mfarm app launch | uninstall | status` on the CLI.
 - Logcat capture per session, streamed and stored.
 - Video recording per session; screenshots on demand and on failure.
 - Artifact store — MinIO on the same box, S3 API, retention policy.
@@ -294,13 +297,27 @@ Exit: a failed CI run links to video, logcat, and screenshots of exactly that se
 
 Deliberately last, and still the thing that makes it feel like a product.
 
-- Device grid: what exists, what state, who holds it, for how long.
-- Live interactive view: WebRTC from Cuttlefish + the existing WebSocket input path.
-- Session list and detail with artifacts inline.
-- App library — upload, version, install to a device in one click.
-- Health dashboard and queue visibility.
-- Human auth. Today there are API keys only; teammates need login plus per-user keys, so a session is
-  attributable to a person.
+- ~~Human auth.~~ **DONE 2026-08-19** — migration 013, scrypt passwords and a revocable
+  `user_sessions` table. A session is attributable to a person.
+- ~~Device grid: what exists, what state, who holds it.~~ **DONE 2026-08-19.**
+- ~~App library — upload, version, install to a device in one click.~~ **DONE 2026-08-19** — the
+  Apps tab: drag-and-drop upload with progress, the library, and Install / Launch / Uninstall per
+  build. Verified end to end in a browser against the fake farm. The **held-device strip** above it
+  is the part worth keeping: releasing a device snapshot-restores it, so an app exists on a device
+  only while its session is alive, and hiding that would make "where did my app go" inexplicable.
+- ~~Session list.~~ **DONE**, with full copyable session ids — truncated ones were useless, since
+  that id is what `mfarm app install --session` and the WebDriver URL both take.
+- **Live interactive view: NOT BUILT.** ADR-0005 settled the routing question (a TURN relay, not an
+  overlay, because end users cannot be asked to join the operator's tailnet) and nothing downstream
+  of that decision exists: no coturn, no per-session relay credential, and the data plane still
+  binds the docker bridge, which no browser can reach. This is the largest remaining gap between the
+  farm and "a product a teammate can use".
+- Session detail with artifacts inline; queue visibility. Not built.
+
+**Testing without hardware.** `workers/agent/scripts/fake-farm.ts` registers two devices that record
+what they were asked to do, so the console, the library and the whole job pipeline can be exercised
+on a laptop. It declares no `screen-stream` and no `webdriver` and calls itself `FAKE (no Android)`,
+because a fake that claimed either would let someone demonstrate a feature that does not work.
 
 ### Phase 5 — Hardening
 
