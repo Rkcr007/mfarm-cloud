@@ -6,8 +6,8 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
   PROTOCOL_VERSION,
-  type AppInstallRequest,
-  type AppInstallResult,
+  type AppActionRequest,
+  type AppActionResult,
   type Capability,
   type RegistrationResponse,
   type WorkerHeartbeatResponse,
@@ -144,10 +144,10 @@ export class Agent {
   private readonly fenceHighWater = new Map<string, number>();
   /** Devices currently being restored, so a re-sent heartbeat request cannot start a second one. */
   private readonly resetsInFlight = new Set<string>();
-  /** Same guard, same reason: the beat re-offers an install that is still running. */
-  private readonly installsInFlight = new Set<string>();
+  /** Same guard, same reason: the beat re-offers an action that is still running. */
+  private readonly actionsInFlight = new Set<string>();
   /** Outcomes waiting to be reported. Flushed alongside metering and resets. */
-  private readonly pendingInstalls: AppInstallResult[] = [];
+  private readonly pendingActions: AppActionResult[] = [];
 
   private readonly opts: AgentOptions;
   /**
@@ -240,6 +240,10 @@ export class Agent {
     // fail one at a time.
     const install: Capability[] = this.opts.devices.some((d) => typeof d.control.installApp === 'function')
       ? ['app-install'] : [];
+    // One capability covers install, launch and uninstall: they are the same adb on the same
+    // device, and a tier that has one and not the others is not a shape that exists today. The
+    // per-method checks in `performAction` are what keep that assumption honest if it ever stops
+    // being true — they name the missing verb instead of failing obscurely.
     return ['screen-stream', 'input-datachannel', 'snapshot-reset', ...install, ...automation];
   }
   get sessionPublicKey(): string | undefined { return this.state?.sessionPublicKey; }
@@ -277,9 +281,22 @@ export class Agent {
     const restored = await this.loadState();
     const fingerprint = this.capabilityFingerprint();
 
-    if (restored && restored.registered === fingerprint && (await this.heartbeat()).ok) {
+    // The state is adopted BEFORE the heartbeat that validates it, and put back if that beat fails.
+    //
+    // The obvious order — heartbeat first, assign on success — is what shipped, and it silently
+    // discarded every piece of work the control plane handed back on that first beat. A beat's
+    // response carries resets and app actions naming devices by their control-plane uuid, and the
+    // only thing that can map a uuid to a local backend is `state.deviceIds`; with the assignment
+    // after the call, `backendForDeviceId` had nothing to look in and logged "unknown device" for
+    // devices sitting right there. It self-healed on the next beat, which is exactly why it went
+    // unnoticed — a restart during a restore just left the device CLEANING for another ten seconds.
+    // Found by running the fake farm, not by a test.
+    if (restored && restored.registered === fingerprint) {
       this.state = restored;
-    } else {
+      if (!(await this.heartbeat()).ok) this.state = undefined;
+    }
+
+    if (!this.state) {
       // Three ways to land here, and all three want the same answer:
       //   - no usable credential, or the control plane rejected it (host rebuilt, token rotated);
       //   - a state file from before v2, which cannot prove what it registered;
@@ -445,7 +462,7 @@ export class Agent {
       // Not awaited for the same reason, and more so: an install is a download plus a dexopt pass,
       // which is minutes, not seconds. The in-flight guard is what makes re-offering it every beat
       // harmless in the meantime.
-      void this.runRequestedInstalls(body.installs ?? []);
+      void this.runRequestedActions(body.actions ?? []);
       return { ok: true, hostState: body.hostState };
     } catch {
       return { ok: false };
@@ -509,26 +526,26 @@ export class Agent {
   /** Called on a timer; also safe to call directly. Buffered events survive a failed flush. */
   async flush(): Promise<{ recorded: number; ok: boolean }> {
     for (const s of this.active.values()) this.emitTick(s, Date.now());
-    if (this.buffer.size === 0 && this.pendingResets.length === 0 && this.pendingInstalls.length === 0) {
+    if (this.buffer.size === 0 && this.pendingResets.length === 0 && this.pendingActions.length === 0) {
       return { recorded: 0, ok: true };
     }
     if (!this.state) return { recorded: 0, ok: false };
 
     const metering = [...this.buffer.values()];
     const resets = [...this.pendingResets];
-    const installs = [...this.pendingInstalls];
+    const actions = [...this.pendingActions];
 
     try {
       const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/events`, {
         method: 'POST',
         headers: { authorization: `Bearer ${this.state.workerToken}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ metering, resets, installs }),
+        body: JSON.stringify({ metering, resets, actions }),
       });
       if (!res.ok) return { recorded: 0, ok: false };
       const body = await res.json() as {
         meteringRecorded: number; meteringRejected?: number;
         resets: Array<{ deviceId: string; accepted: boolean }>;
-        installs?: Array<{ installId: string; accepted: boolean }>;
+        actions?: Array<{ actionId: string; accepted: boolean }>;
       };
 
       // Only clear what we actually sent — anything added while the request was in flight stays.
@@ -538,11 +555,11 @@ export class Agent {
         if (i >= 0) this.pendingResets.splice(i, 1);
       }
       // Dropped whether or not the control plane accepted them: a rejected outcome means the
-      // install was already recorded or is not ours, and re-sending gets the same answer forever.
-      // The install itself is not lost by this — it stays PENDING there and comes back on a beat.
-      for (const r of installs) {
-        const i = this.pendingInstalls.findIndex((p) => p.installId === r.installId);
-        if (i >= 0) this.pendingInstalls.splice(i, 1);
+      // action was already recorded or is not ours, and re-sending gets the same answer forever.
+      // The action itself is not lost by this — it stays PENDING there and comes back on a beat.
+      for (const r of actions) {
+        const i = this.pendingActions.findIndex((p) => p.actionId === r.actionId);
+        if (i >= 0) this.pendingActions.splice(i, 1);
       }
       for (const r of body.resets ?? []) {
         if (!r.accepted) {
@@ -639,70 +656,105 @@ export class Agent {
   }
 
   /**
-   * Perform the installs the control plane attached to a heartbeat.
+   * Perform the app actions the control plane attached to a heartbeat.
    *
    * Same three properties as `runRequestedResets`, for the same reasons — an in-flight guard
-   * because the request is re-offered every beat and an install outlives one, a failure that is
+   * because the request is re-offered every beat and an action outlives one, a failure that is
    * REPORTED rather than retried here, and an unknown device that warns instead of throwing.
    *
    * The difference is what a failure means. A reset that fails must leave the device stuck in
-   * CLEANING, because a device that cannot be cleaned must never go back into the pool. An install
-   * that fails is a fact about the tenant's APK — a bad signature, a wrong ABI, not enough space —
-   * and the person who asked for it is waiting for exactly that sentence. So it is recorded as
-   * FAILED with adb's own words rather than left pending for a retry that would fail identically.
+   * CLEANING, because a device that cannot be cleaned must never go back into the pool. An action
+   * that fails is a fact about the tenant's APK — a bad signature, a wrong ABI, no launcher
+   * activity, not enough space — and the person who asked for it is waiting for exactly that
+   * sentence. So it is recorded as FAILED with adb's own words rather than left pending for a retry
+   * that would fail identically.
    */
-  private async runRequestedInstalls(requests: AppInstallRequest[]): Promise<void> {
+  private async runRequestedActions(requests: AppActionRequest[]): Promise<void> {
     for (const r of requests) {
-      if (this.installsInFlight.has(r.installId)) continue;
-      if (this.pendingInstalls.some((p) => p.installId === r.installId)) continue; // done, awaiting flush
+      if (this.actionsInFlight.has(r.actionId)) continue;
+      if (this.pendingActions.some((p) => p.actionId === r.actionId)) continue; // done, awaiting flush
 
       const backend = this.backendForDeviceId(r.deviceId);
       if (!backend) {
         // Delivery is host-scoped, so this should be unreachable. Warn rather than report a
         // failure: claiming an outcome for a device we do not own is the one answer that is worse
         // than silence.
-        console.warn(`[agent] control plane asked to install on unknown device ${r.deviceId}`);
+        console.warn(`[agent] control plane asked to ${r.kind} on unknown device ${r.deviceId}`);
         continue;
       }
       const control = backend.control;
-      if (!control.installApp) {
-        this.pendingInstalls.push({
-          installId: r.installId, ok: false,
-          error: `${control.info.localId} cannot install apps: this device tier has no install path.`,
-        });
-        await this.flush();
-        continue;
-      }
+
       // Second lock on a device that has been reallocated since this beat was built. The control
-      // plane already refuses to offer a stale install; this one still holds if the beat was in
+      // plane already refuses to offer a stale action; this one still holds if the beat was in
       // flight while the device changed hands.
       if (!this.acceptFence(r.deviceId, r.fence)) {
-        this.pendingInstalls.push({
-          installId: r.installId, ok: false,
-          error: 'Stale fence: this device was reallocated before the install ran.',
-        });
+        this.report(r, false, 'Stale fence: this device was reallocated before the action ran.');
         await this.flush();
         continue;
       }
 
-      this.installsInFlight.add(r.installId);
+      this.actionsInFlight.add(r.actionId);
       try {
-        console.log(`[agent] installing ${r.packageName} (${r.sha256.slice(0, 12)}) on ${control.info.localId}`);
-        const apkPath = await this.fetchApk(r);
-        await control.installApp(apkPath);
-        console.log(`[agent] installed ${r.packageName} on ${control.info.localId}`);
-        this.pendingInstalls.push({ installId: r.installId, ok: true });
+        console.log(`[agent] ${r.kind} ${r.packageName} on ${control.info.localId}`);
+        await this.performAction(backend, r);
+        console.log(`[agent] ${r.kind} of ${r.packageName} on ${control.info.localId} succeeded`);
+        this.report(r, true);
       } catch (e) {
         const error = (e as Error).message;
-        console.error(`[agent] install of ${r.packageName} on ${control.info.localId} failed: ${error}`);
-        this.pendingInstalls.push({ installId: r.installId, ok: false, error });
+        console.error(`[agent] ${r.kind} of ${r.packageName} on ${control.info.localId} failed: ${error}`);
+        this.report(r, false, error);
       } finally {
-        this.installsInFlight.delete(r.installId);
+        this.actionsInFlight.delete(r.actionId);
       }
-      // Reported immediately rather than on the metering timer: someone is watching this install
-      // in a UI or a CLI poll, and a 15s wait to learn it finished is most of a short install.
+      // Reported immediately rather than on the metering timer: someone is watching this in a UI or
+      // a CLI poll, and a 15s wait to learn it finished is most of a short action.
       await this.flush();
     }
+  }
+
+  private report(r: AppActionRequest, ok: boolean, error?: string): void {
+    this.pendingActions.push({ actionId: r.actionId, ok, ...(error ? { error } : {}) });
+  }
+
+  /**
+   * Dispatch one verb.
+   *
+   * The capability check is per METHOD, not per device, and that is the whole point of the optional
+   * members on `DeviceControl`: a tier can gain the ability to install without gaining the ability
+   * to launch, and the honest answer for the one it lacks is a named failure rather than a silent
+   * success. Only `install` touches the network, which is why the download lives here and not in
+   * the caller — `launch` and `uninstall` carry a package name and nothing else.
+   */
+  private async performAction(backend: DeviceBackend, r: AppActionRequest): Promise<void> {
+    const control = backend.control;
+    if (r.kind === 'install') {
+      if (!control.installApp) {
+        throw new Error(`${control.info.localId} cannot install apps: this device tier has no install path.`);
+      }
+      // Refused rather than defaulted: without a digest there is nothing to check the download
+      // against, and installing an unverified blob is the one thing this path exists to prevent.
+      const { sha256 } = r;
+      if (!sha256) throw new Error('the control plane offered an install with no digest to verify against');
+      await control.installApp(await this.fetchApk({ ...r, sha256 }));
+      return;
+    }
+    if (r.kind === 'launch') {
+      if (!control.launchApp) {
+        throw new Error(`${control.info.localId} cannot launch apps: this device tier has no launch path.`);
+      }
+      await control.launchApp(r.packageName);
+      return;
+    }
+    if (r.kind === 'uninstall') {
+      if (!control.uninstallApp) {
+        throw new Error(`${control.info.localId} cannot uninstall apps: this device tier has no uninstall path.`);
+      }
+      await control.uninstallApp(r.packageName);
+      return;
+    }
+    // A verb from a newer control plane. Reported as a failure rather than ignored: the row would
+    // otherwise stay PENDING and be re-offered on every beat forever.
+    throw new Error(`this worker does not know how to "${String((r as { kind: string }).kind)}" an app`);
   }
 
   /**
@@ -722,7 +774,7 @@ export class Agent {
    * and not a problem; it becomes one on a long-lived host, and the fix is a sweep by last-access,
    * not a smaller cache.
    */
-  private async fetchApk(r: AppInstallRequest): Promise<string> {
+  private async fetchApk(r: AppActionRequest & { sha256: string }): Promise<string> {
     const dir = this.appCacheDir();
     await mkdir(dir, { recursive: true });
     const finalPath = join(dir, `${r.sha256}.apk`);
@@ -734,10 +786,10 @@ export class Agent {
     }
 
     if (!this.state) throw new Error('not registered: cannot download an app');
-    // The install id is the authorization, not the worker token alone — the control plane will only
-    // serve a build this host is currently holding an install for.
+    // The action id is the authorization, not the worker token alone — the control plane will only
+    // serve a build this host is currently holding a pending INSTALL for.
     const url = `${this.opts.controlPlaneUrl}/v1/apps/${encodeURIComponent(r.appId)}/blob`
-      + `?installId=${encodeURIComponent(r.installId)}`;
+      + `?actionId=${encodeURIComponent(r.actionId)}`;
     const res = await fetch(url, { headers: { authorization: `Bearer ${this.state.workerToken}` } });
     if (!res.ok || !res.body) {
       throw new Error(`downloading the app failed: ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`);

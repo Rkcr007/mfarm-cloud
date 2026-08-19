@@ -632,6 +632,36 @@ export class CuttlefishDevice implements DeviceControl {
   }
 
   /**
+   * Bring an app to the foreground, without knowing which activity is its launcher.
+   *
+   * `monkey` resolves that from the package's own intent filters, which is why it is used here in
+   * preference to `am start -n <pkg>/<activity>` — the activity name is not something the control
+   * plane knows, and asking a user for it to click "Launch" would be absurd.
+   *
+   * **monkey exits 0 when it fails.** `** No activities found to run, monkey aborted.` comes back on
+   * stdout with a success code, so the output check below is not belt-and-braces — it is the only
+   * signal there is. A package with no launcher activity (a service-only APK, an SDK, a test APK)
+   * is the normal way to reach it.
+   */
+  async launchApp(packageName: string): Promise<void> {
+    const out = await run('adb', [
+      '-s', this.adbSerial, 'shell', 'monkey', '-p', packageName,
+      '-c', 'android.intent.category.LAUNCHER', '1',
+    ], process.cwd(), 60_000);
+    if (/No activities found|Error|Exception/i.test(out)) {
+      throw new Error(`could not launch ${packageName} on ${this.info.localId}: ${out.trim().split('\n').slice(-2).join(' ')}`);
+    }
+  }
+
+  async uninstallApp(packageName: string): Promise<void> {
+    const out = await run('adb', ['-s', this.adbSerial, 'uninstall', packageName], process.cwd(), 120_000);
+    // Same shape as install: adb has historically reported failure on stdout with a zero exit.
+    if (/^\s*(Failure|Error)/im.test(out)) {
+      throw new Error(`adb uninstall failed for ${packageName} on ${this.info.localId}: ${out.trim().split('\n').slice(-2).join(' ')}`);
+    }
+  }
+
+  /**
    * Input goes over the WebRTC data channel that Cuttlefish already serves, NOT through here.
    *
    * These methods exist for control-plane-initiated actions (health probes, cleanup between

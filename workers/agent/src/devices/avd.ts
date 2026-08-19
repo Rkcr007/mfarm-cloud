@@ -206,6 +206,23 @@ export class AvdDevice implements DeviceControl {
     }
   }
 
+  /** See the Cuttlefish backend for why `monkey`, and why its output must be read on success. */
+  async launchApp(packageName: string): Promise<void> {
+    const out = await this.adb([
+      'shell', 'monkey', '-p', packageName, '-c', 'android.intent.category.LAUNCHER', '1',
+    ], 60_000);
+    if (/No activities found|Error|Exception/i.test(out)) {
+      throw new Error(`could not launch ${packageName} on ${this.info.localId}: ${out.trim().split('\n').slice(-2).join(' ')}`);
+    }
+  }
+
+  async uninstallApp(packageName: string): Promise<void> {
+    const out = await this.adb(['uninstall', packageName], 120_000);
+    if (/^\s*(Failure|Error)/im.test(out)) {
+      throw new Error(`adb uninstall failed for ${packageName} on ${this.info.localId}: ${out.trim().split('\n').slice(-2).join(' ')}`);
+    }
+  }
+
   async tap(x: number, y: number): Promise<void> {
     await this.send(`input tap ${Math.round(x)} ${Math.round(y)}`);
   }

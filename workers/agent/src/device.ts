@@ -83,6 +83,19 @@ export interface DeviceControl {
    */
   installApp?(apkPath: string): Promise<void>;
 
+  /**
+   * Bring an installed app to the foreground. No-op-safe to call twice.
+   *
+   * Separate from `installApp` rather than an option on it, because the two fail for entirely
+   * different reasons — an install fails on the package, a launch fails on the *device* having no
+   * launcher activity for it — and a caller that wants "install then open" wants to know which of
+   * the two went wrong.
+   */
+  launchApp?(packageName: string): Promise<void>;
+
+  /** Remove an app and its data. Uninstalling something that is not there is an error, not a no-op. */
+  uninstallApp?(packageName: string): Promise<void>;
+
   tap(x: number, y: number): Promise<void>;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
   key(name: 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'): Promise<void>;
