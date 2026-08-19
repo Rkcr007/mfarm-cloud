@@ -23,7 +23,8 @@ import {
   reaperPromoted,
   reaperRuns,
 } from '../metrics.ts';
-import { appPool, systemPool } from '../db.ts';
+import { appPool, systemPool, withSystem } from '../db.ts';
+import { GIT_SHA, BUILT_AT, shortSha } from '../version.ts';
 import type { Pool } from 'pg';
 
 declare module 'fastify' {
@@ -90,6 +91,13 @@ async function probePool(pool: Pool): Promise<Error | null> {
  * The new exposure a cookie brings is that the browser attaches it to requests the user did not
  * make. That is answered by `SameSite=Strict` plus the CSRF check in the auth hook, not here.
  */
+/**
+ * When this process started, so the console can tell "the deploy restarted the API" from "the API
+ * has been up since yesterday and your change never shipped" — the two look identical in a version
+ * string alone when a redeploy lands the same SHA.
+ */
+const STARTED_AT = new Date().toISOString();
+
 export function requireTenant(req: FastifyRequest): { orgId: string } {
   if (!req.principal) throw unauthorized();
   if (req.principal.kind === 'worker') {
@@ -399,6 +407,34 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   // from a dead pod to a kubelet, so leaving it in the global bucket lets one noisy IP restart the
   // fleet. It costs nothing to serve, so exemption costs nothing either.
   app.get('/health', { config: { rateLimit: false } }, async () => ({ status: 'ok' }));
+
+  /**
+   * The running release: the commit this image was built from, when it was built, and the last
+   * migration the database has applied.
+   *
+   * AUTHENTICATED, unlike `/health`. A build SHA is not a secret in the way a credential is, but it
+   * names the exact source of an internet-facing service to anyone who asks, and the console — the
+   * only thing that needs it — is behind a session cookie anyway. `/health` stays anonymous because
+   * a liveness probe cannot present a credential; this has no such excuse.
+   *
+   * The migration row matters as much as the SHA. Code and schema deploy as one unit here (the
+   * compose stack runs `migrate` before `api`), and the failure worth catching is the one where
+   * they disagree — an image expecting a column that a half-applied migration never created.
+   */
+  app.get('/v1/version', async (req) => {
+    requireTenant(req);
+    const { rows } = await withSystem((c) => c.query<{ name: string; applied_at: Date }>(
+      'SELECT name, applied_at FROM schema_migrations ORDER BY name DESC LIMIT 1',
+    ));
+    return {
+      sha: GIT_SHA,
+      short: shortSha(),
+      builtAt: BUILT_AT,
+      startedAt: STARTED_AT,
+      migration: rows[0]?.name ?? null,
+      migratedAt: rows[0]?.applied_at ?? null,
+    };
+  });
 
   // /ready does NOT get that exemption, and the argument for /health does not transfer to it: this
   // endpoint does I/O. HOST defaults to 0.0.0.0 and the WebDriver hub has to be internet-facing on

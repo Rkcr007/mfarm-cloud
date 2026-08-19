@@ -18,3 +18,6 @@ deploy/secrets/
 # deploy/farm-up.sh state. Holds the minted tenant API key so a re-run does not mint another —
 # a live credential, and never a build input.
 deploy/.state/
+
+# Session scratch: worktrees, checkpoints, local agent config. Never part of a release.
+.claude/

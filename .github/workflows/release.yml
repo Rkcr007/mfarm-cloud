@@ -1,0 +1,82 @@
+# Build the control-plane image once, publish it, and let the box pull that exact thing.
+#
+# WHY THIS EXISTS. `deploy/docker-compose.prod.yml` used to say `build: context: ..`, so the box
+# compiled its own image out of whatever source happened to be sitting in `~/mfarm`. Nothing tied
+# the running container to a commit, which made "is my fix deployed?" a question you could only
+# answer by sshing in and reading a git log — so in practice nobody answered it. The artifact is now
+# built in one place, tagged with the commit that produced it, and carries that commit inside itself
+# (`/v1/version`).
+#
+# Only on `main`, and only when CI is green: this workflow is what makes a commit deployable, and a
+# deployable artifact from a red build is a trap left lying around for a future deploy.
+
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+# The default token can read the repo; publishing needs one more verb, and only this job gets it.
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Publish mfarm-api
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # `workflow_run` fires for failures too — that is the point of the event, and it means the guard
+    # is not optional.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Check out the commit CI actually tested
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # NOT the branch tip. Between CI finishing and this job starting, main can move; building
+          # the tip would publish an image tagged with a SHA whose tests never ran.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.6.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          # The SHA tag is the one deployments name. `latest` exists for a human typing a command by
+          # hand and is never what a deploy script should resolve — "latest" is not a version, it is
+          # a race.
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/mfarm-api:${{ github.event.workflow_run.head_sha }}
+            ghcr.io/${{ github.repository_owner }}/mfarm-api:latest
+          build-args: |
+            GIT_SHA=${{ github.event.workflow_run.head_sha }}
+            BUILT_AT=${{ github.event.workflow_run.updated_at }}
+          # The registry doubles as the layer cache, so a one-line change rebuilds the last layer
+          # and reuses `npm ci`.
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/mfarm-api:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/mfarm-api:buildcache,mode=max
+
+      - name: Say what is now deployable
+        run: |
+          echo "### Deployable" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "deploy/mfarm-deploy.sh ${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

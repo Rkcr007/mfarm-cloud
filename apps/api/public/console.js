@@ -1763,6 +1763,29 @@ async function checkReach() {
   }
 }
 
+/**
+ * The running release, in the header.
+ *
+ * Deliberately fails quiet — an API too old to know `/v1/version` still serves a perfectly good
+ * console, and a dash is a truthful answer to "which build is this?" when nothing said so.
+ */
+async function showBuild() {
+  const el = $('build');
+  try {
+    const v = await api('/v1/version');
+    el.textContent = v.short;
+    el.title = [
+      `commit ${v.sha}`,
+      v.builtAt ? `built ${new Date(v.builtAt).toLocaleString()}` : 'built locally',
+      `api up since ${new Date(v.startedAt).toLocaleString()}`,
+      v.migration ? `schema ${v.migration}` : 'schema unknown',
+    ].join('\n');
+  } catch {
+    el.textContent = '—';
+    el.title = 'this API does not report a build';
+  }
+}
+
 /* ---------------------------------------------------------------------------- boot */
 
 async function boot() {
@@ -1778,6 +1801,7 @@ async function boot() {
   $('who-avatar').textContent = (me.user.email || '?').slice(0, 1).toUpperCase();
   $('who-avatar').title = `${me.user.email} · ${me.org.name} · ${me.role}`;
   $('palette-kbd').textContent = navigator.platform?.startsWith('Mac') ? '⌘K' : 'Ctrl K';
+  void showBuild();
 
   state.route = parseHash();
   await refreshAll();

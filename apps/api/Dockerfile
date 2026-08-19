@@ -55,6 +55,19 @@ COPY apps/api ./apps/api
 # with EACCES on a deployment that looked fine until someone uploaded something.
 RUN mkdir -p /var/lib/mfarm/apps && chown -R node:node /var/lib/mfarm
 
+# THE IMAGE'S OWN IDENTITY, and it goes here — after the source — for two reasons. It changes on
+# every commit, so any earlier position would invalidate the dependency and source layers and turn a
+# one-line fix into a full rebuild. And it must describe the source ALREADY COPIED above: an ARG
+# read before the COPY would name a commit whose code is not necessarily what shipped.
+#
+# `unknown` is the default rather than a git call, because a build with no SHA passed genuinely does
+# not have a release identity and should say so. `/v1/version` reports whatever lands here, so a
+# lie here is a lie in the console header.
+ARG GIT_SHA=unknown
+ARG BUILT_AT=
+ENV MFARM_GIT_SHA=$GIT_SHA
+ENV MFARM_BUILT_AT=$BUILT_AT
+
 # Runs as the image's built-in unprivileged user. The one path it writes to is APP_STORE_DIR above,
 # which is a mounted volume; everything else this process knows is in Postgres.
 USER node

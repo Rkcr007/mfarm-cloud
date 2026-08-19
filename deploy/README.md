@@ -168,6 +168,75 @@ and a dropped table. It does not protect you from the disk, the machine, or the 
 somewhere else — `rclone sync`, `restic`, an S3 bucket, another box on the tailnet — and do it before
 you need it rather than after.
 
+## Shipping a change
+
+One command, and it names a commit:
+
+```bash
+deploy/mfarm-deploy.sh 91c171d              # the API, onto that commit
+deploy/mfarm-deploy.sh 91c171d --worker     # ...and the worker agent too
+deploy/mfarm-deploy.sh 3a41105              # rollback is the same command, older sha
+```
+
+**The commit is the unit of deployment, not the branch and not "the stack".** Push to `main`, CI
+runs, and on green `.github/workflows/release.yml` builds one image tagged with that exact commit
+and pushes it to `ghcr.io/rkcr007/mfarm-api`. The box pulls that image — it never builds its own any
+more, because an image built on the box answers to nothing: two builds of "the same" source can
+differ, and neither can be pointed at afterwards.
+
+`mfarm-deploy.sh` then does four things, in an order chosen by how they fail:
+
+1. **Resolves the image.** Pull from the registry; if the box has no registry credential yet, build
+   locally from that pinned commit and *say so* — a local build is not the artifact CI tested.
+2. **Migrates.** A separate one-shot with `restart: "no"`, so a half-applied migration stays failed
+   and visible. If this step fails the API is never restarted, and the old code keeps serving the
+   old schema — which is the correct outcome.
+3. **Restarts only `api`.** `--no-deps`, so Postgres keeps its connections and the backup sidecar
+   keeps its schedule. The worker is not in this compose file at all, so its devices stay booted.
+4. **Asks the running API what it is.** `GET /v1/version` must report the commit that was requested,
+   or the script fails loudly. Every deployment mechanism that has bitten this project bit it by
+   succeeding quietly while changing nothing.
+
+### Knowing what is deployed, without asking anyone
+
+`/v1/version` returns the commit baked into the image at build time, when it was built, when the
+process started, and the last migration the database applied. The console shows the short sha in its
+header, with the rest on hover. **That badge is the point of the whole pipeline**: "is my fix live?"
+is a browser refresh rather than an ssh session, and a redeploy that lands the same sha is still
+visible because the process start time moves.
+
+The sha is baked in at build time rather than read from a checkout at runtime, deliberately. A
+process that reports the git state of the directory it happens to be running in reports the
+deployer's intent; a process that carries the sha it was built from cannot misreport its own
+contents.
+
+### Registry credentials
+
+The image is private, like the repository. Until the box has a credential, `mfarm-deploy.sh` falls
+back to building locally — correct, but not the artifact CI tested. To close that gap, create a
+GitHub token with `read:packages` and, once per box:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u rkcr007 --password-stdin
+```
+
+### The worker is a service, not a terminal
+
+`deploy/install-worker-service.sh` installs `mfarm-worker.service` and stops the tmux session it
+replaces. After that the agent survives reboots and closed ssh sessions, and its log is
+`journalctl -u mfarm-worker -f`. `farm-up.sh` defers to the unit when it is installed rather than
+starting a second agent onto the same devices.
+
+Restarting the worker is cheaper than it looks: `bringUp()` adopts already-running cvd groups in
+about 0.1s, so shipping a worker fix does not reboot a device.
+
+### What this does not do
+
+Auto-deploy on green. It was considered and declined: the value of a manual step is that somebody
+decides *when* the farm changes underneath a running session. Rollback needs no plan because images
+are immutable and tagged by commit — but **migrations do not roll back**, so moving code back past a
+migration it depends on is a decision, not a command.
+
 ## Backups
 
 Written by the `backup` sidecar, which runs the same image as the server so `pg_dump` always matches

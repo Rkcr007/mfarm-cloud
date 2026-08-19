@@ -94,10 +94,11 @@ services:
   # rather than looping, because the second attempt of a half-applied migration is rarely better than
   # the first.
   migrate:
-    build:
-      context: ..
-      dockerfile: apps/api/Dockerfile
-    image: mfarm-api:${MFARM_VERSION:-latest}
+    # No `build:` any more. The image is built once by `.github/workflows/release.yml` from the
+    # commit CI tested and pulled here by `deploy/mfarm-deploy.sh`; a box that can build its own
+    # image is a box whose running code answers to nothing. The deploy script's fallback builds
+    # locally and tags the same name, so this reference is correct either way.
+    image: ${MFARM_IMAGE:-ghcr.io/rkcr007/mfarm-api:latest}
     restart: "no"
     depends_on:
       postgres:
@@ -109,10 +110,7 @@ services:
     command: ["node", "apps/api/scripts/migrate.mjs"]
 
   api:
-    build:
-      context: ..
-      dockerfile: apps/api/Dockerfile
-    image: mfarm-api:${MFARM_VERSION:-latest}
+    image: ${MFARM_IMAGE:-ghcr.io/rkcr007/mfarm-api:latest}
     restart: unless-stopped
     depends_on:
       postgres:

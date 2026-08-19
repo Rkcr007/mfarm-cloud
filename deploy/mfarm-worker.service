@@ -1,0 +1,49 @@
+# The worker agent, supervised by the machine rather than by a terminal.
+#
+# It ran in tmux until now, which meant it died with whoever started it and never came back after a
+# reboot — so a farm could be perfectly healthy at the cvd layer with nothing registering it. This
+# unit is the fix, and it is a unit rather than a container on purpose: the agent needs /dev/kvm,
+# the cvd instance database (which is per-uid), adb, and the host's own network. Containerising it
+# would mean handing a container all of that, which is most of the host.
+#
+# Installed by deploy/install-worker-service.sh, which writes the environment file it reads.
+
+[Unit]
+Description=MFARM worker agent (Cuttlefish devices, Appium, automation gateway)
+Documentation=https://github.com/Rkcr007/mfarm-cloud/blob/main/workers/agent/README.md
+# Docker holds the control plane it registers with. Wanted, not Required: the agent retries
+# registration, and a farm whose API is briefly down should not become a farm with no worker.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rkcr070707
+# cvd's instance database is per-uid and lives under this home; running as anyone else finds no
+# devices and cheerfully builds a second set.
+WorkingDirectory=/home/rkcr070707/mfarm
+EnvironmentFile=/home/rkcr070707/mfarm/deploy/.state/worker.env
+ExecStart=/usr/bin/node --experimental-strip-types workers/agent/src/index.ts
+
+# The agent exits non-zero to withdraw itself (index.ts): a capability it can no longer honour is
+# reported by dying, so that registration re-runs truthfully on the way back in. Restarting it is
+# therefore correct — but not instantly, or a host problem becomes a registration loop.
+Restart=always
+RestartSec=10s
+# Five failures in five minutes means the problem is not transient. Stopping lets it be seen.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Journal, not a log file. `journalctl -u mfarm-worker -f` replaces "attach to my tmux session",
+# which is the entire reason a session ending used to take the farm's observability with it.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mfarm-worker
+
+# Devices take minutes to cold boot and the agent brings them up before it registers; a stop that
+# does not wait for that would leave cvd groups half-started.
+TimeoutStartSec=900
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

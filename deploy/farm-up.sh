@@ -261,7 +261,17 @@ bridge_ip="$(docker network inspect mfarm_default -f '{{range .IPAM.Config}}{{.G
 [ -n "$bridge_ip" ] || die "could not read the compose network's gateway address; is the stack up?"
 note "worker binds to $bridge_ip (the host, as the API container sees it)"
 
-if tmux has-session -t mfarm-worker 2>/dev/null; then
+# SYSTEMD WINS IF IT IS INSTALLED. `deploy/install-worker-service.sh` moves the agent out of tmux and
+# under the machine's own supervision, which is what makes it survive a reboot and a closed ssh
+# session. Starting a second copy here would put two agents on one set of devices and one set of
+# ports — the shape of failure that is hardest to read, because both look healthy on their own.
+if systemctl is-active --quiet mfarm-worker 2>/dev/null; then
+  note "worker runs under systemd — leaving it alone (journalctl -u mfarm-worker -f)"
+elif systemctl is-enabled --quiet mfarm-worker 2>/dev/null; then
+  say "Starting the worker (systemd)"
+  sudo systemctl start mfarm-worker
+  note "journalctl -u mfarm-worker -f"
+elif tmux has-session -t mfarm-worker 2>/dev/null; then
   note "session 'mfarm-worker' already running — leaving it alone (tmux kill-session -t mfarm-worker to replace it)"
 else
   tmux new-session -d -s mfarm-worker -c "$REPO_ROOT" \

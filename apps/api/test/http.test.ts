@@ -607,6 +607,26 @@ describe('rate limiting', () => {
   });
 });
 
+describe('the running release', () => {
+  test('reports the build it was compiled from and the schema it is talking to', async () => {
+    const r = await app.inject({ method: 'GET', url: '/v1/version', headers: auth(keyA) });
+    assert.equal(r.statusCode, 200);
+    const v = r.json();
+    // `unknown`/`dev` in a test run is the honest answer — this process was started from a working
+    // tree, not built from a commit — and asserting it keeps the fallback from rotting into
+    // something that invents a SHA.
+    assert.equal(typeof v.sha, 'string');
+    assert.equal(v.short, v.sha === 'unknown' ? 'dev' : v.sha.slice(0, 7));
+    assert.ok(v.startedAt, 'a redeploy that lands the same commit is only visible through this');
+    assert.match(v.migration, /^\d{3}_.*\.sql$/, 'the schema half, not just the code half');
+  });
+
+  test('an anonymous caller does not learn which commit is serving the internet', async () => {
+    const r = await app.inject({ method: 'GET', url: '/v1/version' });
+    assert.equal(r.statusCode, 401);
+  });
+});
+
 describe('worker events', () => {
   test('metering batches are idempotent across retries', async () => {
     await clearDevices();
