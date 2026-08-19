@@ -308,9 +308,12 @@ jobs:
     name: Alert rules and scrape config
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    container:
-      image: prom/prometheus:v2.55.1
-      options: --user root --entrypoint ""
+    # NOT `container:` any more, and the reason is worth keeping. Running the whole job inside
+    # prom/prometheus meant GitHub had to execute its own JavaScript actions in that image, and when
+    # the runner moved to node24 every step died before reaching promtool with
+    # `exec /__e/node24/bin/node: no such file or directory`. The image is Prometheus's to build,
+    # not ours to keep in step with GitHub's runtime. So the job runs on the normal runner and calls
+    # promtool through docker, where the only contract is a file path.
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -320,13 +323,24 @@ jobs:
       - name: Check rules and config
         run: |
           set -eu
-          promtool check rules deploy/observability/alerts.yml
           # `check config` resolves rule_files and credentials_file against absolute paths that only
-          # exist inside the running container, so stage both where the config expects them.
-          mkdir -p /etc/prometheus /run/secrets
-          cp deploy/observability/alerts.yml /etc/prometheus/alerts.yml
-          echo ci-token > /run/secrets/metrics_token
-          promtool check config deploy/observability/prometheus.yml
+          # exist inside the running container, so stage both where the config expects them and
+          # mount the staging directory at those paths.
+          mkdir -p ci-prometheus ci-secrets
+          cp deploy/observability/alerts.yml ci-prometheus/alerts.yml
+          echo ci-token > ci-secrets/metrics_token
+          docker run --rm \
+            -v "$PWD:/work" \
+            -v "$PWD/ci-prometheus:/etc/prometheus" \
+            -v "$PWD/ci-secrets:/run/secrets" \
+            -w /work --entrypoint promtool \
+            prom/prometheus:v2.55.1 check rules deploy/observability/alerts.yml
+          docker run --rm \
+            -v "$PWD:/work" \
+            -v "$PWD/ci-prometheus:/etc/prometheus" \
+            -v "$PWD/ci-secrets:/run/secrets" \
+            -w /work --entrypoint promtool \
+            prom/prometheus:v2.55.1 check config deploy/observability/prometheus.yml
 
   yaml-lint:
     name: Workflow hygiene (YAML, pins, shell syntax)
