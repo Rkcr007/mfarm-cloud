@@ -98,6 +98,10 @@ services:
     # commit CI tested and pulled here by `deploy/mfarm-deploy.sh`; a box that can build its own
     # image is a box whose running code answers to nothing. The deploy script's fallback builds
     # locally and tags the same name, so this reference is correct either way.
+    # The `:latest` fallback here is a TRAP, and it is defused in deploy/.env rather than by removing
+    # it: `mfarm-deploy.sh` writes MFARM_IMAGE into that file, and compose reads it automatically, so
+    # even a bare `docker compose up -d api` now serves the deployed commit. Removing the default
+    # instead would break `farm-up.sh`, which builds its own image and never sets the variable.
     image: ${MFARM_IMAGE:-ghcr.io/rkcr007/mfarm-api:latest}
     restart: "no"
     depends_on:

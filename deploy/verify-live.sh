@@ -53,6 +53,15 @@ VERSION="$(curl -s --max-time 5 -H "Authorization: Bearer $KEY" "$API/v1/version
 SHA="$(printf '%s' "$VERSION" | sed -n 's/.*"short":"\([^"]*\)".*/\1/p')"
 [ -n "$SHA" ] && ok "running commit $SHA" || warn "could not read /v1/version (is deploy/.state/api_key present?)"
 
+# The image tag, separately from the commit, because `:latest` is how this deployment lies. A bare
+# `docker compose up -d api` used to fall back to it and serve older code while reporting success.
+RUNNING_IMAGE="$(docker inspect mfarm-api-1 --format '{{.Config.Image}}' 2>/dev/null || true)"
+case "$RUNNING_IMAGE" in
+  *:latest) bad "the API is running $RUNNING_IMAGE — a floating tag, not a deployed commit. Run deploy/mfarm-deploy.sh <sha>."; FAIL=1 ;;
+  "") : ;;
+  *) ok "image pinned to a commit (${RUNNING_IMAGE##*:})" ;;
+esac
+
 # The public route is a separate question from the API being up: Caddy terminates TLS and proxies
 # both the console and /dp, and a certificate that failed to renew looks exactly like a dead API.
 if curl -sf --max-time 15 "$HOST_PUBLIC/health" >/dev/null 2>&1; then

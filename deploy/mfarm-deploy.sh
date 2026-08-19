@@ -90,6 +90,20 @@ fi
 mkdir -p "$STATE_DIR"
 printf '%s\n' "$IMAGE" > "$STATE_DIR/deployed_image"
 
+# AND INTO .env, which is the half that actually works. `deployed_image` is a record; `.env` is what
+# `docker compose` reads without being told. Without this line the compose file's `:latest` fallback
+# applies to any bare `docker compose up -d api`, silently rolling the API back to an older build —
+# a "deploy" that exits zero and serves the wrong code. That happened twice before this line existed,
+# the second time in the middle of moving the farm to its domain.
+ENV_FILE="$REPO_ROOT/deploy/.env"
+if [ -f "$ENV_FILE" ]; then
+  if grep -q '^MFARM_IMAGE=' "$ENV_FILE"; then
+    sed -i "s|^MFARM_IMAGE=.*|MFARM_IMAGE=$IMAGE|" "$ENV_FILE"
+  else
+    printf '\n# Written by deploy/mfarm-deploy.sh. Makes a bare `docker compose up` serve the\n# deployed commit instead of falling back to :latest.\nMFARM_IMAGE=%s\n' "$IMAGE" >> "$ENV_FILE"
+  fi
+fi
+
 # ---------------------------------------------------------------- 2. schema, then code
 #
 # In that order, and as separate steps, because they fail differently. `migrate` is `restart: "no"`
