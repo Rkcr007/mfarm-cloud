@@ -46,10 +46,10 @@ export interface FakeControlPlaneOptions {
   /** Answer GET without a data-plane block, as a control plane older than the known-issue-9 fix
    *  does. The CLI must degrade rather than crash. */
   omitPolledDataPlane?: boolean;
-  /** States returned by GET /v1/installs/:id, consumed in order; the last one repeats. */
-  installStates?: string[];
-  /** Error text attached to a FAILED install, as a worker would have reported it. */
-  installError?: string;
+  /** States returned by GET /v1/app-actions/:id, consumed in order; the last one repeats. */
+  actionStates?: string[];
+  /** Error text attached to a FAILED action, as a worker would have reported it. */
+  actionError?: string;
   /** Answer POST /v1/apps with this status instead of 201. 200 means "already in the library". */
   uploadStatus?: number;
 }
@@ -76,7 +76,7 @@ export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Pro
   const createStatuses = [...(opts.createStatuses ?? [201])];
   const pollStates = [...(opts.pollStates ?? ['ACTIVE'])];
   const region = opts.region ?? 'us-east';
-  const installStates = [...(opts.installStates ?? ['INSTALLED'])];
+  const actionStates = [...(opts.actionStates ?? ['DONE'])];
   const requests: RecordedRequest[] = [];
 
   const server: Server = createServer((req, res) => {
@@ -154,22 +154,23 @@ export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Pro
           }],
         });
       }
-      if (req.method === 'POST' && /^\/v1\/sessions\/[^/]+\/installs$/.test(path)) {
+      if (req.method === 'POST' && /^\/v1\/sessions\/[^/]+\/app-actions$/.test(path)) {
+        const kind = (body as { kind?: string } | null)?.kind ?? 'install';
         return json(res, 202, {
-          install: {
-            id: INSTALL_ID, appId: APP_ID, sessionId: SESSION_ID, deviceId: DEVICE_ID,
+          action: {
+            id: INSTALL_ID, kind, appId: APP_ID, sessionId: SESSION_ID, deviceId: DEVICE_ID,
             state: 'PENDING', error: null,
           },
           message: 'Queued.',
         });
       }
-      if (req.method === 'GET' && path.startsWith('/v1/installs/')) {
-        const state = installStates.length > 1 ? installStates.shift()! : installStates[0]!;
+      if (req.method === 'GET' && path.startsWith('/v1/app-actions/')) {
+        const state = actionStates.length > 1 ? actionStates.shift()! : actionStates[0]!;
         return json(res, 200, {
-          install: {
-            id: INSTALL_ID, appId: APP_ID, sessionId: SESSION_ID, deviceId: DEVICE_ID,
+          action: {
+            id: INSTALL_ID, kind: 'install', appId: APP_ID, sessionId: SESSION_ID, deviceId: DEVICE_ID,
             state,
-            error: state === 'FAILED' ? (opts.installError ?? 'adb: Failure [INSTALL_FAILED_OLDER_SDK]') : null,
+            error: state === 'FAILED' ? (opts.actionError ?? 'adb: Failure [INSTALL_FAILED_OLDER_SDK]') : null,
           },
         });
       }

@@ -78,15 +78,15 @@ describe('mfarm app install', () => {
   test('waits out the queue and exits 0 when the device has it', async () => {
     // PENDING first, because that is always the first answer: the worker collects the job on its
     // next heartbeat, so an install that is instantly INSTALLED would not exercise the wait at all.
-    const cp = await startControlPlane({ installStates: ['PENDING', 'INSTALLED'] });
+    const cp = await startControlPlane({ actionStates: ['PENDING', 'DONE'] });
     try {
       const res = await runCli([
         'app', 'install', APP_ID, '--session', SESSION_ID, '--wait', '10', '--api', cp.url,
       ]);
       assert.equal(res.code, 0, res.stderr);
-      assert.equal(res.stdout.trim(), 'INSTALLED');
-      assert.equal(cp.of('POST', `/v1/sessions/${SESSION_ID}/installs`).length, 1);
-      assert.ok(cp.of('GET', `/v1/installs/${INSTALL_ID}`).length >= 2);
+      assert.equal(res.stdout.trim(), 'DONE');
+      assert.equal(cp.of('POST', `/v1/sessions/${SESSION_ID}/app-actions`).length, 1);
+      assert.ok(cp.of('GET', `/v1/app-actions/${INSTALL_ID}`).length >= 2);
     } finally {
       await cp.close();
     }
@@ -94,8 +94,8 @@ describe('mfarm app install', () => {
 
   test('a failed install exits non-zero with the reason the worker reported', async () => {
     const cp = await startControlPlane({
-      installStates: ['FAILED'],
-      installError: 'adb: Failure [INSTALL_FAILED_NO_MATCHING_ABIS]',
+      actionStates: ['FAILED'],
+      actionError: 'adb: Failure [INSTALL_FAILED_NO_MATCHING_ABIS]',
     });
     try {
       const res = await runCli([
@@ -111,14 +111,14 @@ describe('mfarm app install', () => {
   test('--wait 0 queues and returns success without polling', async () => {
     // For a script that wants to fire off an install and check it later. Not waiting is a choice
     // the caller made, so it is not a failure.
-    const cp = await startControlPlane({ installStates: ['PENDING'] });
+    const cp = await startControlPlane({ actionStates: ['PENDING'] });
     try {
       const res = await runCli([
         'app', 'install', APP_ID, '--session', SESSION_ID, '--wait', '0', '--api', cp.url,
       ]);
       assert.equal(res.code, 0, res.stderr);
       assert.equal(res.stdout.trim(), 'PENDING');
-      assert.equal(cp.of('GET', `/v1/installs/${INSTALL_ID}`).length, 0);
+      assert.equal(cp.of('GET', `/v1/app-actions/${INSTALL_ID}`).length, 0);
     } finally {
       await cp.close();
     }
@@ -126,7 +126,7 @@ describe('mfarm app install', () => {
 
   test('giving up waiting is a failure, and says so as itself', async () => {
     // Still PENDING when the clock runs out. Exiting 0 here would tell CI the app is installed.
-    const cp = await startControlPlane({ installStates: ['PENDING'] });
+    const cp = await startControlPlane({ actionStates: ['PENDING'] });
     try {
       const res = await runCli([
         'app', 'install', APP_ID, '--session', SESSION_ID, '--wait', '2', '--api', cp.url,
@@ -155,13 +155,50 @@ describe('mfarm app install', () => {
   test('MFARM_SESSION_ID is enough, which is what makes it usable inside `mfarm run`', async () => {
     // `mfarm run` puts the session id in the child's environment, so a script it launches can
     // install onto the device the run already holds without being told which one that is.
-    const cp = await startControlPlane({ installStates: ['INSTALLED'] });
+    const cp = await startControlPlane({ actionStates: ['DONE'] });
     try {
       const res = await runCli(['app', 'install', APP_ID, '--api', cp.url], {
         env: { MFARM_SESSION_ID: SESSION_ID },
       });
       assert.equal(res.code, 0, res.stderr);
-      assert.equal(cp.of('POST', `/v1/sessions/${SESSION_ID}/installs`).length, 1);
+      assert.equal(cp.of('POST', `/v1/sessions/${SESSION_ID}/app-actions`).length, 1);
+    } finally {
+      await cp.close();
+    }
+  });
+});
+
+describe('mfarm app launch / uninstall', () => {
+  test('the verb is sent as the action kind, not inferred by the server', async () => {
+    const cp = await startControlPlane({ actionStates: ['DONE'] });
+    try {
+      for (const verb of ['launch', 'uninstall']) {
+        const res = await runCli([
+          'app', verb, APP_ID, '--session', SESSION_ID, '--wait', '10', '--api', cp.url,
+        ]);
+        assert.equal(res.code, 0, res.stderr);
+      }
+      const sent = cp.of('POST', `/v1/sessions/${SESSION_ID}/app-actions`);
+      assert.deepEqual(sent.map((r) => (r.body as { kind: string }).kind), ['launch', 'uninstall']);
+    } finally {
+      await cp.close();
+    }
+  });
+
+  test('a failed launch names the verb that failed, not "install"', async () => {
+    // The message a service-only APK produces. Reporting it as an install failure would send
+    // someone to look at a build that installed perfectly well.
+    const cp = await startControlPlane({
+      actionStates: ['FAILED'],
+      actionError: '** No activities found to run, monkey aborted.',
+    });
+    try {
+      const res = await runCli([
+        'app', 'launch', APP_ID, '--session', SESSION_ID, '--wait', '10', '--api', cp.url,
+      ]);
+      assert.equal(res.code, 1);
+      assert.match(res.stderr, /launch failed/);
+      assert.match(res.stderr, /No activities found/);
     } finally {
       await cp.close();
     }

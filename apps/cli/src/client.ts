@@ -97,12 +97,15 @@ export interface UploadResult {
   deduplicated: boolean;
 }
 
-export interface InstallSummary {
+export type AppActionKind = 'install' | 'launch' | 'uninstall';
+
+export interface ActionSummary {
   id: string;
+  kind: AppActionKind | string;
   appId: string;
   sessionId: string;
   deviceId: string;
-  state: 'PENDING' | 'INSTALLED' | 'FAILED' | string;
+  state: 'PENDING' | 'DONE' | 'FAILED' | string;
   error: string | null;
   requestedAt?: string;
   finishedAt?: string | null;
@@ -341,27 +344,27 @@ export class ControlPlaneClient {
   }
 
   /**
-   * Ask for a build to be installed onto the device a session holds.
+   * Ask for a build to be installed, launched or uninstalled on the device a session holds.
    *
    * Returns as soon as the job exists, which is the honest shape: nothing has reached the device
-   * yet. The worker collects it on its next heartbeat — poll `getInstall` for the outcome.
+   * yet. The worker collects it on its next heartbeat — poll `getAction` for the outcome.
    */
-  async requestInstall(sessionId: string, appId: string): Promise<InstallSummary> {
-    const res = await this.request('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/installs`, {
-      body: { appId },
+  async requestAction(sessionId: string, appId: string, kind: AppActionKind = 'install'): Promise<ActionSummary> {
+    const res = await this.request('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/app-actions`, {
+      body: { appId, kind },
     });
-    const payload = res.body as { install?: InstallSummary };
-    if (!payload?.install?.id) {
-      throw new TransportError(`Malformed install response: ${snippet(res.text)}`, 1);
+    const payload = res.body as { action?: ActionSummary };
+    if (!payload?.action?.id) {
+      throw new TransportError(`Malformed app-action response: ${snippet(res.text)}`, 1);
     }
-    return payload.install;
+    return payload.action;
   }
 
-  async getInstall(installId: string): Promise<InstallSummary> {
-    const res = await this.request('GET', `/v1/installs/${encodeURIComponent(installId)}`);
-    const payload = res.body as { install?: InstallSummary };
-    if (!payload?.install?.id) throw new TransportError(`Malformed install response: ${snippet(res.text)}`, 1);
-    return payload.install;
+  async getAction(actionId: string): Promise<ActionSummary> {
+    const res = await this.request('GET', `/v1/app-actions/${encodeURIComponent(actionId)}`);
+    const payload = res.body as { action?: ActionSummary };
+    if (!payload?.action?.id) throw new TransportError(`Malformed app-action response: ${snippet(res.text)}`, 1);
+    return payload.action;
   }
 
   private async request(

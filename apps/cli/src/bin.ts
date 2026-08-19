@@ -39,6 +39,8 @@ USAGE
   mfarm app upload <file.apk>                  add a build to your organisation's library
   mfarm app list [--package <name>]            list builds
   mfarm app install <app-id> --session <id>    install a build onto the device that session holds
+  mfarm app launch <app-id> --session <id>     open it on that device
+  mfarm app uninstall <app-id> --session <id>  remove it from that device
   mfarm --version | --help
 
 GLOBAL OPTIONS
@@ -60,10 +62,10 @@ DEVICES OPTIONS
   --region <r>  --platform <android|ios>  --state <s>   filters, all optional
 
 APP OPTIONS
-  --session <id>    which session's device to install onto (app install; required)
+  --session <id>    which session's device to act on (app install/launch/uninstall; required)
   --package <name>  filter the library to one package        (app list)
-  --wait <seconds>  wait for the install to finish, 0 to return as soon as it is queued
-                    (app install, default ${DEFAULT_INSTALL_WAIT_SECONDS})
+  --wait <seconds>  wait for the action to finish, 0 to return as soon as it is queued
+                    (app install/launch/uninstall, default ${DEFAULT_INSTALL_WAIT_SECONDS})
 
 ENVIRONMENT GIVEN TO THE CHILD
   MFARM_SESSION_ID  MFARM_DEVICE_ID  MFARM_REGION
@@ -321,43 +323,54 @@ async function appCommand(flags: Flags, rest: string[]): Promise<number> {
     return 0;
   }
 
-  if (sub === 'install') {
-    if (!target) throw new UsageError('mfarm app install needs an app id. Get one from `mfarm app list`.');
+  if (sub === 'install' || sub === 'launch' || sub === 'uninstall') {
+    if (!target) throw new UsageError(`mfarm app ${sub} needs an app id. Get one from \`mfarm app list\`.`);
     const sessionId = text(flags.session, process.env.MFARM_SESSION_ID);
     if (!sessionId) {
-      throw new UsageError('No session. Pass --session <id>, or set MFARM_SESSION_ID — an install needs a device you already hold.');
+      throw new UsageError(`No session. Pass --session <id>, or set MFARM_SESSION_ID — a ${sub} needs a device you already hold.`);
     }
     const waitSeconds = integer('--wait', text(flags.wait), DEFAULT_INSTALL_WAIT_SECONDS, 0, 3_600);
 
-    let install = await c.requestInstall(sessionId, target);
-    if (!g.quiet) process.stderr.write(`mfarm: queued install ${install.id}\n`);
+    let action = await c.requestAction(sessionId, target, sub);
+    if (!g.quiet) process.stderr.write(`mfarm: queued ${sub} ${action.id}\n`);
 
     if (waitSeconds > 0) {
       const deadline = Date.now() + waitSeconds * 1000;
-      while (install.state === 'PENDING' && Date.now() < deadline) {
+      while (action.state === 'PENDING' && Date.now() < deadline) {
         await sleep(INSTALL_POLL_MS);
-        install = await c.getInstall(install.id);
+        action = await c.getAction(action.id);
       }
     }
 
-    if (g.json) process.stdout.write(`${JSON.stringify({ install })}\n`);
-    else process.stdout.write(`${install.state}\n`);
+    if (g.json) process.stdout.write(`${JSON.stringify({ action })}\n`);
+    else process.stdout.write(`${action.state}\n`);
 
     // Exit code carries the outcome, because this is a thing scripts branch on. A still-PENDING
-    // install is not a failure of the install — it is this command giving up waiting — so it is
+    // action is not a failure of the action — it is this command giving up waiting — so it is
     // reported as its own case rather than folded into either success or failure.
-    if (install.state === 'INSTALLED') return 0;
-    if (install.state === 'FAILED') {
-      process.stderr.write(`mfarm: install failed: ${install.error ?? 'no reason reported'}\n`);
+    if (action.state === 'DONE') return 0;
+    if (action.state === 'FAILED') {
+      process.stderr.write(`mfarm: ${sub} failed: ${action.error ?? 'no reason reported'}\n`);
       return EXIT_FAILURE;
     }
     if (!g.quiet) {
-      process.stderr.write(`mfarm: install ${install.id} is still pending after ${waitSeconds}s. Poll it with \`mfarm app install\`'s id.\n`);
+      process.stderr.write(`mfarm: ${sub} ${action.id} is still pending after ${waitSeconds}s. Poll it with \`mfarm app status ${action.id}\`.\n`);
     }
     return waitSeconds === 0 ? 0 : EXIT_FAILURE;
   }
 
-  throw new UsageError('Usage: mfarm app upload <file.apk> | mfarm app list | mfarm app install <app-id> --session <id>');
+  if (sub === 'status') {
+    if (!target) throw new UsageError('mfarm app status needs an action id.');
+    const action = await c.getAction(target);
+    if (g.json) process.stdout.write(`${JSON.stringify({ action })}\n`);
+    else process.stdout.write(`${action.state}${action.error ? ` — ${action.error}` : ''}\n`);
+    return action.state === 'FAILED' ? EXIT_FAILURE : 0;
+  }
+
+  throw new UsageError(
+    'Usage: mfarm app upload <file.apk> | mfarm app list | ' +
+    'mfarm app install|launch|uninstall <app-id> --session <id> | mfarm app status <action-id>',
+  );
 }
 
 function appLine(a: AppSummary): string {
