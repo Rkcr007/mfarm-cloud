@@ -10,6 +10,14 @@ supersedes: []
 resolves: [HANDOFF blocker 6]
 ---
 
+> **Update 2026-08-19 — implemented and extended by [ADR-0007](0007-live-view-signaling-relay.md).**
+> Everything decided here now exists and has run on hardware: coturn with per-session credentials,
+> the split bind, and a browser driving a real device without client software. ADR-0007 answers the
+> question this one left open — how the browser and the device *negotiate* — and records two things
+> measurement contradicted: relayed media was not needed on the LAN path (a direct candidate won),
+> and a snapshot-restored device publishes no display at all, which turns "media reachability" into
+> a reset-mode decision this ADR could not have anticipated.
+
 ## Context
 
 `dataplane.ts` carries control and input. **Media is not proxied**: the browser negotiates WebRTC

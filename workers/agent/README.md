@@ -18,6 +18,10 @@ npm start         # requires the env below
 | `CF_INSTANCES` | no | instances to start, default 1 |
 | `AVD_NAME` | AVD fallback | only used when Cuttlefish is unavailable |
 | `DATA_PLANE_PORT` | no | default 8080 |
+| `DATA_PLANE_BIND_HOST` | no | where the data plane binds. **Defaults to loopback**, which is right when the console's ingress proxies `/dp` from the same box; set it to the VPC address when the proxy is elsewhere (ADR-0007) |
+| `AUTOMATION_BIND_HOST` | no | where the automation gateway binds. Only the hub needs to reach it, so it belongs on the docker bridge or loopback. Both fall back to the older shared `BIND_HOST` |
+| `CF_OPERATOR_URL` | no | cvd's WebRTC operator, default `http://127.0.0.1:1080`. **Must stay on loopback** — it is unauthenticated device control, and the worker relays a viewer's signalling to it |
+| `CF_RESET_MODE` | no | `snapshot` (default, ~10s recycle, **no live view**) or `powerwash` (~40–80s, live view works). A snapshot-restored Cuttlefish publishes no display — see ADR-0007 |
 | `APPIUM_ENABLED` | no | supervise an Appium 2 server for the device (see WebDriver below) |
 | `APPIUM_PATH` | no | binary to spawn, default `appium` on PATH |
 | `APPIUM_BASE_PORT` | no | first port of the derived range, default 4723 |
@@ -246,7 +250,11 @@ unverified until there is hardware.
 
 ## Not yet built
 
-Logcat streaming and video recording — install, launch and uninstall are done, see above.
+~~Logcat streaming~~ — **done** (ADR-0007): `captureLogcat` on both backends, streamed live to the
+console over the data plane. Not persisted anywhere; there is still no artifact store. Screenshots
+are done too (`screenshot`, one PNG on demand). **Video recording is not**, and `recording` was
+removed from the capability list rather than left as a claim — install, launch and uninstall are
+done, see above.
 `resolveDeviceIds`
 returns an empty map — the agent currently learns a device's control-plane uuid from the signed token
 that arrives for it, which is authenticated and therefore trustworthy, but a future protocol revision

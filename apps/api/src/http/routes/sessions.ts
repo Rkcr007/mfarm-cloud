@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, release } from '../../allocator.ts';
 import { mintSessionToken, DEFAULT_TTL_SECONDS } from '../../tokens.ts';
+import { mintIce, type IceBlock } from '../../turn.ts';
+import { loadConfig } from '../../config.ts';
 import { requireTenant } from '../server.ts';
 import { notFound, badRequest } from '../errors.ts';
 import { idempotencyKey, claim, complete, abandon } from '../idempotency.ts';
@@ -49,6 +51,25 @@ interface HostRow {
   id: string;
   endpoint: string | null;
   region: string;
+}
+
+/**
+ * Where a BROWSER opens the data-plane socket for a session on this host (ADR-0007).
+ *
+ * Distinct from `hosts.endpoint`, which is where a program on the same network dials and which the
+ * worker registers for itself. A browser cannot use that one: it is loopback or a VPC address, and a
+ * page served over HTTPS cannot open a plain-ws socket to either. So the route is composed from the
+ * console's own origin, and the console's TLS ingress proxies `/dp/<hostId>` to the worker.
+ *
+ * The host id is in the PATH rather than in a query string because a proxy routes on paths. It
+ * discloses nothing: it is fleet infrastructure, it is already in every session's response, and it
+ * authorises nothing on its own — the socket still refuses everything until a signed grant arrives.
+ *
+ * Returns null when no route is configured, and the console says so rather than hanging.
+ */
+function browserEndpoint(hostId: string): string | null {
+  const base = loadConfig().dataPlanePublicBase;
+  return base ? `${base}/${encodeURIComponent(hostId)}` : null;
 }
 
 /**
@@ -152,6 +173,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         },
         dataPlane: {
           endpoint: host.endpoint,
+          browserEndpoint: browserEndpoint(host.id),
           token,
           expiresInSeconds: DEFAULT_TTL_SECONDS,
         },
@@ -240,15 +262,30 @@ export async function sessionRoutes(app: FastifyInstance) {
      * someone else's device. The worker's fence check would reject it, but a token that has to be
      * rejected should never have been issued.
      */
-    let dataPlane: { endpoint: string; token: string; expiresInSeconds: number } | undefined;
+    let dataPlane: {
+      endpoint: string;
+      browserEndpoint: string | null;
+      token: string;
+      expiresInSeconds: number;
+    } | undefined;
+    /**
+     * Relay credentials, minted on exactly the same condition as the token above.
+     *
+     * The condition is the point. ICE credentials for an ENDED session are bandwidth granted to
+     * whoever holds that device now — not a screen leak, because the grant is separate and this
+     * carries no device id, but still a thing issued to someone with no reason to have it.
+     */
+    let ice: IceBlock | null = null;
     if (row.device_id && row.fence !== null && LIVE_STATES.has(row.state)) {
       const host = await hostForDevice(row.device_id);
       // An endpoint-less host is a real state (a worker registered before it had one), not an
       // error. `POST` releases the device in that case because it is mid-allocation and can still
       // undo it; here the session is already running, so the honest answer is coordinates omitted.
       if (host?.endpoint) {
+        ice = mintIce(row.id, loadConfig(), process.env.TURN_SECRET);
         dataPlane = {
           endpoint: host.endpoint,
+          browserEndpoint: browserEndpoint(host.id),
           token: mintSessionToken(
             {
               sid: row.id,
@@ -272,6 +309,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         expiresAt: row.expires_at, endedAt: row.ended_at, endReason: row.end_reason,
       },
       ...(dataPlane ? { dataPlane } : {}),
+      ...(ice ? { ice } : {}),
     };
   });
 

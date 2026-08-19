@@ -44,6 +44,17 @@ export interface DeviceInfo {
   adbSerial?: string;
 }
 
+/**
+ * The keys a device can be asked to press.
+ *
+ * Volume joined this list with the device toolbar (ADR-0007): Cuttlefish's WebRTC control channel
+ * carries power, home, menu and back and nothing else, so every other button a real device toolbar
+ * has must come down this path instead.
+ */
+export type KeyName =
+  | 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'
+  | 'volume_up' | 'volume_down';
+
 export type DeviceHealth =
   | { status: 'healthy'; inputLatencyMs: number }
   | { status: 'degraded'; reason: string; inputLatencyMs?: number }
@@ -96,9 +107,41 @@ export interface DeviceControl {
   /** Remove an app and its data. Uninstalling something that is not there is an error, not a no-op. */
   uninstallApp?(packageName: string): Promise<void>;
 
+  /**
+   * Stream this device's log until the returned handle is stopped.
+   *
+   * OPTIONAL for the same reason `installApp` is: an iOS simulator has no logcat, and a required
+   * method every backend answers with `throw new NotSupported()` is the fat interface this file
+   * exists to reject. A backend that implements it declares `logcat`.
+   *
+   * Push, not pull. The alternative — a `readLogcat(since)` the console polls — means either
+   * buffering the whole log in the worker or losing the lines between two polls, and the thing a
+   * person watches a log for is the line that appears while they are watching.
+   */
+  captureLogcat?(onLine: (line: string) => void): Promise<LogcatHandle>;
+
+  /**
+   * Turn the device, the way a person turns a phone.
+   *
+   * OPTIONAL, and on Cuttlefish it is a sensor injection rather than a display command — the guest
+   * has to believe gravity moved, or Android rotates nothing. A backend with no accelerometer to
+   * lie to does not implement it, and the toolbar does not offer it.
+   */
+  rotate?(direction: 'left' | 'right'): Promise<void>;
+
+  /**
+   * One frame, right now, as encoded image bytes.
+   *
+   * Deliberately NOT a way to build a video: it shells out, it costs a round trip and an encode,
+   * and a caller that wants motion wants `screen-stream`. It exists because "what was on screen
+   * when it failed" is a different question from "show me the device", and it is the only one of
+   * the two that survives the session ending.
+   */
+  screenshot?(): Promise<{ bytes: Buffer; contentType: string }>;
+
   tap(x: number, y: number): Promise<void>;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
-  key(name: 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'): Promise<void>;
+  key(name: KeyName): Promise<void>;
   text(value: string): Promise<void>;
 
   health(): Promise<DeviceHealth>;
@@ -115,6 +158,41 @@ export interface DeviceControl {
 export interface MediaSource {
   /** null when the backend cannot stream at all, which the capability list must also reflect. */
   endpoint(): Promise<{ url: string; kind: 'webrtc' } | null>;
+
+  /**
+   * Open a signaling channel to whatever negotiates this device's stream (ADR-0007).
+   *
+   * The worker relays the frames of this conversation between the browser and the device's own
+   * WebRTC stack and reads none of them. That is the whole contract: `send` takes an opaque payload
+   * from the client, `onPayload` hands opaque payloads back, and the media itself never appears
+   * here — it is negotiated to flow directly between the browser and the device host.
+   *
+   * Optional, and its absence is what a tier without a live view looks like. `endpoint()` returning
+   * null and `signal` being undefined say the same thing from two directions; both are honest.
+   */
+  signal?(opts: SignalOptions): Promise<SignalChannel>;
+}
+
+export interface SignalOptions {
+  onPayload: (payload: unknown) => void;
+  /** Called once when the far side goes away, with a reason to show a human. */
+  onClose: (reason: string) => void;
+}
+
+export interface SignalChannel {
+  /** What the device's own signaling server said about itself when the channel opened. */
+  readonly deviceInfo: unknown;
+  /**
+   * ICE servers the device's host suggests. Advisory only — the control plane's minted TURN
+   * credentials take precedence, because those expire with the session and these do not.
+   */
+  readonly iceServers: unknown[];
+  send(payload: unknown): void;
+  close(): void;
+}
+
+export interface LogcatHandle {
+  stop(): void;
 }
 
 export interface DeviceBackend {

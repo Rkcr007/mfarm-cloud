@@ -65,6 +65,66 @@ class FakeDevice implements DeviceControl {
   async health(): Promise<DeviceHealth> { return { status: 'healthy', inputLatencyMs: 1 }; }
 }
 
+/**
+ * A device that can do the viewer things, and a signalling server that answers like the operator.
+ *
+ * Separate from FakeDevice because the honest default is a device that CANNOT: most of this suite
+ * asserts on a plain Cuttlefish-shaped stub, and giving every one of them a live view would hide the
+ * refusal paths that matter most here.
+ */
+class ViewableDevice extends FakeDevice {
+  logcatRunning = 0;
+  screenshotFails = false;
+  private emit?: (line: string) => void;
+
+  async captureLogcat(onLine: (line: string) => void) {
+    this.logcatRunning += 1;
+    this.emit = onLine;
+    return { stop: () => { this.logcatRunning -= 1; this.emit = undefined; } };
+  }
+  say(line: string) { this.emit?.(line); }
+  async screenshot() {
+    if (this.screenshotFails) throw new Error('screencap did not return a PNG');
+    return { bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]), contentType: 'image/png' };
+  }
+}
+
+class FakeSignalServer {
+  opened = 0;
+  closed = 0;
+  refuse?: string;
+  readonly sent: unknown[] = [];
+  private onPayload?: (p: unknown) => void;
+
+  channel = async (h: { onPayload: (p: unknown) => void; onClose: (r: string) => void }) => {
+    if (this.refuse) throw new Error(this.refuse);
+    this.opened += 1;
+    this.onPayload = h.onPayload;
+    return {
+      deviceInfo: { hardware: { cpus: 8 } },
+      iceServers: [{ urls: 'stun:operator.local:3478' }],
+      send: (p: unknown) => { this.sent.push(p); },
+      close: () => { this.closed += 1; },
+    };
+  };
+  /** Play the device's half of the negotiation. */
+  fromDevice(payload: unknown) { this.onPayload?.(payload); }
+}
+
+function viewableBackend(localId = 'view-1') {
+  const control = new ViewableDevice(localId);
+  control.info.capabilities = [...control.info.capabilities, 'logcat', 'screenshot'];
+  const signals = new FakeSignalServer();
+  return {
+    control,
+    signals,
+    media: {
+      async endpoint() { return { url: 'https://cf.example/?d=1', kind: 'webrtc' as const }; },
+      signal: signals.channel,
+    },
+  };
+}
+
 function fakeBackend(localId = 'fake-1'): DeviceBackend & { control: FakeDevice } {
   const control = new FakeDevice(localId);
   return { control, media: { async endpoint() { return { url: 'https://cf.example/?d=1', kind: 'webrtc' as const }; } } };
@@ -786,5 +846,210 @@ describe('device automation identity', () => {
       (await c.query('SELECT adb_serial, system_port FROM devices WHERE host_id = $1', [agent.hostId])).rows[0]);
     assert.equal(row.system_port, null);
     assert.equal(row.adb_serial, '0.0.0.0:adb-cf-1', 'identity is reported regardless — it is a fact about the device');
+  });
+});
+
+/**
+ * The viewer half of the data plane — signalling, logcat and screenshots (ADR-0007).
+ *
+ * The thing these protect is not "does a message round trip". It is that a live view **cannot
+ * become a second way in**: every viewer verb sits behind the same `hello` that input does, so a
+ * socket that never authenticated, or whose fence has moved on, gets nothing new here. And that a
+ * viewer who walks away does not leave an `adb logcat` and an operator socket running against a
+ * device the next tenant is about to be handed.
+ */
+describe('data plane — viewer', () => {
+  let agent: Agent, dp: DataPlane, port: number, backend: ReturnType<typeof viewableBackend>;
+
+  before(async () => {
+    backend = viewableBackend();
+    agent = makeAgent([backend], `view-${randomUUID().slice(0, 8)}`);
+    await agent.start();
+    dp = new DataPlane({
+      agent,
+      backends: new Map([[backend.control.info.localId, backend]]),
+      resolveDevice: () => backend,
+    });
+    port = await dp.listen(0);
+  });
+
+  after(async () => { await dp.close(); await agent.shutdown(); });
+
+  const connect = () => new Promise<WebSocket>((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.once('open', () => resolve(ws));
+    ws.once('error', reject);
+  });
+
+  const nextMessage = (ws: WebSocket) => new Promise<Record<string, unknown>>((resolve) => {
+    ws.once('message', (d) => resolve(JSON.parse(d.toString())));
+  });
+
+  /** Wait for a specific frame type, ignoring anything the device volunteers in the meantime. */
+  const until = (ws: WebSocket, t: string) => new Promise<Record<string, unknown>>((resolve) => {
+    const on = (d: Buffer): void => {
+      const msg = JSON.parse(d.toString());
+      if (msg.t !== t) return;
+      ws.off('message', on);
+      resolve(msg);
+    };
+    ws.on('message', on);
+  });
+
+  async function tokenFor() {
+    const deviceId = await withSystem(async (c) => {
+      await c.query(`UPDATE devices SET state = 'OFFLINE' WHERE region = $1 AND state = 'READY'`, [REGION]);
+      await c.query(`UPDATE hosts SET endpoint = 'wss://dp.example' WHERE id = $1`, [agent.hostId]);
+      const d = await c.query(
+        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities, local_id)
+         VALUES ($1,$2,'android','cuttlefish','fake','15','READY',
+                 '["screen-stream","input-datachannel","snapshot-reset","logcat","screenshot"]'::jsonb, $3)
+         RETURNING id`,
+        [agent.hostId, REGION, `view-dev-${randomUUID().slice(0, 8)}`]);
+      return d.rows[0].id as string;
+    });
+    const res = await fetch(`${baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tenantKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ region: REGION, platform: 'android' }),
+    });
+    const body = await res.json() as {
+      session: { id: string; fence: number; deviceId: string };
+      dataPlane: { token: string };
+    };
+    assert.equal(res.status, 201, `expected an allocation, got ${JSON.stringify(body)}`);
+    assert.equal(body.session.deviceId, deviceId);
+    return body;
+  }
+
+  /** A socket that has said hello and had it accepted. */
+  async function authed() {
+    const created = await tokenFor();
+    const ws = await connect();
+    ws.send(JSON.stringify({ t: 'hello', token: created.dataPlane.token }));
+    assert.equal((await nextMessage(ws)).t, 'ready');
+    return ws;
+  }
+
+  test('every viewer verb is refused before hello', async () => {
+    // The point of the whole file, in one test. A live view must not be a second door: it inherits
+    // the grant check rather than adding one of its own, so an unauthenticated socket asking for a
+    // screen gets the same treatment as one asking for a tap.
+    for (const msg of [{ t: 'signal-open' }, { t: 'logcat', action: 'start' }, { t: 'screenshot' }]) {
+      const ws = await connect();
+      ws.send(JSON.stringify(msg));
+      const err = await nextMessage(ws);
+      assert.equal(err.code, 'unauthenticated', `${msg.t} must not work without a session`);
+      ws.close();
+    }
+  });
+
+  test('signal-open reports the device info and the operator ice servers', async () => {
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'signal-open' }));
+    const ready = await until(ws, 'signal-ready');
+    assert.deepEqual(ready.deviceInfo, { hardware: { cpus: 8 } });
+    assert.deepEqual(ready.iceServers, [{ urls: 'stun:operator.local:3478' }]);
+    ws.close();
+  });
+
+  test('signalling passes both ways without being understood', async () => {
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'signal-open' }));
+    await until(ws, 'signal-ready');
+
+    // Outbound. A field this worker has never heard of must survive the trip: the relay is opaque
+    // so that a Cuttlefish release adding one is not a worker release.
+    const offerRequest = { type: 'request-offer', ice_servers: [], some_future_field: 7 };
+    ws.send(JSON.stringify({ t: 'signal', payload: offerRequest }));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(backend.signals.sent.at(-1), offerRequest);
+
+    // Inbound.
+    backend.signals.fromDevice({ type: 'offer', sdp: 'v=0...' });
+    const framed = await until(ws, 'signal');
+    assert.deepEqual(framed.payload, { type: 'offer', sdp: 'v=0...' });
+    ws.close();
+  });
+
+  test('a second signal-open on one socket is refused', async () => {
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'signal-open' }));
+    await until(ws, 'signal-ready');
+    ws.send(JSON.stringify({ t: 'signal-open' }));
+    const err = await until(ws, 'signal-error');
+    assert.match(String(err.message), /already has a signalling channel/);
+    ws.close();
+  });
+
+  test('signalling before signal-open is an error, not a silent drop', async () => {
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'signal', payload: { type: 'answer' } }));
+    const err = await until(ws, 'signal-error');
+    assert.match(String(err.message), /signal-open/);
+    ws.close();
+  });
+
+  test('logcat batches lines rather than sending one frame each', async () => {
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'logcat', action: 'start' }));
+    await until(ws, 'logcat-started');
+    const batch = until(ws, 'logcat');
+    for (let i = 0; i < 5; i++) backend.control.say(`08-19 13:43:2${i}.000  1245  1245 I Tag: line ${i}`);
+    const got = await batch;
+    assert.equal((got.lines as string[]).length, 5, 'five lines arrived as one frame');
+    ws.send(JSON.stringify({ t: 'logcat', action: 'stop' }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(backend.control.logcatRunning, 0);
+    ws.close();
+  });
+
+  test('closing the socket stops logcat and the signalling channel', async () => {
+    // The leak this prevents is not a resource leak in the abstract: an adb child and an operator
+    // socket left running belong to a device that is about to be snapshot-restored for the next
+    // tenant, and the next tenant is who they would then be following.
+    const opened = backend.signals.closed;
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'signal-open' }));
+    await until(ws, 'signal-ready');
+    ws.send(JSON.stringify({ t: 'logcat', action: 'start' }));
+    await until(ws, 'logcat-started');
+    assert.equal(backend.control.logcatRunning, 1);
+
+    ws.close();
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(backend.control.logcatRunning, 0, 'the adb child was killed with the socket');
+    assert.equal(backend.signals.closed, opened + 1, 'the operator socket was closed with it');
+  });
+
+  test('a screenshot comes back base64 with its content type', async () => {
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'screenshot', id: 'shot-1' }));
+    const shot = await until(ws, 'screenshot');
+    assert.equal(shot.id, 'shot-1', 'correlated, so a slow capture cannot answer the wrong request');
+    assert.equal(shot.contentType, 'image/png');
+    assert.equal(Buffer.from(String(shot.data), 'base64').subarray(0, 4).toString('hex'), '89504e47');
+    ws.close();
+  });
+
+  test('a failed screenshot reports the device’s own words', async () => {
+    const ws = await authed();
+    backend.control.screenshotFails = true;
+    ws.send(JSON.stringify({ t: 'screenshot', id: 'shot-2' }));
+    const err = await until(ws, 'screenshot-error');
+    assert.equal(err.id, 'shot-2');
+    assert.match(String(err.message), /did not return a PNG/);
+    backend.control.screenshotFails = false;
+    ws.close();
+  });
+
+  test('an unknown verb is answered rather than ignored', async () => {
+    // A client speaking a newer protocol than this worker must find out, not wait forever for a
+    // reply that is never coming.
+    const ws = await authed();
+    ws.send(JSON.stringify({ t: 'record', action: 'start' }));
+    const err = await until(ws, 'error');
+    assert.equal(err.code, 'unknown_message');
+    ws.close();
   });
 });

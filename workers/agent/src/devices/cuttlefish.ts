@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Capability } from '@mfarm/protocol';
-import type { DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, MediaSource } from '../device.ts';
+import type {
+  DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, LogcatHandle, MediaSource,
+  SignalChannel, SignalOptions,
+} from '../device.ts';
+import { openSignalChannel } from './operator.ts';
 
 /**
  * Cuttlefish backend — the target tier.
@@ -39,6 +43,21 @@ export interface CuttlefishOptions {
    */
   snapshotDir?: string;
   webrtcPort?: number;
+  /**
+   * Where cvd's WebRTC operator answers. Loopback in every real deployment (ADR-0007) — this is the
+   * signalling server a viewer is relayed to, and it is unauthenticated, so it must never be bound
+   * anywhere a browser could reach it directly.
+   */
+  operatorUrl?: string;
+  /**
+   * How a device is returned to a clean state between tenants.
+   *
+   * `snapshot` (the default) restores in ~10s and is what makes per-second billing and fast
+   * recycling work. `powerwash` returns the device to first boot in ~80s and is THE ONLY MODE WITH A
+   * WORKING LIVE VIEW on this cvd build — see `powerwash()` for the measurement. A farm used
+   * interactively wants powerwash; one used only for automation wants snapshot.
+   */
+  resetMode?: 'snapshot' | 'powerwash';
   publicHost?: string;
   osVersion?: string;
   gpuMode?: 'guest_swiftshader' | 'none';
@@ -142,6 +161,26 @@ function run(bin: string, args: string[], cwd: string, timeoutMs = 300_000): Pro
 }
 
 /**
+ * `run`, but for a command whose output is bytes rather than text.
+ *
+ * Separate rather than a flag on `run` because the two differ in more than the return type: this one
+ * must never touch the encoding, must not trim, and concatenates buffers instead of a string. A
+ * screenshot that went through `run` would arrive as a UTF-8-mangled string and be unopenable.
+ */
+function runBinary(bin: string, args: string[], timeoutMs: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const p = spawn(bin, args);
+    const chunks: Buffer[] = [];
+    let err = '';
+    const t = setTimeout(() => { p.kill('SIGKILL'); reject(new Error(`timeout: ${bin} ${args.join(' ')}`)); }, timeoutMs);
+    p.stdout.on('data', (d: Buffer) => chunks.push(d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('close', (c) => { clearTimeout(t); c === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`${bin} exited ${c}: ${err.trim()}`)); });
+    p.on('error', (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+/**
  * How long one `adb install` may take before it is killed.
  *
  * Generous on purpose. A 100 MB APK onto a SwiftShader Cuttlefish is a slow push followed by a
@@ -173,9 +212,14 @@ export class CuttlefishDevice implements DeviceControl {
       // unconditionally is what made every device claim a reset that threw `no snapshotDir
       // configured`, which leaves it stuck in CLEANING forever because a restore that never
       // completes never reports completion.
+      // `recording` USED TO BE HERE AND WAS NEVER IMPLEMENTED. Nothing in the worker started a
+      // screenrecord, so the console correctly offered no control for it and the declaration was
+      // simply a lie — the one place this codebase broke ADR-0003's rule that a capability is
+      // observed state. It comes back when `startRecording` does. `logcat` and `screenshot` are
+      // here because the methods below now exist.
       capabilities: [
         'screen-stream', 'input-datachannel',
-        'app-install', 'logcat', 'recording',
+        'app-install', 'logcat', 'screenshot',
       ] as Capability[],
       screen: { width: 720, height: 1280, density: 320 },
       // Published, not just used internally. This class has always known the serial — every adb
@@ -249,6 +293,16 @@ export class CuttlefishDevice implements DeviceControl {
     const seen = await this.findExisting();
     if (await this.snapshotIsStale(seen?.instanceDir)) {
       await this.dropSnapshot(`it belongs to a group that no longer exists (${seen?.instanceDir})`);
+    }
+
+    // In powerwash mode there is nothing to take and nothing to be stale: the reset is a first-boot
+    // restore, so the whole snapshot apparatus below is skipped rather than kept warm for a path
+    // that will never run. It also skips ~4 GB of disk and a minute of boot per device.
+    if (this.opts.resetMode === 'powerwash') {
+      await this.refreshResetCapability();
+      this.info.osVersion = await run('adb', ['-s', this.adbSerial, 'shell', 'getprop', 'ro.build.version.release'], process.cwd(), 10_000)
+        .catch(() => this.opts.osVersion ?? 'unknown');
+      return;
     }
 
     let snapshotted = await this.ensureSnapshot();
@@ -572,10 +626,35 @@ export class CuttlefishDevice implements DeviceControl {
    * of the snapshot, and passing them again is a good way to get a confusing failure.
    */
   async resetToSnapshot(): Promise<void> {
+    if (this.opts.resetMode === 'powerwash') return this.powerwash();
     const path = this.snapshotPath();
     await run('cvd', this.sel('stop'), this.opts.imageDir, 60_000).catch(() => { /* already stopped */ });
     await run('cvd', this.sel('start', `--snapshot_path=${path}`, '--daemon'), this.opts.imageDir, 120_000);
     await this.waitForBoot(60_000);
+  }
+
+  /**
+   * Reset by returning the device to first-boot state, instead of restoring a snapshot.
+   *
+   * SLOWER AND THE ONLY OPTION FOR A LIVE VIEW, which is the whole reason it exists. Measured on the
+   * lab box 2026-08-19: a snapshot-restored Cuttlefish completes the WebRTC negotiation, sends an
+   * audio track, and publishes NO DISPLAY — so there is no video at all. A cold-booted one streams
+   * at ~49 fps over the same path. Re-taking the snapshot from a device whose display was working
+   * did not help; the restore itself is what loses it. So the two headline properties of this tier —
+   * a 10s recycle and a live screen — cannot both be had from a restore on this cvd build.
+   *
+   * `cvd powerwash` is documented as "functionally equivalent to removing the device and creating it
+   * again, but more efficient", and it leaves the group intact — which matters, because rebuilding a
+   * group invalidates its snapshot (that path is a boot loop, not a reset).
+   *
+   * The tenant guarantee is unchanged and is the reason this still counts as `snapshot-reset`: the
+   * next tenant gets first-boot state, with the previous tenant's apps, accounts and data gone.
+   */
+  private async powerwash(): Promise<void> {
+    // Generous, and matched to cvd's own default: this is a full boot, not a restore. The device is
+    // already out of the schedulable pool while it runs, so the cost of waiting is bounded.
+    await run('cvd', this.sel('powerwash'), this.opts.imageDir, 600_000);
+    await this.waitForBoot(120_000);
   }
 
   private snapshotPath(): string {
@@ -633,9 +712,16 @@ export class CuttlefishDevice implements DeviceControl {
     }
   }
 
-  /** Advertise `snapshot-reset` when, and only when, a snapshot exists to reset to. */
+  /**
+   * Advertise `snapshot-reset` when, and only when, there is a way to reset to a clean state.
+   *
+   * The capability's NAME says snapshot and its MEANING is "this device can be handed to a second
+   * tenant" — `REQUIRED_FOR_TENANT_USE` is what reads it. Powerwash satisfies that meaning exactly:
+   * the next tenant gets first-boot state. Withholding the capability in powerwash mode would make
+   * every device unschedulable for the sake of a word.
+   */
   private async refreshResetCapability(): Promise<void> {
-    const has = Boolean(await this.snapshotOnDisk());
+    const has = this.opts.resetMode === 'powerwash' || Boolean(await this.snapshotOnDisk());
     const listed = this.info.capabilities.includes('snapshot-reset');
     if (has && !listed) this.info.capabilities = [...this.info.capabilities, 'snapshot-reset'];
     if (!has && listed) this.info.capabilities = this.info.capabilities.filter((c) => c !== 'snapshot-reset');
@@ -697,6 +783,54 @@ export class CuttlefishDevice implements DeviceControl {
   }
 
   /**
+   * Follow this device's log.
+   *
+   * `-v threadtime` because that is the format every Android engineer already reads, and the one the
+   * console's parser splits on. `-T 200` seeds the view with the last 200 lines rather than either
+   * replaying the entire buffer (tens of thousands of lines into a browser) or starting empty and
+   * making a person wait for the device to say something.
+   *
+   * The child is killed by the returned handle and nothing else. A logcat left running is an adb
+   * connection held open against a device that is about to be snapshot-restored out from under it.
+   */
+  async captureLogcat(onLine: (line: string) => void): Promise<LogcatHandle> {
+    const p = spawn('adb', ['-s', this.adbSerial, 'logcat', '-v', 'threadtime', '-T', '200']);
+    let carry = '';
+    const feed = (chunk: Buffer): void => {
+      // Chunk boundaries do not respect lines, so the tail of one read is the head of the next.
+      const parts = (carry + chunk.toString()).split('\n');
+      carry = parts.pop() ?? '';
+      for (const line of parts) if (line.trim()) onLine(line);
+    };
+    p.stdout.on('data', feed);
+    // adb writes its own diagnostics ("device offline", "waiting for device") to stderr, and those
+    // are exactly the lines someone staring at an empty log pane needs to see.
+    p.stderr.on('data', feed);
+    p.on('error', (e) => onLine(`--- logcat could not start: ${e.message}`));
+    return {
+      stop: () => { p.kill('SIGTERM'); },
+    };
+  }
+
+  /**
+   * One PNG, straight off the framebuffer.
+   *
+   * `exec-out` rather than `shell`, because `adb shell` mangles binary output on some platforms by
+   * translating CRLF — the classic corrupt-screenshot bug — and `exec-out` is the raw-bytes channel
+   * that exists to avoid it. `maxBuffer` is raised because a 720x1280 PNG comfortably exceeds
+   * Node's 1 MB default and the failure mode is a truncated file rather than an error.
+   */
+  async screenshot(): Promise<{ bytes: Buffer; contentType: string }> {
+    const bytes = await runBinary('adb', ['-s', this.adbSerial, 'exec-out', 'screencap', '-p'], 30_000);
+    // PNG magic. adb has been known to exit 0 having written an error message instead of an image,
+    // and a console that renders that as a broken <img> tells nobody anything.
+    if (bytes.length < 8 || bytes[0] !== 0x89 || bytes[1] !== 0x50) {
+      throw new Error(`screencap did not return a PNG on ${this.info.localId}: ${bytes.subarray(0, 120).toString().trim()}`);
+    }
+    return { bytes, contentType: 'image/png' };
+  }
+
+  /**
    * Input goes over the WebRTC data channel that Cuttlefish already serves, NOT through here.
    *
    * These methods exist for control-plane-initiated actions (health probes, cleanup between
@@ -716,8 +850,30 @@ export class CuttlefishDevice implements DeviceControl {
     const codes: Record<string, string> = {
       home: 'KEYCODE_HOME', back: 'KEYCODE_BACK', recents: 'KEYCODE_APP_SWITCH',
       power: 'KEYCODE_POWER', enter: 'KEYCODE_ENTER', backspace: 'KEYCODE_DEL',
+      volume_up: 'KEYCODE_VOLUME_UP', volume_down: 'KEYCODE_VOLUME_DOWN',
     };
     await run('adb', ['-s', this.adbSerial, 'shell', 'input', 'keyevent', codes[name] ?? name], process.cwd(), 10_000);
+  }
+
+  /**
+   * Rotate by lying to the accelerometer, which is the only thing Android listens to.
+   *
+   * `cuttlefish_sensor_injection` ships in the guest image for exactly this. Turning the display
+   * instead — `cvd display` or a WM override — moves the pixels and leaves every orientation-aware
+   * app believing the device is still upright, which is worse than not offering the button.
+   *
+   * The argument is an absolute orientation (0 portrait, 1 landscape), not a delta, so "left" and
+   * "right" are the two states rather than a running total. A device that has no such binary is
+   * reported as a failure rather than silently doing nothing.
+   */
+  async rotate(direction: 'left' | 'right'): Promise<void> {
+    const out = await run('adb', [
+      '-s', this.adbSerial, 'shell', '/vendor/bin/cuttlefish_sensor_injection',
+      'rotate', direction === 'left' ? '1' : '0',
+    ], process.cwd(), 15_000);
+    if (/not found|No such file|Error/i.test(out)) {
+      throw new Error(`this image has no sensor injection binary, so it cannot be rotated: ${out.trim().split('\n').slice(-1)[0]}`);
+    }
   }
 
   async text(value: string): Promise<void> {
@@ -752,6 +908,24 @@ export class CuttlefishMedia implements MediaSource {
     const host = this.opts.publicHost ?? 'localhost';
     const port = this.opts.webrtcPort ?? 8443;
     return { url: `https://${host}:${port}/?device_id=${encodeURIComponent(this.opts.localId)}`, kind: 'webrtc' as const };
+  }
+
+  /**
+   * Open the operator conversation on behalf of one viewer (ADR-0007).
+   *
+   * Note what is NOT here: no peer connection, no track, no frame. This returns a pipe for the
+   * browser's own negotiation, and the media it negotiates flows between the browser and this host
+   * without passing through the worker at all.
+   */
+  async signal(handlers: SignalOptions): Promise<SignalChannel> {
+    return openSignalChannel(
+      {
+        baseUrl: this.opts.operatorUrl,
+        localId: this.opts.localId,
+        instanceNum: this.opts.instanceNum,
+      },
+      handlers,
+    );
   }
 }
 

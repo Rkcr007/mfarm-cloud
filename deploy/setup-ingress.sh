@@ -13,14 +13,26 @@
 # asia-south1; it costs about ₹250/month while attached and is the entire reason the console has a
 # permanent home.
 #
-# WHAT STAYS PRIVATE. The API keeps its 127.0.0.1 bind; Caddy is the only public listener and it
-# proxies exactly one upstream. The metrics listener on :9464 carries fleet-wide cross-tenant gauges
-# and is deliberately NOT proxied. The worker's data plane and automation gateway stay on the docker
-# bridge, unreachable from outside, which is why there is still no live video (ADR-0005).
+# WHAT STAYS PRIVATE. The API keeps its 127.0.0.1 bind; Caddy is the only public listener. The
+# metrics listener on :9464 carries fleet-wide cross-tenant gauges and is deliberately NOT proxied.
+#
+# TWO upstreams since ADR-0007, not one. `/dp/<hostId>` is proxied to the WORKER's data plane so a
+# browser can open the live-view WebSocket over this same TLS name — which is what keeps the socket
+# same-origin and the console's strict CSP unwidened. The worker itself still publishes no port: it
+# binds loopback or the VPC address, and this is the only route in.
+#
+# THIS PROXY IS NOT AUTHORISATION and must not be mistaken for it. Every connection through it still
+# has to present an Ed25519 grant naming session, device, org, fence and host, which the worker
+# verifies offline. Caddy is a route (ADR-0005), and the automation gateway is deliberately NOT
+# proxied here — the hub reaches it host-locally and it has no business being public.
 set -euo pipefail
 
 HOSTNAME_PUBLIC="${HOSTNAME_PUBLIC:-34-100-138-213.sslip.io}"
 UPSTREAM="127.0.0.1:3000"
+# The device host's data plane, reached over the VPC (ADR-0006 put it on its own machine). Empty
+# disables the /dp route entirely, which is the right setting for a control plane with no worker
+# behind it — a route to nothing answers 502 and looks like a broken live view.
+WORKER_DATA_PLANE="${WORKER_DATA_PLANE:-10.160.0.2:8080}"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
@@ -38,13 +50,44 @@ else
 fi
 
 say "Writing the Caddyfile for $HOSTNAME_PUBLIC"
+# The whole /dp stanza is built here rather than templated inline, so that "no worker" produces a
+# Caddyfile with no such route at all instead of one pointing at nothing. A route to an absent
+# upstream answers 502, which in a browser is indistinguishable from a broken live view.
+if [ -n "$WORKER_DATA_PLANE" ]; then
+  echo "    /dp/* -> $WORKER_DATA_PLANE (live view)"
+  DP_BLOCK=$(cat <<DPEOF
+
+	# The live-view data plane (ADR-0007). The path segment is the HOST id, which is how this
+	# generalises past one device host: add a matcher per host id and point each at its worker. At
+	# one host the id is not consulted, and the worker rejects anything whose grant names a
+	# different host anyway — the audience check is in the token, not in this file.
+	#
+	# NOT AUTHORISATION. Every connection through here still presents an Ed25519 grant that the
+	# worker verifies offline. This is a route (ADR-0005).
+	@dataplane path /dp/*
+	handle @dataplane {
+		reverse_proxy $WORKER_DATA_PLANE {
+			# A live view is a long-lived socket with long silences between a person's taps. The
+			# default buffering would hold frames and the default timeouts would close it mid
+			# session, which presents as the device freezing.
+			flush_interval -1
+		}
+	}
+DPEOF
+)
+else
+  echo "    /dp/* omitted (WORKER_DATA_PLANE is empty) — no live view from this ingress"
+  DP_BLOCK=""
+fi
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 # MFARM console + WebDriver hub. Managed by setup-ingress.sh — edit there, not here.
 #
-# One upstream on purpose. Everything the product exposes to a human or to a CI client is served by
-# the API process on $UPSTREAM: the console at /, the tenant API at /v1/*, the WebDriver hub at
-# /wd/hub/*. The metrics listener is a SEPARATE port and is not proxied, because its gauges are
-# fleet-wide and collected on the owner pool — RLS does not hide them.
+# Two upstreams. Everything a human or a CI client touches is served by the API process on
+# $UPSTREAM: the console at /, the tenant API at /v1/*, the WebDriver hub at /wd/hub/*. The one
+# exception is /dp/*, which reaches the device host's data plane so a browser can hold the live-view
+# socket over this same TLS name (ADR-0007). The metrics listener is a SEPARATE port and is not
+# proxied, because its gauges are fleet-wide and collected on the owner pool — RLS does not hide
+# them. The automation gateway is not proxied either: the hub reaches it host-locally.
 $HOSTNAME_PUBLIC {
 	encode zstd gzip
 
@@ -54,12 +97,16 @@ $HOSTNAME_PUBLIC {
 		-Server
 	}
 
-	reverse_proxy $UPSTREAM {
-		# The API decides cookie Secure from config, not from the request scheme, so these headers
-		# are for logging and for anything downstream that wants the real client — not load-bearing
-		# for auth.
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Real-IP {remote_host}
+$DP_BLOCK
+
+	handle {
+		reverse_proxy $UPSTREAM {
+			# The API decides cookie Secure from config, not from the request scheme, so these
+			# headers are for logging and for anything downstream that wants the real client — not
+			# load-bearing for auth.
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
 	}
 }
 EOF

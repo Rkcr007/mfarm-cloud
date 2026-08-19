@@ -1,8 +1,19 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-19. **Two machines now (ADR-0006): `mfarm-cp` always-on holds the control
-plane and console at https://34-100-138-213.sslip.io; `mfarm-lab` holds the devices and is started
-when needed.** Deploys go through a pipeline — `deploy/README.md` "Shipping a change", and known
+Last updated 2026-08-19. **New here? Read `docs/START_HERE.md` — closed laptop to a device you can
+tap, in seven steps.** This file is the state of play and every known issue; that one is the path.
+
+**Two machines (ADR-0006): `mfarm-cp` holds the control plane and console at
+https://34-100-138-213.sslip.io; `mfarm-lab` holds the devices. Both are stopped between sessions;
+`./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
+
+**2026-08-19 — the interactive device view is BUILT AND VERIFIED ON HARDWARE** (issue 28, ADR-0007):
+a Launch flow, a live device-mirroring cockpit at ~50 fps, touch, logcat and screenshots, plus a
+real APK installed and launched from a browser. One constraint came with it and it is a product
+decision rather than a bug: a snapshot-restored Cuttlefish publishes no display, so `CF_RESET_MODE`
+chooses between a ~10s recycle and a live view.
+
+ Deploys go through a pipeline — `deploy/README.md` "Shipping a change", and known
 issue 26. The console header shows the commit it is running. Read this file first in a new session.
 
 **2026-08-19 — `docs/E2E_MVP_PLAN.md` is the ordered plan from here to a teammate using this.** It
@@ -273,11 +284,17 @@ without one rather than advertise `127.0.0.1` to the fleet.
 - Blocker 5 below (multi-instance).
 - ~~App install / launch outside Appium~~ — **built 2026-08-19** (issues 21 and 22): upload, install,
   launch, uninstall, over the heartbeat, from the CLI or the console. Never yet run against adb.
-- Logcat streaming, video recording, artifacts. **Both `logcat` and `recording` are nevertheless
-  advertised as capabilities** — see issue 23, which is the one place this codebase breaks its own
-  ADR-0003 rule.
+- ~~Logcat streaming~~ — **built 2026-08-19 (issue 28, ADR-0007)**, live over the data plane, with a
+  filter and level chips in the cockpit. NOT persisted: closing the tab loses it, because there is
+  still no artifact store. Screenshots the same — on demand, downloadable, held in the tab only.
+- Video recording, and artifacts generally (an `artifacts` table, retention, a blob route). Issue 23
+  is now half closed: `logcat` and `screenshot` are implemented and honestly declared, and
+  `recording` was REMOVED from the Cuttlefish capability list rather than left as a claim with
+  nothing behind it.
 - ~~Web UI~~ — **built 2026-08-19** (issue 20 and the v2 design): sign-in, devices, sessions, queue,
-  apps, health. No interactive device view; that is ADR-0005's, and none of it is built.
+  apps, health, and since issue 28 a **Launch** flow and an interactive cockpit — live video, a
+  control rail, logcat and screenshots. The code path is complete and the WebRTC half has never met
+  a real cvd operator; see issue 28 for exactly what is verified and what is not.
 - Publishing. Every package is `"private": true`, so `npx mfarm` does not work yet and the Action's
   `npx --yes mfarm@latest` has nothing to resolve.
 - Observability gaps, all of which look covered from the dashboard and are not: **no
@@ -780,10 +797,11 @@ before building any viewer**, because it determines whether a browser needs clie
     Fixed with a negation that must stay below the exclusion.
 
     Two things the console does NOT do, both stated in the UI rather than hidden behind a disabled
-    button: there is no interactive device view (media needs ADR-0005's relay, which is not
-    deployed), and a session cannot be pinned to a specific device (the allocator chooses). ~~App
-    upload and install are not built.~~ **Built, and the console drives them — see issues 21 and
-    22.**
+    button: ~~there is no interactive device view (media needs ADR-0005's relay, which is not
+    deployed)~~ **— built and verified on hardware, issue 28** — and a session cannot be pinned to a
+    specific device (the allocator chooses; the Launch screen offers device *profiles*, which is
+    what the API accepts). ~~App upload and install are not built.~~ **Built, and the console drives
+    them — see issues 21 and 22.**
 
 21. **THE APP LIBRARY EXISTS: UPLOAD A BUILD, INSTALL IT ON A DEVICE YOU HOLD.** 2026-08-19,
     migration 014. Phase 3's first bullet, minus launch and uninstall.
@@ -890,14 +908,20 @@ before building any viewer**, because it determines whether a browser needs clie
     `replaceChildren` throws the node away, so the first version could not survive long enough to be
     confirmed. **Anything a user is halfway through has to live somewhere the poll cannot replace.**
 
-    **Still no interactive device view.** ADR-0005 decided the routing (a TURN relay, not an overlay,
-    because end users cannot be asked to join the operator's tailnet) and nothing downstream of that
-    decision is built: no coturn, no per-session relay credential, and the data plane still binds the
-    docker bridge, which no browser can reach. That, and the fact that no `adb install` has still
-    ever run from this code path, are the two gaps between this and a farm a teammate can use.
+    ~~**Still no interactive device view.**~~ **BUILT 2026-08-19 — see issue 28 and ADR-0007.** What
+    this paragraph described as missing now exists and has run on hardware: coturn with per-session
+    credentials, the split bind, a signalling relay, and a browser driving a real Android 17 device
+    at ~50 fps. `adb install` has also met a real device. Kept as written because it is what was
+    true here, and because the second gap it names is the one that turned out to matter least — the
+    install path worked first time; the live view is what found four silent defects.
 
 23. **`logcat` AND `recording` ARE ADVERTISED CAPABILITIES WITH NO IMPLEMENTATION.** Found by audit,
-    2026-08-19, while writing `docs/E2E_MVP_PLAN.md`.
+    2026-08-19, while writing `docs/E2E_MVP_PLAN.md`. **CLOSED the same day by ADR-0007, both
+    halves:** `logcat` is implemented (`captureLogcat`, streamed live to the console) and so is
+    `screenshot`; `recording` was DELETED from the declaration rather than implemented, which is the
+    half that actually restores ADR-0003's rule. `avd.ts` had the same false claim and got the same
+    implementation, because it is eight identical lines and it is what makes the console's log dock
+    work for anyone developing against an AVD on a laptop.
 
     `devices/cuttlefish.ts:177` declares `'logcat'` and `'recording'` in its capability list.
     `DeviceControl` in `workers/agent/src/device.ts` has **no method for either** — there is no
@@ -1154,6 +1178,51 @@ Reporting it on a host where only *some* devices had a server therefore stored o
 the others — B2 exactly, arriving through the compatibility path. It is now withheld unless every
 device is covered by the same URL. Caught by a test, not by review.
 
+28. **THE LIVE VIEW, AND THE FOUR THINGS BUILDING IT FOUND.** 2026-08-19, ADR-0007.
+
+    The console now has a **Launch** screen (pick a build, pick a device profile, start) and a
+    bring-up screen whose checklist is derived entirely from real state — session row, app-action
+    row, socket — with a percentage rather than a spinner. It hands over to a cockpit with a live
+    device view, a control rail on the WebRTC data channel, a logcat dock and screenshots.
+
+    How it reaches the device: the browser's WebRTC **signalling** rides the data-plane WebSocket it
+    already holds, and the worker relays those frames opaquely to cvd's operator on loopback. Media
+    still never touches the worker (ADR-0005); it negotiates directly, through coturn where a direct
+    path does not exist. `deploy/setup-turn.sh` deploys the relay; `deploy/setup-ingress.sh` gained a
+    `/dp/*` route so the socket is same-origin behind the console's own TLS.
+
+    **What is verified, and it is more than expected.** `fake-farm.ts` now runs the real `DataPlane`,
+    so grant verification, the fence check, `signal-open`, batched logcat, screenshots and the honest
+    refusal from a tier with no media source were all exercised end to end in a browser. What has NOT
+    run is a negotiation against a real operator — that needs the device host, and two things there
+    are asserted rather than measured: the operator's port (1080, not the 8443 `CuttlefishMedia` had
+    hard-coded from the `launch_cvd` era) and the device id (`--webrtc_device_id` does not survive a
+    snapshot restore, so it is discovered from `GET /devices` and REFUSED rather than guessed when
+    two candidates are equally plausible).
+
+    Four defects surfaced while building, none of which a test or a review would have found:
+
+    **A browser-started session could never become ACTIVE.** `session_activate` had exactly one
+    caller — the WebDriver hub — so a session opened from the console sat in `ALLOCATING` for its
+    whole life. `started_at` stayed NULL, so every duration and lease bar was measured from the
+    allocation rather than the attach, and the device never showed as in use. Migration 017 adds a
+    host-scoped `session_attach` that the WORKER reports on its existing events channel, because the
+    data plane is the only party that observes a client attaching.
+
+    **`index.ts` declared a uuid -> backend map for the data plane and never filled it.** The comment
+    beside it described a mapping "taught on first use" that nothing taught. At one device the
+    single-device fallback hid it completely; at two, every data-plane connection would have been
+    refused as `unknown_device`.
+
+    **The CSP blocked the socket, silently.** `connect-src 'self'` does not match a different port,
+    and a blocked WebSocket reaches JavaScript as a bare `error` event with no reason — so a console
+    that could never connect looked exactly like a worker that was down. `connect-src` now names the
+    one configured data-plane origin when it is not same-origin.
+
+    **A device that cannot stream was losing its whole connection.** `signal-error` was treated as a
+    connection failure, which took logcat and input down with the missing video. It is now a distinct
+    `nostream` state: attached, driveable, no picture.
+
 ## Working notes for whoever picks this up
 
 **Context is cache; disk is truth.** This file, `docs/adrs/`, and the test suite are the system of
@@ -1195,6 +1264,14 @@ What is left, in this order:
    App upload, install, launch and uninstall landed 2026-08-19 (issues 21 and 22), and the console
    can drive all of them. The first thing to do with a live box is push a real APK through it: that
    path has only ever met a fake device, and `adb install` has never run from this code.
-5. **The interactive viewer**, which is the last thing standing between this and something a
-   teammate uses without being taught. ADR-0005 already decided how (coturn, per-session
-   credentials, and the data plane moving off the docker bridge); none of it is built.
+5. ~~**The interactive viewer**~~ — **built 2026-08-19 (issue 28, ADR-0007)**, and what remains is
+   a box rather than more code. In order, on the device host:
+   a. `deploy/install-worker-service.sh` (it now writes `DATA_PLANE_BIND_HOST` and `CF_OPERATOR_URL`)
+      and confirm the operator really is on 1080 — `curl -s localhost:1080/devices`. If it is not,
+      that is one environment variable.
+   b. `deploy/setup-turn.sh` on the device host, then `TURN_URLS`/`TURN_SECRET` into the control
+      plane's `.env`, then `WORKER_DATA_PLANE=10.160.0.2:8080 deploy/setup-ingress.sh` and
+      `DATA_PLANE_PUBLIC_BASE=wss://<console-host>/dp` on the API.
+   c. Open a session from the console and watch the bring-up. **Exercise BOTH ICE modes** — ADR-0005
+      is explicit that a viewer tested only on a LAN has not been tested, so the second run is from a
+      phone on mobile data, checking the cockpit's Stream panel reports `relayed (TURN)`.

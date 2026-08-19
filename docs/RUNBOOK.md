@@ -1,5 +1,8 @@
 # Runbook — start it, ship to it, stop it
 
+> **Just want it running?** `docs/START_HERE.md` is the seven-step path from a closed laptop to a
+> device you can tap. This file is the reference underneath it.
+
 Two machines (ADR-0006). The **control plane** stays on; the **device host** is the expensive half
 and is off unless someone is using devices.
 
@@ -138,3 +141,30 @@ operator rather than by the reaper, and only a human lifts that.
 
 **A deploy fell back to building locally** — the box lost its registry credential. On that host:
 `docker login ghcr.io -u rkcr007` with a `read:packages` token.
+
+## Bringing the farm back after a stop — two commands
+
+Both VMs are stopped between sessions; the device host is ~95% of the cost. Everything on them
+restarts itself (docker `unless-stopped`, systemd for the worker, Caddy and coturn), so this is
+genuinely two commands:
+
+```bash
+./deploy/farm-online.sh     # start both machines, and re-point the media relay
+./deploy/farm-check.sh      # wait for the devices, then report what is actually live
+```
+
+**Why the first one is a script rather than `gcloud compute instances start`.** The device host's
+public IP is EPHEMERAL and changes on every stop/start, while coturn advertises it to browsers and
+the control plane hands out `turn:<that address>` in every session's ICE block. After a restart both
+point at an address that now belongs to somebody else, and the failure is silent in the worst way:
+the console works, the device list is right, sessions start, and video never arrives — with an empty
+relay log, because nobody ever called it. `farm-online.sh` detects the change and rewrites both ends.
+
+The console's own address is reserved (`mfarm-lab-ip`, 34.100.138.213), so its URL and its Let's
+Encrypt certificate survive a stop. Reserving one for the device host too (~₹250/month) would make
+that reconcile unnecessary, and is worth it if this becomes routine.
+
+`farm-check.sh` waits up to ten minutes, because two Cuttlefish devices cold boot after a host start.
+It reports the running commit, the fleet as the CONTROL PLANE sees it, whether `/dp` reaches the
+worker (a 426 is the proof), and whether the relay answers.
+

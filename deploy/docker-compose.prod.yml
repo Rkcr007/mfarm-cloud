@@ -159,6 +159,17 @@ services:
       # file". `config.ts` refuses to start in production if this is unset, for that reason.
       APP_STORE_DIR: /var/lib/mfarm/apps
       APP_MAX_UPLOAD_BYTES: ${APP_MAX_UPLOAD_BYTES:-536870912}
+      # ---------------------------------------------------------------- live view (ADR-0007)
+      # Where a BROWSER opens the data-plane socket. Distinct from the worker's own registered
+      # endpoint, which is a VPC address no browser can reach: this names the console's public TLS
+      # host, and Caddy proxies /dp/<hostId> to the worker. Unset means the console says the live
+      # view has no route rather than offering a button that hangs.
+      DATA_PLANE_PUBLIC_BASE: ${DATA_PLANE_PUBLIC_BASE:-}
+      # The TURN relay's urls. Comma-separated, because a working relay is normally several (udp,
+      # tcp, and 443 for networks that allow nothing else) and offering one is how the hotspot case
+      # fails. The SECRET is a docker secret, below — never here.
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_TTL_SECONDS: ${TURN_TTL_SECONDS:-43200}
     volumes:
       - appstore:/var/lib/mfarm/apps
     secrets:
@@ -166,6 +177,7 @@ services:
       - session_public_key
       - worker_registration_token
       - metrics_token
+      - turn_secret
     ports:
       # Loopback only, exactly like Postgres. Tailscale is what makes this reachable; publishing on
       # 0.0.0.0 would put the control plane on the internet the first time a firewall rule relaxed.
@@ -189,6 +201,11 @@ services:
         SESSION_PUBLIC_KEY="$$(cat /run/secrets/session_public_key)"; export SESSION_PUBLIC_KEY
         WORKER_REGISTRATION_TOKEN="$$(cat /run/secrets/worker_registration_token)"; export WORKER_REGISTRATION_TOKEN
         METRICS_TOKEN="$$(cat /run/secrets/metrics_token)"; export METRICS_TOKEN
+        # Optional: a farm on one network needs no relay, and `config.ts` refuses to start if this
+        # is set without TURN_URLS. So it is exported only when the file has content.
+        if [ -s /run/secrets/turn_secret ]; then
+          TURN_SECRET="$$(cat /run/secrets/turn_secret)"; export TURN_SECRET
+        fi
         exec node --experimental-strip-types apps/api/src/main.ts
     healthcheck:
       # /health is LIVENESS: no I/O, never fails while the process lives. Deliberately not /ready,
@@ -215,6 +232,12 @@ secrets:
   # the two cannot drift into a scrape that 401s forever while every dashboard reads "No data".
   metrics_token:
     file: ./secrets/metrics_token
+  # coturn's `static-auth-secret`. Every per-session relay credential is HMAC-SHA1 of it, so this
+  # one value is the whole trust relationship between the control plane and the relay. An EMPTY file
+  # is a supported state and means "no relay configured"; deploy/setup-turn.sh generates the real
+  # one on the device host and prints it.
+  turn_secret:
+    file: ./secrets/turn_secret
 
 volumes:
   pgdata:

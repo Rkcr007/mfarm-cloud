@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Capability } from '@mfarm/protocol';
-import type { DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, MediaSource } from '../device.ts';
+import type {
+  DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, KeyName, LogcatHandle, MediaSource,
+} from '../device.ts';
 
 /**
  * Android Emulator (AVD) backend.
@@ -26,6 +28,7 @@ const EMULATOR = process.env.EMULATOR_PATH ?? `${process.env.ANDROID_HOME ?? ''}
 const KEYCODES: Record<string, string> = {
   home: 'KEYCODE_HOME', back: 'KEYCODE_BACK', recents: 'KEYCODE_APP_SWITCH',
   power: 'KEYCODE_POWER', enter: 'KEYCODE_ENTER', backspace: 'KEYCODE_DEL',
+  volume_up: 'KEYCODE_VOLUME_UP', volume_down: 'KEYCODE_VOLUME_DOWN',
 };
 
 export interface AvdOptions {
@@ -231,8 +234,28 @@ export class AvdDevice implements DeviceControl {
     await this.send(`input swipe ${Math.round(x1)} ${Math.round(y1)} ${Math.round(x2)} ${Math.round(y2)} ${Math.round(durationMs)}`);
   }
 
-  async key(name: 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'): Promise<void> {
+  async key(name: KeyName): Promise<void> {
     await this.send(`input keyevent ${KEYCODES[name]}`);
+  }
+
+  /**
+   * This tier declared `logcat` for months with nothing behind it (HANDOFF issue 23). Implemented
+   * rather than un-declared, because it is the same eight lines as the Cuttlefish backend and it is
+   * what makes the console's log dock work for anyone developing against an AVD on a laptop.
+   */
+  async captureLogcat(onLine: (line: string) => void): Promise<LogcatHandle> {
+    const p = spawn('adb', ['-s', this.serial, 'logcat', '-v', 'threadtime', '-T', '200']);
+    let carry = '';
+    const feed = (chunk: Buffer): void => {
+      const parts = (carry + chunk.toString()).split('\n');
+      carry = parts.pop() ?? '';
+      for (const line of parts) if (line.trim()) onLine(line);
+    };
+    p.stdout.on('data', feed);
+    // adb's own diagnostics go to stderr, and they are what explains an otherwise empty pane.
+    p.stderr.on('data', feed);
+    p.on('error', (e) => onLine(`--- logcat could not start: ${e.message}`));
+    return { stop: () => { p.kill('SIGTERM'); } };
   }
 
   async text(value: string): Promise<void> {

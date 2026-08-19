@@ -22,7 +22,8 @@ against the same process that serves the page:
 | Devices | `GET /v1/devices` |
 | Apps | `GET /v1/apps`, `POST /v1/apps` (XHR, real upload progress), `GET /v1/app-actions` |
 | Sessions | `GET /v1/sessions?limit=50` |
-| Cockpit | `GET /v1/sessions/:id`, `POST /v1/sessions/:id/app-actions`, `GET /v1/app-actions/:id` |
+| Cockpit | `GET /v1/sessions/:id`, `POST /v1/sessions/:id/app-actions`, `GET /v1/app-actions/:id`, plus the data-plane WebSocket for video, input, logcat and screenshots |
+| Launch | `GET /v1/devices`, `GET /v1/apps`, `POST /v1/sessions`, then the same app-action pipeline |
 | Queue | derived from `/v1/sessions` + `/v1/devices` |
 | Health | derived from `/v1/devices`, `/v1/sessions`, `/v1/app-actions` |
 | Session card | `GET /v1/sessions/:id` for the held session |
@@ -32,9 +33,9 @@ devices that **is** real-time; replacing it with a socket would add a half-conne
 buy nothing. Do not rewrite it.
 
 The console is also already *hosted* in the only sense the code cares about:
-`apps/api/src/http/routes/ui.ts` serves `/`, `/console.css`, `/console.js` from the API process behind
-a strict CSP and an explicit four-path allowlist. There is no separate frontend to deploy, no build
-step, no bundler.
+`apps/api/src/http/routes/ui.ts` serves `/`, `/console.css`, `/console.js` and `/live.js` from the API
+process behind a strict CSP and an explicit allowlist. There is no separate frontend to deploy, no
+build step, no bundler.
 
 ### So what is actually fake?
 
@@ -42,6 +43,12 @@ step, no bundler.
 `workers/agent/scripts/fake-farm.ts` — a worker that registers two devices called `FAKE (no Android)`
 which log what they were asked to do and run nothing. It declares no `screen-stream` and no
 `webdriver` precisely so nobody can demo a capability that does not work.
+
+It does, since ADR-0007, run the **real** `DataPlane` — the socket, the offline grant verification,
+the fence check, the input queue and the logcat stream are production code paths with a fake device
+behind them. That is what makes the console's viewer developable without hardware, and the one place
+the fake cannot follow is exactly where it says so: `signal-open` is answered with a refusal and a
+reason, because there is no media source to negotiate with.
 
 ### "Real device" means real Android, not a handset
 
@@ -67,6 +74,12 @@ That is the real gap, and it is not a UI gap. The honest statement of the remain
 > The control plane, the console, the app pipeline and the WebDriver hub are built and tested. The
 > farm they manage does not currently exist (the lab VM is terminated), and three product surfaces —
 > **live view, artifacts, and team/account management** — have no backend at all.
+
+**Updated 2026-08-19 (ADR-0007).** The live view is now built — including logcat and screenshots, the
+first slice of what M3 calls artifacts — and has been exercised in a browser against `fake-farm.ts`,
+which now runs the real data plane. Two of the three surfaces remain: **artifacts that outlive a
+session** (a table, a blob route, retention — nothing is persisted today) and **team/account
+management**. The live view's own remaining work is deployment, not code: §M4.
 
 ---
 
@@ -111,20 +124,21 @@ undo by deleting a bind address.
 
 ### NOT BLOCKING, but must be known
 
-**3. Two capabilities are advertised with no implementation.** `devices/cuttlefish.ts:177` declares
-`'logcat'` and `'recording'`. `DeviceControl` in `workers/agent/src/device.ts` has **no method for
-either**, and nothing in the agent collects them. Per ADR-0003 capabilities are observed state, never
-configuration — this is the one place the codebase breaks its own rule, and the console will
-correctly offer nothing for them. M3 closes it.
+**~~3. Two capabilities are advertised with no implementation.~~ CLOSED 2026-08-19 (ADR-0007).**
+`logcat` is now implemented (`captureLogcat`, streamed over the data plane) and so is `screenshot`.
+`recording` was DELETED from the declaration rather than implemented — the honest half of the fix,
+and the one that restores ADR-0003's rule that a capability is observed state. It comes back when
+`startRecording` does.
 
 **4. `adb install` has never run from this code.** Migrations 014/015, `POST /v1/apps`, the job
 pipeline over heartbeat, and `mfarm app install|launch|uninstall` are all tested — against a fake
 device whose `installApp` is a log line. **The first real APK is a test, not a demo.** Expect it to
 find something.
 
-**5. The data plane binds the docker bridge (`172.18.0.1`).** A workaround so the containerised hub
-could reach the automation gateway. Host-local by construction, so no browser anywhere can reach it.
-ADR-0005 already says the fix is to separate the two binds. Automation is unaffected.
+**~~5. The data plane binds the docker bridge (`172.18.0.1`).~~ CLOSED 2026-08-19 (ADR-0007).** The
+two listeners bind separately now — `AUTOMATION_BIND_HOST` keeps the gateway host-local for the
+containerised hub, `DATA_PLANE_BIND_HOST` puts the data plane where the console's ingress can reach
+it. `farm-up.sh` and `install-worker-service.sh` both write the pair.
 
 **6. Alertmanager has no receiver, backups have no off-box copy, and no host metrics exist.** 15
 alert rules fire into a UI nobody watches. A full disk takes the database and the backups down and
@@ -279,7 +293,20 @@ Console:
 **Done when:** a session that failed links to the video, the logcat and the screenshots of *that
 session*, and an ended session still has them.
 
-### M4 — Live interactive view  *(mostly no box to build; ~2–3 days + a real-hardware day)*
+### M4 — Live interactive view  *(BUILT 2026-08-19 — ADR-0007, HANDOFF issue 28)*
+
+> **Status.** The code half is done and exercised end to end in a browser against `fake-farm.ts`,
+> which now runs the real `DataPlane`. What is left is the box: the operator's port confirmed, coturn
+> deployed, the ingress `/dp` route live, and **both ICE modes exercised** — point 6 below is the one
+> that has not been met and cannot be met on a laptop.
+>
+> The shape landed differently from the sketch below in two ways worth knowing. Signalling is
+> relayed through the data-plane socket rather than the browser reaching the operator itself (the
+> operator is unauthenticated device control and must not be public), and the CSP mostly did NOT
+> have to be widened — routing `/dp` through the console's own ingress keeps the socket same-origin.
+> Steps 1, 2, 3 and 4 landed as written.
+
+
 
 The largest remaining gap between this and a product, and **cheaper than it looks**, because
 `workers/agent/src/dataplane.ts` already does most of it: it verifies the grant offline, checks the

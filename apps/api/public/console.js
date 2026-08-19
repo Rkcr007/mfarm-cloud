@@ -12,12 +12,16 @@
  *      creates text nodes, so a call site cannot opt out by accident.
  *   2. Every unsafe request carries the CSRF token. `api()` does it centrally.
  *   3. NOTHING IS RENDERED THAT THE API CANNOT ANSWER FOR. Where the design has a screen the
- *      control plane has no endpoint behind — team, activity, settings, evidence, live view,
- *      logcat, device vitals — this file states the gap in words instead of inventing the data.
- *      Each such omission is commented where it would otherwise be.
+ *      control plane has no endpoint behind — team, activity, settings, evidence — this file states
+ *      the gap in words instead of inventing the data. Each such omission is commented where it
+ *      would otherwise be. The live view, logcat and screenshots left that list with ADR-0007 and
+ *      are now driven by a real socket to a real device; every one of them is still gated on the
+ *      device DECLARING the capability, which is the same rule under a different name.
  *   4. NO OPTIMISTIC UI ON DEVICE ACTIONS. The control plane cannot dial a worker; every app
  *      action is a job a heartbeat carries down. Nothing reports success before the worker does.
  */
+
+import { ATTACHED, LiveSession, parseLogLine } from '/live.js';
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -77,6 +81,33 @@ const state = {
   /** The build the cockpit's tool picker has selected, kept across re-renders. */
   pickedApp: null,
   route: { name: 'devices', id: null },
+
+  /**
+   * The live view for the cockpit's current session.
+   *
+   * One at a time, deliberately. Two open viewers means two peer connections relaying video for the
+   * same person, and on a relayed path that is twice the egress for nothing — so navigating away
+   * tears the old one down before anything else opens.
+   */
+  live: null,
+  liveState: 'idle',
+  liveDetail: null,
+  liveStats: { fps: 0, kbps: 0, rtt: null, ice: null },
+  /** Ring buffer of parsed logcat lines, plus what the dock is filtering to. */
+  log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 },
+  /** Screenshots taken this session. Data urls, in memory only — nothing persists them yet. */
+  shots: [],
+  /**
+   * The device panel's live DOM, kept across renders so the <video> is never destroyed.
+   * See `stagePanel`. Cleared only when the viewer closes.
+   */
+  stage: null,
+
+  /** What the launch screen has selected, kept across re-renders and across a queued wait. */
+  launch: { appId: null, deviceId: null, ttlMinutes: 60, launchAfterInstall: true },
+  /** The bring-up in progress: `{ sessionId, steps, appId, error }`. */
+  bringup: null,
+
   poll: null,
   tick: null,
   palIndex: 0,
@@ -127,7 +158,7 @@ const KIND_LABEL = { install: 'Install', launch: 'Launch', uninstall: 'Uninstall
  * POST /sessions/:id/app-actions before it will queue anything, so a device without it needs to say
  * so in the UI or the disabled Install button has no explanation.
  */
-const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'screen-stream'];
+const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'screen-stream', 'logcat', 'screenshot'];
 
 /* ---------------------------------------------------------------------------- transport */
 
@@ -478,13 +509,16 @@ async function refreshAll() {
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['devices', 'apps', 'sessions', 'queue', 'health']);
+const ROUTES = new Set(['devices', 'apps', 'sessions', 'queue', 'health', 'launch']);
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
   const [name, id] = raw.split('/');
   if (name === 'devices' && id) return { name: 'device', id };
   if (name === 'sessions' && id) return { name: 'cockpit', id };
+  // `#/launch` picks; `#/launch/<sessionId>` watches one come up. The session id is in the URL so
+  // that a reload mid-bring-up rejoins the same session rather than allocating a second device.
+  if (name === 'launch' && id) return { name: 'launching', id };
   return { name: ROUTES.has(name) ? name : 'devices', id: null };
 }
 
@@ -494,11 +528,19 @@ function go(hash) {
 }
 
 window.addEventListener('hashchange', () => {
+  const previous = state.route;
   state.route = parseHash();
   state.action = null;
   closeOverlays();
+  // Leaving the cockpit — or opening a DIFFERENT session's cockpit — closes the socket and the peer
+  // connection. Without this a person who clicks through three sessions is relaying three video
+  // streams, and on the TURN path that is billed egress for two screens nobody is looking at.
+  if (previous.name === 'cockpit' && (state.route.name !== 'cockpit' || state.route.id !== previous.id)) {
+    closeLive();
+  }
   render();
   if (state.route.name === 'cockpit') loadSessionDetail(state.route.id).then(render);
+  if (state.route.name === 'launching') watchBringup(state.route.id);
 });
 
 for (const item of document.querySelectorAll('.navitem')) {
@@ -517,7 +559,7 @@ function renderChrome() {
   $('fs-holding').hidden = !held;
 
   // Nav highlight. The two detail routes keep their parent lit rather than lighting nothing.
-  const parent = { device: 'devices', cockpit: 'sessions' }[state.route.name] || state.route.name;
+  const parent = { device: 'devices', cockpit: 'sessions', launching: 'launch' }[state.route.name] || state.route.name;
   for (const item of document.querySelectorAll('.navitem')) {
     item.classList.toggle('is-active', item.dataset.route === parent);
   }
@@ -865,6 +907,597 @@ function screenDevice(id) {
   ];
 }
 
+/* ------------------------------------------------------------------ the live device connection */
+
+/**
+ * Open — or reuse — the viewer for a session.
+ *
+ * Idempotent, because both the bring-up screen and the cockpit call it on every render and a render
+ * happens every five seconds. Re-opening a working connection would restart the negotiation under
+ * someone's finger.
+ *
+ * The connection deliberately OUTLIVES the bring-up screen: the same socket that proves the device
+ * is up is the one the cockpit then draws from, so arriving at the cockpit does not mean waiting for
+ * a second negotiation to show the first frame.
+ */
+function ensureLive(sess) {
+  if (!sess?.dataPlane || !LIVE_SESSION_STATES.has(sess.state)) return null;
+  if (state.live && state.live.sessionId === sess.id) return state.live;
+  if (state.live) closeLive();
+
+  const url = sess.dataPlane.browserEndpoint;
+  if (!url) {
+    // Configuration, not a device fault, and worth naming exactly: `hosts.endpoint` is where a
+    // program on the farm's network dials, and a browser cannot use it.
+    state.liveState = 'unrouted';
+    state.liveDetail = 'This control plane publishes no browser route to the data plane (DATA_PLANE_PUBLIC_BASE is unset), so nothing can stream to a browser.';
+    return null;
+  }
+
+  const live = new LiveSession({
+    url,
+    token: sess.dataPlane.token,
+    iceServers: sess.ice?.iceServers,
+    onState: (s, detail) => {
+      state.liveState = s;
+      state.liveDetail = detail || null;
+      scheduleRender();
+    },
+    onStream: (stream) => { state.liveStream = stream; scheduleRender(); },
+    onLog: (lines) => {
+      for (const raw of lines) state.log.lines.push(parseLogLine(raw));
+      // Bounded in the browser too, and for the same reason it is bounded in the worker: a device
+      // left logging overnight must not grow this tab until it is killed.
+      if (state.log.lines.length > 5000) state.log.lines.splice(0, state.log.lines.length - 5000);
+      paintLog();
+    },
+    onScreenshot: (shot) => {
+      state.shots.unshift({ ...shot, url: `data:${shot.contentType};base64,${shot.data}` });
+      if (state.shots.length > 12) state.shots.pop();
+      scheduleRender();
+    },
+    onNotice: (message) => toast('Device', message, 'warn'),
+  });
+  live.sessionId = sess.id;
+  state.live = live;
+  state.liveStream = null;
+  state.liveState = 'connecting';
+  state.liveDetail = null;
+  live.connect();
+
+  // The stats sampler runs inside LiveSession; this is what moves its numbers onto the page. It is
+  // a paint, not a render: rebuilding the cockpit once a second would drop taps (see `render`).
+  if (state.liveStatsTimer) clearInterval(state.liveStatsTimer);
+  state.liveStatsTimer = setInterval(() => {
+    if (!state.live) return;
+    state.liveStats = state.live.stats;
+    paintVitals();
+  }, 1000);
+  return live;
+}
+
+function closeLive() {
+  state.live?.close();
+  state.live = null;
+  state.liveStream = null;
+  state.liveState = 'idle';
+  state.liveDetail = null;
+  state.log = { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 };
+  state.shots = [];
+  // The panel goes with the connection. Keeping it would re-show the last frame of a device
+  // somebody else now holds, which is a stale screen presented as a live one.
+  state.stage = null;
+  if (state.liveStatsTimer) clearInterval(state.liveStatsTimer);
+  state.liveStatsTimer = null;
+}
+
+/**
+ * Put the stream into whichever <video> is on the page now.
+ *
+ * Called on every render because `render()` replaces the DOM wholesale, so the element that had the
+ * stream a moment ago is gone. `srcObject` is a property, never an attribute, so this cannot be
+ * expressed in the element builder.
+ */
+function attachVideo() {
+  const video = state.stage?.video;
+  if (!video || !state.liveStream) return;
+  if (video.srcObject !== state.liveStream) {
+    // A property, not an attribute. Autoplay of a stream with an audio track is blocked unless the
+    // element is muted, and `h()` writes unknown props with setAttribute — which browsers honour at
+    // parse time but not reliably on an element created after the fact.
+    video.muted = true;
+    video.srcObject = state.liveStream;
+    video.play?.().catch(() => { /* autoplay is muted, so this only fires on a detached element */ });
+    state.live?.attachInput(video);
+  }
+}
+
+/* ------------------------------------------------------------------ the launch screen */
+
+/**
+ * Device PROFILES rather than individual devices.
+ *
+ * `POST /v1/sessions` names a region, a platform and a tier — the allocator chooses which physical
+ * device, atomically, and there is no field for "that one". Listing individual devices to click
+ * would therefore be a control that does not exist. Grouping identical devices into a profile says
+ * exactly what the API accepts, and it is also how a person thinks about it: they want an Android
+ * 17 phone, not serial number two.
+ */
+function deviceProfiles() {
+  const by = new Map();
+  for (const d of state.devices) {
+    const key = `${d.platform}|${d.tier}|${d.region}|${d.model}|${d.osVersion}`;
+    let p = by.get(key);
+    if (!p) {
+      p = {
+        key, platform: d.platform, tier: d.tier, region: d.region,
+        model: d.model, osVersion: d.osVersion,
+        total: 0, free: 0, devices: [],
+        // The INTERSECTION, not the union: a profile can only promise what every device in it can
+        // do, because the allocator may hand over any of them.
+        capabilities: null,
+      };
+      by.set(key, p);
+    }
+    p.total += 1;
+    if (d.state === 'READY') p.free += 1;
+    p.devices.push(d);
+    const caps = d.capabilities || [];
+    p.capabilities = p.capabilities === null ? [...caps] : p.capabilities.filter((c) => caps.includes(c));
+  }
+  return [...by.values()].sort((a, b) => b.free - a.free || a.model.localeCompare(b.model));
+}
+
+function profileRow(p) {
+  const picked = state.launch.profileKey === p.key;
+  const live = (p.capabilities || []).includes('screen-stream');
+  return h('button', {
+    class: `pickrow${picked ? ' picked' : ''}`,
+    onclick: () => { state.launch.profileKey = p.key; render(); },
+  },
+    h('span', { class: 'pick-main' },
+      h('span', { class: 'pick-title', text: p.model }),
+      h('span', { class: 'pick-sub mono', text: `${p.platform} ${p.osVersion} · ${p.tier} · ${p.region}` }),
+    ),
+    h('span', { class: 'pick-side' },
+      p.free
+        ? pill(`${p.free} free`, 'ok', { dot: false })
+        : pill(`${p.total} busy`, 'warn', { dot: false }),
+      live ? null : h('span', { class: 'caption', text: 'no live view' }),
+    ),
+  );
+}
+
+function buildPickRow(a) {
+  const picked = state.launch.appId === a.id;
+  return h('button', {
+    class: `pickrow${picked ? ' picked' : ''}`,
+    onclick: () => { state.launch.appId = a.id; render(); },
+  },
+    h('span', { class: 'pick-main' },
+      h('span', { class: 'pick-title', text: a.label || a.packageName }),
+      h('span', { class: 'pick-sub mono', text: `${a.packageName} · ${a.versionName || '—'} · ${bytes(a.sizeBytes || 0)}` }),
+    ),
+    h('span', { class: 'pick-side' }, h('span', { class: 'caption', text: ago(a.createdAt) })),
+  );
+}
+
+function screenLaunch() {
+  const profiles = deviceProfiles();
+  const profile = profiles.find((p) => p.key === state.launch.profileKey) || null;
+  const app = state.apps.find((a) => a.id === state.launch.appId) || null;
+  const canInstall = !app || (profile?.capabilities || []).includes('app-install');
+  const ready = Boolean(profile) && canInstall;
+
+  return [
+    pageHead(
+      [{ label: 'Farm' }],
+      'Launch a device',
+      app
+        ? `Launching ${app.label || app.packageName} ${app.versionName || ''} on ${profile ? profile.model : 'a device'}`.replace(/\s+/g, ' ')
+        : 'Pick a device. Add a build if you want one installed before you get there.',
+      h('div', { class: 'row tight' },
+        profile && !profile.free
+          ? h('span', { class: 'caption', text: 'nothing free — you will be queued' })
+          : null,
+        btn(ready ? 'Start' : 'Pick a device', 'primary lg', () => ready && startLaunch(), { disabled: !ready }),
+      ),
+    ),
+
+    h('div', { class: 'launchgrid' },
+      card('Build', {
+        aside: btn('Upload an APK', 'tiny ghost', () => go('#/apps')),
+      },
+        h('div', { class: 'picklist' },
+          h('button', {
+            class: `pickrow${state.launch.appId === null ? ' picked' : ''}`,
+            onclick: () => { state.launch.appId = null; render(); },
+          },
+            h('span', { class: 'pick-main' },
+              h('span', { class: 'pick-title', text: 'No build' }),
+              h('span', { class: 'pick-sub', text: 'Just the device, as the clean snapshot left it' }),
+            ),
+          ),
+          state.apps.map(buildPickRow),
+        ),
+        !state.apps.length
+          ? h('p', { class: 'caption mt-sm', text: 'No builds uploaded yet. A device on its own is still useful — you can install one from the cockpit later.' })
+          : h('p', { class: 'caption mt-sm', text: 'Installed for this session only. Releasing the device restores the clean snapshot and removes it.' }),
+        app ? h('label', { class: 'row tight mt-md checkline' },
+          h('input', {
+            type: 'checkbox',
+            checked: state.launch.launchAfterInstall,
+            onchange: (e) => { state.launch.launchAfterInstall = e.target.checked; },
+          }),
+          h('span', { class: 'secondary', text: 'Open the app once it is installed' }),
+        ) : null,
+      ),
+
+      card('Device', { aside: h('span', { class: 'caption', text: `${state.available} free` }) },
+        profiles.length
+          ? h('div', { class: 'picklist' }, profiles.map(profileRow))
+          : empty('No devices are registered.', 'A worker has to register a host before anything can be launched. Check Health.'),
+        h('p', { class: 'caption mt-sm', text: 'The allocator picks a free device matching this profile — there is no way to reserve a particular one, so nothing here pretends otherwise.' }),
+        !canInstall
+          ? h('p', { class: 'help mt-sm', text: 'These devices do not declare app-install, so the API would refuse the install. Choose “No build”, or another profile.' })
+          : null,
+      ),
+    ),
+
+    card('Advanced', {},
+      h('div', { class: 'row tight' },
+        h('span', { class: 'micro', text: 'Lease' }),
+        h('select', {
+          class: 'field narrow',
+          onchange: (e) => { state.launch.ttlMinutes = Number(e.target.value); },
+        }, [15, 30, 60, 120, 240].map((m) => h('option', {
+          value: String(m), selected: state.launch.ttlMinutes === m, text: `${m} minutes`,
+        }))),
+        h('span', { class: 'caption', text: 'The reaper releases the device when the lease expires, whether or not anyone is watching.' }),
+      ),
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------------ bring-up */
+
+/**
+ * Start a session and go and watch it come up.
+ *
+ * The navigation happens on the FIRST answer, queued or not, because a queued session is a real
+ * session holding a real place in line — sending someone back to the picker to try again is how two
+ * devices get allocated to one person.
+ */
+async function startLaunch() {
+  const profiles = deviceProfiles();
+  const profile = profiles.find((p) => p.key === state.launch.profileKey);
+  if (!profile) return;
+  const appId = state.launch.appId;
+
+  try {
+    const out = await api('/v1/sessions', {
+      method: 'POST',
+      body: {
+        region: profile.region,
+        platform: profile.platform,
+        tier: profile.tier,
+        ttlMinutes: state.launch.ttlMinutes,
+        // Asked for only when a build is going to be installed. Demanding it unconditionally would
+        // make a device that can stream but not sideload unschedulable for someone who only wants
+        // to look at it.
+        ...(appId ? { requireCapabilities: ['app-install'] } : {}),
+      },
+    });
+    state.bringup = {
+      sessionId: out.session.id,
+      appId,
+      launchAfter: state.launch.launchAfterInstall,
+      install: null,
+      launch: null,
+      error: null,
+      startedAt: Date.now(),
+    };
+    await Promise.all([refreshDevices(), refreshSessions()]);
+    go(`#/launch/${out.session.id}`);
+  } catch (err) {
+    toast('Could not start a session', err.message, 'bad');
+  }
+}
+
+/**
+ * Follow one session from allocation to a usable device.
+ *
+ * A loop rather than a chain of callbacks because every step here is genuinely a poll: the control
+ * plane cannot dial a worker, so "is it installed yet" has exactly one honest answer shape — ask
+ * again. It exits when the session is usable, when something fails, or when the person navigates
+ * away.
+ */
+async function watchBringup(sessionId) {
+  if (!state.bringup || state.bringup.sessionId !== sessionId) {
+    // A reload, or a link someone was sent. Rejoin rather than allocate: the session already exists.
+    state.bringup = { sessionId, appId: null, launchAfter: false, install: null, launch: null, error: null, startedAt: Date.now() };
+  }
+  const b = state.bringup;
+
+  const deadline = Date.now() + 15 * 60_000;
+  while (state.route.name === 'launching' && state.route.id === sessionId && Date.now() < deadline) {
+    await loadSessionDetail(sessionId);
+    const sess = state.detail;
+    if (!sess || sess.missing) { b.error = sess?.message || 'That session is not visible.'; render(); return; }
+
+    if (!LIVE_SESSION_STATES.has(sess.state) && sess.state !== 'QUEUED') {
+      b.error = `The session ended before it was usable (${(sess.endReason || sess.state).toLowerCase()}).`;
+      render();
+      return;
+    }
+
+    if (sess.deviceId && LIVE_SESSION_STATES.has(sess.state)) {
+      ensureLive(sess);
+      // Re-read the queued actions from the shared list EVERY tick, not just when they are queued.
+      // Without this the checklist held whatever the POST returned — PENDING, forever — while the
+      // worker had long since finished. `state.actions` is the same list the cockpit and the Apps
+      // screen read, refreshed by the ordinary poll: one source, not a private poll per screen.
+      await refreshActions();
+      for (const kind of ['install', 'launch']) {
+        if (b[kind]?.id) b[kind] = state.actions.find((a) => a.id === b[kind].id) || b[kind];
+      }
+
+      // Queued once, on the first tick where a device exists. Queuing earlier means queuing against
+      // a session with no device, which the API refuses.
+      if (b.appId && !b.install) await queueBringupAction(b, 'install');
+      else if (b.appId && b.install?.state === 'DONE' && b.launchAfter && !b.launch) await queueBringupAction(b, 'launch');
+    }
+
+    render();
+    if (bringupDone(sess)) {
+      // Straight into the cockpit. The socket opened above is not torn down on the way — the first
+      // frame is already on screen by the time the cockpit renders.
+      go(`#/sessions/${sessionId}`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
+async function queueBringupAction(b, kind) {
+  const app = appById(b.appId);
+  if (!app) return;
+  try {
+    const out = await api(`/v1/sessions/${encodeURIComponent(b.sessionId)}/app-actions`, {
+      method: 'POST', body: { appId: app.id, kind },
+    });
+    b[kind] = out.action;
+  } catch (err) {
+    b[kind] = { state: 'FAILED', error: err.message };
+  }
+  // From here the action's progress is read off the periodic /v1/app-actions refresh, which is the
+  // same list the cockpit and the Apps screen read — one source, not a private poll per screen.
+  await refreshActions();
+  const seen = state.actions.find((a) => a.id === b[kind]?.id);
+  if (seen) b[kind] = seen;
+}
+
+function bringupStep(key, label, st, note) {
+  return { key, label, state: st, note };
+}
+
+/**
+ * The checklist, derived entirely from state the API and the socket already report.
+ *
+ * Nothing here is timed or faked. A step is `done` because a session row says so, an action row says
+ * so, or a peer connection is carrying frames — which is why the last step can sit at `active` for
+ * a while on a cold device and why that is the truth rather than a stalled animation.
+ */
+function bringupSteps(sess) {
+  const b = state.bringup;
+  const app = b?.appId ? appById(b.appId) : null;
+  const device = sess?.deviceId ? deviceById(sess.deviceId) : null;
+  const canStream = !device || (device.capabilities || []).includes('screen-stream');
+  const steps = [];
+
+  const queued = sess?.state === 'QUEUED';
+  steps.push(bringupStep('acquire', 'Acquiring a device from the farm',
+    sess?.deviceId ? 'done' : (queued ? 'active' : 'active'),
+    queued ? queueNote() : (sess?.deviceId ? (device?.model || short(sess.deviceId)) : null)));
+
+  steps.push(bringupStep('ready', 'Device ready',
+    sess?.state === 'ACTIVE' ? 'done' : (sess?.deviceId ? 'active' : 'pending'),
+    sess?.state === 'ALLOCATING' ? 'Restoring the clean snapshot' : null));
+
+  /**
+   * Attaching is its OWN step, separate from streaming, and the separation was earned.
+   *
+   * The socket is what makes a session ACTIVE (migration 017) and what carries logcat, so it matters
+   * on a device that cannot stream at all. When the two were one step, a device with no
+   * `screen-stream` marked it `skipped` — and a socket that was being refused outright, on a real
+   * failure with a real message, was silently hidden behind that word.
+   */
+  const attachFailed = state.liveState === 'failed' || state.liveState === 'unrouted';
+  const attached = ATTACHED.has(state.liveState);
+  steps.push(bringupStep('attach', 'Attaching to the device',
+    attached ? 'done' : attachFailed ? 'failed' : sess?.deviceId ? 'active' : 'pending',
+    attachFailed ? state.liveDetail : null));
+
+  if (canStream) {
+    const noVideo = state.liveState === 'nostream' || state.liveState === 'nodisplay';
+    steps.push(bringupStep('stream', 'Connecting the live view',
+      state.liveState === 'streaming' ? 'done'
+        : (attachFailed || noVideo) ? 'failed'
+        : sess?.deviceId ? 'active' : 'pending',
+      noVideo ? state.liveDetail : null));
+  } else {
+    steps.push(bringupStep('stream', 'Live view', 'skipped',
+      'This device does not declare screen-stream — everything else still works'));
+  }
+
+  if (b?.appId) {
+    const ins = b.install;
+    steps.push(bringupStep('install', `Installing ${app?.label || app?.packageName || 'the build'}`,
+      ins?.state === 'DONE' ? 'done' : ins?.state === 'FAILED' ? 'failed' : ins ? 'active' : 'pending',
+      ins?.state === 'FAILED' ? ins.error : ins ? 'Queued for the worker’s next heartbeat' : null));
+
+    if (b.launchAfter) {
+      const la = b.launch;
+      steps.push(bringupStep('launch', `Opening ${app?.packageName || 'the app'}`,
+        la?.state === 'DONE' ? 'done' : la?.state === 'FAILED' ? 'failed' : la ? 'active' : 'pending',
+        la?.state === 'FAILED' ? la.error : null));
+    }
+  }
+  return steps;
+}
+
+function queueNote() {
+  const q = queuedSessions();
+  const i = q.findIndex((s) => s.id === state.bringup?.sessionId);
+  if (i < 0) return 'Waiting for a device to free up';
+  return `Position ${i + 1} of ${q.length} in the queue`;
+}
+
+/**
+ * "Done" is deliberately not "every step is green".
+ *
+ * A device that cannot stream, or a live view that failed to connect, is still a device somebody can
+ * install onto and drive with WebDriver — holding them on this screen would be refusing to hand over
+ * something that works. What genuinely gates the cockpit is the session being ACTIVE and any app
+ * work having finished one way or the other.
+ */
+function bringupDone(sess) {
+  if (sess?.state !== 'ACTIVE') return false;
+  const b = state.bringup;
+  // `settled` means "queued AND finished". An action that has not been queued yet is NOT settled —
+  // treating it as settled is how the launch step got skipped entirely: the tick that saw the
+  // install turn DONE also saw `b.launch` undefined, read that as nothing left to wait for, and
+  // handed over the cockpit before the app was ever opened.
+  const settled = (a) => Boolean(a) && (a.state === 'DONE' || a.state === 'FAILED');
+  if (b?.appId && !settled(b.install)) return false;
+  // Only gate on the launch where one is actually expected: a failed install means no launch is
+  // ever queued, and waiting for it would strand the person on this screen.
+  if (b?.appId && b.launchAfter && b.install?.state === 'DONE' && !settled(b.launch)) return false;
+  // The socket has to have SETTLED either way — attached or refused with a reason. Handing over a
+  // cockpit while the attach is still in flight means the person arrives to a blank stage and no
+  // explanation, which is the one thing this screen exists to prevent.
+  const settledSocket = ATTACHED.has(state.liveState) || state.liveState === 'failed' || state.liveState === 'unrouted';
+  if (!settledSocket) return false;
+  const device = sess?.deviceId ? deviceById(sess.deviceId) : null;
+  const canStream = device && (device.capabilities || []).includes('screen-stream');
+  // A streamable device gets a little longer: 'negotiating' means frames are seconds away, and
+  // arriving mid-negotiation shows a ring in the cockpit rather than a screen.
+  if (canStream && state.liveState === 'negotiating') return false;
+  // `nodisplay` is settled, not pending: the negotiation finished and the answer was "no video".
+  // Waiting past it strands someone on the bring-up screen holding a device that works.
+  return true;
+}
+
+const STEP_TONE = { done: 'ok', active: 'accent', failed: 'bad', skipped: '', pending: '' };
+
+function screenLaunching(id) {
+  const sess = state.detail?.id === id ? state.detail : null;
+  const steps = bringupSteps(sess);
+  const counted = steps.filter((s) => s.state !== 'skipped');
+  const done = counted.filter((s) => s.state === 'done').length;
+  const pct = counted.length ? Math.round((done / counted.length) * 100) : 0;
+  const failed = steps.find((s) => s.state === 'failed');
+  const device = sess?.deviceId ? deviceById(sess.deviceId) : null;
+
+  return [
+    pageHead(
+      [{ label: 'Farm' }, { label: 'Launch', to: '#/launch' }],
+      device ? device.model : 'Bringing up a device',
+      sess ? `Session ${short(id)} · ${(SESSION_STATE[sess.state] || {}).label || sess.state}` : 'Asking the control plane for a device',
+      h('div', { class: 'row tight' },
+        btn('Cancel', 'ghost', () => cancelBringup(id)),
+      ),
+    ),
+
+    h('div', { class: 'bringup' },
+      h('div', { class: 'bringup-stage' },
+        h('div', { class: 'phone big' },
+          h('div', { class: 'phone-screen' },
+            // The video is mounted from the first moment there is a session, not once every step is
+            // green: the frames start arriving before the install does, and watching the app appear
+            // on the device is the most convincing thing this screen can show.
+            // The same persistent element the cockpit uses, so arriving at the cockpit does not
+            // restart the stream that is already playing here.
+            state.liveState === 'streaming' && state.stage?.video
+              ? state.stage.video
+              : progressRing(pct),
+          ),
+        ),
+        h('p', { class: 'caption', text: device ? `${device.model} · Android ${device.osVersion} · ${device.tier}` : 'no device yet' }),
+      ),
+
+      h('div', { class: 'bringup-steps' },
+        h('p', { class: 'micro', text: `Launching ${device ? device.model : 'a device'}` }),
+        h('ul', { class: 'steplist' }, steps.map((s) => h('li', { class: `step ${s.state}` },
+          h('span', { class: 'step-mark' },
+            s.state === 'done' ? '✓' : s.state === 'failed' ? '!' : s.state === 'skipped' ? '–' : '',
+          ),
+          h('span', { class: 'stack tight' },
+            h('span', { class: 'step-label', text: s.label }),
+            s.note ? h('span', { class: 'caption', text: s.note }) : null,
+          ),
+        ))),
+
+        failed
+          ? h('div', { class: 'inset mt-md' },
+              h('p', { class: 'micro bad-text', text: 'This step did not complete' }),
+              h('p', { class: 'help', text: failed.note || 'The worker reported no reason.' }),
+              h('p', { class: 'caption mt-sm', text: 'The device is yours either way — open the cockpit and try from there, or release it.' }),
+              h('div', { class: 'row tight mt-sm' },
+                btn('Open cockpit', 'primary', () => go(`#/sessions/${id}`)),
+                btn('Release', 'danger', () => cancelBringup(id)),
+              ),
+            )
+          : h('p', { class: 'caption mt-md', text: 'Every line above is a real state change reported by the control plane or the device — nothing here is on a timer.' }),
+
+        state.bringup?.error
+          ? h('p', { class: 'error-text mt-md', text: state.bringup.error })
+          : null,
+      ),
+    ),
+  ];
+}
+
+/**
+ * A ring, drawn as an SVG rather than as a spinner.
+ *
+ * The percentage is real — steps completed over steps that apply — so it is worth showing. A spinner
+ * would say "something is happening" for up to a minute of cold boot without saying what.
+ */
+function progressRing(pct) {
+  const r = 54;
+  const c = 2 * Math.PI * r;
+  const svg = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+    return el;
+  };
+  const wrap = h('div', { class: 'ring' });
+  const s = svg('svg', { viewBox: '0 0 128 128', class: 'ring-svg' });
+  s.appendChild(svg('circle', { cx: 64, cy: 64, r, class: 'ring-track' }));
+  s.appendChild(svg('circle', {
+    cx: 64, cy: 64, r, class: 'ring-fill',
+    'stroke-dasharray': `${c}`, 'stroke-dashoffset': `${c * (1 - pct / 100)}`,
+    transform: 'rotate(-90 64 64)',
+  }));
+  wrap.appendChild(s);
+  wrap.appendChild(h('span', { class: 'ring-num tnum' }, String(pct), h('small', { text: '%' })));
+  return wrap;
+}
+
+async function cancelBringup(id) {
+  closeLive();
+  state.bringup = null;
+  try {
+    await api(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    toast('Released', 'The device is restoring its clean snapshot.', 'ok');
+  } catch (err) {
+    toast('Could not release', err.message, 'bad');
+  }
+  await Promise.all([refreshDevices(), refreshSessions()]);
+  go('#/launch');
+}
+
 /* ---------------------------------------------------------------------------- screen: cockpit */
 
 /**
@@ -876,33 +1509,401 @@ function screenDevice(id) {
 async function loadSessionDetail(id) {
   try {
     const out = await api(`/v1/sessions/${encodeURIComponent(id)}`);
-    state.detail = { ...out.session, dataPlane: out.dataPlane || null, fetchedAt: Date.now() };
+    // `ice` is carried, and forgetting it was a real bug with an almost undiagnosable symptom. The
+    // relay credentials live BESIDE `session` in the response, not inside it, so spreading
+    // `out.session` alone silently produced a viewer with no TURN — which works perfectly on the
+    // farm's own network and fails from anywhere else with an empty peer connection, no error, and
+    // not a single line in the relay's log to say nobody ever called.
+    state.detail = {
+      ...out.session,
+      dataPlane: out.dataPlane || null,
+      ice: out.ice || null,
+      fetchedAt: Date.now(),
+    };
   } catch (err) {
     state.detail = { id, missing: true, message: err.message };
   }
 }
 
+/* ------------------------------------------------------------------ the device panel */
+
 /**
- * The stage.
+ * SVG, built through the DOM rather than from a string.
  *
- * The design puts a live device view here, with a control rail, a logcat dock and a vitals panel.
- * None of the four exist: there is no media path from a worker to a browser (ADR-0005 chose a TURN
- * relay and it is not deployed), and the API has no logcat, screenshot or telemetry endpoint. So
- * this states the gap in words and names what DOES reach the device, rather than rendering a frame
- * that will never show a pixel or buttons that cannot fire.
+ * The console's CSP has no `unsafe-inline` and `h()` refuses an `html` prop, so every icon here is
+ * constructed element by element. That is not a workaround — it is what keeps rule 1 structural:
+ * there is no path by which a string from anywhere becomes markup on this page.
  */
-function stagePanel(sess) {
-  return h('div', { class: 'stage' },
-    h('div', { class: 'phone' },
-      h('div', { class: 'phone-screen' },
-        h('div', { class: 'stack tight' },
-          h('p', { class: 'micro', text: 'No live view' }),
-          h('p', { class: 'help', text: 'Nothing streams this device to a browser yet — the media relay is not deployed.' }),
-          h('p', { class: 'caption', text: 'Drive it with WebDriver, or install and launch a build from the panel beside this one.' }),
-        ),
-      ),
+function svgEl(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, String(v));
+  return el;
+}
+
+/**
+ * The toolbar icon set, drawn to read at 20px.
+ *
+ * Back, home and overview are deliberately Android's own shapes — triangle, circle, square — rather
+ * than invented glyphs, because a person coming from a device toolbar already knows them and any
+ * cleverness here costs recognition for nothing.
+ */
+const ICONS = {
+  power: (g) => { g.appendChild(svgEl('path', { d: 'M12 3v9', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M6.6 6.6a7.5 7.5 0 1 0 10.8 0', 'stroke-linecap': 'round' })); },
+  volup: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M18.5 6.5a8 8 0 0 1 0 11', 'stroke-linecap': 'round' })); },
+  voldown: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); },
+  rotl: (g) => { g.appendChild(svgEl('path', { d: 'M4 12a8 8 0 1 1 2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M4 6.5V12h5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  rotr: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 0-2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 6.5V12h-5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  back: (g) => { const p = svgEl('path', { d: 'M15 5 7 12l8 7z', 'stroke-linejoin': 'round' }); p.setAttribute('fill', 'currentColor'); g.appendChild(p); },
+  home: (g) => { const c = svgEl('circle', { cx: 12, cy: 12, r: 7 }); c.setAttribute('fill', 'currentColor'); g.appendChild(c); },
+  overview: (g) => { const r = svgEl('rect', { x: 5.5, y: 5.5, width: 13, height: 13, rx: 1.5 }); r.setAttribute('fill', 'currentColor'); g.appendChild(r); },
+  camera: (g) => { g.appendChild(svgEl('path', { d: 'M3 8.5h3.5L8 6h8l1.5 2.5H21v11H3z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('circle', { cx: 12, cy: 13.5, r: 3.5 })); },
+  refresh: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 1-2.4-5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 4v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  zoomin: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5M11 8.5v5', 'stroke-linecap': 'round' })); },
+  zoomout: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5', 'stroke-linecap': 'round' })); },
+  fit: (g) => { g.appendChild(svgEl('path', { d: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+};
+
+function icon(name) {
+  const s = svgEl('svg', { viewBox: '0 0 24 24', width: 20, height: 20, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'aria-hidden': 'true' });
+  (ICONS[name] || ICONS.fit)(s);
+  return s;
+}
+
+/**
+ * One toolbar button. `enabled` is passed rather than inferred, because every control on this bar
+ * is gated on something different — a capability, an open data channel, a live session — and a
+ * button that looks available and does nothing is the thing this console refuses to ship.
+ */
+function toolBtn(name, label, enabled, onclick, opts = {}) {
+  return h('button', {
+    class: `devbtn${opts.active ? ' on' : ''}`,
+    title: label + (opts.kbd ? ` (${opts.kbd})` : ''),
+    disabled: !enabled,
+    onclick,
+  }, icon(name), h('span', { class: 'sr', text: label }));
+}
+
+/**
+ * The device panel, kept ALIVE across renders.
+ *
+ * This is the one part of the console that is not rebuilt on every poll, and the reason is
+ * measurable rather than stylistic: `render()` replaces the whole page every five seconds, and a
+ * `<video>` element that is destroyed and recreated drops its stream, re-attaches `srcObject` and
+ * re-decodes — a visible stutter twice a minute on the one surface where smoothness is the product.
+ *
+ * So the root node, the frame and the video are created once and cached on `state.stage`. Renders
+ * re-append the same node and repaint only the parts that actually changed: the toolbar's disabled
+ * states, the overlay, and the caption. Moving a live `<video>` between parents keeps its stream.
+ */
+function stagePanel(sess, live) {
+  const device = deviceById(sess.deviceId);
+  const caps = device?.capabilities || [];
+
+  if (!state.stage) {
+    const video = h('video', {
+      id: 'device-video', class: 'dev-video',
+      autoplay: true, playsinline: true, tabindex: '0',
+    });
+    const overlay = h('div', { class: 'dev-overlay' });
+    const frame = h('div', { class: 'dev-frame' }, video, overlay);
+    const screenWrap = h('div', { class: 'dev-fit' }, frame);
+    const toolbar = h('div', { class: 'devbar' });
+    const caption = h('p', { class: 'caption dev-caption' });
+    const root = h('div', { class: 'devpanel' },
+      toolbar,
+      h('div', { class: 'dev-stage' }, screenWrap),
+    );
+    state.stage = { root, video, overlay, frame, toolbar, caption, zoom: 1 };
+    root.appendChild(caption);
+  }
+
+  const st = state.stage;
+  paintToolbar(sess, live, caps);
+  paintOverlay(sess, live, caps);
+  paintFrame(device);
+
+  st.caption.textContent = device
+    ? `${device.model}${screenOf(device)} · Android ${device.osVersion} · ${sess.region || 'lab'}`
+    : 'no device';
+  return st.root;
+}
+
+/** Aspect ratio and zoom, written as CSS custom properties so resizing costs no layout thrash. */
+function paintFrame(device) {
+  const st = state.stage;
+  const s = state.live?.screen || device?.screen;
+  const ratio = s?.width && s?.height ? s.width / s.height : 0.5625;
+  st.frame.style.setProperty('--dev-aspect', String(ratio));
+  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+}
+
+function setZoom(z) {
+  const st = state.stage;
+  if (!st) return;
+  st.zoom = Math.min(2.5, Math.max(0.4, Number(z.toFixed(2))));
+  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+  paintToolbar(state.detail, true, deviceById(state.detail?.deviceId)?.capabilities || []);
+}
+
+/**
+ * The control bar, in Android's own order: system buttons together, hardware keys above them.
+ *
+ * Every entry is present only where it can work. `power`, `back`, `home` and `overview` ride the
+ * WebRTC `device-control` channel, so they need an open peer connection; volume and rotate go
+ * through the data plane because Cuttlefish exposes no control-channel command for them; screenshot
+ * needs the capability. Nothing here is rendered disabled-with-a-tooltip as a stand-in for a
+ * feature that does not exist.
+ */
+function paintToolbar(sess, live, caps) {
+  const st = state.stage;
+  if (!st) return;
+  const streaming = state.liveState === 'streaming';
+  const attached = ATTACHED.has(state.liveState);
+  const ctrl = streaming && state.live?.control?.readyState === 'open';
+
+  const press = (cmd) => () => {
+    if (!state.live?.pressButton(cmd)) toast('Not connected', 'The device control channel is not open yet.', 'warn');
+  };
+  const send = (msg) => () => state.live?.sendControl(msg);
+
+  st.toolbar.replaceChildren(
+    toolBtn('power', 'Power', ctrl, press('power')),
+    toolBtn('volup', 'Volume up', attached, send({ t: 'key', name: 'volume_up' })),
+    toolBtn('voldown', 'Volume down', attached, send({ t: 'key', name: 'volume_down' })),
+    h('span', { class: 'devbar-sep' }),
+    toolBtn('rotl', 'Rotate left', attached, send({ t: 'rotate', dir: 'left' })),
+    toolBtn('rotr', 'Rotate right', attached, send({ t: 'rotate', dir: 'right' })),
+    h('span', { class: 'devbar-sep' }),
+    toolBtn('back', 'Back', ctrl, press('back')),
+    toolBtn('home', 'Home', ctrl, press('home')),
+    toolBtn('overview', 'Overview', ctrl, press('menu')),
+    h('span', { class: 'devbar-sep' }),
+    caps.includes('screenshot')
+      ? toolBtn('camera', 'Screenshot', Boolean(live), () => void takeScreenshot(), { kbd: 'S' })
+      : null,
+    toolBtn('refresh', 'Reconnect', Boolean(live), () => reconnectLive()),
+    h('span', { class: 'devbar-sep' }),
+    toolBtn('zoomin', 'Zoom in', streaming, () => setZoom(st.zoom + 0.15)),
+    toolBtn('zoomout', 'Zoom out', streaming, () => setZoom(st.zoom - 0.15)),
+    toolBtn('fit', 'Fit to panel', streaming, () => setZoom(1)),
+  );
+}
+
+/**
+ * Whatever is covering the screen right now — a progress ring, a reason, or nothing.
+ *
+ * Separate from the video so that reaching `streaming` is one class change rather than a rebuild.
+ */
+function paintOverlay(sess, live, caps) {
+  const st = state.stage;
+  const canStream = caps.includes('screen-stream');
+  const show = (...kids) => { st.overlay.replaceChildren(...kids.filter(Boolean)); st.overlay.hidden = false; st.root.dataset.live = 'off'; };
+
+  if (state.liveState === 'streaming') {
+    st.overlay.replaceChildren();
+    st.overlay.hidden = true;
+    st.root.dataset.live = 'on';
+    return;
+  }
+
+  if (!live) {
+    return show(
+      h('p', { class: 'micro', text: 'Session ended' }),
+      h('p', { class: 'help', text: 'This device was released and restored to its clean snapshot.' }),
+    );
+  }
+  if (!canStream) {
+    return show(
+      h('p', { class: 'micro', text: 'No live view' }),
+      h('p', { class: 'help', text: 'This device does not declare screen-stream. WebDriver and installs still work.' }),
+    );
+  }
+
+  switch (state.liveState) {
+    case 'nodisplay':
+      return show(
+        h('p', { class: 'micro warn-text', text: 'Connected, but no display' }),
+        h('p', { class: 'help', text: state.liveDetail || 'The device is not publishing a display.' }),
+        caps.includes('screenshot')
+          ? h('div', { class: 'row tight mt-sm' }, btn('Take a screenshot', 'primary', () => takeScreenshot()))
+          : null,
+      );
+    case 'nostream':
+      return show(
+        h('p', { class: 'micro', text: 'No live view' }),
+        h('p', { class: 'help', text: state.liveDetail || 'This device tier does not negotiate a media stream.' }),
+      );
+    case 'failed':
+    case 'unrouted':
+      return show(
+        h('p', { class: 'micro bad-text', text: 'The live view did not connect' }),
+        h('p', { class: 'help', text: state.liveDetail || 'No reason was reported.' }),
+        h('div', { class: 'row tight mt-sm' }, btn('Try again', 'primary', () => reconnectLive())),
+      );
+    default:
+      return show(
+        progressRing(state.liveState === 'connecting' ? 25 : state.liveState === 'authenticated' ? 55 : 80),
+        h('p', { class: 'caption', text:
+          state.liveState === 'connecting' ? 'Opening the data plane'
+            : state.liveState === 'authenticated' ? 'Asking the device to stream'
+            : 'Negotiating the media connection' }),
+      );
+  }
+}
+
+/** ` · 720 × 1280`, or nothing at all when neither side has reported a panel size. */
+function screenOf(device) {
+  const s = state.live?.screen || device?.screen;
+  return s?.width ? ` · ${s.width} × ${s.height}` : '';
+}
+
+function reconnectLive() {
+  closeLive();
+  render();
+  loadSessionDetail(state.route.id).then(() => { ensureLive(state.detail); render(); });
+}
+
+async function takeScreenshot() {
+  if (!state.live) { toast('Not connected', 'Open the live view first.', 'warn'); return; }
+  try {
+    await state.live.screenshot();
+    toast('Screenshot taken', 'It is in “Captured this session”, in the panel on the right.', 'ok');
+  } catch (err) {
+    toast('Screenshot failed', err.message, 'bad');
+  }
+}
+
+/* ------------------------------------------------------------------ logcat dock */
+
+const LOG_LEVELS = ['ALL', 'E', 'W', 'I', 'D'];
+/** Which levels each filter admits. Choosing E shows only errors and fatals, not "E and above". */
+const LEVEL_SET = { E: ['E', 'F'], W: ['W'], I: ['I'], D: ['D', 'V'] };
+
+function visibleLog() {
+  const { lines, filter, level } = state.log;
+  const needle = filter.trim().toLowerCase();
+  return lines.filter((l) => {
+    if (level !== 'ALL' && !(LEVEL_SET[level] || []).includes(l.level)) return false;
+    if (!needle) return true;
+    return l.raw.toLowerCase().includes(needle);
+  });
+}
+
+/**
+ * Repaint the log without re-rendering the page.
+ *
+ * The log arrives five times a second. Putting it through `render()` would rebuild the cockpit — and
+ * every rebuild under a pointer costs a click (see `render`), which on this screen could be the
+ * Release button. So the dock owns its own node and this writes into it directly.
+ */
+function paintLog() {
+  const body = $('logbody');
+  if (!body) return;
+  const rows = visibleLog().slice(-600);
+  body.replaceChildren(...rows.map((l) => h('div', { class: `logline l${l.level || 'X'}` },
+    h('span', { class: 'log-t', text: l.time }),
+    h('span', { class: 'log-l', text: l.level }),
+    h('span', { class: 'log-g', text: l.tag }),
+    h('span', { class: 'log-m', text: l.message }),
+  )));
+  const count = $('logcount');
+  if (count) count.textContent = `${rows.length} / ${state.log.lines.length} lines`;
+  if (state.log.follow) body.scrollTop = body.scrollHeight;
+}
+
+function logcatDock(sess, live) {
+  const device = deviceById(sess.deviceId);
+  if (!(device?.capabilities || []).includes('logcat')) {
+    // Absent rather than empty: this device genuinely produces no log through this path, and an
+    // empty pane would read as a quiet device.
+    return card('Logcat', {}, h('p', { class: 'help', text: 'This device does not declare the logcat capability, so nothing here would ever fill.' }));
+  }
+
+  const following = Boolean(state.log.streaming);
+  return card('Logcat', {
+    aside: h('div', { class: 'row tight' },
+      h('span', { class: 'caption tnum', id: 'logcount', text: `0 / ${state.log.lines.length} lines` }),
+      btn(following ? 'Pause' : 'Follow', 'tiny ghost', () => toggleLogcat(), { disabled: !live }),
+      btn('Clear', 'tiny ghost', () => { state.log.lines = []; paintLog(); }),
     ),
-    h('p', { class: 'caption', text: `${sess.region || '—'} · session ${short(sess.id)} · no screen stream, no logcat, no device telemetry` }),
+  },
+    h('div', { class: 'row tight logbar' },
+      h('input', {
+        class: 'field', id: 'logfilter', placeholder: 'Filter', value: state.log.filter,
+        oninput: (e) => { state.log.filter = e.target.value; paintLog(); },
+      }),
+      h('div', { class: 'row tight' }, LOG_LEVELS.map((lv) => h('button', {
+        class: `levelchip${state.log.level === lv ? ' on' : ''}`,
+        onclick: () => { state.log.level = lv; paintLog(); },
+      }, lv))),
+    ),
+    h('div', {
+      class: 'logbody mono', id: 'logbody',
+      // Following is turned off by scrolling up and back on by scrolling to the bottom, which is
+      // what every log viewer does and what a person expects without being told.
+      onscroll: (e) => {
+        const el = e.target;
+        state.log.follow = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+      },
+    }),
+    !live
+      ? h('p', { class: 'caption mt-sm', text: 'The session has ended, so nothing more will arrive. Nothing was kept — artifacts are not built yet.' })
+      : h('p', { class: 'caption mt-sm', text: 'Streamed straight off the device over the same connection as the screen. Nothing is stored; closing this page loses it.' }),
+  );
+}
+
+function toggleLogcat() {
+  if (!state.live) { toast('Not connected', 'Open the live view first.', 'warn'); return; }
+  if (state.log.streaming) { state.live.stopLogcat(); state.log.streaming = false; }
+  else { state.live.startLogcat(); state.log.streaming = true; }
+  render();
+}
+
+/* ------------------------------------------------------------------ vitals and captures */
+
+/**
+ * The measured numbers, painted rather than rendered — same reason as the log.
+ *
+ * Frame rate is measured off `getStats`, never assumed. Snapshot/restore forces software rendering,
+ * so the honest answer is single digits, and a UI implying otherwise would be selling the product on
+ * something it does not do.
+ */
+function paintVitals() {
+  const s = state.liveStats;
+  const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
+  set('vit-fps', s.fps ? `${s.fps} fps` : '—');
+  set('vit-kbps', s.kbps ? `${s.kbps} kbit/s` : '—');
+  set('vit-rtt', s.rtt == null ? '—' : `${s.rtt} ms`);
+  set('vit-path', s.ice ? (s.ice === 'relay' ? 'relayed (TURN)' : `direct (${s.ice})`) : '—');
+}
+
+function vitalsCard() {
+  if (state.liveState !== 'streaming') return null;
+  const row = (label, id) => h('div', { class: 'row between vit' },
+    h('span', { class: 'caption', text: label }),
+    h('span', { class: 'secondary tnum', id, text: '—' }),
+  );
+  return card('Stream', {},
+    row('Frame rate', 'vit-fps'),
+    row('Bitrate', 'vit-kbps'),
+    row('Round trip', 'vit-rtt'),
+    row('Path', 'vit-path'),
+    // MEASURED, and it corrected an assumption this project had carried for months. The plan said
+    // to expect single digits because snapshot-restore forces SwiftShader; a cold-booted Cuttlefish
+    // on an n2-standard-16 actually streams at ~49 fps over a direct path. Say what the numbers are
+    // for, not what they were predicted to be.
+    h('p', { class: 'caption mt-sm', text: 'Rendering is software (SwiftShader), so frame rate depends on how busy the host is. `relayed (TURN)` means media is going through the relay, which costs egress; `direct` means it is not.' }),
+  );
+}
+
+function capturesCard() {
+  if (!state.shots.length) return null;
+  return card('Captured this session', { aside: h('span', { class: 'caption', text: `${state.shots.length}` }) },
+    h('div', { class: 'shotstrip' }, state.shots.map((s) => h('a', {
+      class: 'shot', href: s.url, download: `mfarm-${s.takenAt.replace(/[:.]/g, '-')}.png`,
+      title: `${s.takenAt} — click to download`,
+    }, h('img', { src: s.url, alt: `Screenshot at ${s.takenAt}` })))),
+    h('p', { class: 'caption mt-sm', text: 'Held in this tab only. There is no artifact store yet, so a reload loses them — download anything worth keeping.' }),
   );
 }
 
@@ -956,10 +1957,56 @@ function toolsCard(sess, live) {
               h('p', { class: 'caption mt-sm', text: 'Every verb is queued and carried down on the worker’s next heartbeat — usually within 10 seconds.' }),
               actionStatusStrip(),
             ],
-    // Screenshot, record, rotate, clear-app-data, send-text and pull-logcat are in the design and
-    // have no endpoint. They are absent rather than disabled: a greyed button implies a permission
-    // problem, when the truth is the feature does not exist.
+    // Text goes down the WebRTC input channel as key events, so it needs no endpoint and no
+    // capability beyond the live view being open — which is exactly when it is shown.
+    live && state.liveState === 'streaming'
+      ? h('div', { class: 'stack tight mt-md' },
+          h('p', { class: 'micro', text: 'Type on the device' }),
+          h('form', {
+            class: 'row tight',
+            onsubmit: (e) => { e.preventDefault(); sendTypedText(e.target.elements.txt); },
+          },
+            h('input', { class: 'field', name: 'txt', placeholder: 'Text to type', autocomplete: 'off' }),
+            btn('Send', '', null, {}),
+          ),
+          h('p', { class: 'caption', text: 'Sent as key events, the same as typing with the device focused. Clicking the screen and typing works too.' }),
+        )
+      : null,
+    // Record, rotate and clear-app-data are in the design and have no implementation. They are
+    // absent rather than disabled: a greyed button implies a permission problem, when the truth is
+    // that no worker method exists behind them.
   );
+}
+
+/**
+ * Type a string on the device.
+ *
+ * Goes through the WebRTC input channel one key at a time rather than through the data plane's
+ * `text` verb, and the difference is not stylistic: `text` shells out to `adb shell input text`,
+ * which costs a round trip per call and mangles anything with a space or a quote. Key events are
+ * what a keyboard produces, so the device treats them identically to real typing.
+ */
+function sendTypedText(input) {
+  const value = input?.value || '';
+  if (!value || !state.live) return;
+  const channel = state.live.input;
+  if (channel?.readyState !== 'open') { toast('Not connected', 'The device input channel is not open.', 'warn'); return; }
+  for (const ch of value) {
+    // DOM `code` values, which is what Cuttlefish's input handler expects — it maps the code, not
+    // the character. Anything outside this map is skipped rather than sent as something else.
+    const code = /[a-z]/i.test(ch) ? `Key${ch.toUpperCase()}`
+      : /[0-9]/.test(ch) ? `Digit${ch}`
+      : ch === ' ' ? 'Space'
+      : ch === '.' ? 'Period'
+      : ch === ',' ? 'Comma'
+      : ch === '-' ? 'Minus'
+      : ch === '@' ? 'Digit2'
+      : null;
+    if (!code) continue;
+    channel.send(JSON.stringify({ type: 'keyboard', keycode: code, event_type: 'keydown' }));
+    channel.send(JSON.stringify({ type: 'keyboard', keycode: code, event_type: 'keyup' }));
+  }
+  input.value = '';
 }
 
 function connectCard(sess) {
@@ -994,6 +2041,10 @@ function screenCockpit(id) {
   }
 
   const live = LIVE_SESSION_STATES.has(sess.state) && sess.deviceId;
+  // Opening the viewer from the render is safe because `ensureLive` is idempotent, and it is the
+  // only place that has both the session detail and the knowledge that the cockpit is on screen.
+  // Arriving from the bring-up screen finds a connection already open and reuses it.
+  if (live) ensureLive(sess);
   const st = SESSION_STATE[sess.state] || { label: sess.state, tone: '' };
   const device = deviceById(sess.deviceId);
   const app = installedOn(sess.id);
@@ -1005,6 +2056,11 @@ function screenCockpit(id) {
       `Session ${short(sess.id)}`,
       null,
       h('div', { class: 'row tight' },
+        state.liveState === 'streaming'
+          // Never a hard-coded "LIVE · 60 fps". The number is sampled off the peer connection, and
+          // on a software-rendered device it is honestly small.
+          ? pill(`LIVE · ${state.liveStats.fps || '—'} fps`, 'bad', { live: true, title: 'Measured from the media stream' })
+          : null,
         pill(st.label, st.tone, { live: sess.state === 'ACTIVE' }),
         live ? btn('Release', 'danger', () => askRelease(sess), { kbd: 'R' }) : null,
       ),
@@ -1031,7 +2087,8 @@ function screenCockpit(id) {
 
     h('div', { class: 'split' },
       h('div', { class: 'content' },
-        stagePanel(sess),
+        stagePanel(sess, live),
+        logcatDock(sess, live),
         card('Actions on this session', { aside: h('span', { class: 'caption', text: `${acts.length} total` }) },
           acts.length
             ? h('div', { class: 'tablewrap' }, h('table', { class: 'table narrow' },
@@ -1056,6 +2113,8 @@ function screenCockpit(id) {
       ),
       h('div', { class: 'rail' },
         toolsCard(sess, live),
+        vitalsCard(),
+        capturesCard(),
         connectCard(sess),
         card('Activity', {},
           acts.length
@@ -1473,6 +2532,7 @@ function screenHealth() {
 function commands() {
   const held = heldSession();
   const list = [
+    { glyph: '▶', label: 'Launch a device', group: 'Go', run: () => go('#/launch') },
     { glyph: '■', label: 'Open Devices', group: 'Go', run: () => go('#/devices') },
     { glyph: '✚', label: 'Open Apps', group: 'Go', run: () => go('#/apps') },
     { glyph: '☰', label: 'Open Sessions', group: 'Go', run: () => go('#/sessions') },
@@ -1482,6 +2542,14 @@ function commands() {
   if (held) {
     list.unshift({ glyph: '▶', label: 'Open your session cockpit', group: 'Session', run: () => go(`#/sessions/${held.id}`) });
     list.push({ glyph: '⏻', label: 'Release your device', group: 'Session', run: () => askRelease(held) });
+  }
+  // Offered only where they would work. A palette entry for a capability the device lacks is the
+  // same lie as a button for one.
+  if (state.route.name === 'cockpit' && state.live) {
+    const dev = deviceById(state.detail?.deviceId);
+    const caps = dev?.capabilities || [];
+    if (caps.includes('screenshot')) list.push({ glyph: '⧉', label: 'Take a screenshot', group: 'Session', run: () => void takeScreenshot() });
+    if (caps.includes('logcat')) list.push({ glyph: '≡', label: state.log.streaming ? 'Pause logcat' : 'Follow logcat', group: 'Session', run: () => toggleLogcat() });
   }
   for (const d of state.devices) {
     if (d.state === 'READY') {
@@ -1553,7 +2621,7 @@ $('palette-input').addEventListener('keydown', (e) => {
  * to.
  */
 let gPending = 0;
-const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', q: 'queue', h: 'health' };
+const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', q: 'queue', h: 'health', l: 'launch' };
 
 function inField(e) {
   const t = e.target;
@@ -1588,11 +2656,22 @@ document.addEventListener('keydown', (e) => {
     const sess = state.sessions.find((s) => s.id === state.route.id);
     if (sess && LIVE_SESSION_STATES.has(sess.state) && sess.deviceId) { e.preventDefault(); askRelease(sess); }
   }
+
+  // The design's `S` and `L`. Both are cockpit-only and both check the same capability the button
+  // does — the shortcut is never a way to reach a control the device does not have.
+  if (state.route.name === 'cockpit' && state.live) {
+    const device = deviceById(state.detail?.deviceId);
+    const caps = device?.capabilities || [];
+    if (k === 's' && caps.includes('screenshot')) { e.preventDefault(); void takeScreenshot(); }
+    if (k === 'l' && caps.includes('logcat')) { e.preventDefault(); toggleLogcat(); }
+  }
 });
 
 /* ---------------------------------------------------------------------------- render */
 
 const SCREENS = {
+  launch: () => screenLaunch(),
+  launching: () => screenLaunching(state.route.id),
   devices: () => screenDevices(),
   device: () => screenDevice(state.route.id),
   apps: () => screenApps(),
@@ -1627,7 +2706,24 @@ function render() {
   const main = $('main');
   main.replaceChildren();
   add(main, [(SCREENS[state.route.name] || SCREENS.devices)()]);
+  // Everything below re-attaches live state to the nodes that were just created. A render throws
+  // the previous DOM away wholesale, so a <video> loses its stream, the log dock comes back empty,
+  // and the vitals reset to em-dashes — none of which is a state change, so none of it belongs in
+  // the tree the screen functions build.
+  attachVideo();
+  paintLog();
+  paintVitals();
 }
+
+/**
+ * A render on the next turn of the loop.
+ *
+ * Used by everything the live connection calls back into. `ensureLive` runs DURING a render (the
+ * cockpit is what knows a viewer is wanted), and `connect()` reports its first state change
+ * synchronously — so calling `render()` from there would re-enter a render that is still building
+ * the tree it is about to discard.
+ */
+function scheduleRender() { setTimeout(render, 0); }
 
 /**
  * The 1s tick. It repaints counters and touches nothing else.
@@ -1809,6 +2905,11 @@ async function boot() {
   render();
   startPoll();
   startTick();
+  // A reload of a bring-up URL has to rejoin the session it names. `hashchange` does not fire on
+  // load, so without this the checklist renders from nothing and the viewer is never opened — and
+  // the person is left staring at a screen that will never advance while their device sits
+  // allocated behind it.
+  if (state.route.name === 'launching') void watchBringup(state.route.id);
 }
 
 // Restore the sidebar width before first paint so it does not flash open then collapse.

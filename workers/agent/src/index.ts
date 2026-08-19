@@ -55,6 +55,14 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
         imageDir,
         snapshotDir: join(snapshotRoot, `cf-${i + 1}`),
         publicHost: process.env.PUBLIC_HOST,
+        // Loopback unless told otherwise. The operator is unauthenticated device control, so the
+        // only reason to override this is an unusual cvd layout, never a remote host.
+        operatorUrl: process.env.CF_OPERATOR_URL,
+        // `powerwash` is what a farm used INTERACTIVELY needs: a snapshot-restored Cuttlefish
+        // publishes no display, so there is no live view at all (see `powerwash()`). It costs ~80s
+        // per reset instead of ~10s. Default stays `snapshot` so an automation-only farm is not
+        // silently slowed down.
+        resetMode: process.env.CF_RESET_MODE === 'powerwash' ? 'powerwash' : 'snapshot',
         gpuMode: process.env.GPU_MODE === 'none' ? 'none' : 'guest_swiftshader',
       }),
     );
@@ -281,10 +289,14 @@ async function main(): Promise<void> {
       })
     : undefined;
   if (gateway) {
-    // BIND_HOST is the one knob that decides whether these listeners exist on a public interface.
-    // Unset means all interfaces, which is right for a box whose only NIC is the tailnet and wrong
-    // for a rented VM — see deploy/README.md, "Tailscale ingress only".
-    const bindHost = process.env.BIND_HOST?.trim() || undefined;
+    // AUTOMATION_BIND_HOST, falling back to the older shared BIND_HOST.
+    //
+    // The two listeners are bound SEPARATELY as of ADR-0005/ADR-0007, and that split is the whole
+    // point: this one only ever has to be reachable by the containerised hub on the same box, so it
+    // belongs on the docker bridge or on loopback. The data plane has to be reachable by a browser
+    // and cannot live there. Sharing one variable meant satisfying the hub broke the viewer, which
+    // is exactly what happened (HANDOFF known issue 15).
+    const bindHost = process.env.AUTOMATION_BIND_HOST?.trim() || process.env.BIND_HOST?.trim() || undefined;
     await gateway.listen(gatewayPort, bindHost);
     console.log(`[agent] automation gateway listening on ${bindHost ?? '0.0.0.0'}:${gatewayPort}`);
   }
@@ -292,19 +304,51 @@ async function main(): Promise<void> {
   const state = await agent.start();
   console.log(`[agent] registered as host ${state.hostId}`);
 
+
+  /**
+   * Control-plane uuid -> local backend, built from what registration just returned.
+   *
+   * THIS MAP USED TO BE EMPTY. It was declared here and never written to, and the comment beside it
+   * described a mapping "taught on first use" that nothing taught — so the single-device fallback
+   * was carrying every case, and a two-device host answered `unknown_device` to every data-plane
+   * connection. Nothing caught it because the fallback is correct at N=1 and the data plane had no
+   * browser client to fail against. Registration returns `deviceIds` (localId -> uuid) precisely so
+   * this does not have to be guessed; that field was added for the automation gateway and is the
+   * same answer here.
+   */
   const byUuid = new Map<string, DeviceBackend>();
+  for (const b of backends) {
+    const uuid = agent.deviceIdFor(b.control.info.localId);
+    if (uuid) byUuid.set(uuid, b);
+    else console.warn(`[agent] the control plane returned no uuid for ${b.control.info.localId} — its data-plane connections will be refused as unknown_device`);
+  }
+
   const dp = new DataPlane({
     agent,
     backends: new Map(backends.map((b) => [b.control.info.localId, b])),
-    // A session token names a control-plane uuid; this host knows only local ids. The token is
-    // signed, so its `did` claim is trustworthy and teaches the mapping on first use. With a single
-    // device the mapping is unambiguous anyway.
+    // Still falls back to the sole device on a single-device host, for the case where a worker is
+    // running from persisted state that predates `deviceIds`.
     resolveDevice: (uuid) => byUuid.get(uuid) ?? (backends.length === 1 ? backends[0] : undefined),
   });
 
-  const dataPlaneHost = process.env.BIND_HOST?.trim() || undefined;
+  /**
+   * Where the data plane binds — the socket a BROWSER connects to, so its reachability is a product
+   * requirement rather than an operational preference.
+   *
+   * Defaults to loopback, and that default changed with ADR-0007. It used to inherit BIND_HOST,
+   * which on this deployment meant the docker bridge and meant no client anywhere could reach it.
+   * The intended deployment now puts the console's TLS ingress in front (`wss://<console>/dp/<host>`
+   * proxied to this port), so loopback is correct AND safe when the proxy runs on this box; set
+   * DATA_PLANE_BIND_HOST to the VPC address when the proxy is on a different one, as it is here.
+   *
+   * It is never a reason to skip the token check: the grant is verified offline on every connection
+   * whatever route the packets took (ADR-0005).
+   */
+  const dataPlaneHost = process.env.DATA_PLANE_BIND_HOST?.trim()
+    || process.env.BIND_HOST?.trim()
+    || '127.0.0.1';
   const port = await dp.listen(Number(process.env.DATA_PLANE_PORT ?? 8080), dataPlaneHost);
-  console.log(`[agent] data plane listening on ${dataPlaneHost ?? '0.0.0.0'}:${port}`);
+  console.log(`[agent] data plane listening on ${dataPlaneHost}:${port}`);
 
   agent.startHeartbeat();
   agent.startMetering();

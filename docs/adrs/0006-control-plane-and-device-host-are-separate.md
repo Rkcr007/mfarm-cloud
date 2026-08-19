@@ -70,7 +70,9 @@ when the host has no `/dev/kvm` rather than registering an empty fleet beside th
 `install-worker-service.sh` now requires `CONTROL_PLANE_URL` because there is no longer a sensible
 default for it.
 
-**What this does not fix.** There is still no interactive video: ADR-0005's relay is undecided in
+**What this does not fix.** *(Fixed 2026-08-19 by [ADR-0007](0007-live-view-signaling-relay.md) —
+the relay is deployed, the signalling path exists, and a browser has driven a real device. Kept as
+written because it was true when this decision was taken.)* There is still no interactive video: ADR-0005's relay is undecided in
 implementation and unbuilt. And `default-allow-internal` permits any VM in the project to reach the
 worker's ports; at two machines that is acceptable, and the grant is what actually gates access, but
 a rule scoped to the control plane's address would be better hygiene the moment a third VM exists.

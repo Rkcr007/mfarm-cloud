@@ -151,6 +151,16 @@ export class Agent {
   /** Outcomes waiting to be reported. Flushed alongside metering and resets. */
   private readonly pendingActions: AppActionResult[] = [];
 
+  /**
+   * Sessions a data-plane client has attached to, waiting to be reported (migration 017).
+   *
+   * Buffered like every other worker-observed fact rather than sent immediately: `hello` is on the
+   * viewer's critical path and must not wait on the control plane, which is the whole reason the
+   * grant is verified offline in the first place. A beat's delay in the session reading ACTIVE is
+   * invisible; a round trip before the first frame is not.
+   */
+  private readonly pendingAttaches: Array<{ sessionId: string; fence: number }> = [];
+
   private readonly opts: AgentOptions;
   /**
    * Live, not frozen at construction, and keyed by device local id. ADR-0003 decision 3 makes
@@ -495,8 +505,12 @@ export class Agent {
 
   // ---------------------------------------------------------------- metering
 
-  beginSession(sessionId: string, deviceId: string, orgId: string): void {
+  beginSession(sessionId: string, deviceId: string, orgId: string, fence?: number): void {
     this.active.set(sessionId, { sessionId, deviceId, orgId, startedAt: Date.now(), ticksEmitted: 0 });
+    // A client attached. Queued, never sent inline — see `pendingAttaches`.
+    if (typeof fence === 'number' && !this.pendingAttaches.some((a) => a.sessionId === sessionId && a.fence === fence)) {
+      this.pendingAttaches.push({ sessionId, fence });
+    }
   }
 
   /** Emits the final partial tick so the last seconds of a session are not given away free. */
@@ -539,7 +553,8 @@ export class Agent {
   /** Called on a timer; also safe to call directly. Buffered events survive a failed flush. */
   async flush(): Promise<{ recorded: number; ok: boolean }> {
     for (const s of this.active.values()) this.emitTick(s, Date.now());
-    if (this.buffer.size === 0 && this.pendingResets.length === 0 && this.pendingActions.length === 0) {
+    if (this.buffer.size === 0 && this.pendingResets.length === 0 && this.pendingActions.length === 0
+        && this.pendingAttaches.length === 0) {
       return { recorded: 0, ok: true };
     }
     if (!this.state) return { recorded: 0, ok: false };
@@ -547,12 +562,13 @@ export class Agent {
     const metering = [...this.buffer.values()];
     const resets = [...this.pendingResets];
     const actions = [...this.pendingActions];
+    const attaches = [...this.pendingAttaches];
 
     try {
       const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/events`, {
         method: 'POST',
         headers: { authorization: `Bearer ${this.state.workerToken}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ metering, resets, actions }),
+        body: JSON.stringify({ metering, resets, actions, attaches }),
       });
       if (!res.ok) return { recorded: 0, ok: false };
       const body = await res.json() as {
@@ -573,6 +589,13 @@ export class Agent {
       for (const r of actions) {
         const i = this.pendingActions.findIndex((p) => p.actionId === r.actionId);
         if (i >= 0) this.pendingActions.splice(i, 1);
+      }
+      // Dropped whether or not they were accepted, and `false` is the ordinary answer: it means the
+      // session was already ACTIVE, which is what a reconnect looks like. Re-sending gets the same
+      // answer forever.
+      for (const a of attaches) {
+        const i = this.pendingAttaches.findIndex((p) => p.sessionId === a.sessionId && p.fence === a.fence);
+        if (i >= 0) this.pendingAttaches.splice(i, 1);
       }
       for (const r of body.resets ?? []) {
         if (!r.accepted) {
