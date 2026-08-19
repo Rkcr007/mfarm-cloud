@@ -43,6 +43,25 @@ step, no bundler.
 which log what they were asked to do and run nothing. It declares no `screen-stream` and no
 `webdriver` precisely so nobody can demo a capability that does not work.
 
+### "Real device" means real Android, not a handset
+
+This document says "real device" a lot, and it means **tier 2 below**. Three tiers exist and only the
+middle one matters here:
+
+| Tier | What it is | Installs and verifies an APK? |
+|---|---|---|
+| `fake-farm.ts` | Not Android at all — a Node class that logs what it was asked to do. Model string reads `FAKE (no Android)`. | **No.** `installApp` is one `log()` line (`fake-farm.ts:68`), so a build that would fail on a device "succeeds" here. |
+| **`tier: 'cuttlefish'`** | **Real AOSP Android 17 as a VM on Linux + KVM.** Real kernel, real framework, real adb serial. | **Yes. This is the MVP.** `cuttlefish.ts:627` runs `adb install -r` and parses adb's own `Failure [INSTALL_FAILED_…]`, because adb has historically exited 0 while failing. |
+| `tier: 'physical'` | A handset on a USB hub. | Declared in the union at `device.ts:26` with **no backend implemented**. Not needed, not planned, not blocking. |
+
+Cuttlefish is **virtual but not fake**: it boots the same AOSP build a phone runs, so adb genuinely
+installs, UiAutomator2 genuinely drives the UI, and a failing test genuinely means the app is broken.
+Two limits are real and neither argues for handsets — no Google Play Services (pure AOSP, hence ask
+#4 in §5) and software rendering (hence the Flutter/RN caveat in §7).
+
+So **"the box" is never a phone.** It is an x86_64 Linux machine with `/dev/kvm` that *hosts* the
+virtual devices, and it is the only hardware anywhere in this plan.
+
 That is the real gap, and it is not a UI gap. The honest statement of the remaining work is:
 
 > The control plane, the console, the app pipeline and the WebDriver hub are built and tested. The
@@ -166,8 +185,8 @@ Android device instead of `FAKE (no Android)`.**
 5. `deploy/verify-webdriver.mjs`, then a real Appium suite from a laptop, sharded across both devices.
    That is Phase 1's exit condition and has never been met.
 
-**Done when:** the Devices, Apps, Sessions, Queue and Health screens are all showing real hardware,
-and an APK you actually ship installs and launches from a browser click.
+**Done when:** the Devices, Apps, Sessions, Queue and Health screens are all showing real Cuttlefish
+devices, and an APK you actually ship installs and launches from a browser click.
 
 ### M2 — Reachable by URL, safely  *(needs the box; ~half a day)*
 
@@ -322,9 +341,9 @@ reason the farm pays for itself.
                                         └──────────────────────────────┘
 ```
 
-Recommended order: **M1 → M2 first**, even though M3/M4 are free, because until real devices are
-behind the console every subsequent verification is against a fake, and M1 is the step most likely to
-surface something that changes the others. Build M3 and M4's code during the same window the box is
+Recommended order: **M1 → M2 first**, even though M3/M4 are free, because until real Android
+(Cuttlefish, not the stub) is behind the console every subsequent verification is against a fake, and
+M1 is the step most likely to surface something that changes the others. Build M3 and M4's code during the same window the box is
 up, so one metered period covers both. Then M5, then M6.
 
 The one ordering rule that is not negotiable: **no viewer work against the docker-bridge bind.**
