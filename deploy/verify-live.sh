@@ -41,9 +41,13 @@ else
   FAIL=1
 fi
 
-VERSION="$(curl -s --max-time 5 "$API/v1/version" 2>/dev/null)"
+# `/v1/*` is authenticated, including version — the running commit is fleet information, not a
+# public banner. Read the key first so this reports the sha instead of shrugging at a 401.
+KEY_FILE="$REPO_ROOT/deploy/.state/api_key"
+KEY="$([ -f "$KEY_FILE" ] && cat "$KEY_FILE" || true)"
+VERSION="$(curl -s --max-time 5 -H "Authorization: Bearer $KEY" "$API/v1/version" 2>/dev/null)"
 SHA="$(printf '%s' "$VERSION" | sed -n 's/.*"short":"\([^"]*\)".*/\1/p')"
-[ -n "$SHA" ] && ok "running commit $SHA" || warn "could not read /v1/version"
+[ -n "$SHA" ] && ok "running commit $SHA" || warn "could not read /v1/version (is deploy/.state/api_key present?)"
 
 # The public route is a separate question from the API being up: Caddy terminates TLS and proxies
 # both the console and /dp, and a certificate that failed to renew looks exactly like a dead API.
@@ -66,11 +70,9 @@ fi
 
 # ---------------------------------------------------------------- 2. the fleet
 say "Fleet (waiting up to ${DEVICE_WAIT_SECONDS}s — devices cold boot after a host start)"
-KEY_FILE="$REPO_ROOT/deploy/.state/api_key"
-if [ ! -f "$KEY_FILE" ]; then
+if [ -z "$KEY" ]; then
   warn "no deploy/.state/api_key; skipping the fleet check"
 else
-  KEY="$(cat "$KEY_FILE")"
   DEADLINE=$(( $(date +%s) + DEVICE_WAIT_SECONDS ))
   AVAIL=0
   while [ "$(date +%s)" -lt "$DEADLINE" ]; do
