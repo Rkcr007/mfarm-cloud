@@ -27,13 +27,27 @@ set -euo pipefail
 FARM_ENV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/farm.env"
 # shellcheck disable=SC1090
 [ -f "$FARM_ENV" ] && . "$FARM_ENV"
-# The address coturn ADVERTISES. Defaults to the configured relay name so a plain `setup-turn.sh`
-# on the device host is correct; falls back to asking the internet only if neither is set.
-PUBLIC_IP="${PUBLIC_IP:-${MFARM_TURN_HOST:-$(curl -s --max-time 5 ifconfig.me || true)}}"
+# The address coturn ADVERTISES, and it must be an IP ADDRESS — coturn's `external-ip` will not take
+# a hostname, and a name there produces a server that starts cleanly and hands clients an address
+# they cannot use. `MFARM_TURN_HOST` became a hostname the day the farm moved to a domain, so it is
+# resolved here rather than passed through.
+_turn_host="${MFARM_TURN_HOST:-}"
+case "$_turn_host" in
+  # Already an IPv4 literal: use it as-is.
+  [0-9]*.[0-9]*.[0-9]*.[0-9]*) _turn_ip="$_turn_host" ;;
+  "") _turn_ip="" ;;
+  *) _turn_ip="$(getent hosts "$_turn_host" 2>/dev/null | awk '{print $1; exit}')"
+     [ -n "$_turn_ip" ] || _turn_ip="$(dig +short "$_turn_host" 2>/dev/null | grep -E '^[0-9.]+$' | head -1)" ;;
+esac
+PUBLIC_IP="${PUBLIC_IP:-${_turn_ip:-$(curl -s --max-time 5 ifconfig.me || true)}}"
+
+# The realm is cosmetic-ish — it appears in the auth exchange — but it should read as this farm
+# rather than as a placeholder, so it follows the domain when there is one.
+REALM_DEFAULT="${_turn_host:-mfarm.local}"
 # The address the NIC actually holds. On a cloud VM this is NOT the public one — the public address
 # is NAT'd in front — and coturn needs BOTH: one to bind relay sockets to, one to advertise.
 PRIVATE_IP="${PRIVATE_IP:-$(hostname -I | awk '{print $1}')}"
-REALM="${TURN_REALM:-mfarm.local}"
+REALM="${TURN_REALM:-$REALM_DEFAULT}"
 STATE_DIR="${STATE_DIR:-$(cd "$(dirname "$0")" && pwd)/.state}"
 SECRET_FILE="$STATE_DIR/turn_secret"
 

@@ -32,6 +32,14 @@ FARM_ENV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/farm.env"
 # shellcheck disable=SC1090
 [ -f "$FARM_ENV" ] && . "$FARM_ENV"
 HOSTNAME_PUBLIC="${HOSTNAME_PUBLIC:-${MFARM_PUBLIC_HOST:-34-100-138-213.sslip.io}}"
+# A SECOND name Caddy also answers on, so a rename is not a cutover.
+#
+# Both names get their own Let's Encrypt certificate and both serve the same site, which means a
+# link somebody bookmarked or pasted into a CI config keeps working while everyone moves. Set it
+# empty once nobody is on the old name — leaving a name served forever is how you end up unable to
+# ever release the address behind it.
+HOSTNAME_LEGACY="${HOSTNAME_LEGACY:-34-100-138-213.sslip.io}"
+[ "$HOSTNAME_LEGACY" = "$HOSTNAME_PUBLIC" ] && HOSTNAME_LEGACY=""
 UPSTREAM="127.0.0.1:3000"
 # The device host's data plane, reached over the VPC (ADR-0006 put it on its own machine). Empty
 # disables the /dp route entirely, which is the right setting for a control plane with no worker
@@ -92,7 +100,7 @@ sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 # socket over this same TLS name (ADR-0007). The metrics listener is a SEPARATE port and is not
 # proxied, because its gauges are fleet-wide and collected on the owner pool — RLS does not hide
 # them. The automation gateway is not proxied either: the hub reaches it host-locally.
-$HOSTNAME_PUBLIC {
+${HOSTNAME_PUBLIC}${HOSTNAME_LEGACY:+, }${HOSTNAME_LEGACY} {
 	encode zstd gzip
 
 	# HSTS. Safe here because this host is only ever reached over TLS.
@@ -122,6 +130,11 @@ sudo systemctl enable caddy >/dev/null 2>&1 || true
 sudo systemctl restart caddy
 sleep 8
 sudo systemctl is-active caddy
+
+if [ -n "$HOSTNAME_LEGACY" ]; then
+  note() { printf '    %s\n' "$*"; }
+  note "also serving the legacy name $HOSTNAME_LEGACY — set HOSTNAME_LEGACY= to retire it"
+fi
 
 say "Certificate + reachability"
 for i in $(seq 1 20); do
