@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Capability } from '@mfarm/protocol';
-import type { DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, MediaSource } from '../device.ts';
+import type {
+  DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, LogcatHandle, MediaSource,
+  SignalChannel, SignalOptions,
+} from '../device.ts';
+import { openSignalChannel } from './operator.ts';
 
 /**
  * Cuttlefish backend — the target tier.
@@ -39,6 +43,12 @@ export interface CuttlefishOptions {
    */
   snapshotDir?: string;
   webrtcPort?: number;
+  /**
+   * Where cvd's WebRTC operator answers. Loopback in every real deployment (ADR-0007) — this is the
+   * signalling server a viewer is relayed to, and it is unauthenticated, so it must never be bound
+   * anywhere a browser could reach it directly.
+   */
+  operatorUrl?: string;
   publicHost?: string;
   osVersion?: string;
   gpuMode?: 'guest_swiftshader' | 'none';
@@ -142,6 +152,26 @@ function run(bin: string, args: string[], cwd: string, timeoutMs = 300_000): Pro
 }
 
 /**
+ * `run`, but for a command whose output is bytes rather than text.
+ *
+ * Separate rather than a flag on `run` because the two differ in more than the return type: this one
+ * must never touch the encoding, must not trim, and concatenates buffers instead of a string. A
+ * screenshot that went through `run` would arrive as a UTF-8-mangled string and be unopenable.
+ */
+function runBinary(bin: string, args: string[], timeoutMs: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const p = spawn(bin, args);
+    const chunks: Buffer[] = [];
+    let err = '';
+    const t = setTimeout(() => { p.kill('SIGKILL'); reject(new Error(`timeout: ${bin} ${args.join(' ')}`)); }, timeoutMs);
+    p.stdout.on('data', (d: Buffer) => chunks.push(d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('close', (c) => { clearTimeout(t); c === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`${bin} exited ${c}: ${err.trim()}`)); });
+    p.on('error', (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+/**
  * How long one `adb install` may take before it is killed.
  *
  * Generous on purpose. A 100 MB APK onto a SwiftShader Cuttlefish is a slow push followed by a
@@ -173,9 +203,14 @@ export class CuttlefishDevice implements DeviceControl {
       // unconditionally is what made every device claim a reset that threw `no snapshotDir
       // configured`, which leaves it stuck in CLEANING forever because a restore that never
       // completes never reports completion.
+      // `recording` USED TO BE HERE AND WAS NEVER IMPLEMENTED. Nothing in the worker started a
+      // screenrecord, so the console correctly offered no control for it and the declaration was
+      // simply a lie — the one place this codebase broke ADR-0003's rule that a capability is
+      // observed state. It comes back when `startRecording` does. `logcat` and `screenshot` are
+      // here because the methods below now exist.
       capabilities: [
         'screen-stream', 'input-datachannel',
-        'app-install', 'logcat', 'recording',
+        'app-install', 'logcat', 'screenshot',
       ] as Capability[],
       screen: { width: 720, height: 1280, density: 320 },
       // Published, not just used internally. This class has always known the serial — every adb
@@ -697,6 +732,54 @@ export class CuttlefishDevice implements DeviceControl {
   }
 
   /**
+   * Follow this device's log.
+   *
+   * `-v threadtime` because that is the format every Android engineer already reads, and the one the
+   * console's parser splits on. `-T 200` seeds the view with the last 200 lines rather than either
+   * replaying the entire buffer (tens of thousands of lines into a browser) or starting empty and
+   * making a person wait for the device to say something.
+   *
+   * The child is killed by the returned handle and nothing else. A logcat left running is an adb
+   * connection held open against a device that is about to be snapshot-restored out from under it.
+   */
+  async captureLogcat(onLine: (line: string) => void): Promise<LogcatHandle> {
+    const p = spawn('adb', ['-s', this.adbSerial, 'logcat', '-v', 'threadtime', '-T', '200']);
+    let carry = '';
+    const feed = (chunk: Buffer): void => {
+      // Chunk boundaries do not respect lines, so the tail of one read is the head of the next.
+      const parts = (carry + chunk.toString()).split('\n');
+      carry = parts.pop() ?? '';
+      for (const line of parts) if (line.trim()) onLine(line);
+    };
+    p.stdout.on('data', feed);
+    // adb writes its own diagnostics ("device offline", "waiting for device") to stderr, and those
+    // are exactly the lines someone staring at an empty log pane needs to see.
+    p.stderr.on('data', feed);
+    p.on('error', (e) => onLine(`--- logcat could not start: ${e.message}`));
+    return {
+      stop: () => { p.kill('SIGTERM'); },
+    };
+  }
+
+  /**
+   * One PNG, straight off the framebuffer.
+   *
+   * `exec-out` rather than `shell`, because `adb shell` mangles binary output on some platforms by
+   * translating CRLF — the classic corrupt-screenshot bug — and `exec-out` is the raw-bytes channel
+   * that exists to avoid it. `maxBuffer` is raised because a 720x1280 PNG comfortably exceeds
+   * Node's 1 MB default and the failure mode is a truncated file rather than an error.
+   */
+  async screenshot(): Promise<{ bytes: Buffer; contentType: string }> {
+    const bytes = await runBinary('adb', ['-s', this.adbSerial, 'exec-out', 'screencap', '-p'], 30_000);
+    // PNG magic. adb has been known to exit 0 having written an error message instead of an image,
+    // and a console that renders that as a broken <img> tells nobody anything.
+    if (bytes.length < 8 || bytes[0] !== 0x89 || bytes[1] !== 0x50) {
+      throw new Error(`screencap did not return a PNG on ${this.info.localId}: ${bytes.subarray(0, 120).toString().trim()}`);
+    }
+    return { bytes, contentType: 'image/png' };
+  }
+
+  /**
    * Input goes over the WebRTC data channel that Cuttlefish already serves, NOT through here.
    *
    * These methods exist for control-plane-initiated actions (health probes, cleanup between
@@ -752,6 +835,24 @@ export class CuttlefishMedia implements MediaSource {
     const host = this.opts.publicHost ?? 'localhost';
     const port = this.opts.webrtcPort ?? 8443;
     return { url: `https://${host}:${port}/?device_id=${encodeURIComponent(this.opts.localId)}`, kind: 'webrtc' as const };
+  }
+
+  /**
+   * Open the operator conversation on behalf of one viewer (ADR-0007).
+   *
+   * Note what is NOT here: no peer connection, no track, no frame. This returns a pipe for the
+   * browser's own negotiation, and the media it negotiates flows between the browser and this host
+   * without passing through the worker at all.
+   */
+  async signal(handlers: SignalOptions): Promise<SignalChannel> {
+    return openSignalChannel(
+      {
+        baseUrl: this.opts.operatorUrl,
+        localId: this.opts.localId,
+        instanceNum: this.opts.instanceNum,
+      },
+      handlers,
+    );
   }
 }
 

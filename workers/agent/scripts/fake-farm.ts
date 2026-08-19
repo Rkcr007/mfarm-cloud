@@ -20,11 +20,19 @@
  *
  * The devices are named `fake-1` and `fake-2` and the model reads `FAKE (no Android)`, so nobody
  * mistakes a screenshot of this for a screenshot of the farm.
+ *
+ * IT DOES RUN A REAL DATA PLANE (ADR-0007). The socket, the offline grant verification, the fence
+ * check, the input queue and the logcat stream are the production code paths, unmodified — what is
+ * fake is only the device behind them. So a console developed against this exercises the viewer's
+ * whole protocol and gets an honest refusal at exactly the one point where a fake cannot follow: it
+ * declares no `screen-stream` and provides no `media.signal`, so `signal-open` is answered with the
+ * reason rather than with a black rectangle.
  */
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { Agent } from '../src/agent.ts';
-import type { DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo } from '../src/device.ts';
+import { DataPlane } from '../src/dataplane.ts';
+import type { DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, LogcatHandle } from '../src/device.ts';
 
 const CONTROL_PLANE = process.env.MFARM_API_URL ?? 'http://127.0.0.1:3000';
 const REGION = process.env.MFARM_REGION ?? 'lab';
@@ -36,6 +44,8 @@ const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS ?? 3000);
 class FakeDevice implements DeviceControl {
   readonly info: DeviceInfo;
   private installedPackages = new Set<string>();
+  /** Whoever is watching this device's log right now. See `captureLogcat`. */
+  private watchers = new Set<(line: string) => void>();
 
   constructor(localId: string) {
     this.info = {
@@ -79,10 +89,37 @@ class FakeDevice implements DeviceControl {
   async key(name: string) { log(this, `key ${name}`); }
   async text(v: string) { log(this, `text ${v.length} chars`); }
   async health(): Promise<DeviceHealth> { return { status: 'healthy', inputLatencyMs: 1 }; }
+
+  /**
+   * This device's log, which is a real log OF A FAKE DEVICE.
+   *
+   * The distinction is the whole reason `logcat` may honestly stay in the capability list. Nothing
+   * here invents Android output — no ActivityManager lines, no PackageManager lines, nothing that
+   * would let someone mistake this for a device booting. What it streams is exactly what this class
+   * already records: the calls it received. Every line says FAKE.
+   */
+  async captureLogcat(onLine: (line: string) => void): Promise<LogcatHandle> {
+    this.watchers.add(onLine);
+    onLine(this.line('logcat attached — these are this fake device\'s own records, not Android'));
+    return { stop: () => { this.watchers.delete(onLine); } };
+  }
+
+  private line(message: string): string {
+    // `-v threadtime` shaped, because that is what the console's parser splits on and a second
+    // format here would only be testing the fallback path.
+    const t = new Date().toISOString().slice(5, 23).replace('T', ' ');
+    return `${t}     0     0 I FAKE    : ${message}`;
+  }
+
+  /** Called by `log()` below, so every recorded call also reaches anyone watching the log. */
+  emit(message: string): void {
+    for (const w of this.watchers) w(this.line(message));
+  }
 }
 
 function log(d: DeviceControl, message: string): void {
   console.log(`  [${d.info.localId}] ${message}`);
+  (d as FakeDevice).emit?.(message);
 }
 
 const backends: DeviceBackend[] = Array.from({ length: DEVICE_COUNT }, (_, i) => ({
@@ -114,6 +151,26 @@ console.log('THESE ARE NOT REAL DEVICES. Nothing here runs an APK.\n');
 const state = await agent.start();
 console.log(`registered as host ${state.hostId}`);
 for (const b of backends) await b.control.start();
+
+/**
+ * The data plane, on the port the registration above advertises.
+ *
+ * Not a stub. This is `DataPlane` itself, so a console connecting here goes through the same
+ * Ed25519 verification, the same audience check and the same fence check it will go through against
+ * a real farm — which is the half of the viewer most worth exercising without hardware.
+ */
+const byUuid = new Map(
+  backends
+    .map((b) => [agent.deviceIdFor(b.control.info.localId), b] as const)
+    .filter((pair): pair is readonly [string, DeviceBackend] => Boolean(pair[0])),
+);
+const dataPlane = new DataPlane({
+  agent,
+  backends: new Map(backends.map((b) => [b.control.info.localId, b])),
+  resolveDevice: (uuid) => byUuid.get(uuid) ?? (backends.length === 1 ? backends[0] : undefined),
+});
+const dpPort = await dataPlane.listen(Number(process.env.FAKE_DATA_PLANE_PORT ?? 8080), '127.0.0.1');
+console.log(`data plane on ws://127.0.0.1:${dpPort} — real protocol, fake device behind it`);
 
 agent.startHeartbeat(HEARTBEAT_MS);
 agent.startMetering(15_000);

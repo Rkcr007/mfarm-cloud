@@ -213,6 +213,7 @@ jobs:
               'quarantine_host(uuid,text,text)',
               'clear_silence_quarantine(uuid)',
               'device_reset_complete(uuid,uuid,bigint)',
+              'session_attach(uuid,uuid,bigint)',
               'record_metering(uuid,uuid[],uuid[],uuid[],text[],numeric[],timestamptz[])'
             ]
             LOOP

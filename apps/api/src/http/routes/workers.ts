@@ -3,7 +3,7 @@ import { timingSafeEqual, createHash } from 'node:crypto';
 import { withSystem } from '../../db.ts';
 import { generateWorkerToken } from '../../auth.ts';
 import { negotiate, deviceAutomationEndpoint, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
-import { resetComplete } from '../../allocator.ts';
+import { resetComplete, sessionAttach } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
 import { appActions, hostsRecovered, meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
@@ -266,10 +266,13 @@ export async function workerRoutes(app: FastifyInstance) {
                          kind: MeterKind; quantity: number; occurredAt: string; orgId?: string }>;
       resets?: Array<{ deviceId: string; fence: number }>;
       actions?: Array<{ actionId: string; ok: boolean; error?: string }>;
+      // A data-plane client attached to this session. The worker is the only party that observes
+      // it — the grant is verified offline, so nothing else on the network knows a viewer arrived.
+      attaches?: Array<{ sessionId: string; fence: number }>;
     };
   }>('/workers/events', async (req) => {
     const { hostId } = requireWorker(req);
-    const { metering = [], resets = [], actions = [] } = req.body ?? {};
+    const { metering = [], resets = [], actions = [], attaches = [] } = req.body ?? {};
 
     const meter = await ingest(
       hostId,
@@ -318,6 +321,18 @@ export async function workerRoutes(app: FastifyInstance) {
      * next flush; the second UPDATE matches nothing and reports `accepted: false`, which is the
      * truthful answer ("already recorded") rather than a second state transition.
      */
+    /**
+     * Attaches. Host-scoped inside `session_attach`, so a worker naming another host's session
+     * changes nothing — same shape as the reset above and for the same reason (migration 008).
+     *
+     * `accepted: false` is the normal answer on a reconnect, because the session is already ACTIVE.
+     * Nothing is logged for it: a viewer whose wifi dropped is not an event.
+     */
+    const attachResults = [];
+    for (const a of attaches) {
+      attachResults.push({ sessionId: a.sessionId, accepted: await sessionAttach(hostId, a.sessionId, a.fence) });
+    }
+
     const actionResults = [];
     for (const r of actions) {
       const accepted = await withSystem(async (c) => {
@@ -345,6 +360,7 @@ export async function workerRoutes(app: FastifyInstance) {
       meteringRejected: meter.rejected,
       resets: resetResults,
       actions: actionResults,
+      attaches: attachResults,
     };
   });
 }

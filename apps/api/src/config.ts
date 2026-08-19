@@ -76,6 +76,29 @@ export interface Config {
   appStoreDir: string;
   /** Largest upload `POST /v1/apps` will accept, enforced on the stream rather than on a header. */
   appMaxUploadBytes: number;
+
+  /**
+   * Public base url of the data-plane route, or null when no live view is reachable.
+   *
+   * The worker's own `hosts.endpoint` is what a program on the network dials. This is what a
+   * BROWSER dials, and they are not the same thing since ADR-0007: the browser reaches the worker
+   * through the console's own TLS ingress (`wss://<console>/dp/<hostId>`), which is what keeps the
+   * socket same-origin and the strict CSP intact. Null is a supported state and means the console
+   * says the live view has no route rather than offering a button that hangs.
+   */
+  dataPlanePublicBase: string | null;
+
+  /**
+   * The TURN relay ADR-0005 chose, and the secret its credentials are derived from.
+   *
+   * The secret is NOT on this object — `describeConfig` gets logged — only whether one was
+   * supplied. Without both, `GET /v1/sessions/:id` returns no `ice` block and the viewer falls back
+   * to whatever the device's own host suggests, which works on a LAN and not from a hotspot.
+   */
+  turnUrls: string[];
+  turnSecretSource: 'environment' | 'none';
+  /** How long a minted TURN credential stays valid. Not the lease — see `turn.ts`. */
+  turnTtlSeconds: number;
 }
 
 // Fields are declared and assigned explicitly rather than through constructor parameter properties:
@@ -507,6 +530,49 @@ export function parseConfig(env: Env): Config {
     env.APP_MAX_UPLOAD_BYTES, 'APP_MAX_UPLOAD_BYTES', 512 * 1024 * 1024, 1024, 4 * 1024 * 1024 * 1024, problems,
   );
 
+  /**
+   * Where the console tells a browser to reach the data plane.
+   *
+   * Validated as a url with a websocket scheme, because the failure it prevents is silent: a value
+   * of `https://...` produces a viewer that cannot connect and a console that shows a spinner, and
+   * the mistake is one character away from correct.
+   */
+  const dataPlanePublicBase = (() => {
+    const raw = env.DATA_PLANE_PUBLIC_BASE?.trim();
+    if (!raw) return null;
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== 'ws:' && u.protocol !== 'wss:') {
+        problems.push(`DATA_PLANE_PUBLIC_BASE="${raw}" must be a ws:// or wss:// url — it is what a browser opens a WebSocket to.`);
+        return null;
+      }
+      if (isProduction && u.protocol === 'ws:') {
+        problems.push('DATA_PLANE_PUBLIC_BASE is ws:// in production. A page served over HTTPS cannot open a plain-ws socket, so the live view would fail as mixed content.');
+        return null;
+      }
+      return raw.replace(/\/+$/, '');
+    } catch {
+      problems.push(`DATA_PLANE_PUBLIC_BASE="${raw}" is not a url.`);
+      return null;
+    }
+  })();
+
+  // Comma-separated because a working TURN deployment is normally several urls — udp, tcp and 443
+  // for the networks that only allow that — and asking an operator to pick one guarantees the
+  // hotspot case fails.
+  const turnUrls = (env.TURN_URLS ?? '').split(',').map((u) => u.trim()).filter(Boolean);
+  const turnSecret = env.TURN_SECRET?.trim();
+  if (turnUrls.length > 0 && !turnSecret) {
+    problems.push('TURN_URLS is set without TURN_SECRET. Credentials are derived from the shared secret coturn is started with (`use-auth-secret`), so a url alone mints nothing.');
+  }
+  if (turnSecret && turnUrls.length === 0) {
+    problems.push('TURN_SECRET is set without TURN_URLS. There is nowhere to point a viewer.');
+  }
+  // 12 hours. Long enough that no lease outlives its own relay credential mid-session — a session
+  // can be extended, and a relay that stops working half way through a debugging session presents
+  // as the device freezing. Short enough that a leaked one is not a permanent grant of bandwidth.
+  const turnTtlSeconds = intVar(env.TURN_TTL_SECONDS, 'TURN_TTL_SECONDS', 12 * 3600, 60, 24 * 3600, problems);
+
   if (problems.length > 0) throw new ConfigError(problems);
 
   return Object.freeze({
@@ -532,6 +598,10 @@ export function parseConfig(env: Env): Config {
     metricsTokenSource,
     appStoreDir,
     appMaxUploadBytes,
+    dataPlanePublicBase,
+    turnUrls,
+    turnSecretSource: turnSecret ? 'environment' as const : 'none' as const,
+    turnTtlSeconds,
   });
 }
 
@@ -583,5 +653,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     metricsTokenSource: c.metricsTokenSource,
     appStoreDir: c.appStoreDir,
     appMaxUploadBytes: c.appMaxUploadBytes,
+    dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (no live view route)',
+    turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };
 }

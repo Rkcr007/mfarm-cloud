@@ -254,12 +254,15 @@ command -v tmux >/dev/null || die "tmux not found — apt-get install -y tmux. R
 # nothing here becomes reachable from outside the box, and Appium itself stays on 127.0.0.1 with the
 # gateway as its only door (ADR-0004).
 #
-# The data plane inherits the same binding, and for it this is a KNOWN LIMITATION rather than a fix:
-# a browser on the tailnet cannot reach 172.x either. That path is blocked on the media routing
-# decision anyway (HANDOFF.md blocker 6), and automation does not touch it.
+# THE DATA PLANE NO LONGER INHERITS IT (ADR-0007). It used to, and that was the limitation ADR-0005
+# named: a browser cannot reach 172.x either, so the live view had no route on this box at all. The
+# two listeners bind separately now — the gateway stays on the bridge where only the API container
+# needs it, and the data plane binds the machine's own address where an ingress can front it.
 bridge_ip="$(docker network inspect mfarm_default -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
 [ -n "$bridge_ip" ] || die "could not read the compose network's gateway address; is the stack up?"
-note "worker binds to $bridge_ip (the host, as the API container sees it)"
+host_ip="$(hostname -I | awk '{print $1}')"
+note "automation gateway binds $bridge_ip (the host, as the API container sees it)"
+note "data plane binds ${host_ip:-$bridge_ip} (where the console's ingress reaches it)"
 
 # A CONTROL PLANE HAS NO DEVICES, AND SHOULD NOT PRETEND OTHERWISE.
 #
@@ -292,9 +295,12 @@ else
     "env CONTROL_PLANE_URL=http://127.0.0.1:$API_PORT \
         WORKER_REGISTRATION_TOKEN='$(cat "$SECRETS_DIR/worker_registration_token")' \
         REGION='$REGION' \
-        PUBLIC_ENDPOINT=ws://$bridge_ip:8080 \
+        PUBLIC_ENDPOINT=ws://${host_ip:-$bridge_ip}:8080 \
         PUBLIC_HOST=$bridge_ip \
         BIND_HOST=$bridge_ip \
+        AUTOMATION_BIND_HOST=$bridge_ip \
+        DATA_PLANE_BIND_HOST=${host_ip:-$bridge_ip} \
+        CF_OPERATOR_URL=http://127.0.0.1:1080 \
         APPIUM_ENABLED=1 \
         APPIUM_ADVERTISE_HOST=$bridge_ip \
         ANDROID_HOME='$ANDROID_HOME' \

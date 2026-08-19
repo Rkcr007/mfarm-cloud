@@ -482,12 +482,24 @@ public interface locks you out of a machine that has no console.
 
 ### The worker's listeners
 
-The agent's data plane and automation gateway bind **all interfaces by default** — right for a box
-whose only NIC is the tailnet, wrong for a rented VM. Set `BIND_HOST` to the Tailscale address:
+The agent has **two listeners and they bind separately** (ADR-0007). Conflating them is what left the
+live view with no route for months: the automation gateway only has to be reachable by the hub, so it
+belongs somewhere host-local, while the data plane has to be reachable by a BROWSER and cannot live
+there.
 
 ```bash
-BIND_HOST=$(tailscale ip -4) DATA_PLANE_PORT=8080 AUTOMATION_GATEWAY_PORT=8090 node workers/agent/src/index.ts
+AUTOMATION_BIND_HOST=$(tailscale ip -4) \
+DATA_PLANE_BIND_HOST=$(tailscale ip -4) \
+DATA_PLANE_PORT=8080 AUTOMATION_GATEWAY_PORT=8090 node workers/agent/src/index.ts
 ```
+
+`BIND_HOST` still works and sets both, which is what every older deployment does. The data plane now
+defaults to **loopback** rather than all interfaces when neither is set — the safe default for a
+worker fronted by a proxy, and a change from the previous "all interfaces" behaviour.
+
+A third variable belongs with them: `CF_OPERATOR_URL` (default `http://127.0.0.1:1080`) names cvd's
+WebRTC operator, which the worker relays signalling to on a viewer's behalf. **It must stay on
+loopback.** The operator is unauthenticated device control — see the Cuttlefish port table below.
 
 Advertised endpoints (`AUTOMATION_ADVERTISE_BASE`, `APPIUM_ADVERTISE_HOST`) must then name the
 tailnet address or MagicDNS name — an endpoint the control plane registers but cannot reach is a
@@ -568,8 +580,14 @@ published by adding it.
 
 - **The metrics listener on `:9464` is deliberately not proxied.** Its gauges are fleet-wide and
   collected on the owner pool, so RLS does not hide them — publishing it would leak across tenants.
-- **The worker's data plane and automation gateway stay on the docker bridge.** Unreachable from
-  outside, which is also why there is still no live video (ADR-0005).
+- **`/dp/*` is a second upstream, and it is the live view** (ADR-0007). It proxies to the device
+  host's data plane so a browser can hold that socket over this same TLS name — which is what keeps
+  it same-origin and the console's CSP unwidened. `WORKER_DATA_PLANE=` (empty) omits the route
+  entirely rather than proxying to nothing, because a 502 in a browser reads as a broken live view.
+  **This proxy is a route, not authorisation**: every connection through it still presents an
+  Ed25519 grant the worker verifies offline.
+- **The automation gateway is still NOT proxied.** The hub reaches it host-locally and it has no
+  business being public — an open Appium is unauthenticated device control.
 - **The WebDriver hub is now internet-facing.** It is built for that — Basic auth carries an API key
   and every proxied hop needs a signed grant — but it is worth knowing that it changed audience.
 
@@ -581,7 +599,7 @@ listeners on `0.0.0.0`, none of which are ours to move:
 | Port | Process | What it is |
 |------|---------|------------|
 | 6520, 6521 | `socket_vsock_proxy` | **adb**, one per device — unauthenticated device control |
-| 1080, 1443 | `operator` | the Cuttlefish web UI |
+| 1080, 1443 | `operator` | the Cuttlefish web UI **and its signalling server** — unauthenticated. The worker relays a viewer's signalling to it on loopback (ADR-0007) precisely so this never has to be exposed. |
 | 7200, 7201 | `gnss_grpc_proxy` | GNSS |
 | 7500, 7501 | `netsimd` | radio simulation |
 
@@ -597,7 +615,14 @@ about above, arrived at by a different route.
 curl -sS -o /dev/null -w '%{http_code}\n' https://<your-host>/health     # 200
 sudo ss -tlnp | grep -E ':(80|443) '                                     # caddy, and only caddy
 sudo ss -tlnp | grep -E ':(9464|3000) '                                  # both still 127.0.0.1
+sudo ss -tlnp | grep -E ':(8080|8090) '     # on the DEVICE host: VPC or loopback, never 0.0.0.0
+sudo ss -ulnp | grep -E ':3478 '            # coturn, and this one IS meant to be public
 ```
+
+The relay is the one thing here that has to answer from the internet, so verifying it from the box
+proves nothing. Use an ICE test page with the credentials `deploy/setup-turn.sh` printed, **from a
+phone on mobile data**, and confirm a candidate of type `relay`. ADR-0005: a viewer tested only on a
+LAN has not been tested.
 
 Then from a machine that is **not** the box, because binding and reachability are different
 questions and the table above is exactly why:

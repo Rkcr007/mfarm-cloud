@@ -37,6 +37,15 @@ die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 BIND_HOST="${BIND_HOST:-$(hostname -I | awk '{print $1}')}"
 [ -n "$BIND_HOST" ] || die "could not determine this host's address; set BIND_HOST"
 
+# THE TWO LISTENERS BIND SEPARATELY (ADR-0007), and conflating them is what ADR-0005 was complaining
+# about. The automation gateway only has to be reachable by the hub, over the VPC. The data plane has
+# to be reachable by a BROWSER — which it is not directly, and must not be: it is fronted by the
+# control plane's TLS ingress at `/dp/<hostId>`, and the ingress reaches it here over the same
+# private address. Both are set from BIND_HOST today; they are separate variables so that changing
+# one to satisfy a proxy cannot silently take the other with it.
+AUTOMATION_BIND_HOST="${AUTOMATION_BIND_HOST:-$BIND_HOST}"
+DATA_PLANE_BIND_HOST="${DATA_PLANE_BIND_HOST:-$BIND_HOST}"
+
 # The control plane is somewhere else now, so this is not optional and has no sensible default. Its
 # public URL is the right answer even from inside the same VPC: it is the one endpoint that is
 # TLS-terminated, and a worker that can only reach the control plane privately is a worker that
@@ -60,6 +69,12 @@ REGION=$REGION
 PUBLIC_ENDPOINT=ws://$BIND_HOST:8080
 PUBLIC_HOST=$BIND_HOST
 BIND_HOST=$BIND_HOST
+AUTOMATION_BIND_HOST=$AUTOMATION_BIND_HOST
+DATA_PLANE_BIND_HOST=$DATA_PLANE_BIND_HOST
+# cvd's WebRTC operator, on loopback. It is unauthenticated device control, so the worker relays
+# signalling to it on a viewer's behalf (ADR-0007) and it is never exposed. Override only for an
+# unusual cvd layout — the port moved from 8443 in the launch_cvd era to 1080/1443 under `cvd`.
+CF_OPERATOR_URL=http://127.0.0.1:1080
 APPIUM_ENABLED=1
 APPIUM_ADVERTISE_HOST=$BIND_HOST
 ANDROID_HOME=$ANDROID_HOME_RESOLVED

@@ -62,6 +62,23 @@ export async function activate(orgId: string, sessionId: string, fence: number):
   });
 }
 
+/**
+ * A data-plane client attached to a session — reported by the WORKER, host-scoped (migration 017).
+ *
+ * Distinct from `activate` above, which is the tenant-scoped form the WebDriver hub calls with an
+ * org it already proved it owns. Here the caller is a worker, so the scope is its host and the org
+ * is derived from the session inside the function rather than accepted from the request — the rule
+ * migration 008 had to retrofit onto every other worker-facing mutation.
+ *
+ * `false` is the ordinary answer on a reconnect (the session is already ACTIVE), not an error.
+ */
+export async function sessionAttach(hostId: string, sessionId: string, fence: number): Promise<boolean> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query('SELECT session_attach($1, $2, $3) AS ok', [hostId, sessionId, fence]);
+    return rows[0].ok === true;
+  });
+}
+
 export async function release(orgId: string, sessionId: string, reason = 'client_disconnect'): Promise<boolean> {
   return withTenant(orgId, async (c) => {
     const { rows } = await c.query('SELECT release_device($1, $2, $3) AS ok', [orgId, sessionId, reason]);
