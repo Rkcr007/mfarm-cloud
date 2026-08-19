@@ -31,6 +31,8 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 FAIL=0
+AVAIL=0
+DP=""
 
 # ---------------------------------------------------------------- 1. the control plane
 say "Control plane"
@@ -74,12 +76,6 @@ fi
 # 426 is the data plane's own "websocket only" answer, which is the proof that Caddy reaches the
 # WORKER over the VPC. Anything else means the live view has no route, however healthy it looks.
 DP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$HOST_PUBLIC/dp/probe" 2>/dev/null)"
-if [ "$DP" = "426" ]; then
-  ok "/dp reaches the device host's data plane (426 = websocket only)"
-else
-  bad "/dp answered $DP, not 426 — the live view has no route to the worker"
-  FAIL=1
-fi
 
 # ---------------------------------------------------------------- 2. the fleet
 say "Fleet (waiting up to ${DEVICE_WAIT_SECONDS}s — devices cold boot after a host start)"
@@ -97,28 +93,51 @@ else
     sleep 15
   done
   printf '\r'
-  if [ "$AVAIL" -ge 2 ]; then
-    ok "$AVAIL devices READY"
-  elif [ "$AVAIL" -ge 1 ]; then
-    warn "only $AVAIL device READY — the other may still be booting (journalctl -u mfarm-worker -f on mfarm-lab)"
+  # A STOPPED DEVICE HOST IS A NORMAL STATE, NOT A FAILURE. It is off between sessions by design and
+  # it is 95% of the bill. Reported as a note so that `farm-check.sh` after starting only the control
+  # plane does not print a wall of red for a farm that is behaving exactly as intended.
+  #
+  # The two symptoms together are what identify it: no devices AND /dp with no upstream. Either one
+  # alone means something else — devices without /dp is a routing problem, /dp without devices is a
+  # worker that is up but has no hardware.
+  if [ "$AVAIL" -eq 0 ] && [ "$DP" = "502" ]; then
+    warn "the device host looks STOPPED — no devices, and /dp has no upstream"
+    warn "that is the normal idle state; start it with ./deploy/farm-online.sh"
   else
-    bad "no devices READY after ${DEVICE_WAIT_SECONDS}s"
-    FAIL=1
-  fi
+    if [ "$DP" = "426" ]; then
+      ok "/dp reaches the device host's data plane (426 = websocket only)"
+    else
+      bad "/dp answered $DP, not 426 — the live view has no route to the worker"
+      FAIL=1
+    fi
 
-  # The live view needs `screen-stream`; the install path needs `app-install`. Reporting the
-  # capability list is what turns "the device is up" into "the device can do the thing you want".
-  printf '%s' "$BODY" | grep -q 'screen-stream' && ok "devices declare screen-stream (live view available)" \
-    || warn "no device declares screen-stream — no live view"
+    if [ "$AVAIL" -ge 2 ]; then
+      ok "$AVAIL devices READY"
+    elif [ "$AVAIL" -ge 1 ]; then
+      warn "only $AVAIL device READY — the other may still be booting (journalctl -u mfarm-worker -f on mfarm-lab)"
+    else
+      bad "no devices READY after ${DEVICE_WAIT_SECONDS}s"
+      FAIL=1
+    fi
+
+    # Only asked once there ARE devices. Grepping an empty response answered "yes" and printed a
+    # green line about a live view on a farm with no hardware at all — a check that reports success
+    # on no data is worse than no check.
+    if [ "$AVAIL" -ge 1 ]; then
+      printf '%s' "$BODY" | grep -q 'screen-stream' && ok "devices declare screen-stream (live view available)" \
+        || warn "no device declares screen-stream — no live view"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------- 3. the media relay
 say "Media relay"
 if command -v nc >/dev/null 2>&1 && nc -z -w 5 "$TURN_HOST" 3478 2>/dev/null; then
   ok "coturn answering on $TURN_HOST:3478/tcp"
+elif [ "$AVAIL" = "0" ] && [ "$DP" = "502" ]; then
+  warn "$TURN_HOST not answering — expected, coturn is on the stopped device host"
 else
-  warn "could not reach $TURN_HOST:3478 from here — note the device host's PUBLIC IP is ephemeral"
-  warn "if it changed, update TURN_URLS in deploy/.env and re-run deploy/setup-turn.sh on mfarm-lab"
+  warn "could not reach $TURN_HOST:3478 while the device host is up — check coturn there"
 fi
 
 say "$([ "$FAIL" -eq 0 ] && echo 'Farm is live.' || echo 'Farm is NOT fully live — see the ✗ lines above.')"
