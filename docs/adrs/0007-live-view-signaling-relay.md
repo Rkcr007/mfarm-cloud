@@ -109,19 +109,57 @@ taps use. `dataplane.ts`'s `tap`/`swipe`/`key`/`text` remain for programmatic an
 and keep their coalescing rules; they shell out per event and are documented as slow. Where the data
 channel is open, the viewer prefers it.
 
+**A SNAPSHOT-RESTORED DEVICE HAS NO SCREEN, and that decides how this farm recycles.** Measured on
+the lab box 2026-08-19, and it is the single most important thing this work found:
+
+| Device brought up by | Result |
+|---|---|
+| cold boot (~78s) | streams at **~49 fps**, direct path, 2.5 Mbit/s |
+| snapshot restore (~10s) | negotiation completes, an **audio** track arrives, **no display is ever published**, no video |
+
+Re-taking the snapshot from a device whose display was working at the time did not help; the restore
+itself loses it. `cvd display add` on a restored device fails. So the two headline properties of this
+tier — a 10-second recycle and a live screen — **cannot both be had from a restore** on cvd 1.55.1.
+
+`CF_RESET_MODE=powerwash` is the answer, and the E2E plan had already guessed at its shape ("giving
+up snapshot restore and resetting via `powerwash_cvd` at roughly cold-boot cost — affordable at two
+devices"). It resets to first-boot state, keeps the group intact, and still satisfies what
+`REQUIRED_FOR_TENANT_USE` actually means. An automation-only farm keeps `snapshot` and its 10s
+recycle; an interactive one pays ~80s per reset to have a screen.
+
+The console does not paper over the other case. A device that connects and publishes no display is
+its own state — `nodisplay` — which says exactly that and offers a screenshot, because `adb
+exec-out screencap` returns a real 720×1280 frame on precisely the device whose video is missing.
+
 **One thing here is unverified, and it is the WebRTC half.** Everything on the worker's side of the
 socket has been exercised end to end against `fake-farm.ts`, which now runs the real `DataPlane`:
 grant verification, fence check, `signal-open`, batched logcat, screenshots, and the honest refusal a
 tier without a media source produces. What has NOT run is a negotiation against a real cvd operator,
 because that needs the device host. Two specifics to check first when it does:
 
-- **The operator's port.** Asserted, not measured — 1080/1443 under `cvd`, where `CuttlefishMedia`
-  had 8443 hard-coded from the `launch_cvd` era. `CF_OPERATOR_URL` exists so being wrong costs an
-  environment variable rather than a release.
-- **The device id.** `--webrtc_device_id` does not survive a snapshot restore, so the id is
-  discovered from `GET /devices` and the resolver refuses rather than guessing when two candidates
-  are equally plausible. On a two-device host that refusal is the expected safe answer, not a bug —
-  but it is the first thing that will bite.
+~~unverified~~ **VERIFIED 2026-08-19 on the lab box**, end to end from a browser: signalling relay,
+offer/answer, ICE, a connected peer connection, live video at 49 fps, and a real APK
+(`io.appium.android.apis`) installed and launched on real Android 17 from the console.
+
+Both of the things flagged as guesses turned out right, and both are worth keeping written down:
+
+- **The operator is on 1080**, not the 8443 `CuttlefishMedia` had hard-coded from the `launch_cvd`
+  era. `CF_OPERATOR_URL` made that a config value rather than a release.
+- **`GET /devices` answers `[{"device_id":"cf-1",…},{"device_id":"cf-2",…}]`** — the exact shape
+  `extractDeviceIds` handles, with ids matching `localId`, so resolution takes the exact-match path
+  and never the fallbacks.
+
+Two things the deployment found that no amount of local testing would have:
+
+- **coturn with `relay-ip=0.0.0.0` refuses every allocation with 486 "Allocation Quota Reached"** —
+  a code that reads like a limit and is nothing of the kind. STUN still works, so the browser
+  gathers `host` and `srflx` candidates and looks healthy; only `relay` is missing. A NAT'd cloud VM
+  needs `external-ip=PUBLIC/PRIVATE` and a real `relay-ip`.
+- **`GET /v1/sessions/:id` returns `ice` beside `session`, not inside it**, and the console spread
+  only `out.session` — so the viewer silently had no TURN. On the farm's own network that is
+  invisible, because a direct candidate works. From anywhere else it is a connection that never
+  completes, with an empty relay log that reads as "the relay is broken" when it means "nobody ever
+  called".
 
 **A latent bug fell out of this.** `index.ts` declared a uuid -> backend map for the data plane and
 never populated it, with a comment describing a mapping "taught on first use" that nothing taught. At
