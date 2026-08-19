@@ -2,10 +2,16 @@
 #
 # Put the console behind real TLS on a public hostname, without buying a domain.
 #
-# WHY sslip.io. `34-100-159-34.sslip.io` resolves to 34.100.159.34 by construction, so Let's Encrypt
-# can satisfy an HTTP-01 challenge against it and issue a genuine certificate. No DNS to configure
-# and nothing to renew by hand. When a real domain arrives, one A record and one line in the
-# Caddyfile replaces it — the cert story does not change.
+# WHY sslip.io. `34-100-138-213.sslip.io` resolves to 34.100.138.213 by construction, so Let's
+# Encrypt can satisfy an HTTP-01 challenge against it and issue a genuine certificate. No DNS to
+# configure and nothing to renew by hand. When a real domain arrives, one A record and one line in
+# the Caddyfile replaces it — the cert story does not change.
+#
+# THE ADDRESS IS RESERVED, and it has to be. This hostname IS the IP, so an ephemeral address makes
+# the URL and its certificate expire together every time the box stops — a link sent to a teammate
+# on Tuesday is dead on Wednesday. `mfarm-lab-ip` (34.100.138.213) is a reserved static address in
+# asia-south1; it costs about ₹250/month while attached and is the entire reason the console has a
+# permanent home.
 #
 # WHAT STAYS PRIVATE. The API keeps its 127.0.0.1 bind; Caddy is the only public listener and it
 # proxies exactly one upstream. The metrics listener on :9464 carries fleet-wide cross-tenant gauges
@@ -13,7 +19,7 @@
 # bridge, unreachable from outside, which is why there is still no live video (ADR-0005).
 set -euo pipefail
 
-HOSTNAME_PUBLIC="${HOSTNAME_PUBLIC:-34-100-159-34.sslip.io}"
+HOSTNAME_PUBLIC="${HOSTNAME_PUBLIC:-34-100-138-213.sslip.io}"
 UPSTREAM="127.0.0.1:3000"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
