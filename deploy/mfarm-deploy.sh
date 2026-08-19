@@ -49,6 +49,24 @@ done
 # commit its tests ran against — and the local build is the fallback for a box that has no registry
 # credential yet. The fallback is NOT silent: an image built here is not the artifact CI tested, and
 # saying so is the difference between a fallback and a lie.
+# WHATEVER YOU TYPED, RESOLVED TO A FULL SHA FIRST.
+#
+# CI tags images with `workflow_run.head_sha`, which is 40 characters. A human reads a short sha —
+# it is what `git log --oneline` prints and what the console badge shows — so `mfarm-deploy.sh
+# c7ab2e1` asked the registry for a tag that does not exist and silently fell through to a local
+# build. Correct output, wrong path, and the failure mode is invisible: you get the code you asked
+# for, built here, and never learn the registry was never consulted.
+#
+# Resolving through git also means a branch name or `HEAD` works, and that the commit is one this
+# box actually has.
+if [ "$VERSION" != latest ]; then
+  git -C "$REPO_ROOT" fetch --quiet origin || true
+  FULL_SHA="$(git -C "$REPO_ROOT" rev-parse --verify --quiet "${VERSION}^{commit}" || true)"
+  [ -n "$FULL_SHA" ] || die "no such commit here: $VERSION (try: git -C $REPO_ROOT fetch origin)"
+  [ "$FULL_SHA" = "$VERSION" ] || note "resolved $VERSION -> $FULL_SHA"
+  VERSION="$FULL_SHA"
+fi
+
 say "Resolving $IMAGE_REPO:$VERSION"
 if docker pull "$IMAGE_REPO:$VERSION" >/dev/null 2>&1; then
   IMAGE="$IMAGE_REPO:$VERSION"
@@ -56,8 +74,7 @@ if docker pull "$IMAGE_REPO:$VERSION" >/dev/null 2>&1; then
 else
   [ "$VERSION" = latest ] && die "cannot build 'latest' — it names no commit. Pass a sha, or run: docker login ghcr.io"
   note "registry pull failed — building $VERSION here instead (NOT the image CI tested)"
-  git -C "$REPO_ROOT" fetch --quiet origin
-  git -C "$REPO_ROOT" cat-file -e "${VERSION}^{commit}" 2>/dev/null || die "no such commit: $VERSION"
+  note "if you expected a pull: docker login ghcr.io -u rkcr007   (a read:packages token)"
   # A detached checkout, deliberately: the working tree becomes exactly the commit being deployed,
   # so what is built cannot include a stray local edit.
   git -C "$REPO_ROOT" checkout --quiet --detach "$VERSION"

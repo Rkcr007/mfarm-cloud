@@ -173,10 +173,17 @@ you need it rather than after.
 One command, and it names a commit:
 
 ```bash
-deploy/mfarm-deploy.sh 91c171d              # the API, onto that commit
-deploy/mfarm-deploy.sh 91c171d --worker     # ...and the worker agent too
-deploy/mfarm-deploy.sh 3a41105              # rollback is the same command, older sha
+deploy/mfarm-deploy.sh c7ab2e1              # the API, onto that commit
+deploy/mfarm-deploy.sh c7ab2e1 --worker     # ...and the worker agent too
+deploy/mfarm-deploy.sh 760b0e4              # rollback is the same command, older sha
+deploy/mfarm-deploy.sh main                 # anything git can resolve works
 ```
+
+A short sha is fine even though the registry tags are 40 characters: the script resolves whatever
+you type through git first. That is not a convenience — before it did, a short sha asked the
+registry for a tag that does not exist, fell through to the local-build fallback, and produced
+exactly the right code by exactly the wrong path, with nothing to tell you the registry had never
+been consulted.
 
 **The commit is the unit of deployment, not the branch and not "the stack".** Push to `main`, CI
 runs, and on green `.github/workflows/release.yml` builds one image tagged with that exact commit
