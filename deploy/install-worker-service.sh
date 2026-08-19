@@ -8,6 +8,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# TWO DIRECTORIES, AND THEY ARE NOT INTERCHANGEABLE — farm-up.sh splits them deliberately:
+# `secrets/` holds material compose bind-mounts into containers (the signing keypair, the worker
+# registration token), `.state/` holds what the operator needs afterwards (the minted API key, the
+# console password). Reading the token from the wrong one fails at install time with a message that
+# sends you to farm-up.sh for a file that is already there.
+SECRETS_DIR="$REPO_ROOT/deploy/secrets"
 STATE_DIR="$REPO_ROOT/deploy/.state"
 ENV_FILE="$STATE_DIR/worker.env"
 UNIT_SRC="$REPO_ROOT/deploy/mfarm-worker.service"
@@ -15,7 +21,7 @@ UNIT_SRC="$REPO_ROOT/deploy/mfarm-worker.service"
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
-[ -r "$STATE_DIR/worker_registration_token" ] || die "no $STATE_DIR/worker_registration_token — run deploy/farm-up.sh first"
+[ -r "$SECRETS_DIR/worker_registration_token" ] || die "no $SECRETS_DIR/worker_registration_token — run deploy/farm-up.sh first"
 
 # The docker bridge address, which is what the containerised control plane can reach on this host.
 # Same value farm-up.sh computes; kept in one place here so the unit and the script cannot drift.
@@ -34,7 +40,7 @@ say "Writing $ENV_FILE"
 umask 077
 cat > "$ENV_FILE" <<ENV
 CONTROL_PLANE_URL=http://127.0.0.1:$API_PORT
-WORKER_REGISTRATION_TOKEN=$(cat "$STATE_DIR/worker_registration_token")
+WORKER_REGISTRATION_TOKEN=$(cat "$SECRETS_DIR/worker_registration_token")
 REGION=$REGION
 PUBLIC_ENDPOINT=ws://$BRIDGE_IP:8080
 PUBLIC_HOST=$BRIDGE_IP
