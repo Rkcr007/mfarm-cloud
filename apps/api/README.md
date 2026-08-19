@@ -290,14 +290,22 @@ and the session list. Three tabs:
   to eight characters they were useless: that id is what `mfarm app install --session` takes and what
   the WebDriver URL carries, and neither accepts a prefix.
 
-There is no interactive device view. ADR-0005 settled how media would reach a browser (a TURN relay,
-not an overlay) and **none of it is built** — no coturn, no per-session relay credential, and the
-data plane still binds the docker bridge, which no client can reach.
+- **Launch** — a build, a device *profile* (not an individual device: `POST /v1/sessions` names a
+  region, platform and tier and the allocator chooses), then a bring-up checklist derived from real
+  state rather than from a timer.
+- **The cockpit** — a live device at ~50 fps with touch, a control toolbar, logcat and screenshots.
+  Everything this API contributes is two fields on `GET /v1/sessions/:id`: `dataPlane.browserEndpoint`
+  and a per-session `ice` block. No frame and no tap transits this process (ADR-0005, ADR-0007).
 
 ## Not yet built
 
-Artifacts, logcat streaming, video, and the interactive viewer above. Rate limiting is in-memory, so
-limits are per API instance; moving to Redis is required before running more than one.
+**Artifacts that outlive a session.** Logcat and screenshots are live-only — streamed to the open
+console and lost when it closes — because there is no `artifacts` table, no blob route and no
+retention sweep. Video recording is not built at all, and `recording` was removed from the worker's
+capability list rather than left as a claim.
+
+Team and account management. Rate limiting is in-memory, so limits are per API instance; moving to
+Redis is required before running more than one.
 
 ## Running it
 
@@ -327,6 +335,10 @@ rather than one per restart. In production it additionally refuses:
 | `RATE_LIMIT_MAX` | `120` | per org per minute, per instance |
 | `LOG_LEVEL` | `info` | validated here because pino throws on an unknown level |
 | `SHUTDOWN_GRACE_MS` | `15000` | fits inside Kubernetes' default 30s grace |
+| `DATA_PLANE_PUBLIC_BASE` | unset | where a BROWSER opens the live-view socket, e.g. `wss://console.example/dp`. Distinct from the worker's registered endpoint, which is a private address no browser can reach. Unset means the console says the live view has no route rather than hanging (ADR-0007) |
+| `TURN_URLS` | unset | comma-separated relay urls. Several on purpose: udp, tcp, and 443 for networks that allow nothing else — offering one is how the hotspot case fails |
+| `TURN_SECRET` | unset | coturn's `static-auth-secret`. Deliberately NOT on the config object, because `describeConfig()` is logged; only whether one exists is. Set without `TURN_URLS` (or the reverse) refuses to boot |
+| `TURN_TTL_SECONDS` | `43200` | how long a minted relay credential lasts. Long, so a relay does not die mid-session; it names no device, so it opens nothing |
 
 Shutdown on SIGTERM/SIGINT: stop accepting connections, drain in-flight requests up to
 `SHUTDOWN_GRACE_MS`, clear the reaper interval (an `onClose` hook, so a `reap()` already in flight
