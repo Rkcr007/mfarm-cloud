@@ -663,9 +663,96 @@ describe('worker events', () => {
   });
 
   test('heartbeat tells a quarantined host it must drain', async () => {
+    // Two arguments, so `p_source` defaults to 'operator' — a judgement a heartbeat cannot answer.
     await withSystem((c) => c.query(`SELECT quarantine_host($1,'test')`, [hostId]));
     const r = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
     assert.equal(r.json().hostState, 'QUARANTINED');
-    await withSystem((c) => c.query(`UPDATE hosts SET state='UP', quarantined_at=NULL WHERE id=$1`, [hostId]));
+    await withSystem((c) => c.query(
+      `UPDATE hosts SET state='UP', quarantined_at=NULL, quarantine_source=NULL WHERE id=$1`, [hostId]));
+  });
+
+  /**
+   * The farm-bricking bug this pair exists to prevent (migration 016).
+   *
+   * Reproduced on the lab box by rebooting the host: the API came up first, reaped against a
+   * heartbeat from before the reboot, and the worker that arrived two minutes later beat into a
+   * control plane reporting `available: 0` for an hour. Nothing in the agent could fix it — a
+   * healthy worker never re-registers, which was the only path that cleared a quarantine.
+   */
+  test('a silence quarantine clears on the next heartbeat, restoring each device to what it was', async () => {
+    await clearDevices();
+    const [ready, cleaning] = await seedDevices(2);
+    await withSystem((c) => c.query(`UPDATE devices SET state='CLEANING' WHERE id=$1`, [cleaning]));
+    await withSystem((c) => c.query(`SELECT quarantine_host($1,'no heartbeat for 90s','reaper')`, [hostId]));
+
+    const quarantined = await withSystem(async (c) =>
+      (await c.query(`SELECT state FROM devices WHERE id = ANY($1)`, [[ready, cleaning]])).rows);
+    assert.deepEqual(quarantined.map((d: { state: string }) => d.state), ['QUARANTINED', 'QUARANTINED']);
+
+    const r = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+    assert.equal(r.json().hostState, 'UP', 'the beat that disproves the quarantine also reports the result');
+
+    const after = await withSystem(async (c) => ({
+      host: (await c.query(`SELECT state, quarantined_at, quarantine_reason, quarantine_source
+                              FROM hosts WHERE id=$1`, [hostId])).rows[0],
+      ready: (await c.query(`SELECT state, quarantined_from FROM devices WHERE id=$1`, [ready])).rows[0],
+      cleaning: (await c.query(`SELECT state, quarantined_from FROM devices WHERE id=$1`, [cleaning])).rows[0],
+    }));
+    assert.equal(after.host.state, 'UP');
+    assert.equal(after.host.quarantined_at, null);
+    assert.equal(after.host.quarantine_reason, null);
+    assert.equal(after.host.quarantine_source, null);
+    assert.equal(after.ready.state, 'READY');
+    // The one that matters: a device whose session had ended goes back to CLEANING and waits for a
+    // worker to confirm the restore. Promoting it to READY would hand the next tenant the last
+    // one's data — the leak CLEANING exists to prevent.
+    assert.equal(after.cleaning.state, 'CLEANING');
+    assert.equal(after.ready.quarantined_from, null, 'the marker is consumed, not left to go stale');
+    assert.equal(after.cleaning.quarantined_from, null);
+  });
+
+  test('an operator quarantine survives every heartbeat the host can send', async () => {
+    await clearDevices();
+    const [dev] = await seedDevices(1);
+    await withSystem((c) => c.query(`SELECT quarantine_host($1,'bad ram','operator')`, [hostId]));
+
+    for (let i = 0; i < 3; i++) {
+      const r = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+      assert.equal(r.json().hostState, 'QUARANTINED', 'a worker cannot beat its way out of a human decision');
+    }
+    const after = await withSystem(async (c) => ({
+      host: (await c.query(`SELECT state, quarantine_source FROM hosts WHERE id=$1`, [hostId])).rows[0],
+      dev: (await c.query(`SELECT state FROM devices WHERE id=$1`, [dev])).rows[0],
+    }));
+    assert.equal(after.host.state, 'QUARANTINED');
+    assert.equal(after.host.quarantine_source, 'operator');
+    assert.equal(after.dev.state, 'QUARANTINED');
+
+    // Belt and braces: the function refuses even when called directly, because the heartbeat
+    // route's check is an optimisation and the authorisation lives in the function body.
+    const n = await withSystem(async (c) =>
+      Number((await c.query(`SELECT clear_silence_quarantine($1) AS n`, [hostId])).rows[0].n));
+    assert.equal(n, -1);
+
+    await withSystem((c) => c.query(
+      `UPDATE hosts SET state='UP', quarantined_at=NULL, quarantine_source=NULL WHERE id=$1`, [hostId]));
+  });
+
+  test('a device quarantined before migration 016 stays put rather than being guessed at', async () => {
+    await clearDevices();
+    const [dev] = await seedDevices(1);
+    // What an upgraded database looks like: the device was quarantined by the old two-argument
+    // function, so nothing recorded what it had been doing.
+    await withSystem((c) => c.query(
+      `UPDATE devices SET state='QUARANTINED', quarantined_from=NULL WHERE id=$1`, [dev]));
+    await withSystem((c) => c.query(`SELECT quarantine_host($1,'no heartbeat for 90s','reaper')`, [hostId]));
+
+    await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+
+    const after = await withSystem(async (c) =>
+      (await c.query(`SELECT state FROM devices WHERE id=$1`, [dev])).rows[0]);
+    assert.equal(after.state, 'QUARANTINED', 'registration stays the recovery for a state nobody recorded');
+    await withSystem((c) => c.query(
+      `UPDATE hosts SET state='UP', quarantined_at=NULL, quarantine_source=NULL WHERE id=$1`, [hostId]));
   });
 });

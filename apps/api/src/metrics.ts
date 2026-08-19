@@ -338,6 +338,18 @@ export const reaperDuration = registry.register(
   new Histogram('mfarm_reaper_duration_seconds', 'Reaper sweep duration.', [], [0.01, 0.05, 0.1, 0.5, 1, 5, 15]),
 );
 
+/**
+ * Hosts that came back from a silence quarantine on their own (migration 016).
+ *
+ * Worth a counter rather than a log line alone: a steady trickle means hosts keep going silent long
+ * enough to be reaped and then returning, which is a network or a supervisor problem that recovery
+ * now hides. Zero after a deploy that includes 016 would mean the clear is not firing.
+ */
+export const hostsRecovered = c(
+  'mfarm_hosts_recovered_total',
+  'Hosts whose silence quarantine was cleared by a heartbeat.',
+);
+
 export const workerResets = c(
   'mfarm_worker_resets_total',
   'Reset completions reported by workers. `accepted="false"` means a stale fence or another host\'s ' +

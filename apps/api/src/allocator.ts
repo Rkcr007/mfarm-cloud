@@ -173,9 +173,15 @@ export async function reap(): Promise<{
      * the allocator pick one of its devices a minute later.
      *
      * Quarantining is the honest state: the device is not gone (the host may come back), it is not
-     * schedulable, and it is visible as a problem rather than as capacity. Recovery is registration
-     * — a returning worker re-asserts its devices, which is why `workers.ts` had to learn to promote
-     * a device OUT of QUARANTINED as well as into it.
+     * schedulable, and it is visible as a problem rather than as capacity.
+     *
+     * Recovery used to be registration alone — a returning worker re-asserts its devices, which is
+     * why `workers.ts` had to learn to promote a device OUT of QUARANTINED as well as into it. That
+     * was not enough, and a host reboot proved it: a healthy agent whose capabilities have not
+     * changed never re-registers, so it beat at a control plane that had written it off for an hour
+     * with `available: 0`. Since migration 016 this quarantine is stamped `reaper`, and the next
+     * heartbeat clears it — the beat is the disproof of the only thing this quarantine ever
+     * asserted. An operator quarantine is stamped differently and stays.
      */
     const dueForSweep = Date.now() - lastHostSweepAt >= hostSweepMinIntervalMs();
     if (dueForSweep) lastHostSweepAt = Date.now();
@@ -188,8 +194,8 @@ export async function reap(): Promise<{
         )
       : { rows: [] as Array<{ id: string; hostname: string }> };
     for (const host of q.rows) {
-      await c.query('SELECT quarantine_host($1, $2)', [
-        host.id, `no heartbeat for ${Math.round(hostSilenceMs() / 1000)}s`,
+      await c.query('SELECT quarantine_host($1, $2, $3)', [
+        host.id, `no heartbeat for ${Math.round(hostSilenceMs() / 1000)}s`, 'reaper',
       ]);
       console.warn(`[reaper] quarantined host ${host.hostname}: silent for over ${Math.round(hostSilenceMs() / 1000)}s`);
     }

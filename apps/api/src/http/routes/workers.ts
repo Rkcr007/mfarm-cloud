@@ -5,7 +5,7 @@ import { generateWorkerToken } from '../../auth.ts';
 import { negotiate, deviceAutomationEndpoint, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
-import { appActions, meteringEvents, workerResets } from '../../metrics.ts';
+import { appActions, hostsRecovered, meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
 import { unauthorized, badRequest } from '../errors.ts';
 
@@ -147,9 +147,37 @@ export async function workerRoutes(app: FastifyInstance) {
     const { hostId } = requireWorker(req);
     const { row, resets, actions } = await withSystem(async (c) => {
       const { rows } = await c.query(
-        `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1 RETURNING state`,
+        `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1
+          RETURNING state, quarantine_source`,
         [hostId],
       );
+      /**
+       * A HEARTBEAT IS THE DISPROOF OF A SILENCE QUARANTINE, so it lifts it (migration 016).
+       *
+       * The reaper quarantines a host that stops beating, and until now the only thing that could
+       * undo that was registration — which a healthy agent never performs, because its stored
+       * capability fingerprint has not changed. A host reboot is enough to trigger it: the API
+       * comes up first, reaps against a `last_heartbeat_at` from before the reboot, and the worker
+       * that arrives two minutes later beats forever into a control plane holding `available: 0`.
+       * Restarting the agent does not help. Deleting its state file by hand was the only exit.
+       *
+       * Only the reaper's own quarantine clears this way. An operator quarantine is a judgement
+       * about a host that a packet from that host cannot answer, and `clear_silence_quarantine`
+       * re-checks the source itself rather than trusting this branch — the branch exists to keep
+       * the common beat down to one write, not to decide anything.
+       */
+      let state = rows[0]?.state as string | undefined;
+      if (state === 'QUARANTINED' && rows[0]?.quarantine_source === 'reaper') {
+        const { rows: cleared } = await c.query<{ n: number }>(
+          'SELECT clear_silence_quarantine($1) AS n', [hostId],
+        );
+        const n = Number(cleared[0]?.n ?? -1);
+        if (n >= 0) {
+          state = 'UP';
+          hostsRecovered.inc();
+          req.log.warn({ hostId, devices: n }, 'host beat again — silence quarantine cleared');
+        }
+      }
       // The other half of the reset story. A device is parked in CLEANING when its session ends and
       // stays unallocatable until a worker confirms the restore — and before this existed, nothing
       // ever ASKED for one, so `Agent.resetAndRelease()` had no caller and every device left the
@@ -198,7 +226,7 @@ export async function workerRoutes(app: FastifyInstance) {
       );
 
       return {
-        row: rows[0],
+        row: { ...rows[0], state },
         resets: cleaning.map((d: { id: string; fence: string | number }) => ({
           deviceId: d.id,
           fence: Number(d.fence),

@@ -136,6 +136,8 @@ async function digestOf(path: string): Promise<string> {
 export class Agent {
   private state?: AgentState;
   private heartbeatTimer?: NodeJS.Timeout;
+  /** Last `hostState` the control plane reported, so the log carries transitions, not a metronome. */
+  private lastHostState?: string;
   private meterTimer?: NodeJS.Timeout;
   private readonly active = new Map<string, ActiveSession>();
   private readonly buffer = new Map<string, MeterEvent>();
@@ -452,8 +454,19 @@ export class Agent {
       const body = await res.json() as WorkerHeartbeatResponse;
       // A host quarantined while it was partitioned learns about it here and must drain rather than
       // keep accepting work.
-      if (body.hostState === 'QUARANTINED') {
-        console.warn('[agent] host is QUARANTINED by the control plane — draining, not accepting sessions');
+      //
+      // ON TRANSITIONS ONLY. Beating every ten seconds, an unconditional line writes 360 identical
+      // warnings an hour, which is how the lab box's quarantine hid in its own log — the state that
+      // mattered was an hour old and every line looked like news. The recovery line is the other
+      // half: since migration 016 a silence quarantine clears on the next beat, so "it came back"
+      // is a thing that now happens and is worth exactly one line when it does.
+      if (body.hostState !== this.lastHostState) {
+        if (body.hostState === 'QUARANTINED') {
+          console.warn('[agent] host is QUARANTINED by the control plane — draining, not accepting sessions');
+        } else if (this.lastHostState === 'QUARANTINED') {
+          console.log(`[agent] host is ${body.hostState} again — back in service`);
+        }
+        this.lastHostState = body.hostState;
       }
       // Deliberately not awaited: a restore takes seconds and the beat must stay a liveness signal.
       // A slow reset that delayed the heartbeat would look like a dead host and get the whole

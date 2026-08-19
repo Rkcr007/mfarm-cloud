@@ -557,11 +557,13 @@ describe('install', () => {
     assert.ok(hostsQuarantined >= 1);
 
     const after = await withSystem(async (c) => (await c.query(
-      'SELECT h.state AS host, d.state AS device FROM hosts h JOIN devices d ON d.host_id = h.id WHERE h.id = $1',
+      `SELECT h.state AS host, d.state AS device, h.quarantine_source AS source
+         FROM hosts h JOIN devices d ON d.host_id = h.id WHERE h.id = $1`,
       [hostA],
     )).rows[0]);
     assert.equal(after.host, 'QUARANTINED');
     assert.equal(after.device, 'QUARANTINED');
+    assert.equal(after.source, 'reaper', 'stamped so the host can beat its way back (migration 016)');
 
     // And the recovery, which is the half that makes the sweep safe rather than a one-way door: the
     // worker comes back and re-registers, and its devices must be schedulable again.
@@ -591,6 +593,33 @@ describe('install', () => {
     workerA = reg.json().workerToken;
     await withSystem((c) => c.query(
       `UPDATE hosts SET last_heartbeat_at = now() WHERE region = $1`, [REGION]));
+  });
+
+  test('a host that goes silent and comes back recovers on its own heartbeat', async () => {
+    await clearFleet();
+    // The whole path, through the real reaper rather than a hand-written quarantine: this is the
+    // sequence a host reboot produces, and before migration 016 it ended with a farm reporting
+    // `available: 0` until a human deleted the agent's state file. The worker never re-registers
+    // here, deliberately — that is exactly what a healthy agent does not do.
+    await withSystem((c) =>
+      c.query(`UPDATE hosts SET last_heartbeat_at = now() - interval '10 minutes' WHERE id = $1`, [hostA]));
+    const { hostsQuarantined } = await reap();
+    assert.ok(hostsQuarantined >= 1);
+
+    const beat = await app.inject({
+      method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerA),
+    });
+    assert.equal(beat.statusCode, 200, beat.body);
+    assert.equal(beat.json().hostState, 'UP');
+
+    const back = await withSystem(async (c) => (await c.query(
+      `SELECT h.state AS host, h.quarantine_source AS source, d.state AS device
+         FROM hosts h JOIN devices d ON d.host_id = h.id WHERE h.id = $1`,
+      [hostA],
+    )).rows[0]);
+    assert.equal(back.host, 'UP');
+    assert.equal(back.source, null);
+    assert.equal(back.device, 'READY', 'and the farm has its capacity back without anyone logging in');
   });
 
   test('a tenant cannot mark its own action DONE', async () => {

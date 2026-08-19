@@ -1,7 +1,7 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-19 (issue 24 — a restored disk image does not restore the snapshot fast
-path). Read this first in a new session.
+Last updated 2026-08-19 (issues 24 and 25 — a restored disk image does not restore the snapshot
+fast path, and a rebooted host could not get back into the fleet). Read this first in a new session.
 
 **2026-08-19 — `docs/E2E_MVP_PLAN.md` is the ordered plan from here to a teammate using this.** It
 audits what the console actually calls (all real endpoints; no mock data anywhere in `public/`),
@@ -937,6 +937,60 @@ before building any viewer**, because it determines whether a browser needs clie
     back into the 8s path and makes the snapshots in the image worth their 8 GB. **Do not build on
     it before it is observed.** A false positive destroys a good snapshot, which is the same reason
     `snapshotIsStale` (`cuttlefish.ts:411`) refuses to act on metadata it has not read and compared.
+
+25. **A REBOOTED HOST CAME BACK AND THE CONTROL PLANE NEVER TOOK IT BACK — `available: 0` FOR AN
+    HOUR WITH BOTH DEVICES RUNNING.** Found 2026-08-19 on the lab box, going to install the first
+    real APK. Fixed by migration 016.
+
+        hosts:   QUARANTINED | quarantined_at 09:23:52 | reason "no heartbeat for 90s"
+                             | last_heartbeat_at 10:33:07     <-- beating for an hour
+        devices: cf-1 QUARANTINED   cf-2 QUARANTINED     GET /v1/devices -> "available": 0
+        cvd:     both groups Running, both adb-responsive
+
+    **Three correct behaviours composing into a farm that cannot come back.**
+
+    1. The box boots. The API container starts before the worker has any devices to register, the
+       reaper reads a `last_heartbeat_at` from before the reboot, and quarantines the host. Right —
+       and the entire point of the fix that added the caller (issue 17's `hostsQuarantined`).
+    2. Nothing clears a quarantine except `POST /workers/register`. That was a deliberate design
+       decision, written down in `index.ts`: an agent that re-registered whenever Appium flapped
+       would repeatedly un-quarantine a host an operator had taken out of service.
+    3. **A healthy agent never re-registers.** `agent.ts` skips registration when the stored
+       capability fingerprint matches and the beat succeeds — which is issue 22's fix working
+       exactly as designed. Restarting the agent changes nothing: same file, same fingerprint, same
+       skip. The only exit was deleting `~/.mfarm/agent-state.json` by hand.
+
+    So the recovery path assumed a re-registration that the normal case never performs, and the
+    trigger is not exotic — **every host reboot reproduces it**, which is to say every restore of
+    `mfarm-farm-ready` (issue 24) starts here.
+
+    **THE FIX IS TO SPLIT THE TWO KINDS OF QUARANTINE BY THEIR EXIT CONDITION**, because they are
+    not the same claim. A silence quarantine asserts "this host is not beating", and a heartbeat is
+    that claim's own disproof — so the beat lifts it. An operator quarantine asserts a judgement no
+    packet can refute, and only a human lifts it. Migration 016 records which one it is in
+    `hosts.quarantine_source`, and `clear_silence_quarantine` (called from the heartbeat, source
+    re-checked inside the function body per migration 005's rule) is the way back.
+
+    **`devices.quarantined_from` is the non-obvious half.** `quarantine_host` collapses READY,
+    OFFLINE, BOOTING and CLEANING into QUARANTINED, and restoring them all to READY would hand the
+    next tenant a device whose previous session had ended without a snapshot restore — the exact
+    leak CLEANING exists to prevent. So the prior state is recorded and put back. Devices
+    quarantined before 016 have NULL there and are deliberately left QUARANTINED: their prior state
+    is unknown, and guessing it is the failure the column exists to avoid.
+
+    **Upgrading a database that is already in this state needs one manual recovery**, because the
+    stuck rows predate the column: stop the worker, move `~/.mfarm/agent-state.json` aside, run
+    `deploy/farm-up.sh`. That forces the registration that has always been the documented cure. It
+    is the last time it should ever be needed.
+
+    Two smaller things fell out of it, both worth keeping:
+
+    - **The agent logged its quarantine 360 times an hour** and the fact hid in the noise — every
+      line looked like news and the one that mattered was an hour old. It now logs host-state
+      TRANSITIONS, including the recovery.
+    - **A capability fingerprint answers "has anything changed?", not "does the control plane still
+      agree with me?"** Issue 22 fixed the first question; this was the second one, unasked. Any
+      cache of "I already told them" should be checked against what they say back.
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.

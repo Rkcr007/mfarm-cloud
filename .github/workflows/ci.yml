@@ -210,7 +210,8 @@ jobs:
             FOREACH fn IN ARRAY ARRAY[
               'expire_sessions()',
               'promote_queued(integer)',
-              'quarantine_host(uuid,text)',
+              'quarantine_host(uuid,text,text)',
+              'clear_silence_quarantine(uuid)',
               'device_reset_complete(uuid,uuid,bigint)',
               'record_metering(uuid,uuid[],uuid[],uuid[],text[],numeric[],timestamptz[])'
             ]
