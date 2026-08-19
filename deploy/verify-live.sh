@@ -16,9 +16,13 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOST_PUBLIC="${HOST_PUBLIC:-https://34-100-138-213.sslip.io}"
+# The farm's two public names, from one place. Environment wins, so a one-off override still works.
+FARM_ENV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/farm.env"
+# shellcheck disable=SC1090
+[ -f "$FARM_ENV" ] && . "$FARM_ENV"
+HOST_PUBLIC="${HOST_PUBLIC:-https://${MFARM_PUBLIC_HOST:-34-100-138-213.sslip.io}}"
 API="${API:-http://127.0.0.1:3000}"
-TURN_HOST="${TURN_HOST:-8.231.85.232}"
+TURN_HOST="${TURN_HOST:-${MFARM_TURN_HOST:-34.100.159.34}}"
 DEVICE_WAIT_SECONDS="${DEVICE_WAIT_SECONDS:-600}"
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }

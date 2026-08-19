@@ -23,7 +23,13 @@
 # a few hundred kbit/s; ten simultaneous viewers is a few megabits of egress, continuously.
 set -euo pipefail
 
-PUBLIC_IP="${PUBLIC_IP:-$(curl -s --max-time 5 ifconfig.me || true)}"
+# The farm's two public names, from one place. Environment wins, so a one-off override still works.
+FARM_ENV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/farm.env"
+# shellcheck disable=SC1090
+[ -f "$FARM_ENV" ] && . "$FARM_ENV"
+# The address coturn ADVERTISES. Defaults to the configured relay name so a plain `setup-turn.sh`
+# on the device host is correct; falls back to asking the internet only if neither is set.
+PUBLIC_IP="${PUBLIC_IP:-${MFARM_TURN_HOST:-$(curl -s --max-time 5 ifconfig.me || true)}}"
 # The address the NIC actually holds. On a cloud VM this is NOT the public one — the public address
 # is NAT'd in front — and coturn needs BOTH: one to bind relay sockets to, one to advertise.
 PRIVATE_IP="${PRIVATE_IP:-$(hostname -I | awk '{print $1}')}"

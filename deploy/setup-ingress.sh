@@ -27,7 +27,11 @@
 # proxied here — the hub reaches it host-locally and it has no business being public.
 set -euo pipefail
 
-HOSTNAME_PUBLIC="${HOSTNAME_PUBLIC:-34-100-138-213.sslip.io}"
+# The farm's two public names, from one place. Environment wins, so a one-off override still works.
+FARM_ENV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/farm.env"
+# shellcheck disable=SC1090
+[ -f "$FARM_ENV" ] && . "$FARM_ENV"
+HOSTNAME_PUBLIC="${HOSTNAME_PUBLIC:-${MFARM_PUBLIC_HOST:-34-100-138-213.sslip.io}}"
 UPSTREAM="127.0.0.1:3000"
 # The device host's data plane, reached over the VPC (ADR-0006 put it on its own machine). Empty
 # disables the /dp route entirely, which is the right setting for a control plane with no worker

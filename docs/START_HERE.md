@@ -47,6 +47,10 @@ git checkout main && git pull
 You do not need the code to *run* the farm — both boxes have their own checkout — but you need it for
 the two scripts in step 3.
 
+**Where the names live.** `deploy/farm.env` holds the console hostname and the relay address, and
+every script reads it. Moving the farm to a domain is an edit there and nowhere else; before it
+existed the console hostname was hardcoded in seven files and the relay address in two.
+
 ---
 
 ## 3. Bring the farm online — one command
@@ -58,15 +62,24 @@ the two scripts in step 3.
 This starts both machines and waits for SSH on each. Everything on them restarts itself: docker with
 `unless-stopped` on the control plane, and systemd units for the worker, Caddy and coturn.
 
-**It also does the one thing that is not self-healing.** The device host's public IP is *ephemeral*
-and changes on every stop/start, while coturn advertises that address to browsers and the control
-plane hands out `turn:<that address>` in every session's ICE block. After a restart both point at an
-address that now belongs to someone else — and it fails in the worst possible way: the console works,
-the device list is right, sessions start, and **video simply never arrives**, with an empty relay log
-because nobody ever called it. The script detects the change and rewrites both ends.
+It also checks that both public addresses are still what `deploy/farm.env` says. **Both are now
+reserved**, so nothing should ever move:
 
-> Reserving a static IP for the device host (~₹250/month, as the console already has) would delete
-> that reconcile entirely. Worth doing if this stop/start becomes routine.
+| Reserved address | IP | Attached to | Serves |
+|---|---|---|---|
+| `mfarm-lab-ip` | 34.100.138.213 | `mfarm-cp` | console, API, WebDriver hub, `/dp` |
+| `mfarm-ip` | 34.100.159.34 | `mfarm-lab` | coturn, and nothing else |
+
+> The two address names are **backwards** — `mfarm-lab-ip` is on the control plane. Both date from
+> the single-box era, and GCP cannot rename a reserved address: you release and re-reserve, and a
+> release hands it back to the pool where someone else may take it. The console URL and its
+> certificate both depend on 34.100.138.213 keeping that exact value, so the names stay wrong.
+
+The check exists because of what this used to do. The device host's IP was ephemeral; coturn
+advertised it to browsers while the control plane handed out `turn:<that address>` in every session,
+so after a restart both pointed at an address belonging to someone else — console fine, device list
+right, sessions starting, and **video simply never arriving**, with an empty relay log because nobody
+ever called it. Reserving the address removed the cause; the check is what would catch it returning.
 
 Takes about two minutes. The devices are still booting when it returns.
 
@@ -93,7 +106,7 @@ Fleet
   ✓ devices declare screen-stream (live view available)
 
 Media relay
-  ✓ coturn answering on 8.231.85.232:3478/tcp
+  ✓ coturn answering on 34.100.159.34:3478/tcp
 
 Farm is live.
 ```
@@ -165,7 +178,7 @@ needed: the disks, the snapshots and the console's reserved IP all survive.
 | Symptom | Look here first |
 |---|---|
 | Console loads, **no video**, everything else fine | `CF_RESET_MODE` on the device host. A snapshot-restored device has no display. This is the single most likely cause. |
-| Video worked yesterday, not today | The device host's IP moved. Re-run `./deploy/farm-online.sh`, which reconciles it. |
+| Video worked yesterday, not today | An address drifted. `farm-online.sh` prints DRIFT if so; both are supposed to be reserved. |
 | `0 devices READY` after ten minutes | `journalctl -u mfarm-worker -f` on `mfarm-lab`. A device that cannot reset is deliberately not schedulable. |
 | Login does nothing | The session cookie needs a secure context. Over the public HTTPS name it is fine; over a plain-HTTP address the browser silently refuses it. |
 | A deploy "worked" but the console is unchanged | `docker compose up -d api` reverts to the `:latest` image. Only `deploy/mfarm-deploy.sh <sha>` deploys a commit, and it verifies the running sha afterwards. |

@@ -6,21 +6,27 @@
 #
 # Then check it with ./deploy/farm-check.sh.
 #
-# WHY THIS IS A SCRIPT AND NOT `gcloud compute instances start`. Everything on both boxes already
-# restarts itself — docker's `unless-stopped`, and systemd units for the worker, Caddy and coturn —
-# so starting the VMs really is enough for the console and the devices.
+# WHY THIS IS A SCRIPT AND NOT `gcloud compute instances start`. Mostly it now IS just that:
+# everything on both boxes restarts itself — docker's `unless-stopped`, and systemd units for the
+# worker, Caddy and coturn — and BOTH public addresses are reserved, so nothing moves any more.
 #
-# The one thing that is NOT self-healing is the media relay's address. The device host's public IP is
-# EPHEMERAL: it changes on every stop/start, and coturn advertises it to browsers while the control
-# plane hands out `turn:<that address>` in every session's ICE block. After a restart both are
-# pointing at an address that now belongs to somebody else, and the failure is silent in the worst
-# way — the console works, the device list is right, sessions start, and video simply never arrives,
-# with an empty relay log because nobody ever called. This reconciles it.
+# It stayed a script for two reasons. It waits for SSH before claiming success, and it VERIFIES that
+# the addresses are still what the configuration says.
 #
-# (The CONSOLE's address is reserved — `mfarm-lab-ip`, 34.100.138.213 — so its URL and certificate
-# survive a stop. Reserving one for the device host too would make this script unnecessary; it costs
-# about ₹250/month and is the better answer if this stop/start becomes routine.)
+# That check earns its place because of what used to happen here. The device host's IP was ephemeral;
+# coturn advertised it to browsers while the control plane handed out `turn:<that address>` in every
+# session's ICE block, so after a restart both pointed at an address that belonged to somebody else.
+# The failure was silent in the worst way — console fine, device list right, sessions starting, and
+# video simply never arriving, with an empty relay log because nobody ever called it. Reserving
+# `mfarm-ip` for the device host removed the cause; this check is what would catch it coming back
+# (an address released by hand, a VM recreated, a quota event) instead of leaving someone to
+# rediscover it from a black rectangle.
 set -uo pipefail
+
+# The farm's two public names, from one place.
+FARM_ENV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/farm.env"
+# shellcheck disable=SC1090
+[ -f "$FARM_ENV" ] && . "$FARM_ENV"
 
 PROJECT="${MFARM_PROJECT:-mfarm-lab}"
 ZONE="${MFARM_ZONE:-asia-south1-c}"
@@ -50,25 +56,33 @@ for host in "$CP" "$LAB"; do
   onbox "$host" true >/dev/null 2>&1 && note "$host up" || die "$host never answered SSH"
 done
 
-say "Reconciling the media relay's address"
+say "Checking the public addresses are still what the configuration says"
 LAB_IP="$(g instances describe "$LAB" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
-[ -n "$LAB_IP" ] || die "could not read $LAB's external IP"
-note "device host is now $LAB_IP"
+CP_IP="$(g instances describe "$CP" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
 
-CURRENT="$(onbox "$CP" "grep -m1 '^TURN_URLS=' ~/mfarm/deploy/.env 2>/dev/null | sed 's/^TURN_URLS=//'")"
-if printf '%s' "$CURRENT" | grep -q "$LAB_IP"; then
-  note "control plane already points at $LAB_IP — nothing to do"
+DRIFT=0
+if [ "$LAB_IP" = "$MFARM_TURN_HOST" ]; then
+  note "device host is $LAB_IP, as configured"
 else
-  note "control plane still points at: ${CURRENT:-<unset>}"
-  note "re-pointing coturn and the control plane at $LAB_IP"
+  note "DRIFT: device host is $LAB_IP but deploy/farm.env says $MFARM_TURN_HOST"
+  DRIFT=1
+fi
 
-  # coturn advertises the address, so it is rewritten first. The secret on disk is reused, which is
-  # what keeps the credential the control plane mints verifiable.
-  onbox "$LAB" "cd ~/mfarm && PUBLIC_IP=$LAB_IP bash deploy/setup-turn.sh >/dev/null 2>&1 && echo ok" \
-    | grep -q ok && note "coturn rewritten on $LAB" || note "WARNING: setup-turn.sh did not report success"
+# The console's address is load-bearing twice over: the sslip.io hostname encodes it, and the
+# Let's Encrypt certificate was issued for that hostname. If this ever drifts, the URL and the cert
+# die together and no amount of restarting fixes it.
+if printf '%s' "$MFARM_PUBLIC_HOST" | grep -q "$(printf '%s' "$CP_IP" | tr '.' '-')" || [ "$CP_IP" = "$MFARM_PUBLIC_HOST" ]; then
+  note "control plane is $CP_IP, matching $MFARM_PUBLIC_HOST"
+else
+  note "DRIFT: control plane is $CP_IP but the console name is $MFARM_PUBLIC_HOST"
+  DRIFT=1
+fi
 
-  onbox "$CP" "cd ~/mfarm && sed -i 's|^TURN_URLS=.*|TURN_URLS=turn:$LAB_IP:3478,turn:$LAB_IP:3478?transport=tcp|' deploy/.env && docker compose -f deploy/docker-compose.prod.yml up -d api >/dev/null 2>&1 && echo ok" \
-    | grep -q ok && note "control plane restarted with the new relay address" || note "WARNING: could not update the control plane"
+if [ "$DRIFT" -eq 1 ]; then
+  printf '\n\033[33m  An address moved. Both are supposed to be reserved:\n'
+  printf '    gcloud compute addresses list --project %s\n' "$PROJECT"
+  printf '  Re-attach it, or update deploy/farm.env and re-run deploy/setup-turn.sh on the\n'
+  printf '  device host and deploy/setup-ingress.sh on the control plane.\033[0m\n'
 fi
 
 say "Online"
