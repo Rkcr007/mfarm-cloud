@@ -1,5 +1,5 @@
-import type { FastifyInstance } from 'fastify';
-import { badRequest } from '../errors.ts';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { ApiError, badRequest } from '../errors.ts';
 import { requireUser } from '../server.ts';
 import {
   clearedCookie, login, logout, sessionCookie, SESSION_COOKIE,
@@ -15,7 +15,56 @@ import { withSystem } from '../../db.ts';
  * response has to carry a CSRF token because the cookie alone is not sufficient authority for an
  * unsafe request.
  */
-export async function authRoutes(app: FastifyInstance): Promise<void> {
+/**
+ * Login attempts per minute from one address.
+ *
+ * Much tighter than the general limit, because this is the one endpoint where the credential is
+ * short enough to guess and the general limit is sized for machines. Ten a minute is far more than a
+ * person mistyping a password and far less than useful for a guessing run.
+ *
+ * Per IP rather than per account on purpose. Keying on the submitted email would let anyone lock a
+ * named colleague out of their own account by spending the budget for them, which turns a defence
+ * into a denial of service against the one user it is supposed to protect.
+ *
+ * This depends on `TRUST_PROXY` being right. With a proxy in front and that flag off, `req.ip` is the
+ * proxy for every caller, this budget becomes one global budget, and the lockout it causes is the
+ * one the paragraph above is trying to avoid — for everybody at once.
+ */
+export const DEFAULT_LOGIN_RATE_LIMIT_MAX = 10;
+
+export interface AuthRoutesOptions {
+  /**
+   * Overrides the default above. Exists for tests, which sign in far more often in a few seconds
+   * than a person ever would and would otherwise spend the budget on themselves — the same reason
+   * `readyRateLimitMax` exists. A deployment should leave it alone.
+   */
+  loginRateLimitMax?: number;
+}
+
+export async function authRoutes(
+  app: FastifyInstance,
+  routeOptions: AuthRoutesOptions = {},
+): Promise<void> {
+  const loginOpts = {
+    config: {
+      rateLimit: {
+        max: routeOptions.loginRateLimitMax ?? DEFAULT_LOGIN_RATE_LIMIT_MAX,
+        timeWindow: '1 minute',
+        // Distinct prefix so the budget is this route's alone: sharing a key with the global bucket
+        // would let ordinary console traffic spend the login allowance and vice versa.
+        keyGenerator: (req: FastifyRequest) => `login:${req.ip}`,
+        // Must be an Error. The plugin `throw`s this, so a plain object reaches the error handler as
+        // an unrecognised throwable and comes back 500 — on the path that exists to return 429.
+        errorResponseBuilder: (_req: FastifyRequest, ctx: { ttl: number; statusCode: number }) =>
+          new ApiError(
+            ctx.statusCode,
+            'rate_limited',
+            `Too many sign-in attempts. Retry after ${Math.ceil(ctx.ttl / 1000)}s.`,
+          ),
+      },
+    },
+  };
+
   /**
    * POST /v1/auth/login
    *
@@ -24,7 +73,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
    * guess was right. `login()` also spends the same scrypt cost on an unknown account so the timing
    * does not answer the question the message refuses to.
    */
-  app.post('/auth/login', async (req, reply) => {
+  app.post('/auth/login', loginOpts, async (req, reply) => {
     const body = (req.body ?? {}) as { email?: unknown; password?: unknown; org?: unknown };
     const email = typeof body.email === 'string' ? body.email.trim() : '';
     const password = typeof body.password === 'string' ? body.password : '';

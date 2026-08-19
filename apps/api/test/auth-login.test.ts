@@ -38,7 +38,10 @@ async function signIn(email = EMAIL, password = PASSWORD) {
 }
 
 before(async () => {
-  app = await buildServer({ logger: false });
+  // The login limiter is per-IP and `inject()` presents one address for the whole file, so the real
+  // default would be spent partway through and every later case would fail as "login returned no
+  // cookie" rather than as itself. The limit gets its own server below, where it is the subject.
+  app = await buildServer({ logger: false, loginRateLimitMax: 10_000 });
   await withSystem(async (c) => {
     const a = await c.query(
       `INSERT INTO orgs (slug, name) VALUES ($1,'Login Test') RETURNING id`, [`login-${randomUUID()}`]);
@@ -237,5 +240,78 @@ describe('a session must not outlive the authority it was minted from', () => {
     const me = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: { cookie: cookie! } });
     assert.equal(me.statusCode, 200);
     assert.ok([orgId, otherOrgId].includes(me.json().org.id));
+  });
+});
+
+/**
+ * The sign-in budget, which is deliberately much tighter than the general limit.
+ *
+ * This matters more since the console became internet-facing: a password is short enough to guess,
+ * so the endpoint that checks one is the endpoint worth rationing. Its own server, with its own
+ * small budget, because the point is to spend it.
+ */
+describe('login is rate limited harder than everything else', () => {
+  let limited: FastifyInstance;
+  const MAX = 3;
+  // Its own account, not the shared EMAIL: a case above rotates that password, so borrowing it
+  // would make these assertions depend on the order the file happens to run in.
+  const LIMITED_EMAIL = `ratelimited-${randomUUID()}@example.test`;
+
+  before(async () => {
+    limited = await buildServer({ logger: false, loginRateLimitMax: MAX });
+    await upsertUser(LIMITED_EMAIL, PASSWORD, orgId, 'member');
+  });
+
+  after(async () => {
+    await limited.close();
+  });
+
+  test('a guessing run is cut off, and the cutoff is a 429 rather than a 500', async () => {
+    const attempt = () => limited.inject({
+      method: 'POST',
+      url: '/v1/auth/login',
+      payload: { email: LIMITED_EMAIL, password: 'not the password' },
+      // A distinct address, so this case cannot be affected by anything else that has run.
+      remoteAddress: '198.51.100.7',
+    });
+
+    for (let i = 0; i < MAX; i++) {
+      assert.equal((await attempt()).statusCode, 401, `attempt ${i + 1} should still be answered`);
+    }
+
+    const blocked = await attempt();
+    // 429 and not 500 is the whole assertion. The limiter `throw`s whatever errorResponseBuilder
+    // returns, so returning a plain object there produces "Internal error" on the one path that
+    // exists to say "slow down" — which is what the general limiter did until a test asked.
+    assert.equal(blocked.statusCode, 429);
+    assert.equal(blocked.json().error.code, 'rate_limited');
+  });
+
+  test('the budget belongs to the address, so a spent one also blocks the right password', async () => {
+    const from = '198.51.100.8';
+    for (let i = 0; i < MAX; i++) {
+      await limited.inject({
+        method: 'POST', url: '/v1/auth/login',
+        payload: { email: LIMITED_EMAIL, password: 'wrong' }, remoteAddress: from,
+      });
+    }
+
+    // Stated as a test because it is a real cost, not an oversight: whoever is behind this address
+    // cannot sign in until the window rolls. That is why the key is the address and not the
+    // submitted email — keyed on email, anyone could spend a named colleague's budget for them and
+    // lock that person out of their own account from anywhere.
+    const correct = await limited.inject({
+      method: 'POST', url: '/v1/auth/login',
+      payload: { email: LIMITED_EMAIL, password: PASSWORD }, remoteAddress: from,
+    });
+    assert.equal(correct.statusCode, 429);
+  });
+
+  test('a different address has its own budget', async () => {
+    const res = await limited.inject({
+      method: 'POST', url: '/v1/auth/login',
+      payload: { email: LIMITED_EMAIL, password: PASSWORD }, remoteAddress: '198.51.100.9',
+    });
+    assert.equal(res.statusCode, 200, 'one attacker must not be able to lock out the whole farm');
   });
 });

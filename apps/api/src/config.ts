@@ -64,6 +64,9 @@ export interface Config {
   metricsEnabled: boolean;
   /** Mark the console session cookie `Secure`. See the parse site for why it is not just isProduction. */
   sessionCookieSecure: boolean;
+  /** Believe `X-Forwarded-For` when deciding the client address. See the parse site: this is only
+   *  safe when something we control is the sole way in. */
+  trustProxy: boolean;
   metricsPort: number;
   metricsHost: string;
   /** Whether a scrape credential was supplied. The token itself is deliberately NOT on this object,
@@ -435,6 +438,22 @@ export function parseConfig(env: Env): Config {
   const sessionCookieSecure = boolVar(
     env.SESSION_COOKIE_SECURE, 'SESSION_COOKIE_SECURE', isProduction, problems,
   );
+  /**
+   * Take the client address from `X-Forwarded-For` rather than from the socket.
+   *
+   * Defaults OFF, and deliberately NOT to `isProduction` the way the cookie flag above does. The two
+   * look like the same question and are not. Marking a cookie `Secure` when nothing terminates TLS
+   * costs a confusing login; believing a forwarded header when nothing sets it hands every caller a
+   * free `req.ip` of their choosing, and `req.ip` is what the rate limiter keys anonymous traffic on.
+   * A spoofable limiter key is not a limiter. So this stays off until a deployment states that a
+   * proxy it controls is the ONLY way in — which is exactly what `deploy/README.md` now asks of it.
+   *
+   * The symptom when it is wrongly off is not an error either, which is why it is worth naming: with
+   * a proxy in front, every anonymous request in the world arrives from one address (the docker
+   * bridge gateway, in this deployment), so the whole internet shares a single rate-limit bucket and
+   * one attacker can 429 everybody else's login.
+   */
+  const trustProxy = boolVar(env.TRUST_PROXY, 'TRUST_PROXY', false, problems);
   // 0 is allowed and means "let the kernel choose", exactly as it does for PORT. Useless for a
   // deployment — Prometheus has to be told a number — and the only way a test can start the real
   // entrypoint without two children fighting over a fixed port.
@@ -507,6 +526,7 @@ export function parseConfig(env: Env): Config {
     shutdownGraceMs,
     metricsEnabled,
     sessionCookieSecure,
+    trustProxy,
     metricsPort,
     metricsHost,
     metricsTokenSource,
@@ -559,6 +579,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     shutdownGraceMs: c.shutdownGraceMs,
     metrics: c.metricsEnabled ? `${c.metricsHost}:${c.metricsPort}` : 'disabled',
     sessionCookie: c.sessionCookieSecure ? 'Secure' : 'not Secure (plain HTTP)',
+    clientAddress: c.trustProxy ? 'X-Forwarded-For (proxied)' : 'socket peer',
     metricsTokenSource: c.metricsTokenSource,
     appStoreDir: c.appStoreDir,
     appMaxUploadBytes: c.appMaxUploadBytes,

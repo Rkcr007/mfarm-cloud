@@ -78,6 +78,18 @@ describe('defaults', () => {
     assert.equal(c.signingKeySource, 'environment');
   });
 
+  test('TRUST_PROXY stays off in production, unlike the cookie flag it resembles', () => {
+    // These two look like one question — "am I behind a proxy?" — and default in opposite
+    // directions on purpose. A Secure cookie with no TLS costs a confusing login; a trusted
+    // X-Forwarded-For with no proxy in front lets any caller name its own `req.ip`, which is the
+    // key the limiter rations anonymous traffic by. Defaulting that on would ship a limiter that
+    // anyone can walk around, so it has to be stated per deployment.
+    assert.equal(parseConfig({}).trustProxy, false);
+    assert.equal(parseConfig(prod()).sessionCookieSecure, true);
+    assert.equal(parseConfig(prod()).trustProxy, false);
+    assert.equal(parseConfig(prod({ TRUST_PROXY: '1' })).trustProxy, true);
+  });
+
   test('the result is frozen', () => {
     const c = parseConfig({});
     assert.throws(() => {

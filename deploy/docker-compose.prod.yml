@@ -148,6 +148,13 @@ services:
       # rather than loud: the browser refuses to store the cookie, login returns 200, and the next
       # request is anonymous, so it looks like signing in does nothing at all.
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-1}
+      # Whether X-Forwarded-For is believed. Defaults OFF, unlike the flag above, and the asymmetry
+      # is deliberate: this container publishes to 127.0.0.1, so the only thing that can reach it is
+      # something on the host — but "on the host" includes anything else on the docker bridge, and a
+      # forwarded header is trivially chosen by whoever sends it. On, with no proxy in front, every
+      # caller picks its own rate-limit key. Off, WITH a proxy in front, every caller shares one.
+      # Set it to 1 in deploy/.env only alongside deploy/setup-ingress.sh.
+      TRUST_PROXY: ${TRUST_PROXY:-0}
       # Uploaded APKs. A NAMED VOLUME, not a temp directory and not the container filesystem: the
       # app_builds rows outlive any container, so blobs stored anywhere ephemeral leave a library
       # full of entries whose bytes are gone — discovered days later as "install failed: no such

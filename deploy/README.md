@@ -378,6 +378,19 @@ sudo ss -tlnp | grep -v '127.0.0.1\|::1\|100\.' && echo "^ PUBLICLY BOUND — fi
 Every listener must be on loopback or on the `100.x.y.z` tailnet address. A bare `0.0.0.0` line is a
 finding, not a formatting quirk.
 
+**Unless you have deliberately published the console** — see [Publishing it on the
+internet](#publishing-it-on-the-internet) below, in which case exactly two lines are expected and
+everything else still is not:
+
+```bash
+sudo ss -tlnp | grep -vE '127\.0\.0\.1|::1|100\.|:(80|443) .*caddy' \
+  && echo "^ PUBLICLY BOUND — fix before continuing"
+```
+
+The reason to keep a check rather than drop one that now "fails": the finding this catches is a
+service someone adds later, and a check that is expected to print something is a check nobody reads.
+Two known lines, named, and anything else is still a finding.
+
 Firewall, as a second layer, because a compose file edited in a hurry can undo the first:
 
 ```bash
@@ -430,6 +443,71 @@ link Grafana generates points at `127.0.0.1` — a different machine for whoever
 
 **Never `tailscale funnel`.** It is one word away from `serve` and it publishes to the open
 internet. An internet-facing Appium port is unauthenticated device control.
+
+## Publishing it on the internet
+
+Everything above assumes the tailnet. That rules out everyone outside it — including a teammate on a
+phone hotspot, which is the case this section exists for. Skip it entirely if `tailscale serve` is
+enough; it is the cheaper and stricter answer.
+
+Run `deploy/setup-ingress.sh` on the box. It installs Caddy, writes a Caddyfile with one upstream,
+and gets a real Let's Encrypt certificate.
+
+```bash
+HOSTNAME_PUBLIC=farm.example.com ./deploy/setup-ingress.sh
+```
+
+Without a domain it defaults to an `sslip.io` name — `34-100-159-34.sslip.io` resolves to
+`34.100.159.34` by construction, so the HTTP-01 challenge succeeds with no DNS to configure. When a
+real domain arrives it is one A record and one line in the Caddyfile; the certificate story does not
+change.
+
+### Two settings that are not optional here
+
+The API keeps its loopback bind and Caddy is the only public listener, which means the API now sees
+every request arriving from the proxy over plain HTTP. Two things follow, and **both must be set in
+`deploy/.env` before publishing**:
+
+```bash
+SESSION_COOKIE_SECURE=1     # the browser is on TLS even though this process is not
+TRUST_PROXY=1               # take the client address from X-Forwarded-For
+```
+
+`TRUST_PROXY` is the one that is easy to skip, because nothing breaks visibly without it. The rate
+limiter keys anonymous traffic on `req.ip`, and behind a proxy that is the proxy for everyone —
+on this deployment, the docker bridge gateway. Every stranger on the internet then shares one bucket,
+and one of them exhausting it locks every real user out of `/v1/auth/login`. Sign-in has a second,
+much tighter per-address budget of its own (`routes/auth.ts`), which is likewise one global budget
+until this flag is on.
+
+Set it **only** when a proxy you control is genuinely the only way in. Turned on with the API
+directly reachable, any caller can put whatever it likes in `X-Forwarded-For` and choose its own
+limiter key, which is worse than having no limiter — it looks like one.
+
+### What stays private, and why
+
+Caddy proxies exactly one upstream. The console, the tenant API and the WebDriver hub are all served
+by the API process, so one `reverse_proxy` covers the product; anything not on that process is not
+published by adding it.
+
+- **The metrics listener on `:9464` is deliberately not proxied.** Its gauges are fleet-wide and
+  collected on the owner pool, so RLS does not hide them — publishing it would leak across tenants.
+- **The worker's data plane and automation gateway stay on the docker bridge.** Unreachable from
+  outside, which is also why there is still no live video (ADR-0005).
+- **The WebDriver hub is now internet-facing.** It is built for that — Basic auth carries an API key
+  and every proxied hop needs a signed grant — but it is worth knowing that it changed audience.
+
+### Verify
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://<your-host>/health     # 200
+sudo ss -tlnp | grep -E ':(80|443) '                                     # caddy, and only caddy
+sudo ss -tlnp | grep -E ':(9464|3000) '                                  # both still 127.0.0.1
+```
+
+Then check the API agrees about who is calling. Sign in from off the box and look at the log line:
+`remoteAddress` should be your real address, not `172.18.0.1`. If it is the bridge address,
+`TRUST_PROXY` did not take, and the limiter is a single shared bucket.
 
 ## Role hardening
 

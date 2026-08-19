@@ -58,6 +58,10 @@ export async function start(cfg: Config): Promise<Service> {
     // Configured, never derived from the request: behind a reverse proxy this process sees plain
     // HTTP even when the browser is on TLS, and this farm serves plain HTTP in production.
     secureCookies: cfg.sessionCookieSecure,
+    // Same reason, opposite default: a proxy in front also means the socket peer is the proxy, so
+    // without this every anonymous caller shares one rate-limit key. Off unless TRUST_PROXY says
+    // the proxy is the only way in.
+    trustProxy: cfg.trustProxy,
   });
 
   // The metrics listener binds BEFORE the API does, and that order is deliberate in both halves.

@@ -173,6 +173,8 @@ export interface ServerOptions {
   readyCacheMs?: number;
   /** Per-IP requests per minute for `/ready`. */
   readyRateLimitMax?: number;
+  /** Per-IP sign-in attempts per minute. Tests raise it; see `routes/auth.ts` for the default. */
+  loginRateLimitMax?: number;
   /**
    * Run `reap()` on this interval. 0 (the default) leaves it off, which is right for tests — the
    * reaper is fleet-wide, so a suite that shares a database with another one would collect its
@@ -192,6 +194,15 @@ export interface ServerOptions {
    * farm leaves it off, because a cookie the browser refuses to send looks like a broken login.
    */
   secureCookies?: boolean;
+  /**
+   * Take the client address from `X-Forwarded-For` instead of the socket peer.
+   *
+   * Only ever true when a proxy we control is the sole route in, because `req.ip` is the rate
+   * limiter's key for anonymous traffic and a caller who can choose it has no limit at all. See
+   * `config.ts` for the full argument, and note it defaults off there while `secureCookies` defaults
+   * to `isProduction` — the failure modes are not symmetric.
+   */
+  trustProxy?: boolean;
 }
 
 export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInstance> {
@@ -202,6 +213,8 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
       redact: ['req.headers.authorization', 'req.headers["x-worker-registration-token"]'],
     },
     genReqId: () => randomUUID(),
+    // Off unless the deployment says a proxy it controls is the only way in. See ServerOptions.
+    trustProxy: opts.trustProxy ?? false,
     // Fastify's AJV defaults to removeAdditional:true, which STRIPS unknown fields instead of
     // rejecting them — so `additionalProperties: false` in a schema silently does nothing. A client
     // that misspells `ttlMinutes` would get the default and never be told. Reject instead.
@@ -429,7 +442,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
 
   // --- routes ----------------------------------------------------------------------------------
   await app.register(uiRoutes);
-  await app.register(authRoutes, { prefix: '/v1' });
+  await app.register(authRoutes, { prefix: '/v1', loginRateLimitMax: opts.loginRateLimitMax });
   await app.register(sessionRoutes, { prefix: '/v1' });
   await app.register(deviceRoutes, { prefix: '/v1' });
   await app.register(workerRoutes, { prefix: '/v1' });
