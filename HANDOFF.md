@@ -1,8 +1,9 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-19. **Deploys go through a pipeline now — `deploy/README.md` "Shipping a
-change", and known issue 26.** The console is permanently at https://34-100-138-213.sslip.io and its
-header shows the commit it is running. Read this file first in a new session.
+Last updated 2026-08-19. **Two machines now (ADR-0006): `mfarm-cp` always-on holds the control
+plane and console at https://34-100-138-213.sslip.io; `mfarm-lab` holds the devices and is started
+when needed.** Deploys go through a pipeline — `deploy/README.md` "Shipping a change", and known
+issue 26. The console header shows the commit it is running. Read this file first in a new session.
 
 **2026-08-19 — `docs/E2E_MVP_PLAN.md` is the ordered plan from here to a teammate using this.** It
 audits what the console actually calls (all real endpoints; no mock data anywhere in `public/`),
@@ -1041,6 +1042,45 @@ before building any viewer**, because it determines whether a browser needs clie
     Rollback needs no plan — images are immutable and tagged by commit, so it is the same command
     with an older sha — but **migrations do not roll back**, and moving code back past one it depends
     on is a decision rather than a command.
+
+
+27. **THE SPLIT, AND THE THREE VERBS FINALLY MEETING REAL adb.** 2026-08-19, ADR-0006.
+
+    The control plane moved to its own always-on machine (`mfarm-cp`, e2-medium) and the device host
+    (`mfarm-lab`, n2-standard-16) now runs only Cuttlefish, Appium and the agent. What that bought,
+    in order of how much it was worth:
+
+    **The console stopped being a property of the device fleet's cost.** It is up whether or not
+    anything can run a test. The trigger was watching a scheduled 19:00 shutdown take the UI down
+    mid-upload, with the operator's reasonable first guess being "it crashed".
+
+    **The worker's data plane left the docker bridge.** It binds `10.160.0.2` now — the internal VPC
+    address — because a control plane on another host cannot reach `172.18.0.1`. That was ADR-0005's
+    outstanding item and it could not be deferred any longer; colocation is what had made the wrong
+    address survivable.
+
+    **Verified across the two hosts, in this order:**
+
+    - A full WebDriver session in **6.7s** — hub on the control plane, gateway/Appium/adb on the
+      device host, over the VPC. `deploy/verify-webdriver.mjs`, unchanged.
+    - **install, launch AND uninstall, all DONE against real adb** (2s / 11s / 11s). Install crosses
+      hosts twice: the job arrives on a heartbeat, and the worker fetches the APK blob from the
+      control plane over HTTPS. **Uninstall had never run anywhere before this** — issue 22 shipped
+      it with only a fake device behind it.
+
+    Things the migration itself taught, all of which cost time:
+
+    - **Compose file secrets are read by uid 1000 inside the image.** `tar` as a non-root user
+      cannot preserve ownership, so the copied secrets came out owned by the login user and the API
+      restart-looped on `cat: can't open '/run/secrets/session_signing_key'`. The README warned
+      about exactly this; it is worth reading before moving a farm, not after.
+    - **`ALTER ROLE mfarm_app` is part of standing up a database, not part of `farm-up.sh`.**
+      Migrations create the role with the committed development password; only farm-up reconciled it
+      to `.env`, so a control-plane-only host came up with a perfect schema and
+      `password authentication failed for user "mfarm_app"`.
+    - **A firewall rule with `targetTags` follows the tag, not the address.** Moving the reserved IP
+      to the new host left `mfarm-web` on the old one, so the console answered on loopback and timed
+      out from the internet — which looks exactly like a broken certificate.
 
 Each of these came from a test failure, not from review. They are the ones most likely to be
 re-broken by someone who does not know the history.
