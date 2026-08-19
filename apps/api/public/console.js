@@ -1496,7 +1496,17 @@ async function cancelBringup(id) {
 async function loadSessionDetail(id) {
   try {
     const out = await api(`/v1/sessions/${encodeURIComponent(id)}`);
-    state.detail = { ...out.session, dataPlane: out.dataPlane || null, fetchedAt: Date.now() };
+    // `ice` is carried, and forgetting it was a real bug with an almost undiagnosable symptom. The
+    // relay credentials live BESIDE `session` in the response, not inside it, so spreading
+    // `out.session` alone silently produced a viewer with no TURN — which works perfectly on the
+    // farm's own network and fails from anywhere else with an empty peer connection, no error, and
+    // not a single line in the relay's log to say nobody ever called.
+    state.detail = {
+      ...out.session,
+      dataPlane: out.dataPlane || null,
+      ice: out.ice || null,
+      fetchedAt: Date.now(),
+    };
   } catch (err) {
     state.detail = { id, missing: true, message: err.message };
   }
