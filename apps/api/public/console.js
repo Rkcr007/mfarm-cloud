@@ -62,7 +62,12 @@ function add(parent, kids) {
 
 /* ---------------------------------------------------------------------------- state */
 
-const state = {
+/**
+ * Exported ONLY so the screen smoke test can seed it and call each screen (see
+ * `apps/api/test/console-screens.test.ts`). Nothing in the browser imports this module, so the
+ * export costs nothing at runtime and is not an invitation to reach in from elsewhere.
+ */
+export const state = {
   csrf: null,
   me: null,
   devices: [],
@@ -3306,7 +3311,8 @@ function randomPassword() {
   return `${pick()}-${pick()}-${pick()}-${n}`;
 }
 
-const SCREENS = {
+/** Exported for the same reason `state` is: the smoke test builds every one of these. */
+export const SCREENS = {
   launch: () => screenLaunch(),
   launching: () => screenLaunching(state.route.id),
   devices: () => screenDevices(),
