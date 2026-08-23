@@ -1282,6 +1282,41 @@ describe('mfarm:appId', () => {
       return base;
     }
 
+    test('a client that hangs up is told so, and not that the install timed out', async () => {
+      await clearFleet();
+      await seedDevices(1, { appInstall: true });
+      const appId = await seedBuild(orgA, { packageName: 'com.acme.hangup' });
+      const url = await listening();
+
+      // Abort mid-install. Nothing is ever offered to a worker, so the wait can only end by
+      // noticing the caller left.
+      const ctrl = new AbortController();
+      const pending = fetch(`${url}/wd/hub/session`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${keyA}`, 'content-type': 'application/json' },
+        body: JSON.stringify(androidCaps({ 'mfarm:appId': appId })),
+        signal: ctrl.signal,
+      }).catch(() => null);
+
+      await new Promise((r) => setTimeout(r, 300));
+      ctrl.abort();
+      await pending;
+
+      // The device must come back rather than be held for the session's whole TTL, and the reason
+      // recorded must be the disconnect — not a timeout that never elapsed. Polled because the
+      // handler unwinds after the abort, not before it.
+      let ended: { state: string; end_reason: string | null } | undefined;
+      for (let i = 0; i < 100; i++) {
+        ended = await withSystem(async (c) => (await c.query(
+          `SELECT state, end_reason FROM sessions WHERE org_id = $1 ORDER BY created_at DESC LIMIT 1`,
+          [orgA],
+        )).rows[0]);
+        if (ended && ended.state !== 'ALLOCATING') break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(ended?.state, 'ENDED', 'an abandoned session must not be left holding a device');
+    });
+
     test('a client that is still waiting is not mistaken for one that hung up', async () => {
       await clearFleet();
       await seedDevices(1, { appInstall: true });

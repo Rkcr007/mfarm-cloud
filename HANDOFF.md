@@ -135,11 +135,11 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**634 tests pass, 0 fail** (2026-08-23, at migration 020), against a real PostgreSQL 16. No mocks for
+**635 tests pass, 0 fail** (2026-08-24, at migration 020), against a real PostgreSQL 16. No mocks for
 anything that matters.
 
 ```
-apps/api/         control plane, app library, console,  407 tests
+apps/api/         control plane, app library, console,  408 tests
                   entrypoint, metrics
 apps/cli/         mfarm CLI                              63 tests
 workers/agent/    worker agent, Appium supervisor,      143 tests
@@ -1379,6 +1379,19 @@ device is covered by the same URL. Caught by a test, not by review.
     `deploy/verify-queue.mjs` fills the farm and proves a queued request is still waiting five
     seconds later — promoted after 69 s once a device was freed. Run them after any change to the
     hub's waits; neither can be replaced by a test using `app.inject()`.
+
+    **The general rule, applied across the repo 2026-08-24: never quote a configured limit as if it
+    were an elapsed time.** An error that reports a budget describes the configuration; only a
+    measurement describes what happened. Four messages did the former and all four now report
+    measured time — the hub's install wait and capacity wait, `mfarm app install --wait`, and
+    `mfarm run`'s queue timeout. Two of them were reachable with a budget of zero, where the old
+    wording claimed a wait that provably never occurred.
+
+    The same edit also split the outcome the waits return. `awaitAppAction` used to answer PENDING
+    for both "the deadline passed" and "the caller went away", so the caller could not tell them
+    apart and reported a timeout either way — which is precisely what let a one-millisecond wait
+    announce itself as a four-minute one. `waitForCapacity` now distinguishes four endings for the
+    same reason.
 
     Diagnosis note for next time: the session row said `ended_at` 43 ms after `created_at` with
     `end_reason = session_not_created`, while the client had been handed a message about 240

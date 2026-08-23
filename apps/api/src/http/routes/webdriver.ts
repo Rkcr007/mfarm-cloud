@@ -285,18 +285,28 @@ export async function webdriverRoutes(app: FastifyInstance) {
       fence = alloc.fence;
 
       if (deviceId === null) {
-        const promoted = await waitForCapacity(gone, orgId, sessionId, caps.queueTimeoutSeconds);
-        if (!promoted) {
+        const wait = await waitForCapacity(gone, orgId, sessionId, caps.queueTimeoutSeconds);
+        if (!wait.promoted) {
           await release(orgId, sessionId, 'no_capacity');
+          // Every branch reports what actually happened. The old single message quoted
+          // `queueTimeoutSeconds` straight from the request, so it claimed the full wait whether or
+          // not any of it had elapsed — and when the abandon predicate was broken it claimed two
+          // minutes for a wait of one poll. See `clientGone`.
+          const waited = Math.round(wait.waitedMs / 1000);
+          const want = `${caps.platform} device ${wanted(build)}`;
           throw sessionNotCreated(
-            caps.queueTimeoutSeconds > 0
-              ? `No ${caps.platform} device ${wanted(build)} became free in ${caps.queueTimeoutSeconds}s in region ${region}.`
-              : `No ${caps.platform} device ${wanted(build)} is free in region ${region}. Set the \`mfarm:queueTimeoutSeconds\` capability to wait for one instead of failing.`,
+            wait.gaveUp === 'never_waited'
+              ? `No ${want} is free in region ${region}. Set the \`mfarm:queueTimeoutSeconds\` capability to wait for one instead of failing.`
+              : wait.gaveUp === 'abandoned'
+                ? `The client disconnected after ${waited}s of waiting for a ${want} in region ${region}.`
+                : wait.gaveUp === 'session_gone'
+                  ? `The queued session ended after ${waited}s before a ${want} could be assigned in region ${region}.`
+                  : `No ${want} became free in region ${region} after waiting ${waited}s.`,
             'no_capacity',
           );
         }
-        deviceId = promoted.deviceId;
-        fence = promoted.fence;
+        deviceId = wait.promoted.deviceId;
+        fence = wait.promoted.fence;
       }
     }
 
@@ -785,9 +795,8 @@ export async function webdriverRoutes(app: FastifyInstance) {
       'installing a library build before handing over the webdriver session',
     );
 
-    const timeoutMs = appInstallTimeoutMs();
     const outcome = await awaitAppAction(orgId, action.id, {
-      timeoutMs,
+      timeoutMs: appInstallTimeoutMs(),
       pollIntervalMs: POLL_INTERVAL_MS,
       // A cancelled CI job is the common case for a long wait ending early. Nothing aborts the
       // handler when the socket closes, and the caller's catch releases the device — so stopping
@@ -810,8 +819,25 @@ export async function webdriverRoutes(app: FastifyInstance) {
         `The install of ${build.packageName} was discarded before it ran.`, 'app_install_lost',
       );
     }
+    // MEASURED, never the configured budget. Quoting `timeoutMs` here is what let a wait that
+    // lasted one millisecond announce itself as a 240-second timeout, and that number was believed
+    // — it read as a slow device for as long as it took to check the session timestamps. An error
+    // that reports a limit is describing the configuration; only an elapsed time describes what
+    // happened.
+    const waited = Math.round(outcome.waitedMs / 1000);
+
+    if (outcome.gaveUp === 'abandoned') {
+      // Nobody is left to read this, and that is the point of saying it plainly: it goes in the log
+      // beside the release, so the device coming back early is explicable rather than mysterious.
+      throw sessionNotCreated(
+        `The client disconnected after ${waited}s, while ${build.packageName} was still installing. ` +
+        'The device was released; the install itself may have succeeded.',
+        'app_install_abandoned',
+      );
+    }
+
     throw sessionNotCreated(
-      `${build.packageName} was still installing after ${Math.round(timeoutMs / 1000)}s. ` +
+      `${build.packageName} was still installing after ${waited}s. ` +
       'The device may be offline, or the build may be very large — check `mfarm app status`.',
       'app_install_timeout',
     );
@@ -886,6 +912,22 @@ export async function webdriverRoutes(app: FastifyInstance) {
    * always time out.
    */
   /**
+   * Why a wait for capacity ended, and how long it actually took.
+   *
+   * FOUR outcomes rather than `null`, because they are four different things to tell somebody and
+   * the old signature could say none of them. A client that hung up, a session the reaper
+   * collected, and a farm that stayed full for the whole timeout all produced the same "no device
+   * became free in Ns" — with N read off the configuration, so the message was equally confident
+   * whether it had waited two minutes or two milliseconds.
+   */
+  type CapacityWait = {
+    promoted: { deviceId: string; fence: number } | null;
+    /** Measured. The whole point. */
+    waitedMs: number;
+    gaveUp?: 'deadline' | 'abandoned' | 'session_gone' | 'never_waited';
+  };
+
+  /**
    * Has the CLIENT gone away — as opposed to the request body simply having been read?
    *
    * `req.raw.destroyed` is the obvious-looking answer, it is what both waits used, and it is wrong
@@ -918,9 +960,11 @@ export async function webdriverRoutes(app: FastifyInstance) {
     orgId: string,
     sessionId: string,
     timeoutSeconds: number,
-  ): Promise<{ deviceId: string; fence: number } | null> {
-    if (timeoutSeconds <= 0) return null;
-    const deadline = Date.now() + timeoutSeconds * 1000;
+  ): Promise<CapacityWait> {
+    const startedAt = Date.now();
+    const waited = () => Date.now() - startedAt;
+    if (timeoutSeconds <= 0) return { promoted: null, waitedMs: 0, gaveUp: 'never_waited' };
+    const deadline = startedAt + timeoutSeconds * 1000;
 
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -928,7 +972,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
       // A cancelled CI job is the common case for a long wait ending early. Nothing aborts the
       // handler when the socket closes, so without this the promotion still lands and a device is
       // held for the session's whole TTL for a client that stopped listening minutes ago.
-      if (gone()) return null;
+      if (gone()) return { promoted: null, waitedMs: waited(), gaveUp: 'abandoned' };
 
       const row = await withTenant(orgId, async (c) => {
         const { rows } = await c.query(
@@ -937,13 +981,13 @@ export async function webdriverRoutes(app: FastifyInstance) {
         );
         return rows[0] as { state: string; device_id: string | null; fence: string | null } | undefined;
       });
-      if (!row) return null;
+      if (!row) return { promoted: null, waitedMs: waited(), gaveUp: 'session_gone' };
       if (row.state === 'ALLOCATING' && row.device_id) {
-        return { deviceId: row.device_id, fence: Number(row.fence) };
+        return { promoted: { deviceId: row.device_id, fence: Number(row.fence) }, waitedMs: waited() };
       }
       // Ended or failed while queued: someone cancelled it, or the reaper did. Stop waiting.
-      if (row.state !== 'QUEUED') return null;
+      if (row.state !== 'QUEUED') return { promoted: null, waitedMs: waited(), gaveUp: 'session_gone' };
     }
-    return null;
+    return { promoted: null, waitedMs: waited(), gaveUp: 'deadline' };
   }
 }

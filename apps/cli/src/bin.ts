@@ -334,8 +334,9 @@ async function appCommand(flags: Flags, rest: string[]): Promise<number> {
     let action = await c.requestAction(sessionId, target, sub);
     if (!g.quiet) process.stderr.write(`mfarm: queued ${sub} ${action.id}\n`);
 
+    const waitStartedAt = Date.now();
     if (waitSeconds > 0) {
-      const deadline = Date.now() + waitSeconds * 1000;
+      const deadline = waitStartedAt + waitSeconds * 1000;
       while (action.state === 'PENDING' && Date.now() < deadline) {
         await sleep(INSTALL_POLL_MS);
         action = await c.getAction(action.id);
@@ -354,7 +355,14 @@ async function appCommand(flags: Flags, rest: string[]): Promise<number> {
       return EXIT_FAILURE;
     }
     if (!g.quiet) {
-      process.stderr.write(`mfarm: ${sub} ${action.id} is still pending after ${waitSeconds}s. Poll it with \`mfarm app status ${action.id}\`.\n`);
+      // Measured, not the budget: with `--wait 0` nothing was waited for, and saying "still pending
+      // after 120s" there would be a straight fabrication. Same mistake as HANDOFF issue 31.
+      const waited = Math.round((Date.now() - waitStartedAt) / 1000);
+      process.stderr.write(
+        waitSeconds === 0
+          ? `mfarm: ${sub} ${action.id} is queued. Poll it with \`mfarm app status ${action.id}\`.\n`
+          : `mfarm: ${sub} ${action.id} is still pending after ${waited}s. Poll it with \`mfarm app status ${action.id}\`.\n`,
+      );
     }
     return waitSeconds === 0 ? 0 : EXIT_FAILURE;
   }

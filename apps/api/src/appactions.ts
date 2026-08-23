@@ -63,8 +63,22 @@ export async function requestAppAction(
 export type AppActionOutcome =
   | { state: 'DONE' }
   | { state: 'FAILED'; error: string | null }
-  /** Still PENDING when the deadline passed — the worker never picked it up, or is still working. */
-  | { state: 'PENDING' }
+  /**
+   * Still PENDING when we stopped looking, which is TWO different facts and they must not be
+   * conflated:
+   *
+   *   deadline   the worker never picked it up, or is still working. A real timeout.
+   *   abandoned  the caller went away, so we stopped watching. Says NOTHING about the install,
+   *              which may well be about to succeed.
+   *
+   * They used to be one value, and the cost of that is on the record: when the abandon predicate
+   * was wrong, every session reported a 240-second install timeout after waiting a millisecond,
+   * and it read as a slow device for as long as it took someone to check the timestamps. A caller
+   * that cannot tell "I gave up" from "it is late" will eventually tell somebody the wrong story.
+   *
+   * `waitedMs` is MEASURED, not the configured budget, for the same reason.
+   */
+  | { state: 'PENDING'; waitedMs: number; gaveUp: 'deadline' | 'abandoned' }
   /** The row is gone: its session or its build was deleted underneath us. */
   | { state: 'GONE' };
 
@@ -84,7 +98,8 @@ export async function awaitAppAction(
   actionId: string,
   opts: { timeoutMs: number; pollIntervalMs: number; abandoned?: () => boolean },
 ): Promise<AppActionOutcome> {
-  const deadline = Date.now() + opts.timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + opts.timeoutMs;
   for (;;) {
     const row = await withTenant(orgId, async (c) => {
       const { rows } = await c.query<{ state: string; error: string | null }>(
@@ -97,7 +112,15 @@ export async function awaitAppAction(
     if (row.state === 'DONE') return { state: 'DONE' };
     if (row.state === 'FAILED') return { state: 'FAILED', error: row.error };
 
-    if (Date.now() >= deadline || opts.abandoned?.()) return { state: 'PENDING' };
+    // Checked in this order because they are not equally informative. The caller leaving is a fact
+    // about the caller; the deadline passing is a fact about the install. If both are true the
+    // caller left first, and saying so is more use than reporting a timeout to nobody.
+    if (opts.abandoned?.()) {
+      return { state: 'PENDING', waitedMs: Date.now() - startedAt, gaveUp: 'abandoned' };
+    }
+    if (Date.now() >= deadline) {
+      return { state: 'PENDING', waitedMs: Date.now() - startedAt, gaveUp: 'deadline' };
+    }
     await new Promise((r) => setTimeout(r, opts.pollIntervalMs));
   }
 }
