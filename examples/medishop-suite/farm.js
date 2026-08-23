@@ -105,6 +105,75 @@ function appCapabilities() {
 }
 
 /**
+ * Tell the farm how a test went.
+ *
+ * THE FARM CANNOT WORK THIS OUT. WebDriver has no concept of an assertion: the hub watches a
+ * session open, drive a device and close, and that looks identical whether every test passed or
+ * every one failed. So this call is not a nicety on top of something the farm already knows — it is
+ * the entire mechanism, and a run that never calls it shows "Not reported" rather than a green tick.
+ *
+ * The session id is `driver.sessionId`, and it is deliberately the SAME id the farm uses: the hub
+ * hands back its own session id rather than Appium's, so one id spans the test log, the API, the
+ * artifact index and the invoice. No correlation step, no bookkeeping.
+ *
+ * Failures here are SWALLOWED, and that is a real decision rather than laziness. This runs inside
+ * the suite's own error path; a farm that is briefly unreachable must not convert a red test into a
+ * confusing crash inside the reporter, nor a green one into a failure. The result is telemetry, and
+ * telemetry that can break the build is worse than telemetry you sometimes lose.
+ */
+export async function reportResult(driver, { name, status, failure, durationMs }) {
+  const sessionId = driver?.sessionId;
+  if (!sessionId) return;
+  try {
+    const res = await fetch(`${HUB.origin}/v1/sessions/${sessionId}/result`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        status,
+        // Bounded here as well as server-side. The server truncates and says so; sending 5 MB of
+        // stack over a metered link to have it cut is just waste.
+        ...(failure ? { failure: String(failure).slice(0, 8000) } : {}),
+        ...(Number.isFinite(durationMs) ? { durationMs: Math.round(durationMs) } : {}),
+      }),
+    });
+    if (!res.ok && process.env.MFARM_DEBUG) {
+      console.error(`mfarm: reporting "${name}" failed: ${res.status} ${await res.text()}`);
+    }
+  } catch (err) {
+    if (process.env.MFARM_DEBUG) console.error(`mfarm: reporting "${name}" failed: ${err.message}`);
+  }
+}
+
+/**
+ * `test()`, plus the one line that tells the farm what happened.
+ *
+ * A wrapper rather than an `afterEach` because `node:test` does not hand a hook the outcome of the
+ * test that just ran. Runners that DO — WebdriverIO's `afterTest(test, ctx, { passed, error,
+ * duration })` is the common one — want the hook form instead, and the README shows it: there the
+ * whole integration really is one line.
+ *
+ * The error is re-thrown untouched. A reporter that changes whether the suite fails is a reporter
+ * nobody can trust.
+ */
+export function farmTest(getDriver, test) {
+  return (name, fn) => test(name, async (t) => {
+    const startedAt = Date.now();
+    try {
+      const out = await fn(t);
+      await reportResult(getDriver(), { name, status: 'passed', durationMs: Date.now() - startedAt });
+      return out;
+    } catch (err) {
+      await reportResult(getDriver(), {
+        name, status: 'failed', durationMs: Date.now() - startedAt,
+        failure: err?.stack || String(err),
+      });
+      throw err;
+    }
+  });
+}
+
+/**
  * Run `fn` against a device, and give the device back whatever happens.
  *
  * On failure it captures a screenshot FIRST, before anything unwinds — the farm takes its own

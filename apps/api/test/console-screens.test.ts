@@ -104,6 +104,7 @@ function seed(route: { name: string; id?: string | null }) {
     lastActivityAt: new Date(Date.now() - 5_000).toISOString(),
     build: { id: 'app-1', packageName: 'com.acme.app', versionName: '1.0' },
     buildCount: 1,
+    tests: { total: 8, passed: 6, failed: 1, skipped: 1, sessionsReporting: 3 },
   };
   Object.assign(mod.state, {
     me: { user: { id: 'u1', email: 'someone@mfarm.local' }, org: { id: 'o1', name: 'Farm', slug: 'farm', maxConcurrent: 5 }, role: 'admin' },
@@ -114,7 +115,15 @@ function seed(route: { name: string; id?: string | null }) {
     actions: [{ id: 'a1', kind: 'install', state: 'SUCCEEDED', appId: 'app-1', deviceId: 'dev-1', sessionId: 'sess-1', requestedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }],
     detail: { ...session, dataPlane: null, ice: null, fetchedAt: Date.now() },
     runs: [run],
-    runDetail: { id: route.id ?? 'run-1', run, sessions: [{ ...session, build: run.build }], loaded: true },
+    runDetail: {
+      id: route.id ?? 'run-1', run, loaded: true,
+      sessions: [{ ...session, build: run.build, tests: { total: 8, passed: 6, failed: 1, skipped: 1 } }],
+      failures: [{
+        id: 'tr-1', sessionId: 'sess-1', name: 'checkout applies a promo',
+        failure: 'AssertionError: expected 8 got 10', durationMs: 1200,
+        reportedAt: new Date().toISOString(),
+      }],
+    },
     held: null,
     route: { name: route.name, id: route.id ?? null },
     error: null,
@@ -223,5 +232,44 @@ describe('the runs screens', () => {
     assert.match(text, /Loading/);
     assert.ok(!/No run by that name/.test(text),
       'telling somebody their run does not exist while it is still arriving is the worse error');
+  });
+});
+
+describe('outcome reporting in the console', () => {
+  test('a run nobody reported reads as unmeasured, never as passing', () => {
+    // The distinction the whole of §4.3 exists to preserve. "0 failed" on a run that was never
+    // instrumented is a green number on an unchecked result, and green numbers stop people looking.
+    seed({ name: 'runs' });
+    mod.state.runs = [{
+      ...mod.state.runs[0],
+      tests: { total: 0, passed: 0, failed: 0, skipped: 0, sessionsReporting: 0 },
+    }];
+    const text = textOf(mod.SCREENS.runs());
+    assert.match(text, /Not reported/);
+    assert.ok(!/all passed|0 failed/.test(text),
+      'an unreported run must not render as a pass');
+  });
+
+  test('a run whose suite reported shows the counts it reported', () => {
+    seed({ name: 'runs' });
+    assert.match(textOf(mod.SCREENS.runs()), /1 failed/);
+  });
+
+  test('the run detail shows the failure and a way to its evidence', () => {
+    seed({ name: 'run', id: '4471' });
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /checkout applies a promo/);
+    assert.match(text, /expected 8 got 10/);
+    assert.match(text, /Open the session/, 'the failure has to link to its logcat and screenshot');
+  });
+
+  test('a partially reported run says so rather than implying the counts cover it', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.run = {
+      ...mod.state.runDetail.run,
+      sessions: { total: 5, live: 0, ended: 5 },
+      tests: { total: 8, passed: 8, failed: 0, skipped: 0, sessionsReporting: 2 },
+    };
+    assert.match(textOf(mod.SCREENS.run()), /Only 2 of 5 sessions reported/);
   });
 });

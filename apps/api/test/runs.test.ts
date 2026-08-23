@@ -111,6 +111,7 @@ async function seedBuild(orgId: string, packageName: string, versionName: string
 
 const clearFleet = () => withSystem(async (c) => {
   await c.query('DELETE FROM app_actions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+  await c.query('DELETE FROM test_results WHERE org_id = ANY($1)', [[orgA, orgB]]);
   await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
   await c.query('DELETE FROM metering_events WHERE org_id = ANY($1)', [[orgA, orgB]]);
   await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
@@ -156,7 +157,8 @@ after(async () => {
   await app.close();
   await withSystem(async (c) => {
     await c.query('DELETE FROM app_actions WHERE org_id = ANY($1)', [[orgA, orgB]]);
-    await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM test_results WHERE org_id = ANY($1)', [[orgA, orgB]]);
+  await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM metering_events WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM runs WHERE org_id = ANY($1)', [[orgA, orgB]]);
@@ -485,6 +487,145 @@ describe('GET /v1/runs', () => {
       payload: { actions: offered.map((a) => ({ actionId: a.actionId, ok: true })) },
     });
   }
+});
+
+describe('outcome reporting', () => {
+  const report = (sessionId: string, body: Record<string, unknown>, key = keyA) => app.inject({
+    method: 'POST', url: `/v1/sessions/${sessionId}/result`, headers: auth(key), payload: body,
+  });
+
+  test('a run with no reports is UNMEASURED, not passing', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    await openSession(keyA, { 'mfarm:runId': 'silent' });
+
+    const list = await app.inject({ method: 'GET', url: '/v1/runs', headers: auth(keyA) });
+    const run = list.json().runs.find((r: { runId: string }) => r.runId === 'silent');
+    assert.equal(run.tests.total, 0);
+    assert.equal(run.tests.failed, 0);
+    // The field that stops a green number appearing on a run nobody instrumented. Without it
+    // "0 failed" is indistinguishable from "nothing broke", which is the exact inference §4.3
+    // exists to refuse.
+    assert.equal(run.tests.sessionsReporting, 0,
+      'no session reported, and that must be visible rather than read as success');
+  });
+
+  test('the suite reports, and the run counts what it said', async () => {
+    await clearFleet();
+    await seedDevices(2);
+    const s1 = await openSession(keyA, { 'mfarm:runId': 'counted' });
+    const s2 = await openSession(keyA, { 'mfarm:runId': 'counted' });
+
+    for (const [session, results] of [
+      [s1, [['a opens', 'passed'], ['b signs in', 'passed'], ['c checks out', 'failed']]],
+      [s2, [['d loads', 'passed'], ['e is pending', 'skipped']]],
+    ] as Array<[string, Array<[string, string]>]>) {
+      for (const [name, status] of results) {
+        const r = await report(session, {
+          name, status, durationMs: 1200,
+          ...(status === 'failed' ? { failure: 'expected 3 items, found 0' } : {}),
+        });
+        assert.equal(r.statusCode, 201, r.body);
+      }
+    }
+
+    const list = await app.inject({ method: 'GET', url: '/v1/runs', headers: auth(keyA) });
+    const run = list.json().runs.find((r: { runId: string }) => r.runId === 'counted');
+    assert.equal(run.tests.total, 5);
+    assert.equal(run.tests.passed, 3);
+    assert.equal(run.tests.failed, 1);
+    assert.equal(run.tests.skipped, 1);
+    assert.equal(run.tests.sessionsReporting, 2);
+    // The counts must not be multiplied by the number of sessions, which is what a plain
+    // three-way join would do — 2 sessions x 5 results reported as 10 of everything.
+    assert.equal(run.sessions.total, 2, 'session count survives the results join');
+  });
+
+  test('the run detail names each failure and the session that produced it', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'has-failures' });
+    await report(s, { name: 'checkout applies a promo', status: 'failed', failure: 'AssertionError: expected £8 got £10' });
+    await report(s, { name: 'cart totals', status: 'passed' });
+
+    const detail = await app.inject({ method: 'GET', url: '/v1/runs/has-failures', headers: auth(keyA) });
+    assert.equal(detail.statusCode, 200, detail.body);
+    const body = detail.json();
+    assert.equal(body.failures.length, 1);
+    assert.equal(body.failures[0].name, 'checkout applies a promo');
+    assert.match(body.failures[0].failure, /expected £8/);
+    // The link to the evidence: this session id is what the artifacts hang off.
+    assert.equal(body.failures[0].sessionId, s);
+    assert.equal(body.sessions[0].tests.passed, 1);
+    assert.equal(body.sessions[0].tests.failed, 1);
+  });
+
+  test('a retry is two results, and the API does not pretend otherwise', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'flaky' });
+    await report(s, { name: 'flaky thing', status: 'failed', failure: 'timed out' });
+    await report(s, { name: 'flaky thing', status: 'passed' });
+
+    const detail = await app.inject({ method: 'GET', url: '/v1/runs/flaky', headers: auth(keyA) });
+    const run = detail.json().run;
+    // Deduplicating on name would throw away the failed/passed pair, which IS the flakiness
+    // signal — and would break parameterised tests that legitimately share a name.
+    assert.equal(run.tests.total, 2);
+    assert.equal(run.tests.failed, 1);
+    assert.equal(run.tests.passed, 1);
+  });
+
+  test('a result is accepted after the session has ended', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'late' });
+    await quit(keyA, s);
+
+    // The case this exists for is a test that CRASHED: its session ends unexpectedly and its
+    // result is the one most worth having. Refusing it would drop data exactly then.
+    const r = await report(s, { name: 'reported after quit', status: 'failed', failure: 'boom' });
+    assert.equal(r.statusCode, 201, r.body);
+    assert.equal(r.json().result.status, 'failed');
+  });
+
+  test('an over-long failure is truncated, not rejected', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'huge' });
+
+    const r = await report(s, { name: 'enormous stack', status: 'failed', failure: 'x'.repeat(25_000) });
+    assert.equal(r.statusCode, 201, 'losing the whole result over a long stack is the worse failure');
+    const stored = r.json().result.failure as string;
+    assert.ok(stored.length < 25_000);
+    assert.match(stored, /truncated by mfarm/, 'a stack that silently stops gets debugged as if complete');
+  });
+
+  test('a bad status or a missing name is refused', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'invalid' });
+
+    assert.equal((await report(s, { name: 'x', status: 'FAILED' })).statusCode, 400);
+    assert.equal((await report(s, { name: 'x', status: 'broken' })).statusCode, 400);
+    assert.equal((await report(s, { status: 'passed' })).statusCode, 400);
+    assert.equal((await report(s, { name: '', status: 'passed' })).statusCode, 400);
+  });
+
+  test('another org cannot report against a session it does not own', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'mine' });
+
+    const r = await report(s, { name: 'trespass', status: 'passed' }, keyB);
+    assert.equal(r.statusCode, 404,
+      'RLS makes another org\'s session indistinguishable from one that does not exist');
+
+    const results = await app.inject({
+      method: 'GET', url: `/v1/sessions/${s}/results`, headers: auth(keyA),
+    });
+    assert.equal(results.json().results.length, 0, 'and nothing was written');
+  });
 });
 
 describe('GET /v1/runs/:id', () => {

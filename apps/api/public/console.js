@@ -2706,6 +2706,49 @@ function runBuild(run) {
 }
 
 /** One tile on the run detail header, in the shape the health screen already uses. */
+/**
+ * How a run's outcome reads, and the one distinction it must never blur.
+ *
+ * A run with no reported tests has NOT passed. Nobody measured it. WebDriver has no concept of an
+ * assertion, so unless the suite called `POST /v1/sessions/:id/result` the farm knows only that
+ * some sessions opened and closed — and rendering that as a green "0 failed" would put a
+ * reassuring number on a run that was never checked, which is the exact inference the whole
+ * outcome-reporting design refuses to make.
+ *
+ * So: "Not reported", in words, with the link to how to fix it.
+ */
+function runOutcome(run) {
+  const t = run.tests || { total: 0, passed: 0, failed: 0, skipped: 0, sessionsReporting: 0 };
+  if (t.total === 0) {
+    return h('span', {
+      class: 'caption', text: 'Not reported',
+      title: 'No session in this run posted results. The farm cannot see assertions — add a '
+        + 'POST /v1/sessions/:id/result call to your afterEach.',
+    });
+  }
+  return h('span', { class: 'row tight' },
+    t.failed > 0 ? pill(`${t.failed} failed`, 'bad') : pill('all passed', 'ok'),
+    h('span', { class: 'caption tnum', text: `${t.passed}/${t.total}` }),
+    t.skipped > 0 ? h('span', { class: 'caption', text: `${t.skipped} skipped` }) : null,
+  );
+}
+
+/**
+ * The caveat that belongs next to any partially-reported run.
+ *
+ * Reported only when it is true and interesting: some sessions spoke and others did not, so the
+ * counts describe part of the run. Silence about that would make a partial pass look like a whole
+ * one.
+ */
+function runPartialNote(run) {
+  const t = run.tests || {};
+  const reporting = t.sessionsReporting ?? 0;
+  const total = run.sessions?.total ?? 0;
+  if (!t.total || reporting === 0 || reporting >= total) return null;
+  return h('p', { class: 'caption',
+    text: `Only ${reporting} of ${total} sessions reported results — these counts cover part of the run.` });
+}
+
 function runStat(label, value, note) {
   return card(null, { class: 'stat stack tight' },
     h('p', { class: 'micro', text: label }),
@@ -2723,9 +2766,10 @@ function screenRuns() {
       rows.length
         ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
             h('thead', null, h('tr', null,
-              ['Run', 'Build', 'Sessions', 'Live', 'Started', 'Last activity', ''].map((t) => h('th', { text: t })))),
+              ['Run', 'Tests', 'Build', 'Sessions', 'Live', 'Started', 'Last activity', ''].map((t) => h('th', { text: t })))),
             h('tbody', null, rows.map((r) => h('tr', null,
               h('td', null, h('code', { text: r.runId })),
+              h('td', null, runOutcome(r)),
               h('td', null, runBuild(r)),
               h('td', { class: 'tnum', text: String(r.sessions.total) }),
               // Live is the ONLY honest "still going" signal: a run has no end of its own, and a
@@ -2745,8 +2789,9 @@ function screenRuns() {
             'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do.'),
     ),
     h('p', { class: 'caption mt-md',
-      text: 'A run has no pass or fail yet: WebDriver has no concept of an assertion, so the farm '
-        + 'sees sessions open and close and cannot tell a passing test from a failing one.' }),
+      text: 'Pass and fail come from the suite, never from the farm — WebDriver has no concept of '
+        + 'an assertion. A run reading "Not reported" ran, but nothing told us how it went: post to '
+        + '/v1/sessions/:id/result from an afterEach.' }),
   ];
 }
 
@@ -2773,6 +2818,10 @@ function screenRun(id) {
       `${run.sessions.total} session${run.sessions.total === 1 ? '' : 's'}, `
       + `${run.sessions.live} still live.`),
     h('div', { class: 'statgrid mb-gap' },
+      runStat('Tests', runOutcome(run),
+        run.tests?.total
+          ? `${run.tests.sessionsReporting} of ${run.sessions.total} sessions reported`
+          : 'The suite has to tell us; the farm cannot see assertions'),
       runStat('Build', runBuild(run),
         run.buildCount > 1 ? 'The sessions did not agree' : 'Installed before each session'),
       runStat('Sessions', h('span', { class: 'val tnum', text: String(run.sessions.total) }),
@@ -2786,16 +2835,45 @@ function screenRun(id) {
         text: run.firstSessionAt ? duration(run.firstSessionAt, run.lastActivityAt) : '—' }),
         'First session to last activity'),
     ),
+    runPartialNote(run),
+
+    // Failures first, above the session list. The reason somebody opened this page is on this card,
+    // and each row carries the session that produced it — which is where its logcat and screenshot
+    // live. That link is the whole payoff of runs plus outcomes.
+    d.failures?.length
+      ? card(`Failures (${d.failures.length})`, { class: 'mb-gap' },
+          h('div', { class: 'stack' }, d.failures.map((f) => h('div', { class: 'stack tight' },
+            h('p', { class: 'row tight' },
+              pill('failed', 'bad'),
+              h('strong', { text: f.name }),
+            ),
+            f.failure
+              ? h('pre', { class: 'failtext', text: f.failure })
+              : h('p', { class: 'caption', text: 'No message was reported with this failure.' }),
+            h('p', { class: 'row tight' },
+              h('span', { class: 'caption', text: 'Evidence:' }),
+              btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
+            ),
+          ))))
+      : null,
+
     card('Sessions', { class: 'flush' },
       d.sessions.length
         ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
             h('thead', null, h('tr', null,
-              ['State', 'Session', 'Device', 'Build', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
+              ['State', 'Session', 'Tests', 'Device', 'Build', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
             h('tbody', null, d.sessions.map((sn) => {
               const st = SESSION_STATE[sn.state] || { label: sn.state, tone: '' };
               return h('tr', null,
                 h('td', null, pill(st.label, st.tone, { live: sn.state === 'ACTIVE' })),
                 h('td', null, h('code', { text: sn.id })),
+                h('td', null, sn.tests?.total
+                  ? h('span', { class: 'row tight' },
+                      sn.tests.failed > 0
+                        ? pill(`${sn.tests.failed} failed`, 'bad')
+                        : pill('passed', 'ok'),
+                      h('span', { class: 'caption tnum', text: `${sn.tests.passed}/${sn.tests.total}` }))
+                  : h('span', { class: 'caption', text: 'Not reported' })),
                 h('td', { text: sn.device || '—' }),
                 h('td', null, sn.build
                   ? h('code', { text: `${sn.build.packageName}${sn.build.versionName ? `@${sn.build.versionName}` : ''}` })

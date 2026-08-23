@@ -19,6 +19,12 @@ import { notFound } from '../errors.ts';
  *
  * What IS reported: how many sessions, how many are still live, the window they span, and the build
  * — named only when every session that installed one installed the same one, counted otherwise.
+ *
+ * Since migration 021 it also reports OUTCOMES, and those come from one place only: what the suite
+ * said. A run whose sessions reported nothing has `tests.total === 0`, which the console renders as
+ * "not reported" rather than as zero failures — the difference between "nothing broke" and "nobody
+ * told us" is the whole reason §4.3 exists, and collapsing it would put a green number on a run that
+ * was never checked.
  */
 
 /** Sessions that have not finished. The only honest "is this run still going" signal available. */
@@ -37,6 +43,11 @@ interface RunRow {
   build_id: string | null;
   package_name: string | null;
   version_name: string | null;
+  tests_total: string;
+  tests_passed: string;
+  tests_failed: string;
+  tests_skipped: string;
+  sessions_reporting: string;
 }
 
 /**
@@ -55,7 +66,8 @@ const LIST_SQL = `
   SELECT r.id, r.external_id, r.created_at,
          agg.session_count, agg.live_count, agg.ended_count,
          agg.first_session_at, agg.last_activity_at, agg.build_count,
-         b.id AS build_id, b.package_name, b.version_name
+         b.id AS build_id, b.package_name, b.version_name,
+         t.tests_total, t.tests_passed, t.tests_failed, t.tests_skipped, t.sessions_reporting
     FROM runs r
     LEFT JOIN LATERAL (
       SELECT count(*)                                                   AS session_count,
@@ -74,6 +86,23 @@ const LIST_SQL = `
        WHERE s.run_id = r.id
     ) agg ON true
     LEFT JOIN app_builds b ON agg.build_count = 1 AND b.id = agg.one_build::uuid
+    -- A SECOND lateral rather than more aggregates in the first one. Sessions and results are
+    -- independent one-to-many branches off a run, so counting both in one join multiplies them:
+    -- a run of 3 sessions with 8 results each would report 24 sessions and 24 of every result. The
+    -- same row-multiplication trap the first lateral exists to avoid, one level down.
+    LEFT JOIN LATERAL (
+      SELECT count(*)                                           AS tests_total,
+             count(*) FILTER (WHERE tr.status = 'passed')       AS tests_passed,
+             count(*) FILTER (WHERE tr.status = 'failed')       AS tests_failed,
+             count(*) FILTER (WHERE tr.status = 'skipped')      AS tests_skipped,
+             -- How many of the run's sessions reported anything at all. This is what separates a
+             -- run that passed from a run nobody instrumented, and without it the two are both
+             -- "0 failures".
+             count(DISTINCT tr.session_id)                      AS sessions_reporting
+        FROM test_results tr
+        JOIN sessions s2 ON s2.id = tr.session_id
+       WHERE s2.run_id = r.id
+    ) t ON true
 `;
 
 function runJson(r: RunRow) {
@@ -96,6 +125,22 @@ function runJson(r: RunRow) {
       : null,
     /** 0, 1, or more. Distinguishes "no build named" from "several", which `build: null` cannot. */
     buildCount,
+    /**
+     * What the SUITE reported. The farm cannot observe any of this.
+     *
+     * `sessionsReporting` is load-bearing: a run with zero failures and zero reporting sessions has
+     * not passed, it has not been measured, and every consumer of this object has to be able to
+     * tell those apart. A retried test appears twice — once failed, once passed — because the farm
+     * cannot distinguish a retry from a distinct test of the same name, and guessing which attempt
+     * counted would be the same class of invention as inferring pass/fail in the first place.
+     */
+    tests: {
+      total: Number(r.tests_total ?? 0),
+      passed: Number(r.tests_passed ?? 0),
+      failed: Number(r.tests_failed ?? 0),
+      skipped: Number(r.tests_skipped ?? 0),
+      sessionsReporting: Number(r.sessions_reporting ?? 0),
+    },
   };
 }
 
@@ -151,13 +196,47 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.region, s.created_at, s.started_at, s.ended_at, s.end_reason,
                 d.local_id AS device_local_id, d.model AS device_model,
-                w.app_build_id, b.package_name, b.version_name
+                w.app_build_id, b.package_name, b.version_name,
+                t.total, t.passed, t.failed, t.skipped
            FROM sessions s
            LEFT JOIN devices d            ON d.id = s.device_id
            LEFT JOIN webdriver_sessions w ON w.session_id = s.id
            LEFT JOIN app_builds b         ON b.id = w.app_build_id
+           -- Lateral again, for the reason the list query documents: joining results directly would
+           -- multiply the session row by its result count.
+           LEFT JOIN LATERAL (
+             SELECT count(*)                                      AS total,
+                    count(*) FILTER (WHERE tr.status = 'passed')  AS passed,
+                    count(*) FILTER (WHERE tr.status = 'failed')  AS failed,
+                    count(*) FILTER (WHERE tr.status = 'skipped') AS skipped
+               FROM test_results tr WHERE tr.session_id = s.id
+           ) t ON true
           WHERE s.run_id = $1
           ORDER BY s.created_at`,
+        [run.id],
+      );
+      return rows;
+    });
+
+    /**
+     * Every failure in the run, with the session that produced it.
+     *
+     * The session id is the point rather than a detail: it is what links a failed assertion to the
+     * logcat and screenshot captured when that device was released. "What failed on build 4471, and
+     * what did the screen look like" is one query and one click from here, which is the whole thing
+     * §4.2 and §4.3 were building towards.
+     *
+     * Capped, because a suite that fails 4,000 tests should produce a usable page rather than a
+     * 40 MB one. The count above is not capped, so the total stays honest when the list is cut.
+     */
+    const failures = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT tr.id, tr.session_id, tr.name, tr.failure, tr.duration_ms, tr.reported_at
+           FROM test_results tr
+           JOIN sessions s ON s.id = tr.session_id
+          WHERE s.run_id = $1 AND tr.status = 'failed'
+          ORDER BY tr.reported_at, tr.id
+          LIMIT 200`,
         [run.id],
       );
       return rows;
@@ -177,6 +256,20 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         build: r.app_build_id
           ? { id: r.app_build_id, packageName: r.package_name, versionName: r.version_name }
           : null,
+        tests: {
+          total: Number(r.total ?? 0),
+          passed: Number(r.passed ?? 0),
+          failed: Number(r.failed ?? 0),
+          skipped: Number(r.skipped ?? 0),
+        },
+      })),
+      failures: failures.map((f: Record<string, unknown>) => ({
+        id: f.id,
+        sessionId: f.session_id,
+        name: f.name,
+        failure: f.failure,
+        durationMs: f.duration_ms,
+        reportedAt: f.reported_at,
       })),
     };
   });
