@@ -143,7 +143,18 @@ export interface WorkerHeartbeatResponse {
   ok: boolean;
   hostState: string;
   /** Devices of THIS host sitting in CLEANING, with the fence to confirm against. */
-  resets?: Array<{ deviceId: string; fence: number }>;
+  resets?: Array<{
+    deviceId: string;
+    fence: number;
+    /**
+     * The session that held this device at this fence, when there is one.
+     *
+     * v2.1. Optional so an older control plane — which sends no such field — still produces a valid
+     * reset, and so a device reset by an operator rather than by a session release does not have to
+     * invent one. A worker with no session id skips artifact capture and resets exactly as before.
+     */
+    sessionId?: string;
+  }>;
   /**
    * App actions requested for THIS host's devices and not yet performed.
    *

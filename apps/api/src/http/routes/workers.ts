@@ -187,8 +187,23 @@ export async function workerRoutes(app: FastifyInstance) {
       // about, let alone be able to act on, another host's devices (migration 008's rule).
       // Re-sent on every beat until the state changes, which makes a missed or failed reset
       // self-healing and costs one indexed read per ten seconds.
+      //
+      // `session_id` rides along so the worker can attach evidence to the run that just finished.
+      // A device in CLEANING is the ONLY universal "a session ended" signal a worker gets: the data
+      // plane's beginSession/endSession pair fires only when a browser attaches, so a WebDriver or
+      // CI session — the case artifacts matter most for — would otherwise never trigger a capture.
+      //
+      // Matched on the FENCE, not on the newest row. The fence is the device's allocation counter
+      // and `sessions.fence` is a copy of it taken at allocation, so this names the session that
+      // held this device at this reset — not whichever session happens to have ended most recently,
+      // which on a busy device is a different run.
       const { rows: cleaning } = await c.query(
-        `SELECT id, fence FROM devices WHERE host_id = $1 AND state = 'CLEANING'`,
+        `SELECT d.id, d.fence,
+                (SELECT s.id FROM sessions s
+                  WHERE s.device_id = d.id AND s.fence = d.fence
+                  ORDER BY s.created_at DESC LIMIT 1) AS session_id
+           FROM devices d
+          WHERE d.host_id = $1 AND d.state = 'CLEANING'`,
         [hostId],
       );
       /**
@@ -227,9 +242,12 @@ export async function workerRoutes(app: FastifyInstance) {
 
       return {
         row: { ...rows[0], state },
-        resets: cleaning.map((d: { id: string; fence: string | number }) => ({
+        resets: cleaning.map((d: { id: string; fence: string | number; session_id: string | null }) => ({
           deviceId: d.id,
           fence: Number(d.fence),
+          // Absent when no session matches the fence — a device reset by an operator, or one whose
+          // session row was deleted. The worker skips capture rather than inventing a target.
+          ...(d.session_id ? { sessionId: d.session_id } : {}),
         })),
         actions: pending.map((i: Record<string, unknown>) => ({
           actionId: i.id as string,

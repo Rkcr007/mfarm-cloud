@@ -141,10 +141,20 @@ export class AppStore {
   }
 }
 
-let cached: AppStore | undefined;
+/**
+ * One store per root, cached.
+ *
+ * A single slot keyed on the last root was correct while `APP_STORE_DIR` was the only caller. There
+ * are two roots now — apps and artifacts (`ARTIFACT_DIR`) — and a one-slot cache alternating
+ * between them evicts on every call, so the cache stops being one. A Map is the same code with the
+ * bug removed; `AppStore` holds no state beyond its root, so this is about allocation, not
+ * correctness.
+ */
+const stores = new Map<string, AppStore>();
 
-/** The process-wide store, built from `APP_STORE_DIR`. See `config.ts` for why production must set it. */
+/** The process-wide store for a root. See `config.ts` for why production must set the directories. */
 export function appStore(root: string): AppStore {
-  if (!cached || cached.root !== root) cached = new AppStore(root);
-  return cached;
+  let s = stores.get(root);
+  if (!s) { s = new AppStore(root); stores.set(root, s); }
+  return s;
 }

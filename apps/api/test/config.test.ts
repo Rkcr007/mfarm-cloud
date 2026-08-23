@@ -32,6 +32,7 @@ const prod = (overrides: Record<string, string | undefined> = {}) => ({
   SESSION_SIGNING_KEY: kp.privateKeyPem,
   SESSION_PUBLIC_KEY: kp.publicKeyPem,
   APP_STORE_DIR: '/var/lib/mfarm/apps',
+  ARTIFACT_DIR: '/var/lib/mfarm/artifacts',
   ...overrides,
 });
 
@@ -421,6 +422,27 @@ describe('metrics listener configuration', () => {
 
   test('APP_STORE_DIR defaults to a temp directory outside production', () => {
     assert.match(parseConfig({}).appStoreDir, /mfarm-app-store/);
+  });
+
+  test('an unset ARTIFACT_DIR is refused in production', () => {
+    // Same delayed failure as APP_STORE_DIR, with a worse ending: the artifacts rows survive the
+    // reboot that clears the blobs, so a failed run links to evidence that 404s — and the person
+    // following the link is already having a bad day.
+    const problems = refusal(prod({ ARTIFACT_DIR: undefined }));
+    assert.ok(mentions(problems, 'ARTIFACT_DIR'));
+    assert.ok(mentions(problems, 'reboot'));
+  });
+
+  test('ARTIFACT_DIR defaults to a temp directory outside production', () => {
+    assert.match(parseConfig({}).artifactDir, /mfarm-artifacts/);
+  });
+
+  test('artifacts and apps never share a root', () => {
+    // They have different lifetimes — apps live until deleted, artifacts expire — so the retention
+    // sweep must never be able to walk into the app store.
+    const c = parseConfig(prod({}));
+    assert.notEqual(c.artifactDir, c.appStoreDir);
+    assert.notEqual(parseConfig({}).artifactDir, parseConfig({}).appStoreDir);
   });
 
   test('a non-loopback bind with no token is refused in production', () => {

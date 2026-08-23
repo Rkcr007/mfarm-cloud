@@ -1181,3 +1181,18 @@ kbd {
 @media (max-width: 720px) {
   .phone.big .phone-screen { width: 232px; height: 464px; }
 }
+
+/* ---------------------------------------------------------------- organisation */
+
+/* A secret a person has to select and copy. `all` so one click takes the whole key rather than a
+   word of it — a partially-copied credential fails somewhere far away from here. */
+.selectable { user-select: all; -webkit-user-select: all; cursor: text; }
+
+/* The one-time key display. Wraps, because a key is longer than the card on a narrow window and a
+   horizontally-scrolled secret hides its own end. */
+.keyplain {
+  word-break: break-all; font-size: 13px; line-height: 1.5;
+  padding: 10px 12px; border-radius: 8px;
+  background: var(--s-inset, rgba(255,255,255,.04));
+  border: 1px solid var(--s-line, rgba(255,255,255,.10));
+}

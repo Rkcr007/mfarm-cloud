@@ -98,6 +98,22 @@ const state = {
   /** Screenshots taken this session. Data urls, in memory only — nothing persists them yet. */
   shots: [],
   /**
+   * The ORGANISATION screens. Loaded on demand rather than with the fleet: this changes when a
+   * person changes it, not every five seconds, and polling it would spend requests on nothing.
+   *
+   * `newKey` holds a freshly minted secret for exactly as long as the page shows it. It is never
+   * written anywhere else, because the server cannot return it a second time.
+   */
+  org: { members: [], keys: [], loaded: false, newKey: null },
+  /**
+   * Artifacts for the session detail screen, keyed by session id.
+   *
+   * Per session rather than one org-wide list: a session's evidence is only ever looked at from
+   * that session, and a farm that has been running for a fortnight has more artifacts than anyone
+   * wants delivered to a page that shows six of them.
+   */
+  artifacts: { sessionId: null, items: [], loaded: false },
+  /**
    * The device panel's live DOM, kept across renders so the <video> is never destroyed.
    * See `stagePanel`. Cleared only when the viewer closes.
    */
@@ -409,6 +425,32 @@ function confirmDialog({ title, lead, removes, keeps, cancel = 'Cancel', confirm
   d.querySelector('.btn.ghost')?.focus();
 }
 
+/**
+ * A dialog that collects something, as opposed to `confirmDialog` which only asks permission.
+ *
+ * Same element and same scrim, so Escape and the backdrop close it the way they close the other one.
+ * The submit button is primary rather than `danger-solid`: these dialogs add access, they do not
+ * remove it, and reusing the destructive styling for both teaches people to ignore red.
+ */
+function formDialog({ title, lead, fields, submit, onSubmit }) {
+  const d = $('dialog');
+  const go = async () => { closeOverlays(); await onSubmit(); };
+  d.replaceChildren(
+    h('h2', { id: 'dialog-title', text: title }),
+    lead ? h('p', { class: 'help mt-xs', text: lead }) : null,
+    h('div', { class: 'stack mt-lg' }, fields),
+    h('div', { class: 'row end mt-xl' },
+      btn('Cancel', 'ghost', closeOverlays),
+      btn(submit, 'primary', go),
+    ),
+  );
+  d.hidden = false;
+  $('scrim').hidden = false;
+  dialogOpen = true;
+  // Focus the first thing a person has to type into, not the cancel button.
+  (d.querySelector('input:not([disabled])') || d.querySelector('.btn.ghost'))?.focus();
+}
+
 function closeOverlays() {
   $('dialog').hidden = true;
   $('palette').hidden = true;
@@ -472,6 +514,36 @@ async function refreshSessions() {
   state.sessions = (await api('/v1/sessions?limit=50')).sessions || [];
 }
 
+/**
+ * Load the team and the key list together.
+ *
+ * Both screens need both: Settings shows who can mint a key, Team shows nothing without members.
+ * One round trip pair on navigation is cheaper than two screens each fetching on mount.
+ */
+async function loadArtifacts(sessionId) {
+  if (state.artifacts.sessionId === sessionId && state.artifacts.loaded) return;
+  state.artifacts = { sessionId, items: [], loaded: false };
+  try {
+    const out = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`);
+    // Guard against a slower request for a session the person has already navigated away from
+    // landing on top of a newer one.
+    if (state.artifacts.sessionId !== sessionId) return;
+    state.artifacts = { sessionId, items: out.artifacts || [], loaded: true };
+  } catch {
+    state.artifacts = { sessionId, items: [], loaded: true };
+  }
+}
+
+async function refreshOrg() {
+  const [members, keys] = await Promise.all([
+    api('/v1/account/members'),
+    api('/v1/account/api-keys'),
+  ]);
+  state.org.members = members.members || [];
+  state.org.keys = keys.keys || [];
+  state.org.loaded = true;
+}
+
 async function refreshApps() {
   state.apps = (await api('/v1/apps')).apps || [];
 }
@@ -509,7 +581,7 @@ async function refreshAll() {
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['devices', 'apps', 'sessions', 'queue', 'health', 'launch']);
+const ROUTES = new Set(['devices', 'apps', 'sessions', 'queue', 'health', 'launch', 'team', 'settings']);
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
@@ -1846,9 +1918,13 @@ function logcatDock(sess, live) {
         state.log.follow = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
       },
     }),
+    // Both halves changed when artifacts landed (019). THIS DOCK still keeps nothing — it is a live
+    // stream to one tab — but the log itself is no longer lost, because the worker dumps the whole
+    // buffer as an artifact when the device is released. Saying "nothing was kept" now would send
+    // someone away from the evidence sitting further down the same page.
     !live
-      ? h('p', { class: 'caption mt-sm', text: 'The session has ended, so nothing more will arrive. Nothing was kept — artifacts are not built yet.' })
-      : h('p', { class: 'caption mt-sm', text: 'Streamed straight off the device over the same connection as the screen. Nothing is stored; closing this page loses it.' }),
+      ? h('p', { class: 'caption mt-sm', text: 'The session has ended, so nothing more will arrive here. The full log was captured when the device was released — see Evidence below.' })
+      : h('p', { class: 'caption mt-sm', text: 'Streamed straight off the device over the same connection as the screen. This dock stores nothing, but the whole log is kept as an artifact when the device is released.' }),
   );
 }
 
@@ -2030,6 +2106,54 @@ function connectCard(sess) {
   );
 }
 
+/**
+ * What the finished run left behind (migration 019).
+ *
+ * IN THE COCKPIT, not on a screen of its own, because `#/sessions/<id>` already routes here — the
+ * cockpit IS the session detail view and has always handled an ended session, which is exactly when
+ * evidence exists.
+ *
+ * The capture happens when the device is RELEASED AND RESET: the worker takes a final screenshot
+ * and dumps the log just before wiping it. So a live session legitimately has nothing here yet, and
+ * saying that is different from saying there is nothing — an empty card during a running session
+ * would read as a loss.
+ */
+function evidenceCard(sess, live) {
+  const id = sess.id;
+  if (state.artifacts.sessionId !== id || !state.artifacts.loaded) {
+    void loadArtifacts(id).then(scheduleRender);
+  }
+  const mine = state.artifacts.sessionId === id;
+  const loaded = mine && state.artifacts.loaded;
+  const arts = mine ? state.artifacts.items : [];
+
+  return card('Evidence', {
+    aside: h('span', { class: 'caption', text: loaded ? `${arts.length} item${arts.length === 1 ? '' : 's'}` : 'loading…' }),
+  },
+    !loaded
+      ? h('p', { class: 'caption', text: 'Loading…' })
+      : arts.length
+        ? h('div', { class: 'stack tight' }, arts.map((a) => h('div', { class: 'row between' },
+            h('div', { class: 'stack tight' },
+              h('span', { class: 'row tight' },
+                pill(a.kind, a.kind === 'screenshot' ? 'accent' : 'warn plain', { dot: false }),
+                h('span', { class: 'caption', text: bytes(a.sizeBytes) })),
+              h('p', { class: 'caption', text: `kept until ${when(a.expiresAt)}` }),
+            ),
+            // A plain link rather than a fetch: the blob route streams and sets its own
+            // content-disposition, so the browser renders a PNG and a log correctly without this
+            // file learning the difference between them.
+            h('a', {
+              class: 'btn tiny', href: `/v1/artifacts/${a.id}/blob`,
+              target: '_blank', rel: 'noopener', text: 'Open',
+            }),
+          )))
+        : h('p', { class: 'caption' }, live
+            ? 'The log and a final screenshot are collected when this device is released and reset.'
+            : 'Nothing was captured — either the worker could not reach the device, or these have passed their retention window.'),
+  );
+}
+
 function screenCockpit(id) {
   const sess = state.detail?.id === id ? state.detail : state.sessions.find((s) => s.id === id);
   if (!sess || sess.missing) {
@@ -2110,6 +2234,7 @@ function screenCockpit(id) {
               ))
             : empty('Nothing has been sent to this device.', 'Install a build from the panel beside this one.'),
         ),
+        evidenceCard(sess, live),
       ),
       h('div', { class: 'rail' },
         toolsCard(sess, live),
@@ -2409,6 +2534,7 @@ function screenSessions() {
   ];
 }
 
+
 /* ---------------------------------------------------------------------------- screen: queue */
 
 function screenQueue() {
@@ -2621,7 +2747,7 @@ $('palette-input').addEventListener('keydown', (e) => {
  * to.
  */
 let gPending = 0;
-const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', q: 'queue', h: 'health', l: 'launch' };
+const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', q: 'queue', h: 'health', l: 'launch', t: 'team', s: 'settings' };
 
 function inField(e) {
   const t = e.target;
@@ -2669,6 +2795,236 @@ document.addEventListener('keydown', (e) => {
 
 /* ---------------------------------------------------------------------------- render */
 
+
+/* ---------------------------------------------------------------------------- organisation */
+
+/** Owner and admin may change access; a member may look. Mirrors `requireOrgAdmin` on the server. */
+function isOrgAdmin() { return state.me?.role === 'owner' || state.me?.role === 'admin'; }
+
+/**
+ * A screen that needs `state.org` renders a skeleton on first paint and fills in.
+ *
+ * The alternative — awaiting the fetch before rendering — leaves the person looking at the previous
+ * screen while a request is in flight, which reads as a dead click.
+ */
+function orgGate() {
+  if (state.org.loaded) return null;
+  void refreshOrg().then(render).catch((e) => toast('Could not load the organisation', e.message, 'bad'));
+  return h('p', { class: 'empty' }, h('strong', { text: 'Loading…' }));
+}
+
+function roleBadge(role) {
+  return h('span', { class: `pill ${role === 'owner' ? 'accent' : ''}`.trim(), text: role });
+}
+
+function screenTeam() {
+  const pending = orgGate();
+  const admin = isOrgAdmin();
+
+  return [
+    pageHead([{ label: 'Organisation' }], 'Team',
+      `${state.org.members.length} ${state.org.members.length === 1 ? 'person' : 'people'} can sign in`,
+      admin ? btn('Add someone', 'primary', () => addMemberDialog()) : null),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' },
+        card('People', {},
+          pending || (state.org.members.length
+            ? h('div', { class: 'stack' }, state.org.members.map((m) => h('div', { class: 'inset row between' },
+                h('div', { class: 'stack tight' },
+                  h('span', { class: 'row tight' },
+                    h('span', { class: 'secondary', text: m.email }),
+                    roleBadge(m.role),
+                    m.email === state.me?.user?.email ? h('span', { class: 'caption', text: '(you)' }) : null),
+                  h('p', { class: 'caption', text: m.lastSeenAt ? `last signed in ${when(m.lastSeenAt)}` : 'has never signed in' }),
+                ),
+                admin && m.email !== state.me?.user?.email
+                  ? h('div', { class: 'row tight' },
+                      btn('Reset password', 'tiny ghost', () => addMemberDialog(m)),
+                      btn('Remove', 'tiny danger', () => removeMember(m)))
+                  : null,
+              )))
+            : empty('Nobody else yet.', 'Add a teammate so they can run suites without SSH to the box.'))),
+      ),
+      h('div', { class: 'rail' },
+        card('How access works', {},
+          h('p', { class: 'caption' },
+            'There is no email on this farm, so adding someone does not send an invite. You choose '
+            + 'their password here and it is shown once — pass it on yourself, and they can change '
+            + 'it by having an admin reset it.'),
+          h('p', { class: 'caption mt-sm' },
+            'Removing someone ends their browser sessions immediately. It does not revoke API keys, '
+            + 'which belong to the organisation rather than to a person — revoke those in Settings.'),
+        ),
+      ),
+    ),
+  ];
+}
+
+function screenSettings() {
+  const pending = orgGate();
+  const admin = isOrgAdmin();
+  const live = state.org.keys.filter((k) => !k.revokedAt);
+  const dead = state.org.keys.filter((k) => k.revokedAt);
+
+  return [
+    pageHead([{ label: 'Organisation' }], 'Settings',
+      `${live.length} active API ${live.length === 1 ? 'key' : 'keys'}`,
+      admin ? btn('New API key', 'primary', () => createKey()) : null),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' },
+        state.org.newKey ? card('Your new key', { class: 'highlight' },
+          h('p', { class: 'caption' },
+            'Copy this now. It is not stored anywhere and cannot be shown again — if you lose it, '
+            + 'revoke it and make another.'),
+          h('p', { class: 'mono selectable keyplain', text: state.org.newKey }),
+          h('div', { class: 'row tight mt-sm' },
+            btn('Copy', 'tiny', async () => {
+              try {
+                await navigator.clipboard.writeText(state.org.newKey);
+                toast('Copied', 'The key is on your clipboard.');
+              } catch { toast('Could not copy', 'Select the text and copy it manually.', 'bad'); }
+            }),
+            btn('Done', 'tiny ghost', () => { state.org.newKey = null; render(); }),
+          ),
+        ) : null,
+
+        card('API keys', {},
+          pending || (state.org.keys.length
+            ? h('div', { class: 'stack' }, [...live, ...dead].map((k) => h('div', { class: 'inset row between' },
+                h('div', { class: 'stack tight' },
+                  h('span', { class: 'row tight' },
+                    h('span', { class: 'mono secondary', text: `${k.prefix}…` }),
+                    k.revokedAt ? h('span', { class: 'pill', text: 'revoked' }) : null),
+                  h('p', { class: 'caption', text: k.revokedAt ? `revoked ${when(k.revokedAt)}` : `created ${when(k.createdAt)}` }),
+                ),
+                admin && !k.revokedAt ? btn('Revoke', 'tiny danger', () => revokeKey(k)) : null,
+              )))
+            : empty('No API keys yet.', 'A key is what a CI job or an Appium suite authenticates with.'))),
+      ),
+      h('div', { class: 'rail' },
+        card('Using a key', {},
+          h('p', { class: 'caption' }, 'Point an existing Appium suite at the farm by changing one URL:'),
+          h('p', { class: 'mono selectable caption mt-sm', text: `${location.origin}/wd/hub` }),
+          h('p', { class: 'caption mt-sm' },
+            'Send the key as HTTP Basic — the key is the username and the password half stays empty '
+            + '— or as `Authorization: Bearer <key>` against /v1.'),
+          h('p', { class: 'caption mt-sm' },
+            'A key belongs to the organisation, not to you. Revoking one breaks every job using it, '
+            + 'so give CI its own.'),
+        ),
+      ),
+    ),
+  ];
+}
+
+/**
+ * Add a person, or reset one's password.
+ *
+ * One dialog for both because the endpoint is one upsert, and because the difference a person cares
+ * about — "this address already exists, so this is a reset" — is something the server decides, not
+ * the form. Generating the password rather than asking for one keeps a farm from filling up with
+ * `password123`; it stays editable because sometimes you want to hand over something sayable.
+ */
+function addMemberDialog(existing) {
+  const generated = randomPassword();
+  const emailInput = h('input', {
+    class: 'field', type: 'email', placeholder: 'someone@company.com',
+    value: existing?.email || '', disabled: Boolean(existing), autocomplete: 'off',
+  });
+  const passInput = h('input', { class: 'field mono', type: 'text', value: generated, autocomplete: 'off' });
+  const roleSelect = h('select', { class: 'field' },
+    ['member', 'admin', 'owner'].map((r) =>
+      h('option', { value: r, selected: (existing?.role || 'member') === r, text: r })));
+
+  formDialog({
+    title: existing ? `Reset password for ${existing.email}` : 'Add someone',
+    lead: existing
+      ? 'Their existing browser sessions end immediately. Tell them the new password yourself — there is no email on this farm.'
+      : 'No invite is sent. Copy the password and pass it on yourself.',
+    fields: [
+      existing ? null : h('label', { class: 'stack tight' }, h('span', { class: 'micro', text: 'Email' }), emailInput),
+      h('label', { class: 'stack tight' }, h('span', { class: 'micro', text: 'Password' }), passInput),
+      h('label', { class: 'stack tight' }, h('span', { class: 'micro', text: 'Role' }), roleSelect),
+    ],
+    submit: existing ? 'Reset password' : 'Add',
+    onSubmit: async () => {
+      const email = (existing?.email || emailInput.value).trim();
+      const password = passInput.value;
+      const role = roleSelect.value;
+      try {
+        const out = await api('/v1/account/members', { method: 'POST', body: { email, password, role } });
+        await refreshOrg();
+        render();
+        toast(out.created ? 'Added' : 'Password reset',
+          `${email} · ${role} · password ${password}`);
+      } catch (e) {
+        toast(existing ? 'Could not reset' : 'Could not add', e.message, 'bad');
+      }
+    },
+  });
+}
+
+function removeMember(m) {
+  confirmDialog({
+    title: `Remove ${m.email}?`,
+    lead: 'They are signed out immediately and lose access to this farm.',
+    removes: ['Their sign-in to this organisation', 'Every browser session they currently hold'],
+    keeps: 'API keys are unaffected — they belong to the organisation, not to a person.',
+    confirm: 'Remove',
+    onConfirm: async () => {
+      try {
+        await api(`/v1/account/members/${m.userId}`, { method: 'DELETE' });
+        await refreshOrg();
+        render();
+        toast('Removed', `${m.email} can no longer sign in.`);
+      } catch (e) {
+        toast('Could not remove', e.message, 'bad');
+      }
+    },
+  });
+}
+
+async function createKey() {
+  try {
+    const { key } = await api('/v1/account/api-keys', { method: 'POST' });
+    // Held in memory only, and only until the person dismisses it. The server keeps a hash.
+    state.org.newKey = key.plaintextShownOnce;
+    await refreshOrg();
+    render();
+  } catch (e) {
+    toast('Could not create a key', e.message, 'bad');
+  }
+}
+
+function revokeKey(k) {
+  confirmDialog({
+    title: `Revoke ${k.prefix}…?`,
+    lead: 'Every job authenticating with this key stops working at once.',
+    removes: ['Any CI job or Appium suite using this key'],
+    keeps: 'Sessions already running are not interrupted; the key just cannot start new ones.',
+    confirm: 'Revoke',
+    onConfirm: async () => {
+      try {
+        await api(`/v1/account/api-keys/${k.prefix}`, { method: 'DELETE' });
+        await refreshOrg();
+        render();
+        toast('Revoked', `${k.prefix}… no longer authenticates.`);
+      } catch (e) {
+        toast('Could not revoke', e.message, 'bad');
+      }
+    },
+  });
+}
+
+/** Readable, and long enough that the scrypt cost is not the only defence. */
+function randomPassword() {
+  const words = ['harbour', 'granite', 'lantern', 'meadow', 'compass', 'thicket', 'cobalt',
+    'juniper', 'kettle', 'marble', 'orchid', 'pewter', 'quarry', 'saffron', 'tundra', 'walnut'];
+  const pick = () => words[crypto.getRandomValues(new Uint32Array(1))[0] % words.length];
+  const n = crypto.getRandomValues(new Uint32Array(1))[0] % 90 + 10;
+  return `${pick()}-${pick()}-${pick()}-${n}`;
+}
+
 const SCREENS = {
   launch: () => screenLaunch(),
   launching: () => screenLaunching(state.route.id),
@@ -2679,6 +3035,8 @@ const SCREENS = {
   cockpit: () => screenCockpit(state.route.id),
   queue: () => screenQueue(),
   health: () => screenHealth(),
+  team: () => screenTeam(),
+  settings: () => screenSettings(),
 };
 
 /**
