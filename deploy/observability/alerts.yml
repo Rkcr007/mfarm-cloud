@@ -204,6 +204,39 @@ groups:
             Client errors are excluded on purpose: a 4xx is the caller's problem and a farm full of
             them is a misconfigured suite, not an incident.
 
+      # ---------------------------------------------------------------- backups
+      #
+      # HANDOFF listed this as a known gap for weeks: the backup sidecar logged its failures and
+      # nothing scraped it, so backups could stop and the dashboard would look identical. These two
+      # rules are the difference between finding that out now and finding it out while restoring.
+
+      - alert: MfarmBackupStale
+        # The default interval is 6h. Two missed runs is a problem; one is a slow dump or a restart.
+        expr: mfarm_backup_age_seconds > 46800
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: 'No database backup has been written for {{ $value | humanizeDuration }}'
+          description: >-
+            Measured from the newest `mfarm-*.dump` on disk, not from the sidecar claiming success —
+            a crashed sidecar reports nothing at all, which is indistinguishable from one that was
+            never asked. Check `docker compose -f deploy/docker-compose.prod.yml logs backup`.
+            Losing pgdata loses the fleet; the app store and artifacts are reproducible, this is not.
+
+      - alert: MfarmBackupUnreadable
+        # Distinct from staleness on purpose. -1 means the API cannot see BACKUP_DIR at all, which is
+        # a mount or configuration fault — reporting it as "very old backups" would send whoever is
+        # paged to look at the sidecar, which is working fine.
+        expr: mfarm_backup_age_seconds == -1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: The control plane cannot see the backup directory
+          description: >-
+            BACKUP_DIR is unset, unmounted or unreadable from the API container, so backup freshness
+            is UNMEASURED — not proven bad, but not proven good either, which is the same thing when
+            it comes to backups. Check the `:ro` bind mount on the api service.
+
       - alert: MfarmMetricSeriesDropped
         expr: mfarm_metric_series_dropped_total > 0
         for: 0m

@@ -32,6 +32,9 @@ import {
 } from '../src/metrics.ts';
 import { startMetricsServer } from '../src/http/metrics-server.ts';
 import { withSystem, closePools } from '../src/db.ts';
+import { mkdtemp, writeFile, rm, utimes } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // ---------------------------------------------------------------- helpers
 
@@ -199,6 +202,79 @@ const seedDevice = (state: string, age = '0 seconds') =>
     );
     return rows[0].id as string;
   });
+
+describe('backup freshness', () => {
+  // The gap these close: the sidecar logged failures and nothing scraped it, so backups could stop
+  // for six weeks and every dashboard would look identical.
+  let dir: string;
+
+  const collect = async () => {
+    const { collectBackups, scrape } = await import('../src/metrics.ts');
+    await collectBackups();
+    return scrape();
+  };
+
+  before(async () => { dir = await mkdtemp(join(tmpdir(), 'mfarm-backups-')); });
+  after(async () => { await rm(dir, { recursive: true, force: true }); delete process.env.BACKUP_DIR; });
+
+  test('an unset BACKUP_DIR reports -1, not zero', async () => {
+    // Zero would read as "a backup was written this instant", which is the most dangerous possible
+    // answer to give about a directory nobody has configured.
+    delete process.env.BACKUP_DIR;
+    assert.equal(sample(await collect(), 'mfarm_backup_age_seconds'), -1);
+  });
+
+  test('an unreadable directory reports -1 rather than a large age', async () => {
+    // "We cannot see the backups" and "the backups are old" are different incidents with different
+    // fixes, and the two alert rules key on exactly this difference.
+    process.env.BACKUP_DIR = join(dir, 'does-not-exist');
+    assert.equal(sample(await collect(), 'mfarm_backup_age_seconds'), -1);
+  });
+
+  test('an empty directory is -1, because no backup is not a fresh backup', async () => {
+    process.env.BACKUP_DIR = dir;
+    assert.equal(sample(await collect(), 'mfarm_backup_age_seconds'), -1);
+    assert.equal(sample(await collect(), 'mfarm_backup_files'), 0);
+  });
+
+  test('a recent dump reports a small age', async () => {
+    process.env.BACKUP_DIR = dir;
+    await writeFile(join(dir, 'mfarm-20260823-120000.dump'), 'x');
+    const body = await collect();
+    const age = sample(body, 'mfarm_backup_age_seconds')!;
+    assert.ok(age >= 0 && age < 60, `age was ${age}`);
+    assert.equal(sample(body, 'mfarm_backup_files'), 1);
+  });
+
+  test('an old dump reports its real age, which is what the alert fires on', async () => {
+    process.env.BACKUP_DIR = dir;
+    const old = join(dir, 'mfarm-20260801-000000.dump');
+    await writeFile(old, 'x');
+    const twoDays = Date.now() - 2 * 86_400_000;
+    await utimes(old, twoDays / 1000, twoDays / 1000);
+    // The newest file wins, so remove the fresh one from the previous case.
+    await rm(join(dir, 'mfarm-20260823-120000.dump'), { force: true });
+    const age = sample(await collect(), 'mfarm_backup_age_seconds')!;
+    assert.ok(age > 46_800, `MfarmBackupStale fires above 46800s; age was ${age}`);
+  });
+
+  test('a half-written dump does not count as a backup', async () => {
+    // `backup.sh` writes `.dump.partial`, verifies it with `pg_restore --list`, and only then
+    // renames. Counting a partial would report a backup that was never proven readable.
+    process.env.BACKUP_DIR = dir;
+    await rm(join(dir, 'mfarm-20260801-000000.dump'), { force: true });
+    await writeFile(join(dir, 'mfarm-20260823-130000.dump.partial'), 'x');
+    assert.equal(sample(await collect(), 'mfarm_backup_age_seconds'), -1);
+  });
+
+  test('the globals file alone is not a backup either', async () => {
+    // It is written FIRST. A run that died inside pg_dump leaves one behind, and treating it as a
+    // backup would make the most dangerous failure look like the healthiest state.
+    process.env.BACKUP_DIR = dir;
+    await writeFile(join(dir, 'mfarm-20260823-140000.globals.sql'), 'x');
+    assert.equal(sample(await collect(), 'mfarm_backup_age_seconds'), -1);
+  });
+});
 
 describe('fleet collectors', () => {
   test('the enum lists in metrics.ts still match the ones in the database', async () => {
