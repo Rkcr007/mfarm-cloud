@@ -7,6 +7,21 @@ tap, in seven steps.** This file is the state of play and every known issue; tha
 https://farm.mfarm.dev; `mfarm-lab` holds the devices. Both are stopped between sessions;
 `./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
 
+**2026-08-23 — `runs`: twenty tests are one run.** A suite sets `mfarm:runId` to an id its CI
+already has — `$GITHUB_RUN_ID`, a Jenkins build number, a uuid per `npm test` — and the FIRST
+session to use that name creates the run while every later one joins it. No coordination call, no
+create step that can fail, nothing to clean up when a suite dies halfway. `GET /v1/runs` rolls up
+per run; `GET /v1/runs/:id` takes the uuid **or the name**, so `/v1/runs/4471` works from a job that
+never saw a uuid; the console has a Runs screen and both directions are navigable. The unique index
+is `(org_id, external_id)` and that is the whole safety argument for letting clients pick names —
+every CI system numbers builds from 1, so a global index would have merged two tenants' runs with no
+policy violated. `webdriver_sessions.app_build_id` is now a real foreign key rather than a jsonb
+key, which is what makes "what failed on build X" a query. **There is deliberately no `ended_at` and
+no run status**: a sequential suite ends every session before starting the next, so "the last
+session ended" would mark a twenty-test run finished nineteen times before it was — and WebDriver
+has no concept of an assertion, so any pass/fail today would be inference presented as fact. Both
+are `docs/EXECUTION_MODEL.md` §4.2; §4.3 (outcome reporting) is what makes them real and is next.
+
 **2026-08-23 — `mfarm:appId`: a suite names its build instead of a path on the device host.** A
 WebDriver session can set `mfarm:appId` to a build in the org's app library — a uuid,
 `com.acme.app@1.4.2`, `com.acme.app@latest`, or a bare package name — and the farm installs it over
@@ -16,8 +31,9 @@ records which build it actually ran. `appium:app` still works; setting both is a
 coin toss. Unknown `mfarm:` keys are now REFUSED — they used to be stripped and forgotten, so
 `mfarm:appid` would have run a whole suite against a launcher screen. `examples/medishop-suite` and
 its `ci-example.yml` now upload and name a build rather than pointing at `/home/rkcr070707/apks/`.
-Design notes and what is next in `docs/EXECUTION_MODEL.md` §4.1 — §4.2 (`runs` + `mfarm:runId`) is
-the next piece and still the one that matters most.
+Design notes in `docs/EXECUTION_MODEL.md` §4.1. **Not yet verified on hardware** — `mfarm-lab` has
+been stopped since it shipped, so the chain hub → real worker → `adb install` → Appium has only run
+with a test playing the worker.
 
 **2026-08-20 — the farm has its own domain.** `mfarm.dev`, registered through Cloud Domains, Cloud
 DNS authoritative, both A records on reserved addresses. `farm.mfarm.dev` (console, API, hub, `/dp`)
@@ -112,18 +128,18 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**609 tests pass, 0 fail** (2026-08-23, at migration 019), against a real PostgreSQL 16. No mocks for
+**633 tests pass, 0 fail** (2026-08-23, at migration 020), against a real PostgreSQL 16. No mocks for
 anything that matters.
 
 ```
-apps/api/         control plane, app library, console,  382 tests
+apps/api/         control plane, app library, console,  406 tests
                   entrypoint, metrics
 apps/cli/         mfarm CLI                              63 tests
 workers/agent/    worker agent, Appium supervisor,      143 tests
                   automation gateway, Cuttlefish backend
 deploy/           deploy scripts and their checks         21 tests
 apps/api/public/  the web console (served by the API at /)
-apps/api/migrations/  019 of them; 019 is the newest
+apps/api/migrations/  020 of them; 020 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
@@ -1282,6 +1298,44 @@ device is covered by the same URL. Caught by a test, not by review.
     because it grepped an empty response. A check that reports success on no data is worse than no
     check. It now also treats "no devices AND /dp with no upstream" as the normal stopped-device-host
     state rather than three failures, and fails if the API is running a floating image tag.
+
+30. **THE RUN, AND THE THREE COLUMNS IT DELIBERATELY DOES NOT HAVE.** 2026-08-23.
+
+    Migration 020 plus `mfarm:runId` (`docs/EXECUTION_MODEL.md` §4.2). A run is four columns — id,
+    org, the caller's name for it, created_at — and everything the Runs screen shows is derived from
+    the run's sessions. Three columns that the original sketch had are absent on purpose, and each
+    one is easy to add back by someone who has not read this:
+
+    **`ended_at`.** There is no signal that a run is over. The obvious substitute — "the last session
+    of the run ended" — is wrong in a way that would be believed, because a sequential suite ends
+    every test's session before starting the next: a twenty-test run would be marked finished
+    nineteen times before it was. The window is derived (`min(created_at)`, `max(ended_at)`) and the
+    number of still-live sessions is reported as a count, which is the only honest signal available.
+
+    **`status`.** WebDriver has no concept of an assertion. Any pass/fail on a run today would be
+    inference presented as fact. §4.3 is what makes it knowable, and until then the screen says
+    nothing about it rather than guessing.
+
+    **`app_build_id` on the run.** A run's sessions can legitimately name different builds — an
+    upgrade test, an A/B — so one denormalised column would silently pick a winner. The build lives
+    on the session that installed it, and the run reports `buildCount`, naming a build only when
+    there is exactly one. The console shows "2 builds" rather than an em-dash for that case, because
+    `build: null` alone reads identically to "installed nothing".
+
+    All three follow 019's rule: a column nothing writes is a claim with nothing behind it.
+
+    Two things worth knowing about the implementation:
+
+    **The unique index is `(org_id, external_id)`, and it is load-bearing rather than tidy.** Run
+    names are chosen by the client, and every CI system on earth numbers builds from 1 — two tenants
+    both running `mfarm:runId: '412'` is the ordinary case, not the adversarial one. A global unique
+    index would have merged their runs, with each org reading the other's session list and no policy
+    violated, because both would genuinely own the row they were handed.
+
+    **The rollup is a LATERAL, not a `GROUP BY` over a three-way join.** The join form multiplies
+    rows before it counts them, so a run whose sessions each hold several artifacts would report its
+    session count times its artifact count — the classic shape of a number that is wrong by a factor
+    nobody notices until it is quoted in an invoice.
 
 ## Working notes for whoever picks this up
 

@@ -203,9 +203,11 @@ export async function sessionRoutes(app: FastifyInstance) {
     const rows = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.device_id, s.region, s.created_at, s.started_at, s.ended_at,
-                s.end_reason, d.local_id AS device_local_id, d.model AS device_model
+                s.end_reason, d.local_id AS device_local_id, d.model AS device_model,
+                s.run_id, r.external_id AS run_external_id
            FROM sessions s
            LEFT JOIN devices d ON d.id = s.device_id
+           LEFT JOIN runs r    ON r.id = s.run_id
           WHERE ($1::text IS NULL OR s.state = $1::session_state)
           ORDER BY s.created_at DESC
           LIMIT $2`,
@@ -225,6 +227,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         startedAt: r.started_at,
         endedAt: r.ended_at,
         endReason: r.end_reason,
+        // Both ids: the uuid is what links to the run, `runId` is the name the caller gave it and
+        // the only one they will recognise in their own CI.
+        run: r.run_id ? { id: r.run_id, runId: r.run_external_id } : null,
       })),
     };
   });
@@ -233,9 +238,12 @@ export async function sessionRoutes(app: FastifyInstance) {
     const { orgId } = requireTenant(req);
     const row = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, state, device_id, fence, region, created_at, started_at, expires_at,
-                ended_at, end_reason
-           FROM sessions WHERE id = $1`,
+        `SELECT s.id, s.state, s.device_id, s.fence, s.region, s.created_at, s.started_at,
+                s.expires_at, s.ended_at, s.end_reason,
+                s.run_id, r.external_id AS run_external_id
+           FROM sessions s
+           LEFT JOIN runs r ON r.id = s.run_id
+          WHERE s.id = $1`,
         [req.params.id],
       );
       return rows[0];
@@ -307,6 +315,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         fence: row.fence === null ? null : Number(row.fence),
         region: row.region, createdAt: row.created_at, startedAt: row.started_at,
         expiresAt: row.expires_at, endedAt: row.ended_at, endReason: row.end_reason,
+        run: row.run_id ? { id: row.run_id, runId: row.run_external_id } : null,
       },
       ...(dataPlane ? { dataPlane } : {}),
       ...(ice ? { ice } : {}),

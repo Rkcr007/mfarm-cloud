@@ -14,6 +14,9 @@ import { remote } from 'webdriverio';
  *              ask for a specific one, so nothing here pretends otherwise.
  *   mfarm:appId    which build to put on the device, named from the farm's app library rather than
  *              by a path on the host it happens to run on.
+ *   mfarm:runId    which RUN these sessions belong to. Eight tests otherwise arrive as eight
+ *              unrelated device leases; with this they are one row in the console's Runs screen,
+ *              and "what happened on build 4471" is a question with an answer.
  *
  * The device is ALLOCATED by `remote()` and RELEASED by `deleteSession()`. A suite that forgets the
  * second one holds a device until the lease expires, which on a two-device farm is half the fleet —
@@ -25,6 +28,14 @@ const KEY = process.env.MFARM_API_KEY;
 const REGION = process.env.MFARM_REGION ?? 'lab';
 /** A build in the farm's app library: an id, `com.example.app@1.4.2`, or `com.example.app@latest`. */
 const APP_ID = process.env.MEDISHOP_APP_ID;
+/**
+ * The id of this run, from whatever the CI system already calls it.
+ *
+ * Nothing has to be created first and nothing has to be cleaned up: the farm creates the run when
+ * the first session names it and every later session joins it. Locally there is usually no such
+ * variable, and that is fine — a session with no run id simply belongs to no run.
+ */
+const RUN_ID = process.env.MFARM_RUN_ID ?? process.env.GITHUB_RUN_ID;
 /** A path on the DEVICE HOST. Works, and is why the library exists — see `appCapabilities` below. */
 const APP = process.env.MEDISHOP_APK;
 
@@ -63,6 +74,9 @@ export function connect() {
       ...appCapabilities(),
       'mfarm:region': REGION,
       'mfarm:queueTimeoutSeconds': 120,
+      // Spread rather than set, because an undefined capability value is still a key, and the hub
+      // refuses a `mfarm:runId` that is not a non-empty string. Omitting it is the local case.
+      ...(RUN_ID ? { 'mfarm:runId': String(RUN_ID) } : {}),
     },
   });
 }

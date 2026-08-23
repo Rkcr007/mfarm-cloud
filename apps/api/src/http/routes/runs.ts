@@ -1,0 +1,183 @@
+import type { FastifyInstance } from 'fastify';
+import { withTenant } from '../../db.ts';
+import { requireTenant } from '../server.ts';
+import { notFound } from '../errors.ts';
+
+/**
+ * Runs — the screen that makes a hundred executions legible (docs/EXECUTION_MODEL.md §4.2).
+ *
+ * Everything here is DERIVED from the run's sessions. `runs` itself holds four columns and no
+ * status, no end time and no build, because none of those three is knowable today and inventing
+ * them would be worse than omitting them:
+ *
+ *   * a run has no end signal — a sequential suite ends every session before starting the next, so
+ *     "the last session ended" would mark a twenty-test run finished nineteen times before it was;
+ *   * WebDriver has no concept of an assertion, so a pass/fail count would be inference presented
+ *     as fact (§4.3 is what makes it real);
+ *   * a run's sessions may legitimately name different builds, so one denormalised `app_build_id`
+ *     would silently pick a winner.
+ *
+ * What IS reported: how many sessions, how many are still live, the window they span, and the build
+ * — named only when every session that installed one installed the same one, counted otherwise.
+ */
+
+/** Sessions that have not finished. The only honest "is this run still going" signal available. */
+const LIVE_STATES = ['QUEUED', 'ALLOCATING', 'ACTIVE'];
+
+interface RunRow {
+  id: string;
+  external_id: string;
+  created_at: Date;
+  session_count: string;
+  live_count: string;
+  ended_count: string;
+  first_session_at: Date | null;
+  last_activity_at: Date | null;
+  build_count: string;
+  build_id: string | null;
+  package_name: string | null;
+  version_name: string | null;
+}
+
+/**
+ * The rollup, in one statement per page rather than one per run.
+ *
+ * The aggregate is a LATERAL rather than a GROUP BY over a three-way join, because the join form
+ * multiplies rows before it counts them: a run whose sessions each hold several artifacts would
+ * report its session count times its artifact count. That is the classic shape of a number that is
+ * wrong by a factor nobody notices until it is quoted in an invoice.
+ *
+ * `build_count` uses COUNT(DISTINCT), and `one_build` is a MAX over the same column — which is the
+ * single value exactly when the count is 1, and is joined only under that condition. Reporting a
+ * build for a run that touched three of them would be the same lie the schema refuses to store.
+ */
+const LIST_SQL = `
+  SELECT r.id, r.external_id, r.created_at,
+         agg.session_count, agg.live_count, agg.ended_count,
+         agg.first_session_at, agg.last_activity_at, agg.build_count,
+         b.id AS build_id, b.package_name, b.version_name
+    FROM runs r
+    LEFT JOIN LATERAL (
+      SELECT count(*)                                                   AS session_count,
+             count(*) FILTER (WHERE s.state = ANY($2::session_state[]))  AS live_count,
+             count(*) FILTER (WHERE s.ended_at IS NOT NULL)              AS ended_count,
+             min(s.created_at)                                           AS first_session_at,
+             -- COALESCE down the lifecycle: a session that is still running has no ended_at, and a
+             -- queued one has no started_at either. Without the fallback a run of nothing but
+             -- queued sessions would report no activity at all, which is when somebody is most
+             -- likely to be looking at it.
+             max(COALESCE(s.ended_at, s.started_at, s.created_at))       AS last_activity_at,
+             count(DISTINCT w.app_build_id)                              AS build_count,
+             max(w.app_build_id::text)                                   AS one_build
+        FROM sessions s
+        LEFT JOIN webdriver_sessions w ON w.session_id = s.id
+       WHERE s.run_id = r.id
+    ) agg ON true
+    LEFT JOIN app_builds b ON agg.build_count = 1 AND b.id = agg.one_build::uuid
+`;
+
+function runJson(r: RunRow) {
+  const buildCount = Number(r.build_count);
+  return {
+    id: r.id,
+    /** What the caller wrote in `mfarm:runId`. Their id, and the one they will search for. */
+    runId: r.external_id,
+    createdAt: r.created_at,
+    sessions: {
+      total: Number(r.session_count),
+      live: Number(r.live_count),
+      ended: Number(r.ended_count),
+    },
+    firstSessionAt: r.first_session_at,
+    lastActivityAt: r.last_activity_at,
+    /** Null when the run's sessions installed nothing, or installed more than one build. */
+    build: buildCount === 1 && r.build_id
+      ? { id: r.build_id, packageName: r.package_name, versionName: r.version_name }
+      : null,
+    /** 0, 1, or more. Distinguishes "no build named" from "several", which `build: null` cannot. */
+    buildCount,
+  };
+}
+
+/** Exactly what Postgres will accept for a uuid, so a run named "nightly" is a lookup, not a 500. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function runRoutes(app: FastifyInstance): Promise<void> {
+  /** GET /v1/runs — the whole org's, newest first. The Runs screen's only query. */
+  app.get<{ Querystring: { limit?: string } }>('/runs', async (req) => {
+    const { orgId } = requireTenant(req);
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
+    const rows = await withTenant(orgId, async (c) => {
+      const r = await c.query<RunRow>(
+        `${LIST_SQL} ORDER BY r.created_at DESC LIMIT $1`,
+        [limit, LIVE_STATES],
+      );
+      return r.rows;
+    });
+    return { runs: rows.map(runJson) };
+  });
+
+  /**
+   * GET /v1/runs/:id — one run and every session in it.
+   *
+   * `:id` takes EITHER the uuid or the name the caller gave it, because the name is the one they
+   * have: a CI job that knows it is build 4471 should be able to ask for `/v1/runs/4471` without
+   * first searching for a uuid it never saw. The uuid is tried first and only when the parameter
+   * looks like one, so a run legitimately named with a uuid still resolves — by id if that is what
+   * it is, by name otherwise.
+   */
+  app.get<{ Params: { id: string } }>('/runs/:id', async (req) => {
+    const { orgId } = requireTenant(req);
+    const key = req.params.id;
+
+    const run = await withTenant(orgId, async (c) => {
+      if (UUID.test(key)) {
+        const byId = await c.query<RunRow>(
+          `${LIST_SQL} WHERE r.id = $1::uuid`, [key, LIVE_STATES],
+        );
+        if (byId.rows[0]) return byId.rows[0];
+      }
+      const byName = await c.query<RunRow>(
+        `${LIST_SQL} WHERE r.external_id = $1`, [key, LIVE_STATES],
+      );
+      return byName.rows[0] ?? null;
+    });
+    // RLS makes another org's run indistinguishable from one that does not exist, which is the
+    // same disclosure boundary as everywhere else — and it matters more here than usual, since run
+    // names are guessable by construction: every CI system numbers builds from 1.
+    if (!run) throw notFound('Run');
+
+    const sessions = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT s.id, s.state, s.region, s.created_at, s.started_at, s.ended_at, s.end_reason,
+                d.local_id AS device_local_id, d.model AS device_model,
+                w.app_build_id, b.package_name, b.version_name
+           FROM sessions s
+           LEFT JOIN devices d            ON d.id = s.device_id
+           LEFT JOIN webdriver_sessions w ON w.session_id = s.id
+           LEFT JOIN app_builds b         ON b.id = w.app_build_id
+          WHERE s.run_id = $1
+          ORDER BY s.created_at`,
+        [run.id],
+      );
+      return rows;
+    });
+
+    return {
+      run: runJson(run),
+      sessions: sessions.map((r: Record<string, unknown>) => ({
+        id: r.id,
+        state: r.state,
+        region: r.region,
+        device: r.device_local_id ?? r.device_model ?? null,
+        createdAt: r.created_at,
+        startedAt: r.started_at,
+        endedAt: r.ended_at,
+        endReason: r.end_reason,
+        build: r.app_build_id
+          ? { id: r.app_build_id, packageName: r.package_name, versionName: r.version_name }
+          : null,
+      })),
+    };
+  });
+}

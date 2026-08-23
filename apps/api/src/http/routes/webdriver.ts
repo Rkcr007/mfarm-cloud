@@ -8,6 +8,7 @@ import { ApiError } from '../errors.ts';
 import { parseCapabilities, type ParsedCapabilities } from '../webdriver/capabilities.ts';
 import { describeAppRef, resolveAppRef, type ResolvedApp } from '../../appref.ts';
 import { awaitAppAction, requestAppAction } from '../../appactions.ts';
+import { findOrCreateRun, stampSessionRun, type Run } from '../../runs.ts';
 import {
   WebDriverError, invalidSessionId, sessionNotCreated, toW3cBody, fromApiError,
 } from '../webdriver/errors.ts';
@@ -228,6 +229,15 @@ export async function webdriverRoutes(app: FastifyInstance) {
     // and, when the farm is busy, a queue wait — to say "no such build".
     const build = caps.appRef ? await resolveApp(orgId, caps) : null;
 
+    // The run is found-or-created here for the same reason, and it is cheap: one INSERT that
+    // usually conflicts. Doing it before allocation means a run row exists even for a session that
+    // never gets a device, which is correct — a CI job whose twenty tests all failed to allocate is
+    // a run that happened and produced nothing, and that is exactly what somebody will come looking
+    // for. Names are per-org and reused on purpose, so this creates one row per run, not per test.
+    const run = caps.runId
+      ? await withTenant(orgId, (c) => findOrCreateRun(c, { orgId, externalId: caps.runId! }))
+      : null;
+
     // Two ways in, and which one it is decides who owns the device afterwards.
     //
     //   bind      — the caller already allocated a session and is telling us to drive it. They keep
@@ -291,6 +301,13 @@ export async function webdriverRoutes(app: FastifyInstance) {
     // and usable by nobody until the reaper notices — but only the session's OWNER may release it,
     // which on the bound path is not us.
     try {
+      // Inside the try, so a refusal below still releases a device this handler allocated.
+      //
+      // Both paths land here. On the allocated path the session is seconds old and its `run_id` is
+      // trivially NULL; on the bound path the caller allocated it themselves and may already have
+      // labelled it, which is why this can fail rather than just assign.
+      if (run) await joinRun(orgId, sessionId, run);
+
       const target = await withSystem(async (c) => {
         const { rows } = await c.query(
           // COALESCE, not `d.automation_endpoint` alone: a v1 worker names one server for the whole
@@ -403,16 +420,23 @@ export async function webdriverRoutes(app: FastifyInstance) {
       const sessionCaps: Record<string, unknown> = {
         ...created.capabilities,
         ...(build ? { 'mfarm:appId': build.id } : {}),
+        // Echoed back for the same reason, minus the resolution: it is what the caller wrote, and
+        // seeing it in the returned capabilities is how a suite author confirms the run was joined
+        // rather than the capability quietly doing nothing.
+        ...(run ? { 'mfarm:runId': run.externalId } : {}),
       };
 
       await withTenant(orgId, (c) =>
         c.query(
+          // `app_build_id` is a COLUMN as well as a capability (migration 020). The jsonb blob is
+          // kept for support — it is the upstream's answer, verbatim — but "which sessions ran this
+          // build" has to be an indexed foreign key, not a cast inside a predicate.
           `INSERT INTO webdriver_sessions
              (session_id, org_id, device_id, upstream_session_id, upstream_base_url, capabilities,
-              hub_allocated)
-           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+              hub_allocated, app_build_id)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
           [sessionId, orgId, deviceId, created.id, base,
-           JSON.stringify(redact(sessionCaps)), hubAllocated],
+           JSON.stringify(redact(sessionCaps)), hubAllocated, build?.id ?? null],
         ),
       );
 
@@ -672,6 +696,37 @@ export async function webdriverRoutes(app: FastifyInstance) {
         : `No ${caps.platform} build matches \`mfarm:appId: "${written}"\` in this account's app ` +
           `library. Check the package name and version — \`mfarm app list\` shows what is there.`,
       'no_such_app',
+    );
+  }
+
+  /**
+   * Label this session with the run the caller named, or refuse if it is already in another.
+   *
+   * A second WebDriver session against one `mfarm run` allocation, passing the same `mfarm:runId`,
+   * is ordinary and silent. Two DIFFERENT run ids on one session is a caller bug with no
+   * defensible resolution — the lease, its artifacts and its cost belong to one run or the other,
+   * and picking either would file them under a run that did not incur them. So it is refused, and
+   * the message names both ids because the caller is the only party who knows which is stale.
+   */
+  async function joinRun(orgId: string, sessionId: string, run: Run): Promise<void> {
+    const joined = await withTenant(orgId, (c) => stampSessionRun(c, { sessionId, runId: run.id }));
+    if (joined) return;
+
+    const existing = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query<{ external_id: string }>(
+        `SELECT r.external_id FROM sessions s JOIN runs r ON r.id = s.run_id WHERE s.id = $1`,
+        [sessionId],
+      );
+      return rows[0]?.external_id ?? null;
+    });
+
+    throw sessionNotCreated(
+      existing
+        ? `Session ${sessionId} is already part of run "${existing}", so it cannot also join ` +
+          `"${run.externalId}". Remove \`mfarm:runId\` from the capabilities, or start a new session.`
+        : `Session ${sessionId} could not be added to run "${run.externalId}" — it is no longer ` +
+          'available to label.',
+      'run_conflict',
     );
   }
 

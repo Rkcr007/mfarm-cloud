@@ -1,4 +1,5 @@
 import { AppRefError, parseAppRef, type AppRef } from '../../appref.ts';
+import { parseRunId, RunRefError } from '../../runs.ts';
 import { invalidArgument } from './errors.ts';
 
 /**
@@ -34,7 +35,7 @@ const MFARM_PREFIX = 'mfarm:';
  * available — worse than failing, because the run continues and reports something.
  */
 const MFARM_KEYS = new Set([
-  'region', 'tier', 'ttlMinutes', 'queueTimeoutSeconds', 'sessionId', 'appId',
+  'region', 'tier', 'ttlMinutes', 'queueTimeoutSeconds', 'sessionId', 'appId', 'runId',
 ]);
 
 function rejectUnknownMfarmKeys(caps: Record<string, unknown>): void {
@@ -66,6 +67,12 @@ export interface ParsedCapabilities {
   appRef?: AppRef;
   /** The reference exactly as the caller wrote it, for error messages that quote them back. */
   appRefRaw?: string;
+  /**
+   * `mfarm:runId` — the caller's own name for the run this session belongs to, so that twenty
+   * tests are one run rather than twenty unrelated leases. Validated here; the row is found or
+   * created by the caller, because that needs the tenant's database scope and this file is pure.
+   */
+  runId?: string;
   /** How long to wait for capacity before giving up. 0 = fail immediately. */
   queueTimeoutSeconds: number;
   /**
@@ -233,6 +240,17 @@ function interpret(
     }
   }
 
+  const runIdRaw = str(caps, `${MFARM_PREFIX}runId`);
+  let runId: string | undefined;
+  if (runIdRaw !== undefined) {
+    try {
+      runId = parseRunId(runIdRaw);
+    } catch (e) {
+      if (e instanceof RunRefError) throw invalidArgument(`\`${MFARM_PREFIX}runId\`: ${e.message}`);
+      throw e;
+    }
+  }
+
   const ttlMinutes = int(caps, `${MFARM_PREFIX}ttlMinutes`, 1, 240);
   const maxQueue = opts.maxQueueTimeoutSeconds ?? 600;
   const queueTimeoutSeconds = int(caps, `${MFARM_PREFIX}queueTimeoutSeconds`, 0, maxQueue) ?? 0;
@@ -263,7 +281,7 @@ function interpret(
 
   return {
     platform, region, tier, ttlMinutes, queueTimeoutSeconds, upstream, protocol, bindSessionId,
-    appRef, appRefRaw,
+    appRef, appRefRaw, runId,
   };
 }
 

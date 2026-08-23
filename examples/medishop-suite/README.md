@@ -15,6 +15,7 @@ MFARM_API_KEY=mfk_…                                    # console → Settings 
 MFARM_HUB=https://farm.mfarm.dev                       # your farm
 MFARM_REGION=lab
 MEDISHOP_APP_ID=com.way2automation.medishop@latest     # a build in the farm's app library
+MFARM_RUN_ID=$(date +%s)                               # optional — groups the eight into one run
 
 npm test
 ```
@@ -53,6 +54,19 @@ that uses it. `mfarm:appId` names a build in the farm's **app library** — by i
 `com.example.app@1.4.2`, or `com.example.app@latest` — and the farm installs it before the session
 opens. (`appium:app` still works and takes a path on the *device host*, which is exactly the coupling
 the library removes. Setting both is an error rather than a coin toss.)
+
+**One line makes the eight tests one run.** `mfarm:runId` takes an id your CI already has —
+`$GITHUB_RUN_ID`, a Jenkins build number, a uuid per `npm test`. Without it the suite arrives as
+eight unrelated device leases in a flat list; with it, it is one row in the console's **Runs**
+screen, showing the build under test, how many sessions it took and how many are still live. Nothing
+has to be created first: the farm creates the run when the first session names it and every later
+session joins it, so a suite that dies halfway leaves a run that simply stops growing. `farm.js`
+falls back to `$GITHUB_RUN_ID` on its own, and omits the capability entirely when neither is set —
+running locally with no run is the normal case.
+
+A run does **not** yet know how many tests passed. WebDriver has no concept of an assertion, so the
+farm sees sessions open and close and cannot tell a passing test from a failing one; it reports what
+it can see and says nothing about the rest.
 
 **One device per spec file, not per test.** Allocation takes seconds and the reset after release
 takes about a minute, so a device per test spends more time recycling than testing. This is the main

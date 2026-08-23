@@ -75,6 +75,11 @@ jobs:
           # The exact build this commit produced. A nightly that wants "whatever was built last"
           # uses `com.example.app@latest` instead; either way the session records which build ran.
           MEDISHOP_APP_ID: ${{ steps.upload.outputs.app-id }}
+          # What makes the eight tests below ONE run in the console rather than eight unrelated
+          # device leases. `github.run_id` is already unique per workflow run and already re-used by
+          # a re-run attempt, which is exactly the grouping wanted — and `farm.js` falls back to
+          # $GITHUB_RUN_ID on its own, so this line is here to be seen rather than to be needed.
+          MFARM_RUN_ID: ${{ github.run_id }}
         run: npm test
 
       # Screenshots the suite captured at the moment a test failed. The farm keeps its own logcat
