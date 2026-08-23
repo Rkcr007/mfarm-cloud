@@ -1013,6 +1013,26 @@ function ensureLive(sess) {
     onState: (s, detail) => {
       state.liveState = s;
       state.liveDetail = detail || null;
+
+      /**
+       * THE LOG FOLLOWS BY DEFAULT. Opening a device and finding an empty pane with a "Follow"
+       * button gets the default backwards: a log is for watching something happen, and the moment
+       * worth seeing is usually the one just before you thought to press start. Everything that
+       * scrolled past while the pane sat idle is simply gone — logcat here is a live stream, not a
+       * buffer that gets replayed.
+       *
+       * Keyed on ATTACHED rather than on video: the log rides the data-plane socket, so it works on
+       * a device whose screen never publishes at all — which is exactly the device someone most
+       * needs a log from.
+       *
+       * `paused` is the person's own decision and outranks this. Without it, every reconnect and
+       * every state change would restart a stream they deliberately stopped.
+       */
+      if (ATTACHED.has(s) && !state.log.streaming && !state.log.paused) {
+        live.startLogcat();
+        state.log.streaming = true;
+      }
+
       scheduleRender();
     },
     onStream: (stream) => { state.liveStream = stream; scheduleRender(); },
@@ -1054,7 +1074,9 @@ function closeLive() {
   state.liveStream = null;
   state.liveState = 'idle';
   state.liveDetail = null;
-  state.log = { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 };
+  // `streaming` and `paused` reset with the connection: a new device starts following again, and a
+  // pause on the last one is not an instruction about this one.
+  state.log = { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0, streaming: false, paused: false };
   state.shots = [];
   // The panel goes with the connection. Keeping it would re-show the last frame of a device
   // somebody else now holds, which is a stale screen presented as a live one.
@@ -1928,7 +1950,10 @@ function logcatDock(sess, live) {
   return card('Logcat', {
     aside: h('div', { class: 'row tight' },
       h('span', { class: 'caption tnum', id: 'logcount', text: `0 / ${state.log.lines.length} lines` }),
-      btn(following ? 'Pause' : 'Follow', 'tiny ghost', () => toggleLogcat(), { disabled: !live }),
+      // `Pause` / `Resume`, never `Follow`: `state.log.follow` is the SCROLL behaviour, turned on and
+      // off by scrolling the pane, and having two different things called follow in one card is how
+      // someone ends up pressing this expecting the scroll to stick.
+      btn(following ? 'Pause' : 'Resume', 'tiny ghost', () => toggleLogcat(), { disabled: !live }),
       btn('Clear', 'tiny ghost', () => { state.log.lines = []; paintLog(); }),
     ),
   },
@@ -1963,8 +1988,16 @@ function logcatDock(sess, live) {
 
 function toggleLogcat() {
   if (!state.live) { toast('Not connected', 'Open the live view first.', 'warn'); return; }
-  if (state.log.streaming) { state.live.stopLogcat(); state.log.streaming = false; }
-  else { state.live.startLogcat(); state.log.streaming = true; }
+  if (state.log.streaming) {
+    state.live.stopLogcat();
+    state.log.streaming = false;
+    // Recorded, so the auto-start above does not immediately undo this on the next state change.
+    state.log.paused = true;
+  } else {
+    state.live.startLogcat();
+    state.log.streaming = true;
+    state.log.paused = false;
+  }
   render();
 }
 
@@ -2708,7 +2741,7 @@ function commands() {
     const dev = deviceById(state.detail?.deviceId);
     const caps = dev?.capabilities || [];
     if (caps.includes('screenshot')) list.push({ glyph: '⧉', label: 'Take a screenshot', group: 'Session', run: () => void takeScreenshot() });
-    if (caps.includes('logcat')) list.push({ glyph: '≡', label: state.log.streaming ? 'Pause logcat' : 'Follow logcat', group: 'Session', run: () => toggleLogcat() });
+    if (caps.includes('logcat')) list.push({ glyph: '≡', label: state.log.streaming ? 'Pause logcat' : 'Resume logcat', group: 'Session', run: () => toggleLogcat() });
   }
   for (const d of state.devices) {
     if (d.state === 'READY') {
