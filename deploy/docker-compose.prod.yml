@@ -170,6 +170,11 @@ services:
       # must not be able to walk into uploads it should never touch. Unset is refused in production
       # for the same reason APP_STORE_DIR is: the rows outlive a temp directory, so a reboot would
       # leave every failed run linking to evidence that 404s.
+      # Where the backup sidecar writes, mounted READ-ONLY below so the API can report how fresh
+      # the newest dump is (`mfarm_backup_age_seconds`). Reporting only — the API never writes here,
+      # and the alert that watches it is the thing that turns "backups stopped six weeks ago" from a
+      # discovery into a page.
+      BACKUP_DIR: /backups
       ARTIFACT_DIR: /var/lib/mfarm/artifacts
       ARTIFACT_MAX_UPLOAD_BYTES: ${ARTIFACT_MAX_UPLOAD_BYTES:-67108864}
       # Two weeks. Long enough that a flake noticed on Monday is still investigable the next Friday.
@@ -188,6 +193,8 @@ services:
     volumes:
       - appstore:/var/lib/mfarm/apps
       - artifacts:/var/lib/mfarm/artifacts
+      # `:ro`. The API measures the backups; it has no business being able to delete one.
+      - ${BACKUP_HOST_DIR:-./backups}:/backups:ro
     secrets:
       - session_signing_key
       - session_public_key
