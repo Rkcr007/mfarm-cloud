@@ -984,7 +984,41 @@ kbd {
   user-select: none;
   touch-action: none;
 }
-.dev-video:focus-visible { box-shadow: inset 0 0 0 2px var(--mf-accent, #755EB8); }
+/* `:focus`, NOT `:focus-visible`, and the distinction matters here more than anywhere else in the
+   console. `:focus-visible` deliberately stays dark for a mouse click, which is right for a button
+   and wrong for this: clicking the screen is what routes your keyboard to Android, and with no ring
+   there is nothing to tell you whether the next thing you type reaches the phone or the page. */
+.dev-video:focus { box-shadow: inset 0 0 0 2px var(--mf-accent, #755EB8); }
+
+/* Says where the keystrokes are going, because a ring alone does not explain itself the first
+   time. Shown only while the screen actually holds focus. */
+.dev-kbd {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: 10px; z-index: 3; pointer-events: none;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; letter-spacing: .04em; white-space: nowrap;
+  color: #fff; background: rgba(117, 94, 184, .92);
+  opacity: 0; transition: opacity .12s ease;
+}
+.dev-frame:focus-within .dev-kbd { opacity: 1; }
+
+/* Touch feedback, drawn locally the instant the pointer goes down.
+   The round trip to the device and back through the encoder is tens of milliseconds at best, so
+   without this a tap feels unanswered until the video catches up — which is the single largest
+   contributor to a mirrored screen feeling sluggish, and it costs nothing to fix. The ripple is
+   NOT a claim that the device received anything; it is an echo of your own input. */
+.dev-taps { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
+.tap-ripple {
+  position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px;
+  border-radius: 50%; border: 2px solid rgba(255, 255, 255, .85);
+  background: rgba(255, 255, 255, .18);
+  animation: tapring .42s ease-out forwards;
+}
+@keyframes tapring {
+  from { transform: scale(.35); opacity: .95; }
+  to   { transform: scale(1.5); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .tap-ripple { animation-duration: .01ms; } }
 /* The video is present from the first render and simply has nothing to show until it does. Hiding
    it rather than removing it is what keeps the element — and its stream — alive across renders. */
 .devpanel[data-live="off"] .dev-video { visibility: hidden; }
