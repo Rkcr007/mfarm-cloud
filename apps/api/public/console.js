@@ -2333,7 +2333,7 @@ function screenCockpit(id) {
       h('div', { class: 'rail' },
         // First in the rail while it is on: the inspector is a mode you are actively working in,
         // and hunting for its panel under four others is the opposite of the point.
-        inspectorCard(caps),
+        inspectorCard(device?.capabilities || []),
         toolsCard(sess, live),
         vitalsCard(),
         capturesCard(),
