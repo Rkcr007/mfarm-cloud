@@ -48,12 +48,23 @@ COPY --from=deps /app ./
 COPY packages/protocol ./packages/protocol
 COPY apps/api ./apps/api
 
-# The app library's blobs (migration 014). Created in the image, owned by `node`, and that
-# ownership is the entire reason this line exists: Docker seeds a fresh named volume from the image
-# directory it is mounted over, and a mount point that does not exist in the image gets a
-# root-owned volume instead — so an unprivileged process cannot write to it and every upload fails
-# with EACCES on a deployment that looked fine until someone uploaded something.
-RUN mkdir -p /var/lib/mfarm/apps && chown -R node:node /var/lib/mfarm
+# The app library's blobs (migration 014) and session artifacts (migration 019). Created in the
+# image, owned by `node`, and that ownership is the entire reason this line exists: Docker seeds a
+# fresh named volume from the image directory it is mounted over, and a mount point that does not
+# exist in the image gets a root-owned volume instead — so an unprivileged process cannot write to
+# it and every upload fails with EACCES on a deployment that looked fine until someone uploaded
+# something.
+#
+# EVERY DIRECTORY MOUNTED AS A VOLUME IN docker-compose.prod.yml MUST BE LISTED HERE. The artifacts
+# volume was added without its mkdir on 2026-08-23 and did exactly what the paragraph above
+# describes: the deploy succeeded, the console was fine, and the first release-time capture failed
+# with `EACCES: mkdir '/var/lib/mfarm/artifacts/tmp'` — swallowed by the worker, as designed, so the
+# only visible symptom was a session that had no evidence. Note that fixing the image does NOT
+# repair a volume that already exists, because Docker seeds ownership only when it creates one:
+# an already-deployed box needs a one-time
+#     docker compose -f deploy/docker-compose.prod.yml exec -u root api \
+#       chown -R node:node /var/lib/mfarm/artifacts
+RUN mkdir -p /var/lib/mfarm/apps /var/lib/mfarm/artifacts && chown -R node:node /var/lib/mfarm
 
 # THE IMAGE'S OWN IDENTITY, and it goes here — after the source — for two reasons. It changes on
 # every commit, so any earlier position would invalidate the dependency and source layers and turn a
