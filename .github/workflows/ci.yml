@@ -150,7 +150,7 @@ jobs:
 
             -- ENABLE alone is not enough. Without FORCE, the table OWNER skips every policy, which
             -- is exactly how people end up believing RLS is on when it is not (see 002_rls.sql).
-            FOREACH t IN ARRAY ARRAY['orgs','memberships','api_keys','devices','sessions','metering_events','app_builds','app_actions']
+            FOREACH t IN ARRAY ARRAY['orgs','memberships','api_keys','devices','sessions','metering_events','app_builds','app_actions','agent_enrollments']
             LOOP
               SELECT relrowsecurity, relforcerowsecurity
                 INTO rs, fs
@@ -167,6 +167,16 @@ jobs:
             -- one reported. This is not hypothetical: 001's ALTER DEFAULT PRIVILEGES grants the
             -- full set on every table the owner creates from then on, so migration 014 arrived with
             -- exactly that privilege until it revoked it. Silent, and invisible in the policy list.
+            -- A bootstrap credential the tenant pool can WRITE is a bootstrap credential a tenant
+            -- can mint for itself, un-expire, or un-revoke — and redeeming one stamps an org onto
+            -- a host. Same ALTER DEFAULT PRIVILEGES trap as below; migration 023 revokes it.
+            IF has_table_privilege('mfarm_app', 'agent_enrollments', 'INSERT')
+               OR has_table_privilege('mfarm_app', 'agent_enrollments', 'UPDATE')
+               OR has_table_privilege('mfarm_app', 'agent_enrollments', 'DELETE') THEN
+              RAISE EXCEPTION
+                'mfarm_app can write agent_enrollments. Enrollments are minted and redeemed on the system pool only; revoke it (see 023_agent_enrollment.sql).';
+            END IF;
+
             IF has_table_privilege('mfarm_app', 'app_actions', 'UPDATE')
                OR has_table_privilege('mfarm_app', 'app_actions', 'DELETE') THEN
               RAISE EXCEPTION

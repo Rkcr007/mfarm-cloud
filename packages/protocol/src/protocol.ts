@@ -374,3 +374,61 @@ export interface FencedCommand<T = unknown> {
 export function acceptFence(highWater: number, incoming: number): boolean {
   return incoming >= highWater;
 }
+
+/* ------------------------------------------------------------------------ the agent tunnel (v3)
+ *
+ * WHY THIS EXISTS. Until now the browser reached a device by dialling the worker: the console's
+ * TLS ingress proxied `/dp/<hostId>` to one statically-configured address, and the worker ran a
+ * WebSocket SERVER for it. That works for a device host you own and have a route to. It does not
+ * work for the case physical devices actually arrive in — a phone on a teammate's laptop, behind
+ * NAT, with nothing listening and no address to put in a config file.
+ *
+ * So the direction inverts. The AGENT dials out and holds one socket open; the control plane
+ * multiplexes browser connections onto it as channels. Registration, the heartbeat and artifact
+ * upload already worked this way, and for the same reason — this extends the rule rather than
+ * adding an exception to it.
+ *
+ * WHAT IT IS NOT. It is not the private network ADR-0004 rejected. That ADR refused a VPN because
+ * "a VPN authenticates the network, not the request", and nothing here authenticates a request.
+ * The tunnel authenticates the AGENT and carries opaque bytes; every frame inside it still contains
+ * the browser's own 120-second Ed25519 grant, and the AGENT still verifies it offline — signature,
+ * audience, then fence — exactly as it does on a directly-dialled socket. The control plane relays
+ * and does not get to decide. It is also not a widening of the trust boundary: the control-plane
+ * host already sat in this path, because it is where the ingress that proxied `/dp/*` runs.
+ */
+
+/** Where the agent dials. One socket per host, re-dialled with backoff. */
+export const TUNNEL_PATH = '/v1/workers/tunnel';
+
+/**
+ * One frame on the tunnel.
+ *
+ * `ch` is allocated by the CONTROL PLANE, which is the only side that opens channels — a browser
+ * arrives there, never at the agent. That makes the id space single-writer, so there is no
+ * collision rule to get wrong and no handshake to lose.
+ *
+ * `d` is the data-plane message verbatim: the JSON the browser sent, or the JSON the worker is
+ * answering with. Deliberately a string rather than a parsed object, so that relaying cannot
+ * become inspecting by accident — a control plane that re-serialised these would be one refactor
+ * away from editing them.
+ */
+export type TunnelFrame =
+  | { ch: number; t: 'open' }
+  | { ch: number; t: 'data'; d: string }
+  | { ch: number; t: 'close'; reason?: string };
+
+/**
+ * A frame is small: data-plane messages are input events, signalling payloads and batched log
+ * lines. A screenshot is the one exception and is already base64 in a JSON field on the existing
+ * path, which is why this is generous rather than tight. Anything larger is a bug or an attack,
+ * and dropping the tunnel is the honest response to both.
+ */
+export const TUNNEL_MAX_FRAME_BYTES = 8 * 1024 * 1024;
+
+export function isTunnelFrame(v: unknown): v is TunnelFrame {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as Record<string, unknown>;
+  if (typeof f.ch !== 'number' || !Number.isInteger(f.ch) || f.ch < 0) return false;
+  if (f.t === 'open' || f.t === 'close') return true;
+  return f.t === 'data' && typeof f.d === 'string';
+}

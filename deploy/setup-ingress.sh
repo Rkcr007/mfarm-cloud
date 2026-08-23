@@ -16,10 +16,20 @@
 # WHAT STAYS PRIVATE. The API keeps its 127.0.0.1 bind; Caddy is the only public listener. The
 # metrics listener on :9464 carries fleet-wide cross-tenant gauges and is deliberately NOT proxied.
 #
-# TWO upstreams since ADR-0007, not one. `/dp/<hostId>` is proxied to the WORKER's data plane so a
-# browser can open the live-view WebSocket over this same TLS name — which is what keeps the socket
-# same-origin and the console's strict CSP unwidened. The worker itself still publishes no port: it
-# binds loopback or the VPC address, and this is the only route in.
+# `/dp/<hostId>` CARRIES THE LIVE VIEW, and where it points is now a choice.
+#
+# By DEFAULT it goes to the API like everything else, because the API terminates the browser's
+# WebSocket and relays it down a tunnel the AGENT dialled out. That is what makes a device host
+# reachable when it has no address anyone can write down — a phone on a laptop behind NAT — and it
+# is also what makes a SECOND device host possible at all, since the line below can only ever name
+# one upstream.
+#
+# Setting WORKER_DATA_PLANE restores the old direct proxy for a host that genuinely is dialable.
+# Kept so this ships without a flag day: an existing farm can move to the tunnel when it is ready
+# rather than at the moment this script is next run.
+#
+# Either way the worker publishes no port of its own — it binds loopback or the VPC address — and
+# either way the console's socket stays same-origin, so its strict CSP is unwidened.
 #
 # THIS PROXY IS NOT AUTHORISATION and must not be mistaken for it. Every connection through it still
 # has to present an Ed25519 grant naming session, device, org, fence and host, which the worker
@@ -66,19 +76,27 @@ say "Writing the Caddyfile for $HOSTNAME_PUBLIC"
 # Caddyfile with no such route at all instead of one pointing at nothing. A route to an absent
 # upstream answers 502, which in a browser is indistinguishable from a broken live view.
 if [ -n "$WORKER_DATA_PLANE" ]; then
-  echo "    /dp/* -> $WORKER_DATA_PLANE (live view)"
-  DP_BLOCK=$(cat <<DPEOF
+  DP_TARGET="$WORKER_DATA_PLANE"
+  echo "    /dp/* -> $WORKER_DATA_PLANE (live view, direct to the worker)"
+  DP_WHY="the WORKER's own listener. Only one host can be named here, and it has to be dialable
+	# from this box — which is exactly what the tunnel below exists to stop being a requirement."
+else
+  DP_TARGET="$UPSTREAM"
+  echo "    /dp/* -> $UPSTREAM (live view, relayed over the agent tunnel)"
+  DP_WHY="the API, which relays each viewer down the tunnel its agent dialled OUT. This is the
+	# path that works for a host behind NAT, and the only one that works for more than one host."
+fi
+DP_BLOCK=$(cat <<DPEOF
 
-	# The live-view data plane (ADR-0007). The path segment is the HOST id, which is how this
-	# generalises past one device host: add a matcher per host id and point each at its worker. At
-	# one host the id is not consulted, and the worker rejects anything whose grant names a
-	# different host anyway — the audience check is in the token, not in this file.
+	# The live-view data plane (ADR-0007). The path segment is the HOST id, and it is routed to
+	# $DP_WHY
 	#
-	# NOT AUTHORISATION. Every connection through here still presents an Ed25519 grant that the
-	# worker verifies offline. This is a route (ADR-0005).
+	# NOT AUTHORISATION, on either path. Every connection through here still presents an Ed25519
+	# grant naming session, device, org, fence and host, which the AGENT verifies offline — the
+	# relay copies bytes and decides nothing. This is a route (ADR-0005).
 	@dataplane path /dp/*
 	handle @dataplane {
-		reverse_proxy $WORKER_DATA_PLANE {
+		reverse_proxy $DP_TARGET {
 			# A live view is a long-lived socket with long silences between a person's taps. The
 			# default buffering would hold frames and the default timeouts would close it mid
 			# session, which presents as the device freezing.
@@ -87,17 +105,14 @@ if [ -n "$WORKER_DATA_PLANE" ]; then
 	}
 DPEOF
 )
-else
-  echo "    /dp/* omitted (WORKER_DATA_PLANE is empty) — no live view from this ingress"
-  DP_BLOCK=""
-fi
 sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
 # MFARM console + WebDriver hub. Managed by setup-ingress.sh — edit there, not here.
 #
 # Two upstreams. Everything a human or a CI client touches is served by the API process on
 # $UPSTREAM: the console at /, the tenant API at /v1/*, the WebDriver hub at /wd/hub/*. The one
-# exception is /dp/*, which reaches the device host's data plane so a browser can hold the live-view
-# socket over this same TLS name (ADR-0007). The metrics listener is a SEPARATE port and is not
+# exception is /dp/*, which carries the live-view socket over this same TLS name (ADR-0007) — to
+# the API by default, which relays it to the agent, or straight to a worker when WORKER_DATA_PLANE
+# names one. The metrics listener is a SEPARATE port and is not
 # proxied, because its gauges are fleet-wide and collected on the owner pool — RLS does not hide
 # them. The automation gateway is not proxied either: the hub reaches it host-locally.
 ${HOSTNAME_PUBLIC}${HOSTNAME_LEGACY:+, }${HOSTNAME_LEGACY} {

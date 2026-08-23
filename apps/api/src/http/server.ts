@@ -30,6 +30,7 @@ import {
 import { appPool, systemPool, withSystem } from '../db.ts';
 import { GIT_SHA, BUILT_AT, shortSha } from '../version.ts';
 import type { Pool } from 'pg';
+import { TunnelRegistry, attachTunnel } from './tunnel.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -37,6 +38,7 @@ declare module 'fastify' {
   }
   interface FastifyInstance {
     signingKey: Keypair;
+    tunnels: TunnelRegistry;
     /** Whether to mark the session cookie `Secure`. See ServerOptions.secureCookies. */
     secureCookies: boolean;
   }
@@ -237,6 +239,15 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   });
 
   app.decorate('signingKey', loadSigningKey());
+
+  /**
+   * The live data-plane tunnels, one per connected agent.
+   *
+   * Decorated rather than module-global so a test can build two servers without them sharing a
+   * fleet — the same reason the reaper is opt-in per server.
+   */
+  app.decorate('tunnels', new TunnelRegistry());
+  attachTunnel(app, app.tunnels);
   app.decorate('secureCookies', opts.secureCookies ?? false);
 
   // Fastify's default JSON parser throws on an empty body when content-type is application/json,

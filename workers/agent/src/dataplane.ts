@@ -1,4 +1,24 @@
 import { WebSocketServer, type WebSocket } from 'ws';
+
+/**
+ * The only thing this class needs a socket to be.
+ *
+ * A `ws` WebSocket satisfies it structurally, and so does a channel multiplexed over the agent's
+ * outbound tunnel — which is the point. An agent on a laptop behind NAT cannot be dialled, so the
+ * browser's frames arrive down a socket the AGENT opened; but the grant check, the fence check, the
+ * sequence gate and the input coalescing must not be reimplemented on that path, because a second
+ * copy of an authorization check is a second place for it to be wrong.
+ *
+ * So the transport is the only thing that varies. Everything below this line cannot tell which one
+ * it is talking to, and does not get to care.
+ */
+export interface DataPlaneSocket {
+  send(data: string): void;
+  close(): void;
+  on(event: 'message', cb: (raw: { toString(): string }) => void): void;
+  on(event: 'close', cb: () => void): void;
+  on(event: 'error', cb: () => void): void;
+}
 import { createServer, type Server } from 'node:http';
 import { verifySessionToken, type SessionClaims } from '@mfarm/protocol';
 import type { Agent } from './agent.ts';
@@ -107,7 +127,7 @@ export interface DataPlaneOptions {
 export class DataPlane {
   private wss?: WebSocketServer;
   private http?: Server;
-  private readonly conns = new Map<WebSocket, Conn>();
+  private readonly conns = new Map<DataPlaneSocket, Conn>();
 
   private readonly opts: DataPlaneOptions;
 
@@ -130,7 +150,18 @@ export class DataPlane {
     return typeof addr === 'object' && addr ? addr.port : 0;
   }
 
-  private onConnection(ws: WebSocket): void {
+  /**
+   * Hand this data plane a socket it did not accept itself.
+   *
+   * The tunnel calls this per browser channel. Identical treatment to a directly-dialled socket,
+   * deliberately: an unauthenticated channel still gets five seconds to say hello, and a grant that
+   * does not verify still closes it.
+   */
+  accept(ws: DataPlaneSocket): void {
+    this.onConnection(ws);
+  }
+
+  private onConnection(ws: DataPlaneSocket): void {
     this.conns.set(ws, { lastSeq: -1, inFlight: false, queue: [], logBuffer: [] });
 
     // An unauthenticated socket is a resource an anonymous client can hold open. Close it if no
@@ -147,7 +178,7 @@ export class DataPlane {
     ws.on('error', () => { clearTimeout(authTimer); this.teardown(ws); });
   }
 
-  private teardown(ws: WebSocket): void {
+  private teardown(ws: DataPlaneSocket): void {
     const conn = this.conns.get(ws);
     if (conn) {
       conn.logcat?.stop();
@@ -157,17 +188,17 @@ export class DataPlane {
     this.conns.delete(ws);
   }
 
-  private reject(ws: WebSocket, code: string, message: string): void {
+  private reject(ws: DataPlaneSocket, code: string, message: string): void {
     try { ws.send(JSON.stringify({ t: 'error', code, message })); } catch { /* already gone */ }
     ws.close();
     this.teardown(ws);
   }
 
-  private send(ws: WebSocket, msg: unknown): void {
+  private send(ws: DataPlaneSocket, msg: unknown): void {
     try { ws.send(JSON.stringify(msg)); } catch { /* the socket is gone; the close handler cleans up */ }
   }
 
-  private async onMessage(ws: WebSocket, raw: string): Promise<void> {
+  private async onMessage(ws: DataPlaneSocket, raw: string): Promise<void> {
     const conn = this.conns.get(ws);
     if (!conn) return;
 
@@ -236,7 +267,7 @@ export class DataPlane {
     }
   }
 
-  private async onHello(ws: WebSocket, conn: Conn, token: string): Promise<void> {
+  private async onHello(ws: DataPlaneSocket, conn: Conn, token: string): Promise<void> {
     const publicKey = this.opts.agent.sessionPublicKey;
     const hostId = this.opts.agent.hostId;
     if (!publicKey || !hostId) return this.reject(ws, 'not_registered', 'Worker has not registered yet.');
@@ -283,7 +314,7 @@ export class DataPlane {
    * put a WebRTC negotiation in the path of a headless test. The viewer asks, and only the viewer
    * pays.
    */
-  private async onSignalOpen(ws: WebSocket, conn: Conn): Promise<void> {
+  private async onSignalOpen(ws: DataPlaneSocket, conn: Conn): Promise<void> {
     if (conn.signal || conn.signalOpening) {
       return this.send(ws, { t: 'signal-error', message: 'This connection already has a signalling channel.' });
     }
@@ -316,14 +347,14 @@ export class DataPlane {
   }
 
   /** One frame of the browser's WebRTC negotiation, forwarded to the device without inspection. */
-  private onSignal(ws: WebSocket, conn: Conn, payload: unknown): void {
+  private onSignal(ws: DataPlaneSocket, conn: Conn, payload: unknown): void {
     if (!conn.signal) {
       return this.send(ws, { t: 'signal-error', message: 'No signalling channel is open. Send signal-open first.' });
     }
     conn.signal.send(payload);
   }
 
-  private async onLogcat(ws: WebSocket, conn: Conn, action: 'start' | 'stop'): Promise<void> {
+  private async onLogcat(ws: DataPlaneSocket, conn: Conn, action: 'start' | 'stop'): Promise<void> {
     if (action === 'stop') {
       conn.logcat?.stop();
       conn.logcat = undefined;
@@ -349,7 +380,7 @@ export class DataPlane {
     }
   }
 
-  private onLogLine(ws: WebSocket, conn: Conn, line: string): void {
+  private onLogLine(ws: DataPlaneSocket, conn: Conn, line: string): void {
     conn.logBuffer.push(line);
     if (conn.logBuffer.length > MAX_LOG_BUFFER) {
       const dropped = conn.logBuffer.length - MAX_LOG_BUFFER;
@@ -361,7 +392,7 @@ export class DataPlane {
     conn.logTimer.unref?.();
   }
 
-  private flushLog(ws: WebSocket, conn: Conn): void {
+  private flushLog(ws: DataPlaneSocket, conn: Conn): void {
     if (conn.logTimer) { clearTimeout(conn.logTimer); conn.logTimer = undefined; }
     if (conn.logBuffer.length === 0) return;
     const lines = conn.logBuffer;
@@ -377,7 +408,7 @@ export class DataPlane {
    * to find out which request an anonymous blob answered. The cost is 33% on an image that is
    * already only sent when a person asks for one.
    */
-  private async onScreenshot(ws: WebSocket, conn: Conn, id?: string): Promise<void> {
+  private async onScreenshot(ws: DataPlaneSocket, conn: Conn, id?: string): Promise<void> {
     const control = conn.backend!.control;
     if (!control.screenshot) {
       return this.send(ws, { t: 'screenshot-error', id, message: 'This device does not declare the screenshot capability.' });
@@ -406,7 +437,7 @@ export class DataPlane {
    * that is already JSON, and parsing it in the worker would put a second copy of Android's layout
    * format somewhere it has to be kept in step.
    */
-  private async onUiDump(ws: WebSocket, conn: Conn, id?: string): Promise<void> {
+  private async onUiDump(ws: DataPlaneSocket, conn: Conn, id?: string): Promise<void> {
     const control = conn.backend!.control;
     if (!control.uiHierarchy) {
       return this.send(ws, { t: 'ui-dump-error', id, message: 'This device does not declare the ui-hierarchy capability.' });

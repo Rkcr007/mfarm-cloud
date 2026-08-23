@@ -59,7 +59,7 @@ middle one matters here:
 |---|---|---|
 | `fake-farm.ts` | Not Android at all — a Node class that logs what it was asked to do. Model string reads `FAKE (no Android)`. | **No.** `installApp` is one `log()` line (`fake-farm.ts:68`), so a build that would fail on a device "succeeds" here. |
 | **`tier: 'cuttlefish'`** | **Real AOSP Android 17 as a VM on Linux + KVM.** Real kernel, real framework, real adb serial. | **Yes. This is the MVP.** `cuttlefish.ts:627` runs `adb install -r` and parses adb's own `Failure [INSTALL_FAILED_…]`, because adb has historically exited 0 while failing. |
-| `tier: 'physical'` | A handset on a USB hub. | Declared in the union at `device.ts:26` with **no backend implemented**. Not needed, not planned, not blocking. |
+| `tier: 'physical'` | A handset on USB, on a machine running the agent. | **Being built — see [ADR-0008](adrs/0008-physical-devices-behind-the-existing-agent.md).** This row read "not needed, not planned, not blocking" until 2026-08-24; that was true of the two-device farm and is no longer the plan of record. Milestone 0 (enrollment, org-pinning, the agent tunnel) is built and unshipped; no device backend exists yet. |
 
 Cuttlefish is **virtual but not fake**: it boots the same AOSP build a phone runs, so adb genuinely
 installs, UiAutomator2 genuinely drives the UI, and a failing test genuinely means the app is broken.

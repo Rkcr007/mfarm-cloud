@@ -15,6 +15,7 @@ afterwards. They are separate files for that reason.
 | `postgres` | `unless-stopped` | `127.0.0.1:5432` | `docker-compose.prod.yml` |
 | `migrate` | `no` — one-shot | — | `docker-compose.prod.yml` |
 | `backup` | `unless-stopped` | — | `docker-compose.prod.yml` |
+| `backup-offsite` | `unless-stopped` | — | `docker-compose.prod.yml` |
 | `api` | `unless-stopped` | `127.0.0.1:3000`, `127.0.0.1:9464` | `docker-compose.prod.yml` |
 | `prometheus` | `unless-stopped` | `127.0.0.1:9090` | `docker-compose.obs.yml` |
 | `alertmanager` | `unless-stopped` | `127.0.0.1:9093` | `docker-compose.obs.yml` |
@@ -165,12 +166,12 @@ registered with it.
 | Backups | every `BACKUP_INTERVAL_SECONDS`, verified after writing |
 | **RPO** | **one backup interval** (6h default). No WAL archiving. |
 | Point-in-time recovery | **no.** Add WAL-G or pgBackRest if hourly loss stops being acceptable |
-| Off-box copies | **no.** See below — this is the gap most likely to bite |
+| Off-box copies | yes — `backup-offsite` to a GCS bucket, confirmed and alerted on |
+| App-store blobs backed up | **no.** Deliberate; see Known gaps |
 
 A backup sitting on the same disk as its database protects you from a bad migration, a bad `DELETE`
-and a dropped table. It does not protect you from the disk, the machine, or the provider. Ship them
-somewhere else — `rclone sync`, `restic`, an S3 bucket, another box on the tailnet — and do it before
-you need it rather than after.
+and a dropped table. It does not protect you from the disk, the machine, or the provider — and that
+is the entire distinction between the two sidecars below.
 
 ## Shipping a change
 
@@ -268,6 +269,59 @@ Each archive is verified with `pg_restore --list` immediately after writing, and
 `.partial` and renamed only on success — an interrupted dump can otherwise leave a truncated file
 with a plausible name that retention keeps and somebody eventually tries to restore.
 
+### Getting them off this machine
+
+The `backup-offsite` sidecar copies every completed pair to `BACKUP_BUCKET` and, every
+`OFFSITE_INTERVAL_SECONDS`, re-confirms that the **newest** one is there at the right size. Set the
+bucket up once — the commands are in `deploy/.env.example`, and the VM authenticates as its own
+service account, so there is no key file and nothing to rotate.
+
+A separate container because `backup.sh` must run in `postgres:16-alpine` to keep `pg_dump` matched
+to the server, and that image has no gcloud. Two containers sharing one directory beats coupling the
+Postgres upgrade path to the storage tool.
+
+The bucket is `gs://mfarm-backups-129651686670` — asia-south1, STANDARD, uniform access, public
+access blocked, 90-day lifecycle delete, 7-day soft delete. Same region as the VMs, which is what
+makes upload egress free.
+
+#### Two things that bite, both found while setting this up
+
+**A scope is not IAM, and it wins.** `mfarm-cp` was created with the default GCE scopes, which
+include `devstorage.read_only`. A scope caps what the instance's token can do regardless of any IAM
+binding, so the roles can be perfectly correct and every upload still 403s. Widening it requires the
+instance to be **stopped** — there is no live edit — so it costs a short console outage and cannot
+be done as part of a rolling deploy. Check it before believing anything else:
+
+```bash
+gcloud compute instances describe mfarm-cp --zone=asia-south1-c \
+  --format="value(serviceAccounts.scopes)"
+```
+
+**The default compute service account holds `roles/editor` on the project**, which carries
+`legacyObjectOwner` on every bucket — including delete. So the deliberately narrow
+`objectCreator` + `objectViewer` binding on this bucket is, on its own, decorative: the VM can still
+delete what it wrote. Fixing that means attaching a **dedicated** service account with only those
+two roles, which also requires stopping the instance. Both fixes ride the same maintenance window;
+do them together.
+
+Three properties worth knowing:
+
+- **It never deletes remotely.** Local retention prunes at `BACKUP_KEEP`, and mirroring that upward
+  would give the bucket the same seven-day horizon. Remote retention is a bucket lifecycle rule,
+  which is set once and cannot be undone by a bug in the loop.
+- **`cp` exiting 0 is not proof.** It asks the bucket how big the object is and compares. Same
+  reasoning as `pg_restore --list` one layer out — a transfer that failed halfway leaves a plausible
+  name behind.
+- **The receipt is the interface.** On success it writes `.offsite-receipt` into `BACKUP_DIR`, and
+  the API turns that file's mtime into `mfarm_backup_offsite_age_seconds`. It is written **only**
+  when the newest backup is confirmed, so a run that could not upload leaves the old receipt to go
+  stale and page. Without it this sidecar would fail the way the local one used to: logging into a
+  stream nobody reads while the dashboard stays green.
+
+`BACKUP_BUCKET=none` is the explicit opt-out. It exits clean, writes no receipt, and
+`MfarmBackupOffsiteUnconfirmed` fires — silence it deliberately, so the choice is visible to whoever
+inherits it.
+
 ## Restoring
 
 Never into the live database on the first attempt.
@@ -306,6 +360,17 @@ Nothing is stubbed. A change that breaks recovery breaks this.
 Run it on a schedule, not once — the failure this catches is the one where backups have been quietly
 producing unusable archives for six weeks. It never touches the farm's own database; everything
 happens in a scratch database dropped on exit, including on failure.
+
+On the control plane, run the version that goes through the bucket:
+
+```bash
+DRILL_BUCKET=gs://mfarm-backups-<suffix> ./deploy/restore-drill.sh
+```
+
+The archive is uploaded, **deleted locally**, downloaded again, and every assertion above then runs
+against what came back. That is the difference between "a backup exists in a bucket" and "the thing
+in the bucket is a farm". Off by default because it needs gcloud and real credentials, and the rest
+of the drill is deliberately hermetic enough to run in CI.
 
 ## Operational notes
 
@@ -409,9 +474,6 @@ with a live worker means the worker is not managing to register, and that is the
 
 Stated rather than implied, because each of these looks covered from the dashboard:
 
-- **No backup-freshness alert.** The `backup` sidecar logs its failures and nothing scrapes it, so
-  backups can stop for six weeks without a page. `restore-drill.sh` in CI proves the *path* works;
-  it does not prove last night's dump exists. Until this is closed, check `deploy/backups/` by hand.
 - **No host metrics.** No disk, CPU, memory or temperature for the box itself. A full disk takes the
   database down and the backups with it, and nothing here will say so first. `node-exporter` is the
   fix and it needs host mounts.

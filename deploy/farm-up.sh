@@ -131,6 +131,14 @@ fi
 set -a; . "$ENV_FILE"; set +a
 [ -n "${POSTGRES_PASSWORD:-}" ] || die "POSTGRES_PASSWORD is empty in $ENV_FILE"
 [ -n "${APP_DB_PASSWORD:-}" ]   || die "APP_DB_PASSWORD is empty in $ENV_FILE"
+# Checked HERE rather than left to compose's `:?`, which fails somewhere inside `up` with a message
+# about variable interpolation. This is a decision someone has to make on purpose — where the
+# backups go, or that they deliberately go nowhere — and it deserves the sentence.
+[ -n "${BACKUP_BUCKET:-}" ] || die "BACKUP_BUCKET is empty in $ENV_FILE.
+    Backups on this VM protect you from a bad migration, not from losing this VM.
+    Set it to gs://<bucket> (setup commands are in deploy/.env.example), or to
+    'none' to accept single-disk backups — which fires MfarmBackupOffsiteUnconfirmed
+    until you silence it, so the choice stays visible."
 note "ok"
 
 # ---------------------------------------------------------------- 3. control plane

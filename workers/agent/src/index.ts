@@ -5,6 +5,7 @@ import { Agent } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
 import { AutomationGateway } from './gateway.ts';
 import { DataPlane } from './dataplane.ts';
+import { AgentTunnel } from './tunnel.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
 import { createAvdBackend } from './devices/avd.ts';
 import type { DeviceBackend } from './device.ts';
@@ -350,6 +351,29 @@ async function main(): Promise<void> {
   const port = await dp.listen(Number(process.env.DATA_PLANE_PORT ?? 8080), dataPlaneHost);
   console.log(`[agent] data plane listening on ${dataPlaneHost}:${port}`);
 
+  /**
+   * The SECOND route to the same data plane, and on a host behind NAT the only one.
+   *
+   * The listener above needs the control plane to be able to dial this box. That holds for a device
+   * host on a VPC with a route written into the ingress, and holds for nothing else — a laptop with
+   * a phone on it has no address to write down. So the agent also dials OUT and holds a socket
+   * open, and the control plane multiplexes viewers onto it.
+   *
+   * Both are live at once on purpose. The listener keeps working for the existing deployment
+   * exactly as it did, so this ships without a flag day; a host that cannot be reached simply never
+   * has anyone arrive on it.
+   *
+   * Set MFARM_TUNNEL=0 to leave it off — for a host where the inbound path is known-good and an
+   * extra long-lived connection is not wanted.
+   */
+  const tunnel = process.env.MFARM_TUNNEL === '0' ? undefined : new AgentTunnel({
+    controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
+    agent,
+    dataPlane: dp,
+    log: (msg, meta) => console.log(`[agent] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
+  });
+  tunnel?.start();
+
   agent.startHeartbeat();
   agent.startMetering();
 
@@ -370,6 +394,9 @@ async function main(): Promise<void> {
       // Order matters: flush metering before killing devices, or the final seconds of every live
       // session are given away free.
       await agent.shutdown();
+      // Before the data plane, so viewers are told the host is going rather than discovering it
+      // when their frames stop.
+      tunnel?.stop();
       await dp.close();
       // The gateway goes before Appium: it is the only route to Appium from off-host, so closing it
       // first means no command can arrive for a device whose driver is already being torn down.
@@ -398,6 +425,14 @@ async function main(): Promise<void> {
   // control plane had deliberately taken out of service. It also mints a fresh worker token on
   // every call and requires keeping WORKER_REGISTRATION_TOKEN — a fleet-wide credential — hot for
   // the life of the process. Withdrawal is not worth silently defeating quarantine.
+  //
+  // TWO OF THOSE THREE REASONS ARE NOW GONE, and this note is kept rather than deleted because the
+  // conclusion still holds for a different one. Registration now respects an operator quarantine —
+  // only `clear_silence_quarantine` lifts one, from the heartbeat or from registration — and a host
+  // may re-register with its OWN worker token, so the fleet secret no longer has to stay hot. What
+  // remains is that the device set and capabilities travel only on registration, which is the
+  // protocol gap ADR-0003 named and did not close. In-place withdrawal belongs on the heartbeat,
+  // not here.
   //
   // So withdrawal is: drain and exit non-zero. The process supervisor restarts the agent, and it
   // re-registers truthfully on the way in because resolveAutomationEndpoints runs again against an

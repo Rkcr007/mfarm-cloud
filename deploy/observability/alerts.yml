@@ -237,6 +237,41 @@ groups:
             is UNMEASURED — not proven bad, but not proven good either, which is the same thing when
             it comes to backups. Check the `:ro` bind mount on the api service.
 
+      - alert: MfarmBackupNotOffsite
+        # The dangerous state is not "no backups" — that alerts loudly above. It is fresh, verified,
+        # retained backups sitting on the same disk as the database they protect, which looks
+        # perfect on every dashboard right up until the VM is gone.
+        #
+        # The uploader confirms every 15m and rewrites the receipt each time, so an hour is four
+        # missed runs. Deliberately tighter than MfarmBackupStale: this measures a cheap existence
+        # check, not a 6-hourly dump.
+        expr: mfarm_backup_offsite_age_seconds > 3600
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: 'The newest backup has not been confirmed off this machine for {{ $value | humanizeDuration }}'
+          description: >-
+            Local backups may be perfectly healthy — check MfarmBackupStale for that. This says the
+            newest dump has not been seen in the bucket, so a lost VM or a lost disk is a lost farm.
+            Usually the service account has lost storage.objects.create on the bucket, or the bucket
+            name changed. Check `docker compose -f deploy/docker-compose.prod.yml logs backup-offsite`.
+
+      - alert: MfarmBackupOffsiteUnconfirmed
+        # -1 is "no receipt has ever been written", which is a different failure from a receipt that
+        # has gone stale: it means the uploader has never once succeeded, or was never configured.
+        # It is also what BACKUP_BUCKET=none produces, and that is intended — accepting single-disk
+        # backups should require silencing an alert that is telling the truth, not a quiet default.
+        expr: mfarm_backup_offsite_age_seconds == -1
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: No backup has ever been confirmed off this machine
+          description: >-
+            There is no `.offsite-receipt` in BACKUP_DIR, so nothing has ever been proven to leave
+            this disk. Either backup-offsite has never succeeded — see its logs, and deploy/README.md
+            for the two IAM commands it needs — or BACKUP_BUCKET is deliberately `none`, in which
+            case silence this alert explicitly so the choice is visible to whoever inherits it.
+
       - alert: MfarmMetricSeriesDropped
         expr: mfarm_metric_series_dropped_total > 0
         for: 0m

@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { withSystem } from '../../db.ts';
-import { generateWorkerToken } from '../../auth.ts';
+import { generateWorkerToken, sha256, safeEqualHex } from '../../auth.ts';
+import { redeemEnrollment, markRedeemed } from '../../enrollment.ts';
 import { negotiate, deviceAutomationEndpoint, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete, sessionAttach } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
@@ -11,27 +12,89 @@ import { unauthorized, badRequest } from '../errors.ts';
 
 const digest = (s: string) => createHash('sha256').update(s).digest();
 
-function registrationTokenValid(presented: string | undefined): boolean {
+function fleetSecretValid(presented: string): boolean {
   const expected = process.env.WORKER_REGISTRATION_TOKEN;
-  if (!expected || !presented) return false;
+  if (!expected) return false;
   // Hash both sides so the comparison is fixed-length regardless of input.
   return timingSafeEqual(digest(presented), digest(expected));
 }
 
+/**
+ * Who is allowed to register, and as what.
+ *
+ * `bad` collapses every failure into one refusal. The reasons are for the server log: a person who
+ * has just pasted a token wants "that token is not valid", and a stranger should not learn which
+ * of the three kinds they got wrong or whether a prefix exists.
+ */
+type Credential =
+  | { kind: 'fleet' }                                        // operator-owned host, shared devices
+  | { kind: 'enrollment'; orgId: string; enrollmentId: string }
+  | { kind: 'rereg'; orgId: string | null }                  // a host that already has an identity
+  | { kind: 'bad'; why: string };
+
 export async function workerRoutes(app: FastifyInstance) {
   /**
-   * Bootstrap. Authenticated by a shared registration token, not a bearer credential — this is the
-   * one endpoint a worker can reach before it has an identity.
+   * Bootstrap. This is the one endpoint a worker can reach before it has an identity, and it is
+   * the credential-issuing operation: it returns a worker token the host persists and uses for
+   * everything afterwards, plus the public key it needs to verify session tokens offline. The
+   * worker never learns the signing key, so a compromised host cannot mint access to the fleet.
    *
-   * Registration is the credential-issuing operation: it returns a worker token the host persists
-   * and uses for everything afterwards, plus the public key it needs to verify session tokens
-   * offline. The worker never learns the signing key, so a compromised host cannot mint access to
-   * the rest of the fleet.
+   * THREE CREDENTIALS ARRIVE ON THE SAME HEADER, told apart by their prefix. One header rather
+   * than three because the agent already sends this one: enrolling a laptop is then a different
+   * value in an existing variable, not a new config key and a new code path in the agent.
+   *
+   *   `mae_…`  a per-agent ENROLLMENT token (migration 023). Single-use, expiring, revocable,
+   *            org-scoped — and the org it names is stamped onto the host and every device the
+   *            host registers, which is what keeps a phone out of the shared pool.
+   *   `mwk_…`  the host's OWN worker token, for re-registration. An agent re-registers whenever
+   *            its capability fingerprint changes, and an enrollment token is spent — so without
+   *            this a laptop could never plug in a second phone. It also narrows the fleet secret:
+   *            an existing host's row can now only be rewritten by something holding that host's
+   *            credential, and only under its own hostname.
+   *   anything the FLEET SECRET matches: unchanged, org-less, shared devices. This is what the
+   *            Cuttlefish hosts use and nothing about them moves.
+   *
+   * Resolved INSIDE the registration transaction, because the enrollment path takes its row
+   * `FOR UPDATE` — that lock is what makes single-use real rather than advisory when two agents
+   * race with the same token.
    */
-  app.post<{ Body: WorkerRegistration }>('/workers/register', async (req, reply) => {
-    if (!registrationTokenValid(req.headers['x-worker-registration-token'] as string | undefined)) {
-      throw unauthorized('Invalid or missing X-Worker-Registration-Token.');
+  async function resolveCredential(
+    c: Parameters<Parameters<typeof withSystem>[0]>[0],
+    presented: string,
+    hostname: string,
+  ): Promise<Credential> {
+    if (presented.startsWith('mae_')) {
+      const r = await redeemEnrollment(c, presented);
+      return r.ok
+        ? { kind: 'enrollment', orgId: r.orgId, enrollmentId: r.enrollmentId }
+        : { kind: 'bad', why: `enrollment token ${r.reason}` };
     }
+
+    if (presented.startsWith('mwk_')) {
+      const { rows } = await c.query(
+        'SELECT id, hostname, token_hash, org_id FROM hosts WHERE token_prefix = $1',
+        [presented.slice(0, 12)],
+      );
+      const row = rows[0];
+      if (!row) return { kind: 'bad', why: 'worker token names no host' };
+      // Signature first, always. Only then is it safe to say anything about the row.
+      if (!safeEqualHex(sha256(presented), row.token_hash)) {
+        return { kind: 'bad', why: 'worker token does not match' };
+      }
+      // A worker token re-registers ITS OWN host and nothing else. Without this a compromised
+      // agent could rewrite any other host's endpoint and capabilities and take its sessions.
+      if (row.hostname !== hostname) {
+        return { kind: 'bad', why: `worker token belongs to ${row.hostname}, not ${hostname}` };
+      }
+      return { kind: 'rereg', orgId: row.org_id };
+    }
+
+    return fleetSecretValid(presented) ? { kind: 'fleet' } : { kind: 'bad', why: 'fleet secret mismatch' };
+  }
+
+  app.post<{ Body: WorkerRegistration }>('/workers/register', async (req, reply) => {
+    const presented = req.headers['x-worker-registration-token'] as string | undefined;
+    if (!presented) throw unauthorized('Invalid or missing X-Worker-Registration-Token.');
 
     const reg = req.body;
     if (!reg?.hostname || !reg?.region) throw badRequest('hostname and region are required.');
@@ -42,13 +105,35 @@ export async function workerRoutes(app: FastifyInstance) {
     const token = generateWorkerToken();
 
     const host = await withSystem(async (c) => {
+      const cred = await resolveCredential(c, presented, reg.hostname);
+      if (cred.kind === 'bad') {
+        req.log.warn({ hostname: reg.hostname, why: cred.why }, 'worker registration refused');
+        throw unauthorized('Invalid or missing X-Worker-Registration-Token.');
+      }
+      // NULL for a fleet-secret host, which is the existing behaviour and the shared pool.
+      const orgId = cred.kind === 'fleet' ? null : cred.orgId;
+      const enrollmentId = cred.kind === 'enrollment' ? cred.enrollmentId : null;
+
       const { rows } = await c.query(
         `INSERT INTO hosts (region, hostname, state, protocol_version, capabilities,
                             cores, memory_mb, endpoint, automation_endpoint,
-                            token_prefix, token_hash, last_heartbeat_at)
-         VALUES ($1,$2,'UP',$3,$4::jsonb,$5,$6,$7,$8,$9,$10, now())
+                            token_prefix, token_hash, last_heartbeat_at, org_id)
+         VALUES ($1,$2,'UP',$3,$4::jsonb,$5,$6,$7,$8,$9,$10, now(), $11)
          ON CONFLICT (hostname) DO UPDATE SET
-           region = EXCLUDED.region, state = 'UP',
+           region = EXCLUDED.region,
+           -- REGISTRATION NO LONGER LIFTS A QUARANTINE, and that is the fix rather than an
+           -- oversight. It used to clear quarantined_at/quarantine_reason unconditionally, which
+           -- silently overruled migration 016: an OPERATOR quarantine is a judgement no packet
+           -- from the host can answer, and this path let the host answer it. It also left
+           -- quarantine_source behind, so a host came back UP still claiming to be quarantined
+           -- by someone.
+           --
+           -- Harmless for years because a healthy agent never re-registers (016's own note). A
+           -- laptop whose phone set changes re-registers routinely, which turns a rare trap into
+           -- the normal path. Un-quarantining now happens in exactly one place, the same
+           -- clear_silence_quarantine the heartbeat calls, which also restores each device to
+           -- what it was doing rather than guessing READY.
+           state = CASE WHEN hosts.state = 'QUARANTINED' THEN hosts.state ELSE 'UP' END,
            protocol_version = EXCLUDED.protocol_version,
            capabilities = EXCLUDED.capabilities,
            cores = EXCLUDED.cores, memory_mb = EXCLUDED.memory_mb,
@@ -56,13 +141,27 @@ export async function workerRoutes(app: FastifyInstance) {
            automation_endpoint = EXCLUDED.automation_endpoint,
            token_prefix = EXCLUDED.token_prefix, token_hash = EXCLUDED.token_hash,
            last_heartbeat_at = now(),
-           quarantined_at = NULL, quarantine_reason = NULL
-         RETURNING id`,
+           -- Only ever set, never cleared here: an enrolled host keeps its org across
+           -- re-registrations, and a fleet-secret host stays NULL because that is what it sends.
+           org_id = COALESCE(EXCLUDED.org_id, hosts.org_id)
+         RETURNING id, state, quarantine_source`,
         [reg.region, reg.hostname, result.version, JSON.stringify(reg.capabilities),
          reg.cores ?? null, reg.memoryMb ?? null, reg.endpoint ?? null,
-         reg.automationEndpoint ?? null, token.prefix, token.hash],
+         reg.automationEndpoint ?? null, token.prefix, token.hash, orgId],
       );
-      const hostId = rows[0].id;
+      const hostId = rows[0].id as string;
+
+      // One un-quarantine path, shared with the heartbeat. A registration is evidence the host is
+      // alive, so it falsifies a SILENCE quarantine exactly the way a beat does — and has exactly
+      // as little standing against an operator's.
+      if (rows[0].state === 'QUARANTINED' && rows[0].quarantine_source === 'reaper') {
+        const { rows: cleared } = await c.query<{ n: number }>(
+          'SELECT clear_silence_quarantine($1) AS n', [hostId],
+        );
+        if (Number(cleared[0]?.n ?? -1) >= 0) hostsRecovered.inc();
+      }
+
+      if (enrollmentId) await markRedeemed(c, enrollmentId, hostId);
 
       const schedulable = new Set(result.schedulable);
       const deviceIds: Record<string, string> = {};
@@ -70,10 +169,15 @@ export async function workerRoutes(app: FastifyInstance) {
         const { rows: dev } = await c.query(
           `INSERT INTO devices (host_id, region, platform, tier, model, os_version,
                                 capabilities, local_id, state, automation_endpoint,
-                                adb_serial, system_port, mjpeg_server_port)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13)
+                                adb_serial, system_port, mjpeg_server_port, org_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14)
            ON CONFLICT (host_id, local_id) WHERE local_id IS NOT NULL DO UPDATE SET
              capabilities = EXCLUDED.capabilities,
+             -- Inherited from the host, which is what keeps a device that cannot be powerwashed
+             -- out of the shared pool. allocate_device already filters on
+             -- (d.org_id IS NULL OR d.org_id = p_org), so this single column is the whole of
+             -- org-pinning — no scheduler change, no policy to remember to apply.
+             org_id = EXCLUDED.org_id,
              os_version = EXCLUDED.os_version,
              model = EXCLUDED.model,
              -- Re-asserted on every registration, and allowed to become NULL. This is the write
@@ -106,7 +210,17 @@ export async function workerRoutes(app: FastifyInstance) {
              -- re-registers, the host row returns to UP, and every device it owns stays
              -- QUARANTINED for the life of the database. A worker re-registering is the fleet's
              -- only evidence that a device is healthy again, so it has to be allowed to say so.
+             --
+             -- A device quarantined by quarantine_host REMEMBERS what it was doing, and CLEANING
+             -- is the case that matters: it means a session ended and no worker has confirmed the
+             -- reset, so promoting it to READY here hands the next tenant the last one's data —
+             -- the exact leak CLEANING exists to prevent. Only clear_silence_quarantine brings
+             -- those back, because only it restores quarantined_from instead of guessing.
+             -- Rows predating migration 016 have a NULL there and keep registration as their
+             -- recovery, exactly as 016 said they would.
              state = CASE
+               WHEN devices.state = 'QUARANTINED' AND devices.quarantined_from IS NOT NULL
+                 THEN devices.state
                WHEN devices.state IN ('READY', 'OFFLINE', 'QUARANTINED') THEN EXCLUDED.state
                ELSE devices.state
              END,
@@ -120,7 +234,7 @@ export async function workerRoutes(app: FastifyInstance) {
            // v1 workers name one server for the whole host; v2 names one per device. Resolved in
            // `packages/protocol` so the hub's COALESCE and this write cannot drift apart.
            deviceAutomationEndpoint(reg, d) ?? null,
-           d.adbSerial ?? null, d.systemPort ?? null, d.mjpegServerPort ?? null],
+           d.adbSerial ?? null, d.systemPort ?? null, d.mjpegServerPort ?? null, orgId],
         );
         if (d.localId && dev[0]?.id) deviceIds[d.localId] = dev[0].id as string;
       }
