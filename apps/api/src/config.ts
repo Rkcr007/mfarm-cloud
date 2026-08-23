@@ -77,6 +77,13 @@ export interface Config {
   /** Largest upload `POST /v1/apps` will accept, enforced on the stream rather than on a header. */
   appMaxUploadBytes: number;
 
+  /** Where session artifacts (logcat, screenshots) are written. Content-addressed, same store. */
+  artifactDir: string;
+  /** Largest single artifact a worker may upload, enforced on the stream. */
+  artifactMaxUploadBytes: number;
+  /** How long an artifact is kept before the reaper deletes the row and, if unreferenced, the blob. */
+  artifactRetentionHours: number;
+
   /**
    * Public base url of the data-plane route, or null when no live view is reachable.
    *
@@ -524,6 +531,31 @@ export function parseConfig(env: Env): Config {
     );
   }
 
+  // Artifacts get their own root, not a subdirectory of the app store. They have a different
+  // lifetime — apps live until deleted, artifacts expire — and mixing them means the retention sweep
+  // walks a tree full of things it must never touch.
+  const artifactDir = env.ARTIFACT_DIR?.trim() || join(tmpdir(), 'mfarm-artifacts');
+  if (isProduction && !env.ARTIFACT_DIR?.trim()) {
+    problems.push(
+      'ARTIFACT_DIR is unset. Session logcat and screenshots would be written under the system ' +
+        'temp directory, which is cleared on reboot while the artifacts rows naming them survive — ' +
+        'so a failed run links to evidence that 404s. Point it at persistent storage.',
+    );
+  }
+
+  // 64 MB. A full session logcat compresses badly and a 720p screenshot is well under a megabyte;
+  // this is generous for both and small enough that a runaway capture cannot fill the disk before
+  // the next sweep.
+  const artifactMaxUploadBytes = intVar(
+    env.ARTIFACT_MAX_UPLOAD_BYTES, 'ARTIFACT_MAX_UPLOAD_BYTES', 64 * 1024 * 1024, 1024, 1024 * 1024 * 1024, problems,
+  );
+
+  // Two weeks. Long enough that a flake noticed on Monday can still be investigated the following
+  // Friday, short enough that a busy fortnight does not need a disk conversation.
+  const artifactRetentionHours = intVar(
+    env.ARTIFACT_RETENTION_HOURS, 'ARTIFACT_RETENTION_HOURS', 14 * 24, 1, 365 * 24, problems,
+  );
+
   // 512 MB. Comfortably past a large debug build with every ABI in it, and far short of a number
   // that lets one upload fill the disk the snapshots live on.
   const appMaxUploadBytes = intVar(
@@ -598,6 +630,9 @@ export function parseConfig(env: Env): Config {
     metricsTokenSource,
     appStoreDir,
     appMaxUploadBytes,
+    artifactDir,
+    artifactMaxUploadBytes,
+    artifactRetentionHours,
     dataPlanePublicBase,
     turnUrls,
     turnSecretSource: turnSecret ? 'environment' as const : 'none' as const,
@@ -653,6 +688,9 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     metricsTokenSource: c.metricsTokenSource,
     appStoreDir: c.appStoreDir,
     appMaxUploadBytes: c.appMaxUploadBytes,
+    artifactDir: c.artifactDir,
+    artifactMaxUploadBytes: c.artifactMaxUploadBytes,
+    artifactRetentionHours: c.artifactRetentionHours,
     dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (no live view route)',
     turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };

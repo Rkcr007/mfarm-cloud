@@ -662,8 +662,85 @@ export class Agent {
    * - **An unknown device is a warning, never a throw.** A control plane naming a device this
    *   worker does not have is a bug somewhere, but it must not stop the beat.
    */
-  private async runRequestedResets(requests: Array<{ deviceId: string; fence: number }>): Promise<void> {
-    for (const { deviceId, fence } of requests) {
+  /**
+   * Collect what the finished session leaves behind, and ship it to the control plane.
+   *
+   * A RELEASE IS NEVER BLOCKED ON AN UPLOAD. Every failure here is logged and swallowed: a device
+   * that cannot ship its logcat is still a device that must reset, and on a two-device farm a
+   * capture that threw would strand half the fleet in CLEANING over a missing screenshot. The
+   * control plane makes the same promise from the other side — `artifact_record` returns NULL
+   * rather than raising when the checks fail.
+   *
+   * Ordered screenshot first. It is the smaller, likelier-to-succeed artifact and the one a person
+   * looks at first; if the device is wedged badly enough that the log dump hangs to its timeout,
+   * the screenshot showing why is already uploaded.
+   */
+  private async captureArtifacts(
+    backend: DeviceBackend, deviceId: string, sessionId: string,
+  ): Promise<void> {
+    const { control } = backend;
+    const name = control.info.localId;
+
+    if (control.screenshot) {
+      try {
+        const shot = await control.screenshot();
+        await this.uploadArtifact(sessionId, deviceId, 'screenshot', shot.bytes, `${name}-final.png`);
+      } catch (e) {
+        console.warn(`[agent] final screenshot for ${name} failed: ${(e as Error).message}`);
+      }
+    }
+
+    if (control.dumpLogcat) {
+      try {
+        const log = await control.dumpLogcat();
+        if (log.trim()) {
+          await this.uploadArtifact(sessionId, deviceId, 'logcat', Buffer.from(log, 'utf8'), `${name}.log`);
+        }
+      } catch (e) {
+        console.warn(`[agent] logcat dump for ${name} failed: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  /**
+   * POST one artifact. Worker-authenticated; the owning org is derived from the session by the
+   * control plane, so nothing here names an org and nothing here could if it wanted to.
+   */
+  private async uploadArtifact(
+    sessionId: string, deviceId: string, kind: 'logcat' | 'screenshot',
+    bytes: Buffer, filename: string,
+  ): Promise<void> {
+    // An unregistered agent has no token to present. Refusing here keeps the failure inside
+    // `captureArtifacts`'s swallow, rather than sending `Bearer undefined` and getting a 401 that
+    // reads like a credential problem.
+    const token = this.state?.workerToken;
+    if (!token) throw new Error('not registered — no worker token to upload with');
+
+    const q = new URLSearchParams({ kind, device: deviceId, filename });
+    const res = await fetch(
+      `${this.opts.controlPlaneUrl}/v1/sessions/${sessionId}/artifacts?${q}`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/octet-stream',
+        },
+        body: new Uint8Array(bytes),
+      },
+    );
+    if (!res.ok) {
+      // Logged with the status, because the two interesting failures look identical from here and
+      // do not from the response: 409 means this worker does not own that session (a bug worth
+      // finding), 400 means the artifact was refused on its own merits.
+      throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+    }
+    console.log(`[agent] uploaded ${kind} for session ${sessionId} (${bytes.length} bytes)`);
+  }
+
+  private async runRequestedResets(
+    requests: Array<{ deviceId: string; fence: number; sessionId?: string }>,
+  ): Promise<void> {
+    for (const { deviceId, fence, sessionId } of requests) {
       if (this.resetsInFlight.has(deviceId)) continue;
       const backend = this.backendForDeviceId(deviceId);
       if (!backend) {
@@ -672,6 +749,9 @@ export class Agent {
       }
       this.resetsInFlight.add(deviceId);
       try {
+        // BEFORE the reset, because the reset destroys exactly what is being captured — and inside
+        // the in-flight guard, so a capture that outlasts a beat cannot start a second one.
+        if (sessionId) await this.captureArtifacts(backend, deviceId, sessionId);
         console.log(`[agent] resetting ${backend.control.info.localId} (fence ${fence})`);
         await this.resetAndRelease(backend, deviceId, fence);
         console.log(`[agent] ${backend.control.info.localId} restored and released`);

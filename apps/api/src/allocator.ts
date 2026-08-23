@@ -1,5 +1,7 @@
 import type { PoolClient } from 'pg';
 import { withTenant, withSystem } from './db.ts';
+import { appStore } from './appstore.ts';
+import { loadConfig } from './config.ts';
 
 export interface AllocationRequest {
   orgId: string;
@@ -147,7 +149,7 @@ let lastHostSweepAt = 0;
 
 export async function reap(): Promise<{
   expired: number; promoted: number; keysPurged: number; installsOrphaned: number;
-  hostsQuarantined: number;
+  hostsQuarantined: number; artifactsExpired: number; blobsDeleted: number;
 }> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
@@ -217,12 +219,41 @@ export async function reap(): Promise<{
       console.warn(`[reaper] quarantined host ${host.hostname}: silent for over ${Math.round(hostSilenceMs() / 1000)}s`);
     }
 
+    /**
+     * Artifacts past their retention window.
+     *
+     * TWO STEPS, AND THE ORDER IS THE WHOLE POINT. `expire_artifacts` deletes the rows and returns
+     * only the digests that no surviving row references — content addressing means two sessions can
+     * share one file, and deleting the bytes because one of them expired would break the other's
+     * download. The blobs are on the API's disk, which SQL cannot reach, so the unlink happens here.
+     *
+     * Rows first, files second, deliberately. Crash between them and the store holds a file nothing
+     * references, which costs disk and breaks nothing; the other order leaves a row pointing at
+     * bytes that are gone, which a person discovers as a 404 while chasing a failure.
+     */
+    const a = await c.query<{ sha256: string; blob_orphaned: boolean }>(
+      'SELECT sha256, blob_orphaned FROM expire_artifacts($1)', [500],
+    );
+    let blobsDeleted = 0;
+    const orphans = a.rows.filter((r) => r.blob_orphaned);
+    if (orphans.length) {
+      const store = appStore(loadConfig().artifactDir);
+      // Deduped: a digest can be flagged by more than one deleted row in the same batch, and
+      // unlinking the same path twice is a wasted syscall rather than an error.
+      for (const sha of new Set(orphans.map((r) => r.sha256))) {
+        await store.remove(sha);
+        blobsDeleted++;
+      }
+    }
+
     return {
       expired: Number(e.rows[0].n),
       promoted: Number(p.rows[0].n),
       keysPurged: g.rowCount ?? 0,
       installsOrphaned: i.rowCount ?? 0,
       hostsQuarantined: q.rows.length,
+      artifactsExpired: a.rows.length,
+      blobsDeleted,
     };
   });
 }

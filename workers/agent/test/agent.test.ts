@@ -75,7 +75,15 @@ class FakeDevice implements DeviceControl {
 class ViewableDevice extends FakeDevice {
   logcatRunning = 0;
   screenshotFails = false;
+  dumpFails = false;
+  dumpText = '01-01 00:00:00.000  1  1 I Boot: hello\n';
   private emit?: (line: string) => void;
+
+  async dumpLogcat() {
+    this.calls.push('dumpLogcat');
+    if (this.dumpFails) throw new Error('adb: device offline');
+    return this.dumpText;
+  }
 
   async captureLogcat(onLine: (line: string) => void) {
     this.logcatRunning += 1;
@@ -84,6 +92,9 @@ class ViewableDevice extends FakeDevice {
   }
   say(line: string) { this.emit?.(line); }
   async screenshot() {
+    // Recorded like every other verb: without this the call log cannot show that the capture
+    // happened BEFORE the reset, which is the property the artifact tests exist to pin.
+    this.calls.push('screenshot');
     if (this.screenshotFails) throw new Error('screencap did not return a PNG');
     return { bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]), contentType: 'image/png' };
   }
@@ -163,6 +174,7 @@ before(async () => {
 after(async () => {
   await app.close();
   await withSystem(async (c) => {
+    await c.query('DELETE FROM artifacts WHERE org_id = $1', [orgId]);
     await c.query('DELETE FROM metering_events WHERE org_id = $1', [orgId]);
     await c.query('DELETE FROM sessions WHERE org_id = $1', [orgId]);
     await c.query('DELETE FROM devices WHERE region = $1', [REGION]);
@@ -408,6 +420,96 @@ describe('reset and release', () => {
     }
     assert.ok(b.control.calls.includes('reset'), 'the heartbeat request never reached the device');
     assert.equal(state, 'READY', 'the restore was confirmed and the device went back into the pool');
+    await agent.shutdown();
+  });
+
+  /**
+   * Artifacts (migration 019). A device entering CLEANING is the only "a session ended" signal a
+   * worker gets for a WebDriver run, so it is where evidence has to be collected — and it has to be
+   * collected BEFORE the reset, because the reset is what destroys it.
+   */
+  test('the agent captures a screenshot and a logcat before resetting', async () => {
+    const b = viewableBackend(`art-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b as unknown as DeviceBackend], `hbart-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId];
+
+    const sessionId = await withSystem(async (c) => {
+      const ses = (await c.query(
+        `INSERT INTO sessions (org_id, device_id, state, region, fence, started_at, ended_at)
+         VALUES ($1,$2,'ENDED',$3,1, now(), now()) RETURNING id`,
+        [orgId, deviceId, REGION])).rows[0].id;
+      await c.query(`UPDATE devices SET state = 'CLEANING', fence = 1 WHERE id = $1`, [deviceId]);
+      return ses as string;
+    });
+
+    await agent.heartbeat();
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !b.control.calls.includes('reset')) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+
+    const shotAt = b.control.calls.indexOf('screenshot');
+    const dumpAt = b.control.calls.indexOf('dumpLogcat');
+    const resetAt = b.control.calls.indexOf('reset');
+    assert.ok(shotAt >= 0 && dumpAt >= 0, `nothing was captured: ${b.control.calls.join(',')}`);
+    assert.ok(shotAt < resetAt, 'the screenshot must be taken before the device is wiped');
+    assert.ok(dumpAt < resetAt, 'the log must be dumped before the device is wiped');
+
+    const rows = await withSystem(async (c) => (await c.query<{ kind: string }>(
+      'SELECT kind FROM artifacts WHERE session_id = $1 ORDER BY kind', [sessionId])).rows);
+    assert.deepEqual(rows.map((r) => r.kind), ['logcat', 'screenshot']);
+    await agent.shutdown();
+  });
+
+  test('a capture that fails does not stop the device being reset', async () => {
+    // THE INVARIANT. On a two-device farm, a device stuck in CLEANING over a missing screenshot is
+    // half the fleet — so every failure in the capture path is swallowed, and the reset proceeds.
+    const b = viewableBackend(`artfail-${randomUUID().slice(0, 8)}`);
+    b.control.screenshotFails = true;
+    b.control.dumpFails = true;
+    const agent = makeAgent([b as unknown as DeviceBackend], `hbartfail-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId];
+
+    await withSystem(async (c) => {
+      await c.query(
+        `INSERT INTO sessions (org_id, device_id, state, region, fence, started_at, ended_at)
+         VALUES ($1,$2,'ENDED',$3,1, now(), now())`, [orgId, deviceId, REGION]);
+      await c.query(`UPDATE devices SET state = 'CLEANING', fence = 1 WHERE id = $1`, [deviceId]);
+    });
+
+    await agent.heartbeat();
+
+    let state = '';
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && state !== 'READY') {
+      state = await withSystem(async (c) =>
+        (await c.query('SELECT state FROM devices WHERE id = $1', [deviceId])).rows[0].state);
+      if (state !== 'READY') await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(state, 'READY', 'a failed capture must never strand a device in CLEANING');
+    await agent.shutdown();
+  });
+
+  test('a reset with no session attached captures nothing and still resets', async () => {
+    // An operator-initiated reset has no run behind it. Inventing a session to file evidence
+    // against would attach it to whichever one happened to be nearby.
+    const b = viewableBackend(`artnone-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b as unknown as DeviceBackend], `hbartnone-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId];
+    await withSystem(async (c) =>
+      c.query(`UPDATE devices SET state = 'CLEANING', fence = 1 WHERE id = $1`, [deviceId]));
+
+    await agent.heartbeat();
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !b.control.calls.includes('reset')) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(b.control.calls.includes('reset'));
+    assert.ok(!b.control.calls.includes('dumpLogcat'), 'nothing to attach evidence to');
     await agent.shutdown();
   });
 

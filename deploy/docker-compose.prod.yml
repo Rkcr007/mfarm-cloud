@@ -163,6 +163,17 @@ services:
       # file". `config.ts` refuses to start in production if this is unset, for that reason.
       APP_STORE_DIR: /var/lib/mfarm/apps
       APP_MAX_UPLOAD_BYTES: ${APP_MAX_UPLOAD_BYTES:-536870912}
+      # ---------------------------------------------------------------- artifacts (migration 019)
+      # Session evidence: the final screenshot and the logcat dump the worker ships when a device is
+      # released. Its OWN named volume, not a subdirectory of the app store, because the two have
+      # different lifetimes — apps live until deleted, artifacts expire — and the retention sweep
+      # must not be able to walk into uploads it should never touch. Unset is refused in production
+      # for the same reason APP_STORE_DIR is: the rows outlive a temp directory, so a reboot would
+      # leave every failed run linking to evidence that 404s.
+      ARTIFACT_DIR: /var/lib/mfarm/artifacts
+      ARTIFACT_MAX_UPLOAD_BYTES: ${ARTIFACT_MAX_UPLOAD_BYTES:-67108864}
+      # Two weeks. Long enough that a flake noticed on Monday is still investigable the next Friday.
+      ARTIFACT_RETENTION_HOURS: ${ARTIFACT_RETENTION_HOURS:-336}
       # ---------------------------------------------------------------- live view (ADR-0007)
       # Where a BROWSER opens the data-plane socket. Distinct from the worker's own registered
       # endpoint, which is a VPC address no browser can reach: this names the console's public TLS
@@ -176,6 +187,7 @@ services:
       TURN_TTL_SECONDS: ${TURN_TTL_SECONDS:-43200}
     volumes:
       - appstore:/var/lib/mfarm/apps
+      - artifacts:/var/lib/mfarm/artifacts
     secrets:
       - session_signing_key
       - session_public_key
@@ -256,3 +268,9 @@ volumes:
     # backup for a large slow one. Losing this volume loses uploads, which are reproducible from CI;
     # losing pgdata loses the fleet. `deploy/README.md` says so under Known gaps.
     name: mfarm_appstore
+  artifacts:
+    # Session logcat and screenshots, addressed by sha256 like the app store. Also NOT backed up,
+    # and here that is barely a trade at all: an artifact is evidence about one run, it expires by
+    # design within a fortnight, and nothing downstream depends on it existing. The reaper deletes
+    # the row and the file together, so this volume does not grow without bound.
+    name: mfarm_artifacts

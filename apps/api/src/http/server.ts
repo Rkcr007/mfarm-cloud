@@ -8,6 +8,8 @@ import { loadSigningKey, type Keypair } from '../tokens.ts';
 import { ApiError, unauthorized, forbidden } from './errors.ts';
 import { sessionRoutes } from './routes/sessions.ts';
 import { authRoutes } from './routes/auth.ts';
+import { accountRoutes } from './routes/account.ts';
+import { artifactRoutes } from './routes/artifacts.ts';
 import { uiRoutes, UI_PATHS } from './routes/ui.ts';
 import { deviceRoutes } from './routes/devices.ts';
 import { workerRoutes } from './routes/workers.ts';
@@ -479,12 +481,14 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   // --- routes ----------------------------------------------------------------------------------
   await app.register(uiRoutes);
   await app.register(authRoutes, { prefix: '/v1', loginRateLimitMax: opts.loginRateLimitMax });
+  await app.register(accountRoutes, { prefix: '/v1' });
   await app.register(sessionRoutes, { prefix: '/v1' });
   await app.register(deviceRoutes, { prefix: '/v1' });
   await app.register(workerRoutes, { prefix: '/v1' });
   // Registered last of the /v1 group, and in its own encapsulation context so its
   // stream-through content-type parser for APK uploads cannot affect any route above it.
   await app.register(appRoutes, { prefix: '/v1' });
+  await app.register(artifactRoutes, { prefix: '/v1' });
 
   // The WebDriver hub, mounted at both spellings the world uses: Appium 2 clients default to `/`,
   // Selenium Grid and Appium 1.x clients to `/wd/hub`. Serving both means the migration is one URL

@@ -819,6 +819,26 @@ export class CuttlefishDevice implements DeviceControl {
   }
 
   /**
+   * The whole log buffer as it stands, for the artifact a finished session leaves behind.
+   *
+   * `-d` dumps and exits rather than following, so there is no process to manage and no window in
+   * which lines are missed. `-v threadtime` matches the live stream's format, so a person reading a
+   * downloaded log and a person watching the dock are reading the same thing.
+   *
+   * Capped, because a chatty run can produce tens of megabytes and the upload limit would reject
+   * the whole artifact — leaving the session with no log at all rather than a long one. Losing the
+   * oldest lines is the right half to lose: a failure is at the end.
+   */
+  async dumpLogcat(): Promise<string> {
+    const out = await runBinary('adb', ['-s', this.adbSerial, 'logcat', '-d', '-v', 'threadtime'], 60_000);
+    const text = out.toString('utf8');
+    const LIMIT = 8 * 1024 * 1024;
+    if (text.length <= LIMIT) return text;
+    const kept = text.slice(text.length - LIMIT);
+    return `--- truncated: ${text.length - LIMIT} earlier bytes dropped ---\n${kept}`;
+  }
+
+  /**
    * One PNG, straight off the framebuffer.
    *
    * `exec-out` rather than `shell`, because `adb shell` mangles binary output on some platforms by

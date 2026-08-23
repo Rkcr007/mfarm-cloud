@@ -121,6 +121,21 @@ export interface DeviceControl {
   captureLogcat?(onLine: (line: string) => void): Promise<LogcatHandle>;
 
   /**
+   * The device's whole log buffer, right now, as one string.
+   *
+   * DELIBERATELY NOT `captureLogcat` with a timer around it. The two answer different questions and
+   * fail differently: a stream is for a person watching a device and it starts from the moment they
+   * looked, while this is for the artifact a finished session leaves behind and it wants everything
+   * the run produced. A session on a powerwashed device starts with an empty buffer, so a dump at
+   * release time IS that session's log — with no capture process to keep alive for its duration, and
+   * nothing to lose if the worker restarts mid-session.
+   *
+   * Optional for the same reason the rest are: a backend with no logcat does not implement it and
+   * does not declare `logcat`.
+   */
+  dumpLogcat?(): Promise<string>;
+
+  /**
    * Turn the device, the way a person turns a phone.
    *
    * OPTIONAL, and on Cuttlefish it is a sensor injection rather than a display command — the guest
