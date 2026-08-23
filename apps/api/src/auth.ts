@@ -46,7 +46,7 @@ export function sha256(s: string): string {
  * Both operands are fixed-length sha256 output, so a length mismatch means malformed input, not a
  * near-miss guess — reject it rather than padding.
  */
-function safeEqualHex(a: string, b: string): boolean {
+export function safeEqualHex(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }

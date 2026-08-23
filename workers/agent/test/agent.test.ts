@@ -22,6 +22,7 @@ import { withSystem, closePools } from '@mfarm/api/db';
 import { createApiKey } from '@mfarm/api/auth';
 import { Agent, deterministicUuid } from '../src/agent.ts';
 import { DataPlane } from '../src/dataplane.ts';
+import { AgentTunnel } from '../src/tunnel.ts';
 import type { DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo } from '../src/device.ts';
 
 const REGION = 'agent-test';
@@ -1153,5 +1154,158 @@ describe('data plane — viewer', () => {
     const err = await until(ws, 'error');
     assert.equal(err.code, 'unknown_message');
     ws.close();
+  });
+});
+
+/**
+ * The data-plane tunnel.
+ *
+ * THE POINT OF THESE, and the reason none of them uses `inject()`: the tunnel is entirely socket
+ * lifecycle. Who dialled whom, what happens when one end goes away, whether a viewer is told or
+ * simply frozen. `app.inject()` cannot see any of it — a 410-line suite once passed against a
+ * feature that worked zero percent of the time in production for exactly this reason — so every
+ * test here binds a real port and speaks a real WebSocket.
+ *
+ * The load-bearing property is that inverting the transport changed no authorization. A browser
+ * arriving at the CONTROL PLANE still presents the same Ed25519 grant, and the AGENT still verifies
+ * it offline against a public key and a fence. The control plane relays and decides nothing.
+ */
+describe('the data-plane tunnel', () => {
+  let agent: Agent, dp: DataPlane, tunnel: AgentTunnel, backend: ReturnType<typeof fakeBackend>;
+
+  const wsBase = () => baseUrl.replace(/^http/, 'ws');
+
+  const waitFor = async (pred: () => boolean, what: string, ms = 3_000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (pred()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+
+  before(async () => {
+    backend = fakeBackend(`tun-${randomUUID().slice(0, 8)}`);
+    agent = makeAgent([backend], `tunnel-${randomUUID().slice(0, 8)}`);
+    await agent.start();
+    dp = new DataPlane({
+      agent,
+      backends: new Map([[backend.control.info.localId, backend]]),
+      resolveDevice: () => backend,
+    });
+    // Deliberately NOT listening. A laptop behind NAT has no inbound path at all, so if any of
+    // these passed because something dialled the worker directly, the test would be a lie.
+    tunnel = new AgentTunnel({ controlPlaneUrl: baseUrl, agent, dataPlane: dp, minBackoffMs: 20 });
+    tunnel.start();
+    await waitFor(() => tunnel.connected, 'the agent tunnel to connect');
+  });
+
+  after(async () => { tunnel.stop(); await dp.close(); await agent.shutdown(); });
+
+  const dial = (url: string) => new Promise<WebSocket>((resolve, reject) => {
+    const ws = new WebSocket(url);
+    ws.once('open', () => resolve(ws));
+    ws.once('error', reject);
+  });
+
+  const nextMessage = (ws: WebSocket) => new Promise<Record<string, unknown>>((resolve) => {
+    ws.once('message', (d) => resolve(JSON.parse(d.toString())));
+  });
+
+  const nextClose = (ws: WebSocket) => new Promise<{ code: number; reason: string }>((resolve) => {
+    ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() }));
+  });
+
+  /** A real session on THIS host's device, so the grant's audience and fence are the real ones. */
+  async function realSession() {
+    await withSystem(async (c) => {
+      await c.query(`UPDATE devices SET state = 'OFFLINE' WHERE region = $1 AND state = 'READY'`, [REGION]);
+      await c.query(`UPDATE hosts SET endpoint = 'wss://dp.example' WHERE id = $1`, [agent.hostId]);
+      await c.query(
+        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities, local_id)
+         VALUES ($1,$2,'android','cuttlefish','fake','15','READY',
+                 '["screen-stream","input-datachannel","snapshot-reset"]'::jsonb, $3)`,
+        [agent.hostId, REGION, `tun-dev-${randomUUID().slice(0, 8)}`]);
+    });
+    const res = await fetch(`${baseUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tenantKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ region: REGION, platform: 'android' }),
+    });
+    const body = await res.json() as { session: { id: string }; dataPlane: { token: string } };
+    assert.equal(res.status, 201, `expected an allocation, got ${JSON.stringify(body)}`);
+    return body;
+  }
+
+  test('a browser drives a device through the control plane, on a worker that is not listening', async () => {
+    const created = await realSession();
+    const ws = await dial(`${wsBase()}/dp/${agent.hostId}`);
+
+    ws.send(JSON.stringify({ t: 'hello', token: created.dataPlane.token }));
+    const ready = await nextMessage(ws);
+    assert.equal(ready.t, 'ready', 'the AGENT verified the grant offline, at the far end of a relay');
+    assert.equal(ready.sessionId, created.session.id);
+
+    // And input reaches the device, which is the half that proves the relay is bidirectional
+    // rather than just an accepted handshake.
+    const before = backend.control.calls.length;
+    ws.send(JSON.stringify({ t: 'tap', x: 10, y: 20, seq: 1 }));
+    await waitFor(() => backend.control.calls.length > before, 'the tap to reach the device');
+    assert.ok(backend.control.calls.at(-1)?.startsWith('tap'), 'the device was tapped, not something else');
+    ws.close();
+  });
+
+  test('a forged grant is refused at the agent, not by the relay', async () => {
+    // The control plane opens the channel without looking at the payload — that is the design, and
+    // this is what makes it safe. The refusal has to come from the far end.
+    const ws = await dial(`${wsBase()}/dp/${agent.hostId}`);
+    ws.send(JSON.stringify({ t: 'hello', token: 'v1.eyJzaWQiOiJmYWtlIn0.AAAA' }));
+    const msg = await nextMessage(ws);
+    assert.equal(msg.t, 'error');
+    assert.equal(msg.code, 'bad_signature',
+      'not a generic refusal: the agent ran the signature check itself, at the far end of the relay');
+    ws.close();
+  });
+
+  test('a host with no agent connected says so, instead of hanging', async () => {
+    const ws = new WebSocket(`${wsBase()}/dp/${randomUUID()}`);
+    const closed = await nextClose(ws);
+    assert.equal(closed.code, 1013);
+    assert.match(closed.reason, /No agent is connected/,
+      'silence here reads to a viewer exactly like a broken device');
+  });
+
+  test('an unauthenticated tunnel dial is refused', async () => {
+    await assert.rejects(dial(`${wsBase()}/v1/workers/tunnel`), /401|Unexpected server response/);
+  });
+
+  test('a tenant key cannot open a tunnel', async () => {
+    // Principal separation: a tunnel is a WORKER's socket, and a tenant key must never become one.
+    await assert.rejects(
+      new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(`${wsBase()}/v1/workers/tunnel`, {
+          headers: { authorization: `Bearer ${tenantKey}` },
+        });
+        ws.once('open', () => resolve(ws));
+        ws.once('error', reject);
+      }),
+      /401|Unexpected server response/,
+    );
+  });
+
+  test('when the tunnel drops, viewers are told rather than frozen', async () => {
+    const created = await realSession();
+    const ws = await dial(`${wsBase()}/dp/${agent.hostId}`);
+    ws.send(JSON.stringify({ t: 'hello', token: created.dataPlane.token }));
+    assert.equal((await nextMessage(ws)).t, 'ready');
+
+    const closed = nextClose(ws);
+    tunnel.stop();
+    const { code } = await closed;
+    assert.equal(code, 1011, 'a dropped agent must close its viewers, not leave a still picture');
+
+    // And it comes back on its own, which is the whole reason a laptop closing its lid is survivable.
+    tunnel.start();
+    await waitFor(() => tunnel.connected, 'the tunnel to reconnect');
   });
 });

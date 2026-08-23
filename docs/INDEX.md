@@ -108,6 +108,7 @@ useful half.
 | [0005](adrs/0005-media-reachability.md) | Media reaches the browser through a **TURN relay** | An overlay network (Tailscale). It would require client software on every viewer's machine. |
 | [0006](adrs/0006-control-plane-and-device-host-are-separate.md) | Two machines | One box. The control plane must survive the device host being stopped — and it is stopped most of the time, because it is the expensive one. |
 | [0007](adrs/0007-live-view-signaling-relay.md) | Signaling relayed through the data plane; **media is not proxied** | Proxying media. It would put every frame through the control plane and make CSP a permanent fight. |
+| [0008](adrs/0008-physical-devices-behind-the-existing-agent.md) | Physical devices are a third **backend** behind the existing agent, reached over a tunnel the agent dials out | A second standalone agent, and a statically-routed `/dp/*`. A phone arrives on a laptop behind NAT, where neither works. |
 
 ---
 
@@ -247,11 +248,17 @@ gcloud compute instances stop mfarm-lab --zone asia-south1-c   # it bills by the
 
 ## 11. What is next
 
-1. **Nothing in the execution model.** §4.1–§4.5 are built and hardware-verified. Video stays
+1. **Physical Android devices** — decided 2026-08-24,
+   [ADR-0008](adrs/0008-physical-devices-behind-the-existing-agent.md). This reverses what §4 of
+   `E2E_MVP_PLAN.md` and Phase 7 of `product_guide_v2.md` said, on purpose and on instruction.
+   Milestone 0 is built and green but **has never run on hardware**: agent enrollment tokens,
+   org-pinned devices, and a data-plane tunnel the agent dials out so a phone on a NAT'd laptop is
+   reachable. The gate before anything is built on top of it is that the EXISTING Cuttlefish farm
+   still passes `verify-live.sh` and `verify-webdriver.mjs` through that tunnel.
+2. **Nothing in the execution model.** §4.1–§4.5 are built and hardware-verified. Video stays
    unbuilt until it records only failures.
-2. **The honest next question is not a capability** — it is whether a two-device farm with a working
-   execution model is worth putting in front of a second team. Everything after that depends on the
-   answer.
-3. **Standing constraints:** multi-instance is blocked by in-memory rate limiting; publishing is
+3. **The honest next question is still not a capability** — it is whether a two-device farm with a
+   working execution model is worth putting in front of a second team.
+4. **Standing constraints:** multi-instance is blocked by in-memory rate limiting; publishing is
    blocked because every package is `"private": true`; observability has no host metrics and no
    worker-side metrics.

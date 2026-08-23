@@ -259,6 +259,9 @@ export class Agent {
     return ['screen-stream', 'input-datachannel', 'snapshot-reset', ...install, ...automation];
   }
   get sessionPublicKey(): string | undefined { return this.state?.sessionPublicKey; }
+
+  /** The host's own bearer credential, once registration has issued one. */
+  get workerToken(): string | undefined { return this.state?.workerToken; }
   get bufferedEventCount(): number { return this.buffer.size; }
   deviceIdFor(localId: string): string | undefined { return this.state?.deviceIds[localId]; }
 

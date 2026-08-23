@@ -3,6 +3,7 @@ import { badRequest, conflict, forbidden, notFound } from '../errors.ts';
 import { requireUser } from '../server.ts';
 import { withSystem, withTenant } from '../../db.ts';
 import { createApiKey, revokeApiKey } from '../../auth.ts';
+import { createEnrollment, listEnrollments, revokeEnrollment } from '../../enrollment.ts';
 import { hashPassword } from '../../users.ts';
 
 /**
@@ -276,6 +277,61 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
     const { orgId } = requireOrgAdmin(req);
     const ok = await revokeApiKey(orgId, req.params.prefix);
     if (!ok) throw notFound('API key');
+    return { revoked: true };
+  });
+
+  /**
+   * ------------------------------------------------------------------- agent enrollment tokens
+   *
+   * The credential a person pastes into a laptop that has a phone plugged into it. Deliberately
+   * NOT the same thing as an API key, and the difference is the reason for a second table rather
+   * than a flag on the first: an API key is a standing credential that acts on an org's data, and
+   * this is a one-shot bootstrap that turns into a HOST — a different principal type entirely,
+   * which is why it expires, is used once, and records what it became.
+   *
+   * Admin-only, like API keys and for a stronger reason: enrolling a host puts a machine into the
+   * fleet, and its devices then take real sessions.
+   */
+  app.get('/account/agent-enrollments', async (req) => {
+    const { orgId } = requireUser(req);
+    return { enrollments: await listEnrollments(orgId) };
+  });
+
+  /**
+   * POST /v1/account/agent-enrollments — mint one. The plaintext in this response is the only copy.
+   *
+   * The TTL is short by default because the failure this table exists to prevent is a bootstrap
+   * secret outliving the afternoon someone set a laptop up. A person who lets one lapse mints
+   * another in one click; a person whose token still works six months later has a fleet-wide
+   * secret again, just with extra steps.
+   */
+  app.post<{ Body: { label?: string; ttlHours?: number } }>(
+    '/account/agent-enrollments',
+    { schema: { body: { type: 'object', properties: {
+      label: { type: 'string', maxLength: 120 },
+      ttlHours: { type: 'integer', minimum: 1, maximum: 168 },
+    } } } },
+    async (req, reply) => {
+      const { orgId, userId } = requireOrgAdmin(req);
+      const { plaintext, prefix, expiresAt } = await createEnrollment(
+        orgId, userId, req.body?.label?.trim() || null, req.body?.ttlHours ?? 24,
+      );
+      return reply.code(201).send({
+        enrollment: {
+          prefix,
+          expiresAt,
+          // Named so a client cannot mistake it for something retrievable later.
+          plaintextShownOnce: plaintext,
+        },
+      });
+    },
+  );
+
+  /** DELETE /v1/account/agent-enrollments/:prefix — revoke one before it is used. */
+  app.delete<{ Params: { prefix: string } }>('/account/agent-enrollments/:prefix', async (req) => {
+    const { orgId } = requireOrgAdmin(req);
+    const ok = await revokeEnrollment(orgId, req.params.prefix);
+    if (!ok) throw notFound('Agent enrollment');
     return { revoked: true };
   });
 }
