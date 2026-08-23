@@ -14,7 +14,8 @@ npm install
 MFARM_API_KEY=mfk_…                                    # console → Settings → API keys
 MFARM_HUB=https://farm.mfarm.dev                       # your farm
 MFARM_REGION=lab
-MEDISHOP_APK=/home/rkcr070707/apks/way2automation.apk  # a path ON THE DEVICE HOST
+MEDISHOP_APP_ID=com.way2automation.medishop@latest     # a build in the farm's app library
+MFARM_RUN_ID=$(date +%s)                               # optional — groups the eight into one run
 
 npm test
 ```
@@ -48,7 +49,24 @@ specific one, so nothing here pretends otherwise. `mfarm:queueTimeoutSeconds` tu
 into a queue rather than an instant failure.
 
 **The APK ships with the session.** Devices are powerwashed between tenants, so anything installed
-by hand beforehand is gone before your suite starts. `appium:app` is the only reliable route.
+by hand beforehand is gone before your suite starts, so the build has to arrive with the session
+that uses it. `mfarm:appId` names a build in the farm's **app library** — by id, or as
+`com.example.app@1.4.2`, or `com.example.app@latest` — and the farm installs it before the session
+opens. (`appium:app` still works and takes a path on the *device host*, which is exactly the coupling
+the library removes. Setting both is an error rather than a coin toss.)
+
+**One line makes the eight tests one run.** `mfarm:runId` takes an id your CI already has —
+`$GITHUB_RUN_ID`, a Jenkins build number, a uuid per `npm test`. Without it the suite arrives as
+eight unrelated device leases in a flat list; with it, it is one row in the console's **Runs**
+screen, showing the build under test, how many sessions it took and how many are still live. Nothing
+has to be created first: the farm creates the run when the first session names it and every later
+session joins it, so a suite that dies halfway leaves a run that simply stops growing. `farm.js`
+falls back to `$GITHUB_RUN_ID` on its own, and omits the capability entirely when neither is set —
+running locally with no run is the normal case.
+
+A run does **not** yet know how many tests passed. WebDriver has no concept of an assertion, so the
+farm sees sessions open and close and cannot tell a passing test from a failing one; it reports what
+it can see and says nothing about the rest.
 
 **One device per spec file, not per test.** Allocation takes seconds and the reset after release
 takes about a minute, so a device per test spends more time recycling than testing. This is the main
@@ -99,11 +117,9 @@ Three things the workflow does that are easy to leave out:
   but its screenshot is taken after Appium stops the app — the failure state only exists in the ones
   this suite captures.
 
-### Getting your build onto the device host
+### Getting your build onto the device
 
-`MEDISHOP_APK` is a path on the **device host**, which suits a fixed demo app and not a build that
-changes every commit. For a real app, upload it to the farm's app library instead and install it
-from there:
+Upload it, then name it. Nothing in your CI needs to be able to reach the device host.
 
 ```bash
 curl -X POST "$MFARM_HUB/v1/apps?filename=app.apk" \
@@ -112,4 +128,21 @@ curl -X POST "$MFARM_HUB/v1/apps?filename=app.apk" \
   --data-binary @app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Uploads are content-addressed, so pushing an unchanged build costs one row and no bytes.
+Uploads are content-addressed, so pushing an unchanged build costs one row and no bytes. The
+response carries the build's `id`; `mfarm:appId` takes that, or a coordinate:
+
+| `mfarm:appId` | resolves to |
+|---|---|
+| `9c3f8e1a-…` | that exact build. The reproducible one — pin it when a run must be repeatable. |
+| `com.example.app@1.4.2` | the newest build whose `versionName` is `1.4.2`. |
+| `com.example.app@latest` | the newest build of that package. What a nightly wants. |
+| `com.example.app` | the same as `@latest`. |
+
+The build that a session actually used comes back as `mfarm:appId` in the returned capabilities, so
+a `@latest` run records which build it resolved to rather than leaving it to be guessed afterwards.
+
+Two things to expect. The install adds **up to a heartbeat interval (10 s) plus the install itself**
+to session creation, because the control plane cannot dial a worker — it queues the job and the
+device's next beat collects it. And the app is installed but not *started* by the farm: the hub sets
+`appium:appPackage` to the resolved package so Appium brings it to the foreground, and a suite that
+needs a specific entry point sets `appium:appActivity` itself.

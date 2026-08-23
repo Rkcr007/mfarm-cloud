@@ -94,6 +94,16 @@ function seed(route: { name: string; id?: string | null }) {
     startedAt: new Date(Date.now() - 55_000).toISOString(),
     expiresAt: new Date(Date.now() + 600_000).toISOString(),
     endedAt: null, endReason: null,
+    run: { id: 'run-1', runId: '4471' },
+  };
+  const run = {
+    id: 'run-1', runId: '4471',
+    createdAt: new Date(Date.now() - 90_000).toISOString(),
+    sessions: { total: 3, live: 1, ended: 2 },
+    firstSessionAt: new Date(Date.now() - 90_000).toISOString(),
+    lastActivityAt: new Date(Date.now() - 5_000).toISOString(),
+    build: { id: 'app-1', packageName: 'com.acme.app', versionName: '1.0' },
+    buildCount: 1,
   };
   Object.assign(mod.state, {
     me: { user: { id: 'u1', email: 'someone@mfarm.local' }, org: { id: 'o1', name: 'Farm', slug: 'farm', maxConcurrent: 5 }, role: 'admin' },
@@ -103,6 +113,8 @@ function seed(route: { name: string; id?: string | null }) {
     apps: [{ id: 'app-1', packageName: 'com.acme.app', versionName: '1.0', sizeBytes: 1024, createdAt: new Date().toISOString(), label: 'Acme' }],
     actions: [{ id: 'a1', kind: 'install', state: 'SUCCEEDED', appId: 'app-1', deviceId: 'dev-1', sessionId: 'sess-1', requestedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }],
     detail: { ...session, dataPlane: null, ice: null, fetchedAt: Date.now() },
+    runs: [run],
+    runDetail: { id: route.id ?? 'run-1', run, sessions: [{ ...session, build: run.build }], loaded: true },
     held: null,
     route: { name: route.name, id: route.id ?? null },
     error: null,
@@ -120,6 +132,8 @@ describe('every screen renders', () => {
     { name: 'device', id: 'dev-1' },
     { name: 'apps' },
     { name: 'sessions' },
+    { name: 'runs' },
+    { name: 'run', id: '4471' },
     { name: 'cockpit', id: 'sess-1' },
     { name: 'queue' },
     { name: 'health' },
@@ -154,10 +168,10 @@ describe('every screen renders', () => {
 describe('screens survive an empty farm', () => {
   // The state a new install is in, and the one every "no devices yet" message exists for. A screen
   // that only works once data has arrived fails on the first morning somebody tries this.
-  for (const name of ['launch', 'devices', 'apps', 'sessions', 'queue', 'health', 'team', 'settings']) {
+  for (const name of ['launch', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'team', 'settings']) {
     test(`${name} renders with nothing in it`, () => {
       seed({ name });
-      Object.assign(mod.state, { devices: [], available: 0, sessions: [], apps: [], actions: [], detail: null, held: null });
+      Object.assign(mod.state, { devices: [], available: 0, sessions: [], apps: [], actions: [], runs: [], runDetail: null, detail: null, held: null });
       assert.ok(countElements(mod.SCREENS[name]()) > 0, `${name} produced no elements when empty`);
     });
   }
@@ -183,5 +197,31 @@ describe('the cockpit', () => {
   test('a session that is not visible renders an explanation, not a blank page', () => {
     seed({ name: 'cockpit', id: 'nope' });
     assert.match(textOf(mod.SCREENS.cockpit()), /not visible to this org/);
+  });
+});
+
+describe('the runs screens', () => {
+  test('a run whose sessions disagreed on the build names none of them', () => {
+    // The rule the schema and the API both hold, restated where a person actually reads it: a run
+    // that touched two builds must not show one of them as THE build. `buildCount` is what carries
+    // the difference, because `build: null` alone reads identically to "installed nothing".
+    seed({ name: 'runs' });
+    mod.state.runs = [{ ...mod.state.runs[0], build: null, buildCount: 2 }];
+    assert.match(textOf(mod.SCREENS.runs()), /2 builds/);
+  });
+
+  test('a run id that resolves to nothing says so, rather than loading forever', () => {
+    seed({ name: 'run', id: 'never-ran' });
+    mod.state.runDetail = { id: 'never-ran', run: null, sessions: [], loaded: true };
+    assert.match(textOf(mod.SCREENS.run()), /No run by that name/);
+  });
+
+  test('a detail fetch still in flight reads as loading, not as a missing run', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail = { id: '4471', run: null, sessions: [], loaded: false };
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /Loading/);
+    assert.ok(!/No run by that name/.test(text),
+      'telling somebody their run does not exist while it is still arriving is the worse error');
   });
 });

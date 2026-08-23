@@ -5,7 +5,10 @@ import { requireTenant } from '../server.ts';
 import { sessionBindingFromBasic } from '../../auth.ts';
 import { mintSessionToken, type SessionClaims } from '../../tokens.ts';
 import { ApiError } from '../errors.ts';
-import { parseCapabilities } from '../webdriver/capabilities.ts';
+import { parseCapabilities, type ParsedCapabilities } from '../webdriver/capabilities.ts';
+import { describeAppRef, resolveAppRef, type ResolvedApp } from '../../appref.ts';
+import { awaitAppAction, requestAppAction } from '../../appactions.ts';
+import { findOrCreateRun, stampSessionRun, type Run } from '../../runs.ts';
 import {
   WebDriverError, invalidSessionId, sessionNotCreated, toW3cBody, fromApiError,
 } from '../webdriver/errors.ts';
@@ -51,6 +54,21 @@ const WD_RATE_LIMIT_MAX = Number(process.env.MFARM_WD_RATE_LIMIT_MAX ?? 6_000);
 /** `pushFile` and `setClipboard` carry base64 payloads that blow past the 1 MB global limit. APKs
  *  are not meant to travel this way — `appium:app` takes a URL — but a few MB has to work. */
 const WD_BODY_LIMIT = Number(process.env.MFARM_WD_BODY_LIMIT ?? 16 * 1024 * 1024);
+
+/**
+ * How long `mfarm:appId` will wait for the app to land on the device before giving up.
+ *
+ * Generous on purpose, and the budget has three parts: up to one heartbeat (10 s) before the worker
+ * is even told, the download of an APK it may not have cached, and `adb install` plus the dexopt
+ * pass — which on a software-rendered Cuttlefish is the slow one. A session that dies at 30 s
+ * because a 150 MB build was still installing is a worse failure than one that took two minutes.
+ *
+ * Read when the plugin is REGISTERED rather than when this module is parsed, which is the same
+ * choice `appRoutes` makes for `loadConfig()` and for the same reason: `import` is hoisted above
+ * every statement in the importing file, so a module-scope read happens before a test — or a
+ * bootstrap that configures the process — has had a chance to set anything.
+ */
+const appInstallTimeoutMs = () => Number(process.env.MFARM_WD_APP_INSTALL_TIMEOUT_MS ?? 240_000);
 
 const POLL_INTERVAL_MS = 500;
 
@@ -191,7 +209,8 @@ export async function webdriverRoutes(app: FastifyInstance) {
   app.get('/status', routeOpts, async () => ({
     value: {
       ready: true,
-      message: 'mfarm WebDriver hub. Send platformName plus mfarm:region to POST /session.',
+      message: 'mfarm WebDriver hub. Send platformName plus mfarm:region to POST /session; '
+        + 'add mfarm:appId to have a build from your app library installed first.',
       build: { version: process.env.MFARM_VERSION ?? 'dev' },
     },
   }));
@@ -204,6 +223,20 @@ export async function webdriverRoutes(app: FastifyInstance) {
       defaultRegion: process.env.MFARM_DEFAULT_REGION,
       urlSessionId: sessionBindingFromBasic(req.headers.authorization),
     });
+
+    // Resolved BEFORE anything is allocated. A typo in `mfarm:appId` is the caller's mistake and
+    // costs nothing to catch here; catching it after allocation would have spent a device lease —
+    // and, when the farm is busy, a queue wait — to say "no such build".
+    const build = caps.appRef ? await resolveApp(orgId, caps) : null;
+
+    // The run is found-or-created here for the same reason, and it is cheap: one INSERT that
+    // usually conflicts. Doing it before allocation means a run row exists even for a session that
+    // never gets a device, which is correct — a CI job whose twenty tests all failed to allocate is
+    // a run that happened and produced nothing, and that is exactly what somebody will come looking
+    // for. Names are per-org and reused on purpose, so this creates one row per run, not per test.
+    const run = caps.runId
+      ? await withTenant(orgId, (c) => findOrCreateRun(c, { orgId, externalId: caps.runId! }))
+      : null;
 
     // Two ways in, and which one it is decides who owns the device afterwards.
     //
@@ -239,7 +272,9 @@ export async function webdriverRoutes(app: FastifyInstance) {
         ttlMinutes: caps.ttlMinutes,
         // A device with no automation server cannot serve this session. Demanding the capability up
         // front is the difference between "no capacity" and allocating, failing, and trying again.
-        requireCapabilities: ['webdriver'],
+        // `app-install` joins it when there is a build to put on the device, for the same reason:
+        // allocating a device that cannot install, then failing, wastes a lease and a reset.
+        requireCapabilities: build ? ['webdriver', 'app-install'] : ['webdriver'],
       });
       sessionId = alloc.sessionId;
       deviceId = alloc.deviceId;
@@ -251,8 +286,8 @@ export async function webdriverRoutes(app: FastifyInstance) {
           await release(orgId, sessionId, 'no_capacity');
           throw sessionNotCreated(
             caps.queueTimeoutSeconds > 0
-              ? `No ${caps.platform} device with an automation server became free in ${caps.queueTimeoutSeconds}s in region ${region}.`
-              : `No ${caps.platform} device with an automation server is free in region ${region}. Set the \`mfarm:queueTimeoutSeconds\` capability to wait for one instead of failing.`,
+              ? `No ${caps.platform} device ${wanted(build)} became free in ${caps.queueTimeoutSeconds}s in region ${region}.`
+              : `No ${caps.platform} device ${wanted(build)} is free in region ${region}. Set the \`mfarm:queueTimeoutSeconds\` capability to wait for one instead of failing.`,
             'no_capacity',
           );
         }
@@ -266,6 +301,13 @@ export async function webdriverRoutes(app: FastifyInstance) {
     // and usable by nobody until the reaper notices — but only the session's OWNER may release it,
     // which on the bound path is not us.
     try {
+      // Inside the try, so a refusal below still releases a device this handler allocated.
+      //
+      // Both paths land here. On the allocated path the session is seconds old and its `run_id` is
+      // trivially NULL; on the bound path the caller allocated it themselves and may already have
+      // labelled it, which is why this can fail rather than just assign.
+      if (run) await joinRun(orgId, sessionId, run);
+
       const target = await withSystem(async (c) => {
         const { rows } = await c.query(
           // COALESCE, not `d.automation_endpoint` alone: a v1 worker names one server for the whole
@@ -275,6 +317,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
           // host and sets no device column at all (migration 010). Preferring the device row is
           // what lets a v2 host point each device at its own gateway path.
           `SELECT d.local_id, d.host_id, d.adb_serial, d.system_port, d.mjpeg_server_port,
+                  d.capabilities,
                   COALESCE(d.automation_endpoint, h.automation_endpoint) AS automation_endpoint
              FROM devices d JOIN hosts h ON h.id = d.host_id
             WHERE d.id = $1`,
@@ -283,6 +326,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
         return rows[0] as {
           local_id: string | null; host_id: string; automation_endpoint: string | null;
           adb_serial: string | null; system_port: number | null; mjpeg_server_port: number | null;
+          capabilities: string[] | null;
         } | undefined;
       });
 
@@ -306,8 +350,30 @@ export async function webdriverRoutes(app: FastifyInstance) {
         );
       }
 
+      // The install goes first, and everything about the ordering is deliberate.
+      //
+      // Appium's `createSession` is what launches the app, so the build has to be on the device
+      // before that call — installing afterwards would mean the session opened against whatever was
+      // on screen and the test's first action ran against the wrong thing. It also costs nothing on
+      // the failure path: if the app cannot be installed, no automation session was ever started, so
+      // the error the suite gets is about its APK rather than about Appium.
+      if (build) {
+        await installBeforeSession(req, orgId, sessionId, deviceId!, target.capabilities, build);
+      }
+
       const base = target.automation_endpoint.replace(/\/+$/, '');
       const upstreamCaps: Record<string, unknown> = { ...caps.upstream };
+      // Appium is told WHICH app to bring to the foreground, since it is no longer the one handing
+      // over the APK. `appActivity` is deliberately not set: the driver resolves the launchable
+      // activity from the package, and guessing it here would be guessing at the caller's manifest.
+      // A suite that wants a specific entry point sets `appium:appActivity` itself.
+      //
+      // Only when the suite named no app of its own — `appium:app` cannot be here (the parser
+      // refuses it beside `mfarm:appId`), but a suite may legitimately preload one build and drive
+      // another, and an explicit `appium:appPackage` is how it says so.
+      if (build && upstreamCaps['appium:appPackage'] === undefined) {
+        upstreamCaps['appium:appPackage'] = build.packageName;
+      }
       // Overridden, never merged: a client that picks its own udid is choosing a device, and the
       // device it chooses may belong to another tenant right now.
       //
@@ -344,14 +410,33 @@ export async function webdriverRoutes(app: FastifyInstance) {
         throw sessionNotCreated(upstreamFailureMessage(upstreamRes), 'upstream_rejected');
       }
 
+      // The resolved build id rides back on the capabilities, and is stored with them.
+      //
+      // `com.acme.app@latest` resolves at session creation, so the same suite run twice can get two
+      // builds — which is the point of it, and exactly why the answer has to be recorded rather than
+      // left implicit. This is the line that makes "which build did last night's run actually use?"
+      // answerable, and a caller that wants to reproduce the run copies this value back into
+      // `mfarm:appId` to pin it.
+      const sessionCaps: Record<string, unknown> = {
+        ...created.capabilities,
+        ...(build ? { 'mfarm:appId': build.id } : {}),
+        // Echoed back for the same reason, minus the resolution: it is what the caller wrote, and
+        // seeing it in the returned capabilities is how a suite author confirms the run was joined
+        // rather than the capability quietly doing nothing.
+        ...(run ? { 'mfarm:runId': run.externalId } : {}),
+      };
+
       await withTenant(orgId, (c) =>
         c.query(
+          // `app_build_id` is a COLUMN as well as a capability (migration 020). The jsonb blob is
+          // kept for support — it is the upstream's answer, verbatim — but "which sessions ran this
+          // build" has to be an indexed foreign key, not a cast inside a predicate.
           `INSERT INTO webdriver_sessions
              (session_id, org_id, device_id, upstream_session_id, upstream_base_url, capabilities,
-              hub_allocated)
-           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+              hub_allocated, app_build_id)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
           [sessionId, orgId, deviceId, created.id, base,
-           JSON.stringify(redact(created.capabilities)), hubAllocated],
+           JSON.stringify(redact(sessionCaps)), hubAllocated, build?.id ?? null],
         ),
       );
 
@@ -364,11 +449,11 @@ export async function webdriverRoutes(app: FastifyInstance) {
 
       // The session id we hand back is the mfarm session id, not Appium's. One id in the test log,
       // the API, the artifact index and the invoice.
-      const value = { sessionId, capabilities: created.capabilities };
+      const value = { sessionId, capabilities: sessionCaps };
       return reply
         .code(200)
         .send(caps.protocol === 'jsonwp'
-          ? { sessionId, status: 0, value: created.capabilities }
+          ? { sessionId, status: 0, value: sessionCaps }
           : { value });
     } catch (err) {
       // Only the owner releases. On the bound path the caller is holding this session — `mfarm run`
@@ -584,6 +669,147 @@ export async function webdriverRoutes(app: FastifyInstance) {
     }
 
     return { sessionId, deviceId: row.device_id, fence: Number(row.fence) };
+  }
+
+  /** What the no-capacity message should say we were looking for. */
+  const wanted = (build: ResolvedApp | null) =>
+    build ? 'with an automation server that can install apps' : 'with an automation server';
+
+  /**
+   * Turn `mfarm:appId` into a build, or refuse the session naming what was not found.
+   *
+   * RLS does the scoping, so another org's build id is indistinguishable from one that never
+   * existed — the same disclosure boundary as everywhere else. What that costs is a slightly vaguer
+   * error, and the message earns it back by naming the two things that are actually wrong most of
+   * the time: nothing uploaded yet, or a version that never shipped.
+   */
+  async function resolveApp(orgId: string, caps: ParsedCapabilities): Promise<ResolvedApp> {
+    const ref = caps.appRef!;
+    const found = await withTenant(orgId, (c) => resolveAppRef(c, ref, caps.platform));
+    if (found) return found;
+
+    const written = caps.appRefRaw ?? describeAppRef(ref);
+    throw sessionNotCreated(
+      ref.kind === 'id'
+        ? `\`mfarm:appId\` names build ${written}, which is not in this account's app library. ` +
+          'Upload it with `mfarm app upload` (or `POST /v1/apps`) first.'
+        : `No ${caps.platform} build matches \`mfarm:appId: "${written}"\` in this account's app ` +
+          `library. Check the package name and version — \`mfarm app list\` shows what is there.`,
+      'no_such_app',
+    );
+  }
+
+  /**
+   * Label this session with the run the caller named, or refuse if it is already in another.
+   *
+   * A second WebDriver session against one `mfarm run` allocation, passing the same `mfarm:runId`,
+   * is ordinary and silent. Two DIFFERENT run ids on one session is a caller bug with no
+   * defensible resolution — the lease, its artifacts and its cost belong to one run or the other,
+   * and picking either would file them under a run that did not incur them. So it is refused, and
+   * the message names both ids because the caller is the only party who knows which is stale.
+   */
+  async function joinRun(orgId: string, sessionId: string, run: Run): Promise<void> {
+    const joined = await withTenant(orgId, (c) => stampSessionRun(c, { sessionId, runId: run.id }));
+    if (joined) return;
+
+    const existing = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query<{ external_id: string }>(
+        `SELECT r.external_id FROM sessions s JOIN runs r ON r.id = s.run_id WHERE s.id = $1`,
+        [sessionId],
+      );
+      return rows[0]?.external_id ?? null;
+    });
+
+    throw sessionNotCreated(
+      existing
+        ? `Session ${sessionId} is already part of run "${existing}", so it cannot also join ` +
+          `"${run.externalId}". Remove \`mfarm:runId\` from the capabilities, or start a new session.`
+        : `Session ${sessionId} could not be added to run "${run.externalId}" — it is no longer ` +
+          'available to label.',
+      'run_conflict',
+    );
+  }
+
+  /**
+   * Put the build on the device, and do not return until it is there.
+   *
+   * This reuses the app-action pipeline rather than adding a second way to install: the heartbeat
+   * carries the job down and `POST /v1/workers/events` carries the outcome up, which buys the fence
+   * re-check at delivery, the host-scoped blob authorisation, and the worker's digest verification
+   * for free (migrations 014 and 015). A direct call to the worker would have to re-earn all three,
+   * and the control plane cannot dial a worker anyway.
+   *
+   * The price is latency, and it is not small: nothing starts until the device's next heartbeat, so
+   * a session with `mfarm:appId` costs up to 10 s before `adb install` has even begun. That is the
+   * floor, it is paid on EVERY session — a device is powerwashed between leases, so nothing is ever
+   * already installed — and the fix if it starts to hurt is a shorter beat or a nudge on the
+   * automation endpoint, not a second install path.
+   */
+  async function installBeforeSession(
+    req: FastifyRequest,
+    orgId: string,
+    sessionId: string,
+    deviceId: string,
+    deviceCapabilities: string[] | null,
+    build: ResolvedApp,
+  ): Promise<void> {
+    // Checked here rather than trusted from the allocator, because the bound path never went
+    // through the allocator: `mfarm:sessionId` arrives holding a device somebody else chose.
+    if (!(deviceCapabilities ?? []).includes('app-install')) {
+      throw sessionNotCreated(
+        `The device on session ${sessionId} does not declare the \`app-install\` capability, so ` +
+        `\`mfarm:appId\` cannot be honoured. Its worker must expose an install path for this tier.`,
+        'no_app_install',
+      );
+    }
+
+    const action = await withTenant(orgId, (c) =>
+      requestAppAction(c, { sessionId, appId: build.id, kind: 'install' }));
+    if (!action) {
+      // The session was live a moment ago and the build resolved a moment before that, so this is a
+      // race with the reaper rather than a caller error.
+      throw sessionNotCreated(
+        `Session ${sessionId} stopped holding a device before ${build.packageName} could be installed.`,
+        'app_install_unqueued',
+      );
+    }
+
+    req.log.info(
+      { sessionId, deviceId, actionId: action.id, appId: build.id, packageName: build.packageName,
+        versionName: build.versionName },
+      'installing a library build before handing over the webdriver session',
+    );
+
+    const timeoutMs = appInstallTimeoutMs();
+    const outcome = await awaitAppAction(orgId, action.id, {
+      timeoutMs,
+      pollIntervalMs: POLL_INTERVAL_MS,
+      // A cancelled CI job is the common case for a long wait ending early. Nothing aborts the
+      // handler when the socket closes, and the caller's catch releases the device — so stopping
+      // here gives it back seconds rather than minutes.
+      abandoned: () => req.raw.destroyed,
+    });
+
+    if (outcome.state === 'DONE') return;
+    if (outcome.state === 'FAILED') {
+      // adb's own words, because they are the ones that name the cause — a bad signature, a wrong
+      // ABI, no space left. A category here would send the reader back to us for the detail.
+      throw sessionNotCreated(
+        `Installing ${build.packageName}${build.versionName ? ` ${build.versionName}` : ''} on the ` +
+        `device failed: ${outcome.error ?? 'the worker reported no reason'}`,
+        'app_install_failed',
+      );
+    }
+    if (outcome.state === 'GONE') {
+      throw sessionNotCreated(
+        `The install of ${build.packageName} was discarded before it ran.`, 'app_install_lost',
+      );
+    }
+    throw sessionNotCreated(
+      `${build.packageName} was still installing after ${Math.round(timeoutMs / 1000)}s. ` +
+      'The device may be offline, or the build may be very large — check `mfarm app status`.',
+      'app_install_timeout',
+    );
   }
 
   interface SessionRow {

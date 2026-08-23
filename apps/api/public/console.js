@@ -75,6 +75,15 @@ export const state = {
   sessions: [],
   apps: [],
   actions: [],
+  /**
+   * Runs — one row per CI job, not per test. The rollup is entirely server-side (`GET /v1/runs`):
+   * counts, the window, and the build, which is named only when every session in the run installed
+   * the same one. Nothing here derives a status, because a run has no end signal to derive one
+   * from — a sequential suite ends every session before starting the next.
+   */
+  runs: [],
+  /** `GET /runs/:id` for the run detail screen: the rollup plus every session in it. */
+  runDetail: null,
   /** GET /sessions/:id for the session we hold — the only source of expiresAt and dataPlane. */
   held: null,
   heldFetchedAt: 0,
@@ -567,6 +576,30 @@ async function refreshActions() {
   state.actions = (await api('/v1/app-actions?limit=100')).actions || [];
 }
 
+async function refreshRuns() {
+  state.runs = (await api('/v1/runs?limit=50')).runs || [];
+}
+
+/**
+ * One run and its sessions.
+ *
+ * Fetched on navigation rather than folded into the 5s poll: a run's session list is bounded by the
+ * suite that made it, not by the fleet, and re-fetching every run anyone has ever opened would grow
+ * the poll without bound. The stale check guards the case a person clicks through three runs
+ * quickly — a slower request for the first must not land on top of the third.
+ */
+async function loadRunDetail(id) {
+  if (state.runDetail?.id !== id) state.runDetail = { id, run: null, sessions: [], loaded: false };
+  try {
+    const out = await api(`/v1/runs/${encodeURIComponent(id)}`);
+    if (state.runDetail?.id !== id) return;
+    state.runDetail = { id, run: out.run, sessions: out.sessions || [], loaded: true };
+  } catch {
+    if (state.runDetail?.id !== id) return;
+    state.runDetail = { id, run: null, sessions: [], loaded: true };
+  }
+}
+
 /**
  * The held session's detail, which is the ONLY source of `expiresAt` and the data-plane
  * coordinates — the list endpoint deliberately returns neither.
@@ -590,19 +623,22 @@ async function refreshHeld(force = false) {
 }
 
 async function refreshAll() {
-  await Promise.all([refreshDevices(), refreshSessions(), refreshApps(), refreshActions()]);
+  await Promise.all([refreshDevices(), refreshSessions(), refreshApps(), refreshActions(), refreshRuns()]);
   await refreshHeld();
 }
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['devices', 'apps', 'sessions', 'queue', 'health', 'launch', 'team', 'settings']);
+const ROUTES = new Set(['devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'team', 'settings']);
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
   const [name, id] = raw.split('/');
   if (name === 'devices' && id) return { name: 'device', id };
   if (name === 'sessions' && id) return { name: 'cockpit', id };
+  // `#/runs/<id>` takes either half of a run's identity — the uuid, or the name the suite gave it.
+  // The API resolves both, so a person can paste a CI build number straight into the URL.
+  if (name === 'runs' && id) return { name: 'run', id: decodeURIComponent(id) };
   // `#/launch` picks; `#/launch/<sessionId>` watches one come up. The session id is in the URL so
   // that a reload mid-bring-up rejoins the same session rather than allocating a second device.
   if (name === 'launch' && id) return { name: 'launching', id };
@@ -627,6 +663,7 @@ window.addEventListener('hashchange', () => {
   }
   render();
   if (state.route.name === 'cockpit') loadSessionDetail(state.route.id).then(render);
+  if (state.route.name === 'run') loadRunDetail(state.route.id).then(render);
   if (state.route.name === 'launching') watchBringup(state.route.id);
 });
 
@@ -646,7 +683,7 @@ function renderChrome() {
   $('fs-holding').hidden = !held;
 
   // Nav highlight. The two detail routes keep their parent lit rather than lighting nothing.
-  const parent = { device: 'devices', cockpit: 'sessions', launching: 'launch' }[state.route.name] || state.route.name;
+  const parent = { device: 'devices', cockpit: 'sessions', run: 'runs', launching: 'launch' }[state.route.name] || state.route.name;
   for (const item of document.querySelectorAll('.navitem')) {
     item.classList.toggle('is-active', item.dataset.route === parent);
   }
@@ -2606,7 +2643,7 @@ function screenSessions() {
       rows.length
         ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
             h('thead', null, h('tr', null,
-              ['State', 'Session', 'Device', 'Region', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
+              ['State', 'Session', 'Run', 'Device', 'Region', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
             h('tbody', null, rows.map((s) => {
               const st = SESSION_STATE[s.state] || { label: s.state, tone: '' };
               return h('tr', null,
@@ -2618,6 +2655,12 @@ function screenSessions() {
                     catch { toast('Could not copy', 'Select the text instead.', 'bad'); }
                   }),
                 )),
+                // Both directions are navigable: a run lists its sessions, and a session names its
+                // run. Without this the flat list is still flat — you can find a run only if you
+                // already knew to look for it.
+                h('td', null, s.run
+                  ? btn(s.run.runId, 'tiny ghost', () => go(`#/runs/${encodeURIComponent(s.run.runId)}`))
+                  : h('span', { class: 'caption', text: '—' })),
                 h('td', { text: s.device || short(s.deviceId) }),
                 h('td', { text: s.region || '—' }),
                 h('td', { class: 'caption', text: s.startedAt ? ago(s.startedAt) : ago(s.createdAt), title: when(s.startedAt || s.createdAt) }),
@@ -2636,6 +2679,141 @@ function screenSessions() {
   ];
 }
 
+
+
+/* ---------------------------------------------------------------------------- runs */
+
+/**
+ * How a run's build reads, and it deliberately refuses to guess.
+ *
+ * `buildCount` is what separates the three real cases. A run whose sessions installed nothing is
+ * not the same as one that installed two different builds, and `build: null` alone cannot tell
+ * them apart — so the middle case says so in words rather than showing an em-dash that reads as
+ * "no build" for a run that had two.
+ */
+function runBuild(run) {
+  if (run.build) {
+    return h('span', { class: 'row tight' },
+      h('code', { text: run.build.packageName }),
+      run.build.versionName ? h('span', { class: 'caption', text: run.build.versionName }) : null,
+    );
+  }
+  if (run.buildCount > 1) {
+    return h('span', { class: 'caption', text: `${run.buildCount} builds`,
+      title: 'The sessions in this run installed different builds, so there is no single one to name.' });
+  }
+  return h('span', { class: 'caption', text: '—' });
+}
+
+/** One tile on the run detail header, in the shape the health screen already uses. */
+function runStat(label, value, note) {
+  return card(null, { class: 'stat stack tight' },
+    h('p', { class: 'micro', text: label }),
+    h('p', { class: 'row tight' }, value),
+    h('p', { class: 'caption', text: note }),
+  );
+}
+
+function screenRuns() {
+  const rows = state.runs;
+  return [
+    pageHead([{ label: 'Farm' }], 'Runs',
+      'One row per CI job, not per test. A suite joins a run by setting the mfarm:runId capability.'),
+    card(null, { class: 'flush' },
+      rows.length
+        ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
+            h('thead', null, h('tr', null,
+              ['Run', 'Build', 'Sessions', 'Live', 'Started', 'Last activity', ''].map((t) => h('th', { text: t })))),
+            h('tbody', null, rows.map((r) => h('tr', null,
+              h('td', null, h('code', { text: r.runId })),
+              h('td', null, runBuild(r)),
+              h('td', { class: 'tnum', text: String(r.sessions.total) }),
+              // Live is the ONLY honest "still going" signal: a run has no end of its own, and a
+              // sequential suite has no live session at all between two tests. So this is reported
+              // as a count of sessions rather than dressed up as a run status.
+              h('td', null, r.sessions.live > 0
+                ? pill(`${r.sessions.live} live`, 'ok', { live: true })
+                : h('span', { class: 'caption', text: '—' })),
+              h('td', { class: 'caption', text: r.firstSessionAt ? ago(r.firstSessionAt) : ago(r.createdAt),
+                title: when(r.firstSessionAt || r.createdAt) }),
+              h('td', { class: 'caption', text: r.lastActivityAt ? ago(r.lastActivityAt) : '—',
+                title: r.lastActivityAt ? when(r.lastActivityAt) : '' }),
+              h('td', { class: 'right' }, btn('Open', 'tiny ghost', () => go(`#/runs/${encodeURIComponent(r.runId)}`))),
+            ))),
+          ))
+        : empty('No runs yet.',
+            'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do.'),
+    ),
+    h('p', { class: 'caption mt-md',
+      text: 'A run has no pass or fail yet: WebDriver has no concept of an assertion, so the farm '
+        + 'sees sessions open and close and cannot tell a passing test from a failing one.' }),
+  ];
+}
+
+function screenRun(id) {
+  const d = state.runDetail;
+
+  // Two different empty states, because they mean opposite things to the person reading them. A
+  // fetch that has not landed is a spinner's worth of nothing; a fetch that came back with nothing
+  // is a wrong id, and telling someone "loading" forever for a typo is the worse of the two.
+  if (!d || d.id !== id || !d.loaded) {
+    return [pageHead([{ label: 'Farm' }, { label: 'Runs', to: '#/runs' }], id, 'Loading…')];
+  }
+  if (!d.run) {
+    return [
+      pageHead([{ label: 'Farm' }, { label: 'Runs', to: '#/runs' }], id),
+      card(null, {}, empty('No run by that name.',
+        'Runs are scoped to this org, so an id from someone else\'s farm will not resolve here.')),
+    ];
+  }
+
+  const run = d.run;
+  return [
+    pageHead([{ label: 'Farm' }, { label: 'Runs', to: '#/runs' }], run.runId,
+      `${run.sessions.total} session${run.sessions.total === 1 ? '' : 's'}, `
+      + `${run.sessions.live} still live.`),
+    h('div', { class: 'statgrid mb-gap' },
+      runStat('Build', runBuild(run),
+        run.buildCount > 1 ? 'The sessions did not agree' : 'Installed before each session'),
+      runStat('Sessions', h('span', { class: 'val tnum', text: String(run.sessions.total) }),
+        `${run.sessions.ended} ended, ${run.sessions.live} live`),
+      runStat('Started', h('span', { class: 'val',
+        text: run.firstSessionAt ? ago(run.firstSessionAt) : ago(run.createdAt) }),
+        when(run.firstSessionAt || run.createdAt)),
+      // SPAN, not duration. It is the gap between the first session and the last thing that
+      // happened, and a run has no end — so calling it a duration would invite reading it as one.
+      runStat('Span', h('span', { class: 'val tnum',
+        text: run.firstSessionAt ? duration(run.firstSessionAt, run.lastActivityAt) : '—' }),
+        'First session to last activity'),
+    ),
+    card('Sessions', { class: 'flush' },
+      d.sessions.length
+        ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
+            h('thead', null, h('tr', null,
+              ['State', 'Session', 'Device', 'Build', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
+            h('tbody', null, d.sessions.map((sn) => {
+              const st = SESSION_STATE[sn.state] || { label: sn.state, tone: '' };
+              return h('tr', null,
+                h('td', null, pill(st.label, st.tone, { live: sn.state === 'ACTIVE' })),
+                h('td', null, h('code', { text: sn.id })),
+                h('td', { text: sn.device || '—' }),
+                h('td', null, sn.build
+                  ? h('code', { text: `${sn.build.packageName}${sn.build.versionName ? `@${sn.build.versionName}` : ''}` })
+                  : h('span', { class: 'caption', text: '—' })),
+                h('td', { class: 'caption', text: sn.startedAt ? ago(sn.startedAt) : ago(sn.createdAt),
+                  title: when(sn.startedAt || sn.createdAt) }),
+                h('td', null, sn.startedAt && !sn.endedAt
+                  ? ticker('since', sn.startedAt)
+                  : h('span', { class: 'tnum', text: duration(sn.startedAt, sn.endedAt) })),
+                h('td', { class: 'right' }, btn('Open', 'tiny ghost', () => go(`#/sessions/${sn.id}`))),
+              );
+            })),
+          ))
+        : empty('This run has no sessions.',
+            'It was named by a session that never got a device — every one of its allocations failed.'),
+    ),
+  ];
+}
 
 
 /* ---------------------------------------------------------------------------- element inspector */
@@ -2934,6 +3112,7 @@ function commands() {
     { glyph: '■', label: 'Open Devices', group: 'Go', run: () => go('#/devices') },
     { glyph: '✚', label: 'Open Apps', group: 'Go', run: () => go('#/apps') },
     { glyph: '☰', label: 'Open Sessions', group: 'Go', run: () => go('#/sessions') },
+    { glyph: '▤', label: 'Open Runs', group: 'Go', run: () => go('#/runs') },
     { glyph: '⋮', label: 'Open Queue', group: 'Go', run: () => go('#/queue') },
     { glyph: '◎', label: 'Open Farm health', group: 'Go', run: () => go('#/health') },
   ];
@@ -3019,7 +3198,9 @@ $('palette-input').addEventListener('keydown', (e) => {
  * to.
  */
 let gPending = 0;
-const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', q: 'queue', h: 'health', l: 'launch', t: 'team', s: 'settings' };
+// `r` was already Sessions when Runs arrived, and rebinding it would have broken the one shortcut
+// people here use most. `u` is what "run" has left once r, n and s are taken.
+const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', t: 'team', s: 'settings' };
 
 /**
  * Is this keystroke meant for something that takes typing, rather than for the console?
@@ -3319,6 +3500,8 @@ export const SCREENS = {
   device: () => screenDevice(state.route.id),
   apps: () => screenApps(),
   sessions: () => screenSessions(),
+  runs: () => screenRuns(),
+  run: () => screenRun(state.route.id),
   cockpit: () => screenCockpit(state.route.id),
   queue: () => screenQueue(),
   health: () => screenHealth(),
@@ -3615,6 +3798,10 @@ async function boot() {
   state.route = parseHash();
   await refreshAll();
   if (state.route.name === 'cockpit') await loadSessionDetail(state.route.id);
+  // A run URL is the one people paste to each other — "what happened on 4471" — so a cold load of
+  // it has to fetch before the first paint, exactly like the cockpit. `hashchange` does not fire on
+  // load, and without this the screen renders its own empty state for a run that has plenty in it.
+  if (state.route.name === 'run') await loadRunDetail(state.route.id);
   render();
   startPoll();
   startTick();

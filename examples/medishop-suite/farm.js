@@ -12,6 +12,11 @@ import { remote } from 'webdriverio';
  *              clients let you configure. `MFARM_WEBDRIVER_URL` embeds it the same way.
  *   mfarm:region   which pool to allocate from. The allocator picks the device; there is no way to
  *              ask for a specific one, so nothing here pretends otherwise.
+ *   mfarm:appId    which build to put on the device, named from the farm's app library rather than
+ *              by a path on the host it happens to run on.
+ *   mfarm:runId    which RUN these sessions belong to. Eight tests otherwise arrive as eight
+ *              unrelated device leases; with this they are one row in the console's Runs screen,
+ *              and "what happened on build 4471" is a question with an answer.
  *
  * The device is ALLOCATED by `remote()` and RELEASED by `deleteSession()`. A suite that forgets the
  * second one holds a device until the lease expires, which on a two-device farm is half the fleet —
@@ -21,6 +26,17 @@ import { remote } from 'webdriverio';
 const HUB = new URL(process.env.MFARM_HUB ?? 'https://farm.mfarm.dev');
 const KEY = process.env.MFARM_API_KEY;
 const REGION = process.env.MFARM_REGION ?? 'lab';
+/** A build in the farm's app library: an id, `com.example.app@1.4.2`, or `com.example.app@latest`. */
+const APP_ID = process.env.MEDISHOP_APP_ID;
+/**
+ * The id of this run, from whatever the CI system already calls it.
+ *
+ * Nothing has to be created first and nothing has to be cleaned up: the farm creates the run when
+ * the first session names it and every later session joins it. Locally there is usually no such
+ * variable, and that is fine — a session with no run id simply belongs to no run.
+ */
+const RUN_ID = process.env.MFARM_RUN_ID ?? process.env.GITHUB_RUN_ID;
+/** A path on the DEVICE HOST. Works, and is why the library exists — see `appCapabilities` below. */
 const APP = process.env.MEDISHOP_APK;
 
 if (!KEY) throw new Error('MFARM_API_KEY is required. Mint one in the console under Settings → API keys.');
@@ -55,13 +71,37 @@ export function connect() {
       'appium:automationName': 'UiAutomator2',
       'appium:newCommandTimeout': 300,
       'appium:autoGrantPermissions': true,
-      // Ship the build with the session. Devices are powerwashed between tenants, so anything
-      // installed by hand beforehand is gone — the APK has to arrive with the session that uses it.
-      ...(APP ? { 'appium:app': APP } : { 'appium:appPackage': PACKAGE }),
+      ...appCapabilities(),
       'mfarm:region': REGION,
       'mfarm:queueTimeoutSeconds': 120,
+      // Spread rather than set, because an undefined capability value is still a key, and the hub
+      // refuses a `mfarm:runId` that is not a non-empty string. Omitting it is the local case.
+      ...(RUN_ID ? { 'mfarm:runId': String(RUN_ID) } : {}),
     },
   });
+}
+
+/**
+ * Where the app under test comes from. Three answers, best first.
+ *
+ * Devices are POWERWASHED between tenants, so anything installed by hand beforehand is gone before
+ * your suite starts. The build has to arrive with the session that uses it, one way or another.
+ *
+ *   mfarm:appId    the app library. Upload once (`POST /v1/apps`, or `mfarm app upload`), then name
+ *                  the build — by id for a pinned run, or `com.example.app@latest` for a nightly.
+ *                  The farm installs it before the session opens. Nothing in your CI needs to be
+ *                  able to reach the device host, which is the point.
+ *   appium:app     a path on the DEVICE HOST. Fine for a fixed demo app that somebody put there by
+ *                  hand; useless for a build that changes every commit.
+ *   appPackage     nothing is installed at all — for an app already baked into the device image.
+ *
+ * The two app forms are mutually exclusive and the hub says so rather than picking one, so this
+ * prefers the library and never sends both.
+ */
+function appCapabilities() {
+  if (APP_ID) return { 'mfarm:appId': APP_ID };
+  if (APP) return { 'appium:app': APP };
+  return { 'appium:appPackage': PACKAGE };
 }
 
 /**

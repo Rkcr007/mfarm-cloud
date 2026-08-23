@@ -127,6 +127,13 @@ devices"). It resets to first-boot state, keeps the group intact, and still sati
 `REQUIRED_FOR_TENANT_USE` actually means. An automation-only farm keeps `snapshot` and its 10s
 recycle; an interactive one pays ~80s per reset to have a screen.
 
+**And the mode has to govern the BOOT path, not only the reset path** — a distinction that cost a
+second debugging session. The first implementation changed `resetToSnapshot()` and left
+`restartExisting()` free to consult `snapshotOnDisk()`, so a snapshot left over from before the mode
+was set was still restored on startup: the farm came up restored, published no display, and lost the
+live view for exactly the reason the mode exists. `snapshotOnDisk()` now returns nothing in powerwash
+mode, which is what makes "this mode ignores snapshots entirely" true rather than aspirational.
+
 The console does not paper over the other case. A device that connects and publishes no display is
 its own state — `nodisplay` — which says exactly that and offers a screenshot, because `adb
 exec-out screencap` returns a real 720×1280 frame on precisely the device whose video is missing.

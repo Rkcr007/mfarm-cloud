@@ -1,8 +1,12 @@
 # Running test suites on MFARM — what exists, what does not, and what to build
 
-Written 2026-08-23 as a handoff. Read `HANDOFF.md` and `docs/E2E_MVP_PLAN.md` first for the
-platform; this file is only about **suite execution** — how a person submits a run, where it goes,
-and how they find out what broke.
+Written 2026-08-23 as a handoff, and updated the same day when §4.1 shipped. Read `HANDOFF.md` and
+`docs/E2E_MVP_PLAN.md` first for the platform; this file is only about **suite execution** — how a
+person submits a run, where it goes, and how they find out what broke.
+
+**Status: §4.1 (`mfarm:appId`) and §4.2 (`runs` + `mfarm:runId`) are both built and tested. "What
+failed on build 4471?" is now a query and a screen. What is still missing is the OUTCOME — §4.3 —
+so a run reports how many sessions it had and which build they ran, not how many passed.**
 
 ---
 
@@ -12,37 +16,48 @@ A stock WebdriverIO suite runs against the farm from a laptop. `examples/medisho
 worked example: 8 tests green against real Cuttlefish, and `ci-example.yml` is a GitHub Actions
 workflow that needs no MFARM CLI at all.
 
-The path is: `remote()` → hub (`/wd/hub/session`) → `allocate_device()` → Ed25519 grant → worker
-gateway → Appium → device. `deleteSession()` releases it, the device powerwashes, and the worker
-captures a logcat and a final screenshot as **artifacts** before the wipe.
+The path is: `remote()` → hub (`/wd/hub/session`) → `allocate_device()` → **`mfarm:appId` install,
+if asked for** → Ed25519 grant → worker gateway → Appium → device. `deleteSession()` releases it,
+the device powerwashes, and the worker captures a logcat and a final screenshot as **artifacts**
+before the wipe.
 
 **One WebDriver session = one device lease.** That is the whole execution model right now.
 
-## 2. The central gap: there is no "run"
+## 2. The central gap: CLOSED (2026-08-23), except for the outcome
 
-Nothing in the schema groups sessions. No `test_run` table, no `build_id`, no tag. A suite of
-twenty tests creates twenty rows in `sessions` with **no relationship between them**, and the
-console's Sessions screen is a flat chronological list.
+**This section described the defect that shaped everything below it, and half of it is now fixed.**
 
-So the question *"what failed on build 4471?"* is not slow to answer — it is **unanswerable**. You
-can find sessions by time and squint.
+Nothing in the schema grouped sessions: no `test_run` table, no `build_id`, no tag. A suite of
+twenty tests created twenty rows in `sessions` with **no relationship between them**, and the
+console's Sessions screen was a flat chronological list — so *"what failed on build 4471?"* was not
+slow to answer, it was unanswerable.
 
-Everything else below is downstream of this.
+Migration 020 and `mfarm:runId` close the grouping half (§4.2). A run is now a row, sessions belong
+to it, the build each session ran is an indexed column rather than a jsonb key, and the console has
+a Runs screen.
+
+**What remains is the word "failed".** WebDriver has no concept of an assertion — the farm sees a
+session open and close and cannot tell a passing test from a failing one — so a run reports its
+sessions, its window and its build, and says nothing at all about pass or fail. Making that real is
+§4.3, and it is now the one that matters most.
 
 ## 3. Answering the specific questions
 
 ### Which app gets installed?
 
-Today `appium:app` takes **a path on the device host**. That is why the example suite passes
-`/home/rkcr070707/apks/way2automation.apk` — a real user cannot use that.
+**Answered by `mfarm:appId` — built 2026-08-23, see §4.1.** A suite names a build in the app library
+and the farm installs it before the session opens. `appium:app` still works and still takes a path
+on the device host; the two are mutually exclusive and the hub refuses both rather than picking one.
 
-The app library already exists and is good: `app_builds` is content-addressed (`POST /v1/apps`,
-re-uploading an unchanged build costs one row and no bytes), and install/launch/uninstall run
-through `app_actions` over the worker heartbeat. But it is reachable **only from the console and the
-CLI**. There is no way for a WebDriver session to say "install build X".
+The recognised vendor namespace is now: `mfarm:region`, `mfarm:tier`, `mfarm:ttlMinutes`,
+`mfarm:sessionId`, `mfarm:queueTimeoutSeconds`, `mfarm:appId`, `mfarm:runId`. Anything else under
+the `mfarm:` prefix is **refused** — that rule was documented below before it was true, and is now
+enforced.
 
-The whole recognised vendor namespace is: `mfarm:region`, `mfarm:tier`, `mfarm:sessionId`,
-`mfarm:queueTimeoutSeconds`. That is it.
+### Which sessions belong together?
+
+**Answered by `mfarm:runId` — built 2026-08-23, see §4.2.** A suite stamps every session with an id
+its CI already has, and the farm creates the run on first use and joins it thereafter.
 
 ### Where are sessions stored, and how are they viewed?
 
@@ -66,44 +81,108 @@ priority, and no fair share between people. Correct, and slow.
 
 ## 4. What to build, in order
 
-### 4.1 `mfarm:appId` — the smallest change with the largest effect
+### 4.1 `mfarm:appId` — DONE (2026-08-23)
 
-Let a suite name a build from the library instead of a path on a host:
+A suite names a build from the library instead of a path on a host:
 
 ```js
 capabilities: {
   platformName: 'Android',
   'appium:automationName': 'UiAutomator2',
   'mfarm:region': 'lab',
-  'mfarm:appId': process.env.APP_ID,        // or 'com.acme.app@1.4.2', or '@latest'
+  'mfarm:appId': process.env.APP_ID,        // or 'com.acme.app@1.4.2', or 'com.acme.app@latest'
 }
 ```
 
-The hub resolves it against `app_builds` **scoped to the caller's org**, and the worker installs it
-from the library before handing the session over — the same content-addressed blob the console
-installs, so a build already on the device is a no-op.
+The hub resolves it against `app_builds` **scoped to the caller's org** (RLS, so another org's build
+id is indistinguishable from one that never existed), then queues an ordinary `app_actions` install
+and blocks until the worker reports it done. Four forms resolve:
 
-This removes the host-path coupling entirely and makes the CI story natural: upload the APK, get an
-id, pass the id. It is also the piece the user asked for by name.
+| `mfarm:appId` | resolves to |
+|---|---|
+| a uuid | that exact build — the reproducible form |
+| `com.acme.app@1.4.2` | the newest build with that `versionName` |
+| `com.acme.app@latest` | the newest build of the package |
+| `com.acme.app` | the same as `@latest` |
 
-Accept a package coordinate too (`com.acme.app@1.4.2`, `com.acme.app@latest`) — an id in a config
-file is opaque, and `@latest` is what a nightly wants.
+Six things that were decided while building it and are not obvious from the capability alone:
 
-### 4.2 `mfarm:runId` and a `runs` table — makes a hundred executions legible
+- **Resolution happens before allocation.** A typo must not spend a device lease, or on a busy farm
+  a queue wait, to say "no such build".
+- **The install goes before `POST /session` upstream.** Appium's `createSession` is what launches
+  the app, so a session opened first would have run its first command against the launcher.
+- **`app-install` joins `webdriver` in `requireCapabilities`,** so a device that cannot install is
+  never allocated for a session that needs one — and the no-capacity message says which requirement
+  went unmet, instead of making the farm look full.
+- **The resolved build id comes back** as `mfarm:appId` in the returned capabilities, and is stored
+  on the `webdriver_sessions` row. `@latest` is deliberately not reproducible; recording what it
+  resolved to is what keeps a nightly's result explicable. This is also the first column that will
+  matter to the Runs screen in §4.2.
+- **The hub sets `appium:appPackage`** to the resolved package so Appium foregrounds it, and does
+  not set `appium:appActivity` — the driver resolves the launchable activity, and guessing at the
+  caller's manifest would be worse than letting it. An explicit `appium:appPackage` from the suite
+  wins, because preloading a build is not the same as launching it.
+- **It costs up to one heartbeat (10 s) plus the install, on every session.** Nothing is ever already
+  installed: a device is powerwashed between leases. The control plane cannot dial a worker, so the
+  job goes down on the next beat — reusing that pipeline is what buys the fence re-check at delivery,
+  the host-scoped blob authorisation and the worker's digest verification for free. If the latency
+  starts to hurt, the fix is a shorter beat or a nudge on the automation endpoint, **not** a second
+  install path.
 
-A client-supplied id (a CI run number, a UUID per `npm test`) stamped on every session it creates.
+### 4.2 `mfarm:runId` and a `runs` table — DONE (2026-08-23)
 
-```sql
-runs(id, org_id, external_id, app_build_id, started_at, ended_at, meta jsonb)
-sessions.run_id → runs(id)
+A suite stamps every session it opens with an id its CI already has:
+
+```js
+capabilities: {
+  'mfarm:region': 'lab',
+  'mfarm:appId': process.env.APP_ID,
+  'mfarm:runId': process.env.GITHUB_RUN_ID,   // or a uuid per `npm test`
+}
 ```
 
-That alone buys:
+The FIRST session to use a name creates the run; every later one joins it. That is what makes it a
+one-line change with no coordination call, no run-create step that can fail, and nothing left to
+clean up when a suite dies halfway. Migration 020:
 
-- a **Runs** screen: one row per run, with the build under test, duration, and device count
-- "what failed on build X" as a query rather than an archaeology exercise
-- artifacts rolled up per run instead of per lease
-- retention and cost attribution per run
+```sql
+runs(id, org_id, external_id, created_at)      -- UNIQUE (org_id, external_id)
+sessions.run_id             → runs(id)
+webdriver_sessions.app_build_id → app_builds(id)
+```
+
+`GET /v1/runs` rolls up per run, `GET /v1/runs/:id` takes either the uuid **or the name** — so
+`/v1/runs/4471` works from a CI job that never saw a uuid — and the console has a Runs screen with
+both directions navigable: a run lists its sessions, a session names its run.
+
+Five things decided while building it that are not obvious from the capability:
+
+- **The unique index is `(org_id, external_id)`, and that is the whole safety argument for
+  client-chosen names.** Every CI system on earth numbers builds from 1, so two tenants both running
+  `mfarm:runId: '412'` is the ordinary case. A global index would have merged them — each org
+  reading the other's session list with no policy violated, because both genuinely own the row.
+- **There is no `ended_at` and no `status`, deliberately.** A run has no end signal, and the obvious
+  substitute is wrong in a way that would be believed: "the last session ended" would mark a
+  sequential twenty-test run finished nineteen times before it was. The window is derived from the
+  sessions and the live count is reported as a count; §4.3 is what makes a real end knowable. Same
+  reasoning as 019 removing `video` from the artifact kinds.
+- **No `app_build_id` on the run.** A run's sessions can legitimately name different builds — an
+  upgrade test, an A/B — so one denormalised column would silently pick a winner. The build is
+  recorded on the SESSION that installed it, and the run reports `buildCount`, naming a build only
+  when there is exactly one.
+- **`webdriver_sessions.app_build_id` is now a column, not just a jsonb key.** §4.1 already recorded
+  the resolved build, but inside `capabilities`, which is stored for support. "What failed on build
+  X" is the query this whole section exists for, and against jsonb it is a scan with a cast in the
+  predicate and no referential integrity. Migration 020 adds the column and backfills it, joined
+  through `app_builds` on org — the blob is tenant-influenced, so a value in it is a string that
+  looks like a build id until a real row confirms it.
+- **`mfarm:runId` is allowed beside `mfarm:sessionId`, unlike tier and ttl.** Those are instructions
+  to an allocator that has already run, so they are refused. A run id is a label and changes nothing
+  about which device was chosen, so `mfarm run` and an explicit run id compose. Two DIFFERENT run
+  ids on one session is refused: the lease and its cost belong to one run or the other.
+
+What is still missing is the outcome — see §4.3. A run today reports how many sessions it had and
+which build they ran, not how many passed.
 
 ### 4.3 Outcome reporting — the farm cannot know a test failed
 
@@ -136,7 +215,7 @@ host scoping and the fence check for free (migration 015 generalised the pipelin
 | capability | why |
 |---|---|
 | `mfarm:runId` | see 4.2 — the one that matters |
-| `mfarm:appId` / `mfarm:app` | see 4.1 |
+| ~~`mfarm:appId`~~ | built, see 4.1 |
 | `mfarm:name` | a human label per session, so the Sessions list reads as test names |
 | `mfarm:build` | commit sha / branch, for "which commit broke it" |
 | `mfarm:video` | opt in per session, since it costs CPU |
@@ -144,11 +223,28 @@ host scoping and the fence check for free (migration 015 generalised the pipelin
 | `mfarm:shard` / `mfarm:priority` | only meaningful past two devices; design now, build later |
 
 Keep the namespace small and typed, and keep rejecting unknown `mfarm:` keys — a silently ignored
-capability is the failure mode the whole vendor prefix exists to prevent.
+capability is the failure mode the whole vendor prefix exists to prevent. (That rejection did not
+actually exist until `mfarm:appId` shipped; an unrecognised `mfarm:` key was stripped and forgotten.
+`mfarm:appid` would have started a session on a device with no app on it and reported whatever the
+launcher showed.)
 
 ## 6. Where to start
 
-`mfarm:appId` first: it is self-contained, it unblocks real CI, and it needs no schema change beyond
-resolving an existing table. Then `runs` + `mfarm:runId`, then outcome reporting. Those three turn
-"I can run tests on the farm" into "our team runs suites and reads results", which is the actual
-product.
+~~`mfarm:appId` first~~ — **done**. ~~`runs` + `mfarm:runId`~~ — **done**. **Outcome reporting
+(§4.3) is next**, and it is the last of the three that turn "I can run tests on the farm" into "our
+team runs suites and reads results", which is the actual product.
+
+The reason it is last and not optional: the two that shipped make a run findable and tell you which
+build it ran, and then stop exactly where a person's question starts. A Runs screen that cannot say
+how many tests passed is a table of device leases with better grouping.
+
+`examples/medishop-suite` and its `ci-example.yml` are the worked example of both: upload the APK in
+a CI step, pass the id it returns, and pass `github.run_id` as `MFARM_RUN_ID`. Nothing in the
+workflow reaches the device host, and the eight tests arrive as one run.
+
+**Neither is verified on hardware yet.** `mfarm-lab` has been stopped since before §4.1 shipped, so
+the install chain (hub queues → real worker → `adb install` → Appium session) and the run stamping
+on top of it have only ever run against the real heartbeat and events endpoints with a test playing
+the worker. The specific thing to watch on the first hardware run is whether UiAutomator2 resolves
+the launchable activity from `appPackage` alone; if it does not, suites need one line of
+`appium:appActivity` and the fix is a note here, not code.

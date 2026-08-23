@@ -6,6 +6,7 @@ import { loadConfig } from '../../config.ts';
 import { appStore, BlobTooLargeError } from '../../appstore.ts';
 import { ApkParseError, readApkMetadata } from '../../apk.ts';
 import type { AppActionKind } from '@mfarm/protocol';
+import { LIVE_SESSION_STATES, requestAppAction, type AppActionRow } from '../../appactions.ts';
 import { requireTenant, requireWorker } from '../server.ts';
 import { badRequest, notFound, conflict } from '../errors.ts';
 
@@ -29,9 +30,6 @@ import { badRequest, notFound, conflict } from '../errors.ts';
  * no route by which a worker can enumerate or fetch an org's apps, which matters because a worker
  * is the least trusted thing here that still holds a credential.
  */
-
-/** Sessions that still hold a device. Installing against anything else has nowhere to land. */
-const LIVE_SESSION_STATES = ['ALLOCATING', 'ACTIVE'];
 
 interface AppRow {
   id: string;
@@ -64,17 +62,7 @@ function appJson(r: AppRow) {
   };
 }
 
-interface ActionRow {
-  id: string;
-  kind: string;
-  app_id: string;
-  session_id: string;
-  device_id: string;
-  state: string;
-  error: string | null;
-  requested_at: Date;
-  finished_at: Date | null;
-}
+type ActionRow = AppActionRow;
 
 function actionJson(r: ActionRow) {
   return {
@@ -355,20 +343,11 @@ export async function appRoutes(app: FastifyInstance) {
           );
         }
 
-        const { rows } = await c.query<ActionRow>(
-          `INSERT INTO app_actions (org_id, app_id, session_id, device_id, fence, kind)
-           SELECT s.org_id, a.id, s.id, s.device_id, s.fence, $4::app_action_kind
-             FROM sessions s, app_builds a
-            WHERE s.id = $1 AND a.id = $2
-              AND s.state = ANY($3::session_state[])
-              AND s.device_id IS NOT NULL AND s.fence IS NOT NULL
-           RETURNING *`,
-          [sessionId, appId, LIVE_SESSION_STATES, kind],
-        );
+        const action = await requestAppAction(c, { sessionId, appId, kind });
         // The session passed its checks a statement ago, so the only row the SELECT can be missing
         // now is the build — which RLS hides when it belongs to another org.
-        if (!rows[0]) throw notFound('App');
-        return rows[0];
+        if (!action) throw notFound('App');
+        return action;
       });
 
       return reply.code(202).send({
