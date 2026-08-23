@@ -188,6 +188,16 @@ export class LiveSession {
       case 'logcat-started':
         return;
 
+      case 'ui-dump': {
+        this.pending.get(msg.id)?.resolve(msg);
+        this.pending.delete(msg.id);
+        break;
+      }
+      case 'ui-dump-error': {
+        this.pending.get(msg.id)?.reject(new Error(msg.message || 'The device could not read the screen.'));
+        this.pending.delete(msg.id);
+        break;
+      }
       case 'screenshot': {
         const r = this.pending.get(msg.id);
         this.pending.delete(msg.id);
@@ -394,6 +404,21 @@ export class LiveSession {
 
     video.addEventListener('pointerdown', (e) => {
       video.focus();
+
+      /**
+       * INSPECT MODE SWALLOWS THE TOUCH.
+       *
+       * Picking an element and pressing it are different intentions, and a tester who is reading a
+       * screen to find a selector must not be navigating it at the same time — one stray tap on
+       * "Delete" while looking for its id is a bad afternoon. So while the inspector is on, a click
+       * selects and nothing reaches the device.
+       */
+      if (this.inspectMode) {
+        const [dx, dy] = scale(video, e.offsetX, e.offsetY);
+        this.o.onInspectPick?.(dx, dy);
+        return;
+      }
+
       echo(e);
       this.activePointers.add(e.pointerId);
       // Capture, so a drag that leaves the element still delivers its move and up events — without
@@ -546,6 +571,24 @@ export class LiveSession {
    * Correlated by id and answered through a promise, because a screenshot takes an adb round trip
    * and a person who presses the button twice must not be shown the first answer twice.
    */
+  /**
+   * Ask the worker for the view tree currently on screen.
+   *
+   * Same correlate-by-id shape as `screenshot`, and for the same reason: it costs an adb round trip
+   * and two presses of the button must not resolve each other's answer.
+   */
+  uiDump() {
+    const id = `u${Date.now()}${Math.random().toString(16).slice(2, 6)}`;
+    return new Promise((resolve, reject) => {
+      if (this.ws?.readyState !== WebSocket.OPEN) return reject(new Error('Not connected to the device.'));
+      this.pending.set(id, { resolve, reject });
+      this.#send({ t: 'ui-dump', id });
+      setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error('The device did not answer the inspector in 45s.'));
+      }, 45_000);
+    });
+  }
+
   screenshot() {
     const id = `s${Date.now()}${Math.random().toString(16).slice(2, 6)}`;
     return new Promise((resolve, reject) => {
@@ -572,4 +615,110 @@ export function parseLogLine(line) {
   const m = THREADTIME.exec(line);
   if (!m) return { time: '', level: '', tag: '', message: line, raw: line };
   return { time: m[1], pid: m[2], tid: m[3], level: m[4], tag: m[5].trim(), message: m[6], raw: line };
+}
+
+
+/* ---------------------------------------------------------------------------- inspector */
+
+/**
+ * Parse a uiautomator dump into a flat list of nodes with screen bounds.
+ *
+ * Flat rather than a tree, deliberately. The question this answers is "what is under my finger and
+ * how do I name it in a test" — that is a hit test and a selector, neither of which needs the
+ * hierarchy. A tree view is the thing every inspector adds and nobody scrolls.
+ *
+ * `DOMParser`, not a regex. The attribute values are arbitrary app strings: an app whose button
+ * says `size="10"` breaks a regex parser and produces a selector that silently matches nothing.
+ */
+export function parseHierarchy(xml) {
+  const doc = new DOMParser().parseFromString(xml, 'text/xml');
+  if (doc.querySelector('parsererror')) throw new Error('The device returned a hierarchy this browser could not parse.');
+
+  const out = [];
+  let i = 0;
+  for (const el of doc.querySelectorAll('*')) {
+    const b = /\[(\d+),(\d+)\]\[(\d+),(\d+)\]/.exec(el.getAttribute('bounds') || '');
+    if (!b) continue;
+    const [x1, y1, x2, y2] = b.slice(1).map(Number);
+    if (x2 <= x1 || y2 <= y1) continue;               // zero-area nodes cannot be pointed at
+    out.push({
+      i: i++,
+      cls: el.getAttribute('class') || el.tagName,
+      pkg: el.getAttribute('package') || '',
+      text: el.getAttribute('text') || '',
+      desc: el.getAttribute('content-desc') || '',
+      id: el.getAttribute('resource-id') || '',
+      clickable: el.getAttribute('clickable') === 'true',
+      enabled: el.getAttribute('enabled') !== 'false',
+      scrollable: el.getAttribute('scrollable') === 'true',
+      x1, y1, x2, y2,
+      area: (x2 - x1) * (y2 - y1),
+    });
+  }
+  return out;
+}
+
+/**
+ * The smallest node containing a point.
+ *
+ * Smallest, because the tree is nested and every ancestor also contains the point — the root
+ * contains every point on the screen. Picking by area is what makes clicking a button select the
+ * button rather than the window.
+ */
+export function nodeAt(nodes, x, y) {
+  let best = null;
+  for (const n of nodes) {
+    if (x < n.x1 || x > n.x2 || y < n.y1 || y > n.y2) continue;
+    if (!best || n.area < best.area) best = n;
+  }
+  return best;
+}
+
+const xpathLiteral = (v) =>
+  v.includes("'") ? `concat('${v.split("'").join(`', "'", '`)}')` : `'${v}'`;
+
+/**
+ * Selectors for a node, best first.
+ *
+ * ORDERED BY HOW WELL EACH SURVIVES THE NEXT BUILD, which is the only ranking that matters to
+ * someone writing a test:
+ *
+ *   resource-id      set deliberately by a developer, and the one thing here that is not content.
+ *   content-desc     also deliberate, and it is what a screen reader reads, so it tends to be kept.
+ *   text             visible copy. Works today and breaks on the first wording change or locale.
+ *   class + index    positional. Breaks when anything above it moves. Offered last and labelled as
+ *                    the fallback it is, because a person who has nothing else still needs a handle.
+ *
+ * Compose apps expose no resource-id at all, which is exactly why this list starts where it does
+ * and why the weak options are still here rather than hidden.
+ */
+export function selectorsFor(node, nodes) {
+  const out = [];
+  if (node.id) {
+    out.push({ how: 'id', strategy: 'id', value: node.id, quality: 'stable',
+               note: 'Set by the developer. Survives copy and layout changes.' });
+    out.push({ how: 'uiautomator', strategy: '-android uiautomator',
+               value: `new UiSelector().resourceId(${JSON.stringify(node.id)})`, quality: 'stable' });
+  }
+  if (node.desc) {
+    out.push({ how: 'accessibility id', strategy: 'accessibility id', value: node.desc, quality: 'stable',
+               note: 'The accessibility label. Usually kept because a screen reader depends on it.' });
+  }
+  if (node.text) {
+    out.push({ how: 'xpath by text', strategy: 'xpath', value: `//*[@text=${xpathLiteral(node.text)}]`,
+               quality: 'brittle', note: 'Visible copy — breaks on rewording or a second locale.' });
+  }
+  if (node.desc) {
+    out.push({ how: 'xpath by description', strategy: 'xpath',
+               value: `//*[@content-desc=${xpathLiteral(node.desc)}]`, quality: 'ok' });
+  }
+  // Positional fallback: index among same-class nodes, 1-based the way XPath counts.
+  const sameClass = nodes.filter((n) => n.cls === node.cls);
+  const idx = sameClass.indexOf(node) + 1;
+  if (idx > 0) {
+    out.push({ how: 'xpath by position', strategy: 'xpath',
+               value: `(//${node.cls})[${idx}]`, quality: 'brittle',
+               note: 'Positional. Breaks whenever anything above it on the screen moves.' });
+  }
+  return out;
 }

@@ -36,6 +36,7 @@ export const CAPABILITIES = [
   'recording',
   'logcat',
   'screenshot',       // a single frame on demand, out of band from the media stream
+  'ui-hierarchy',        // the on-screen view tree on demand, for building selectors
   'network-capture',     // per-session proxy: isolation + record/replay + waterfall (v2 decision 9)
   'gpu',                 // hardware rendering available; absent means software rendering only
   'webdriver',           // an automation (Appium) server fronts this device, so it can serve the
