@@ -1677,7 +1677,11 @@ function stagePanel(sess, live) {
       autoplay: true, playsinline: true, tabindex: '0',
     });
     const overlay = h('div', { class: 'dev-overlay' });
-    const frame = h('div', { class: 'dev-frame' }, video, overlay);
+    // Local echo of your own taps, and the badge that says the keyboard is pointed at Android.
+    // Both are pure feedback: neither asserts anything about what the device did.
+    const taps = h('div', { class: 'dev-taps' });
+    const kbd = h('span', { class: 'dev-kbd', text: 'Keyboard → device' });
+    const frame = h('div', { class: 'dev-frame' }, video, overlay, taps, kbd);
     const screenWrap = h('div', { class: 'dev-fit' }, frame);
     const toolbar = h('div', { class: 'devbar' });
     const caption = h('p', { class: 'caption dev-caption' });
@@ -2749,10 +2753,24 @@ $('palette-input').addEventListener('keydown', (e) => {
 let gPending = 0;
 const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', q: 'queue', h: 'health', l: 'launch', t: 'team', s: 'settings' };
 
+/**
+ * Is this keystroke meant for something that takes typing, rather than for the console?
+ *
+ * THE DEVICE SCREEN COUNTS, and leaving it out was a real bug. A focused `<video>` is not an INPUT,
+ * a TEXTAREA or a SELECT, so every character typed at a live device also ran the console's
+ * single-letter shortcuts: an email address contains `r` (release), `s` (screenshot), `l` (logcat)
+ * and `g`+letter (navigate away). The first of those to fire moved focus off the video and the rest
+ * of the typing vanished, which read as "the keyboard does not work".
+ *
+ * `live.js` also stops propagation at the source. Both exist deliberately: that one is the fix,
+ * this one is the guard for any future path that reaches the device without going through it.
+ */
 function inField(e) {
   const t = e.target;
-  return t instanceof HTMLElement
-    && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
+  if (!(t instanceof HTMLElement)) return false;
+  if (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) return true;
+  // The mirrored device: anything typed here belongs to Android, not to this page.
+  return t.classList.contains('dev-video');
 }
 
 document.addEventListener('keydown', (e) => {

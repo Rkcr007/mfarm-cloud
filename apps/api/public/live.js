@@ -368,8 +368,33 @@ export class LiveSession {
       }));
     };
 
+    /**
+     * Echo the touch locally, at once.
+     *
+     * The device's answer has to travel to the host, through Android, back out through the encoder
+     * and over WebRTC before a tap is visible — tens of milliseconds on a good day and far more on
+     * a relayed path. Until then the screen looks like it ignored you, and the instinct is to tap
+     * again, which on a real UI means two taps. Drawing the ring here costs nothing and removes the
+     * whole class of doubt. It reflects YOUR input, never the device's state.
+     */
+    const echo = (e) => {
+      const layer = video.parentElement?.querySelector('.dev-taps');
+      if (!layer) return;
+      const r = video.getBoundingClientRect();
+      const dot = document.createElement('span');
+      dot.className = 'tap-ripple';
+      dot.style.left = `${e.clientX - r.left}px`;
+      dot.style.top = `${e.clientY - r.top}px`;
+      layer.append(dot);
+      // Removed on its own animation's end rather than a timer, so a reduced-motion user (whose
+      // animation is ~0ms) does not accumulate rings.
+      dot.addEventListener('animationend', () => dot.remove(), { once: true });
+      setTimeout(() => dot.remove(), 1000);
+    };
+
     video.addEventListener('pointerdown', (e) => {
       video.focus();
+      echo(e);
       this.activePointers.add(e.pointerId);
       // Capture, so a drag that leaves the element still delivers its move and up events — without
       // it a swipe that overshoots the phone's edge leaves the device believing a finger is still
@@ -392,6 +417,21 @@ export class LiveSession {
         // Prevented so that space does not scroll the console and tab does not move focus out of
         // the device the person is typing into.
         if (e.cancelable) e.preventDefault();
+
+        // STOPPED, and this is the whole reason typing into the device used to do nothing.
+        //
+        // `preventDefault` suppresses the BROWSER's default action. It does not stop the event
+        // bubbling, so every keystroke aimed at the device also reached the console's global
+        // shortcut layer — which reads bare letters as commands. Typing an email address ran `r`
+        // (release the device), `s` (screenshot), `l` (logcat) and `g`+letter (navigate away), and
+        // the moment one of those opened a dialog or changed the route the video lost focus, so the
+        // REST of the address went nowhere at all. The symptom was "the keyboard does not work";
+        // the cause was that it worked and something else ate it.
+        //
+        // The console's `inField()` also learned about this element, so the guard exists on both
+        // sides: this line keeps the event from ever arriving, and that one refuses it if it does.
+        e.stopPropagation();
+
         this.input.send(JSON.stringify({ type: 'keyboard', keycode: e.code, event_type: e.type }));
       });
     }
