@@ -411,6 +411,45 @@ export class LiveSession {
     };
     for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) video.addEventListener(ev, up);
 
+    /**
+     * Modifier keys, which the device only learns about from their own key events.
+     *
+     * Cuttlefish's input protocol carries a keycode and nothing else — there is no field for "shift
+     * was held". The device builds that state from `ShiftLeft` keydown/keyup like a real keyboard,
+     * so it works for a person pressing Shift and breaks for anything that produces a character
+     * WITHOUT emitting the modifier's own event: an on-screen keyboard, an IME, an accessibility
+     * tool, a remote-desktop client, a test harness. Verified here — a synthetic `Shift+2` arrives
+     * as `code=Digit2 key="@" shiftKey=true` with no ShiftLeft event at all, and the device
+     * faithfully typed `2`.
+     *
+     * So the flags are honoured directly: if a key says a modifier was held and the device has not
+     * been told, press it first and release it after. A real Shift keypress still goes through as
+     * itself and is tracked, so nothing is pressed twice.
+     */
+    const MOD_FOR = { shiftKey: 'ShiftLeft', ctrlKey: 'ControlLeft', altKey: 'AltLeft', metaKey: 'MetaLeft' };
+    const IS_MOD = /^(Shift|Control|Alt|Meta)(Left|Right)$/;
+    const heldMods = new Set();   // what the DEVICE believes is down
+    const synthMods = new Set();  // ...of which these were pressed by us, not by the person
+
+    const sendKey = (code, type) =>
+      this.input.send(JSON.stringify({ type: 'keyboard', keycode: code, event_type: type }));
+
+    /**
+     * Let go of everything on the way out.
+     *
+     * A modifier is only released by its keyup, and a keyup only arrives if the element still has
+     * focus. Lose focus mid-chord — alt-tab, a dialog, or the five-second re-render this console
+     * used to do — and the device is left holding Shift forever, turning every subsequent keystroke
+     * into the wrong character. That is invisible, sticky, and looks exactly like a broken keyboard.
+     */
+    const releaseMods = () => {
+      if (this.input?.readyState !== 'open') { heldMods.clear(); synthMods.clear(); return; }
+      for (const code of heldMods) sendKey(code, 'keyup');
+      heldMods.clear();
+      synthMods.clear();
+    };
+    video.addEventListener('blur', releaseMods);
+
     for (const ev of ['keydown', 'keyup']) {
       video.addEventListener(ev, (e) => {
         if (this.input?.readyState !== 'open') return;
@@ -432,7 +471,32 @@ export class LiveSession {
         // sides: this line keeps the event from ever arriving, and that one refuses it if it does.
         e.stopPropagation();
 
-        this.input.send(JSON.stringify({ type: 'keyboard', keycode: e.code, event_type: e.type }));
+        // A modifier pressed by the person: forward it and remember the device now holds it.
+        if (IS_MOD.test(e.code)) {
+          if (e.type === 'keydown') heldMods.add(e.code); else { heldMods.delete(e.code); synthMods.delete(e.code); }
+          sendKey(e.code, e.type);
+          return;
+        }
+
+        // An ordinary key. Bring the device's modifier state up to date first.
+        if (e.type === 'keydown') {
+          for (const [flag, code] of Object.entries(MOD_FOR)) {
+            if (!e[flag]) continue;
+            // Already down — either because the person is holding it, or the other side of the pair.
+            if ([...heldMods].some((c) => c.startsWith(code.replace(/(Left|Right)$/, '')))) continue;
+            sendKey(code, 'keydown');
+            heldMods.add(code);
+            synthMods.add(code);
+          }
+        }
+
+        sendKey(e.code, e.type);
+
+        // Release only what we pressed, and only once the key it qualified has gone up.
+        if (e.type === 'keyup' && synthMods.size) {
+          for (const code of synthMods) { sendKey(code, 'keyup'); heldMods.delete(code); }
+          synthMods.clear();
+        }
       });
     }
   }

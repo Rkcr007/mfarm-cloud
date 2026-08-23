@@ -990,17 +990,16 @@ kbd {
    there is nothing to tell you whether the next thing you type reaches the phone or the page. */
 .dev-video:focus { box-shadow: inset 0 0 0 2px var(--mf-accent, #755EB8); }
 
-/* Says where the keystrokes are going, because a ring alone does not explain itself the first
-   time. Shown only while the screen actually holds focus. */
+/* Says where the keystrokes are going, because the focus ring alone does not explain itself the
+   first time. BELOW the phone, never on it: an earlier version floated this inside the bezel, where
+   it covered Android's navigation bar and sat in the swipe-up gesture zone. Nothing overlays the
+   device screen — that screen is the thing under test and must be seen as the device draws it. */
 .dev-kbd {
-  position: absolute; left: 50%; transform: translateX(-50%);
-  bottom: 10px; z-index: 3; pointer-events: none;
-  padding: 4px 10px; border-radius: 999px;
   font-size: 11px; letter-spacing: .04em; white-space: nowrap;
-  color: #fff; background: rgba(117, 94, 184, .92);
+  color: var(--mf-accent, #755EB8);
   opacity: 0; transition: opacity .12s ease;
 }
-.dev-frame:focus-within .dev-kbd { opacity: 1; }
+.devpanel:focus-within .dev-kbd { opacity: 1; }
 
 /* Touch feedback, drawn locally the instant the pointer goes down.
    The round trip to the device and back through the encoder is tens of milliseconds at best, so
@@ -1038,8 +1037,13 @@ kbd {
 .dev-caption {
   grid-area: caption;
   padding-top: 10px;
-  text-align: center;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
+.dev-caption-text { margin: 0; }
 
 @media (max-width: 720px) {
   .devpanel { grid-template-columns: 1fr; grid-template-areas: "stage" "bar" "caption"; }
