@@ -219,7 +219,7 @@ export class CuttlefishDevice implements DeviceControl {
       // here because the methods below now exist.
       capabilities: [
         'screen-stream', 'input-datachannel',
-        'app-install', 'logcat', 'screenshot',
+        'app-install', 'logcat', 'screenshot', 'ui-hierarchy',
       ] as Capability[],
       screen: { width: 720, height: 1280, density: 320 },
       // Published, not just used internally. This class has always known the serial — every adb
@@ -816,6 +816,38 @@ export class CuttlefishDevice implements DeviceControl {
     return {
       stop: () => { p.kill('SIGTERM'); },
     };
+  }
+
+  /**
+   * The view tree on screen, via uiautomator.
+   *
+   * `exec-out ... /dev/tty` rather than dumping to a file and catting it back: one round trip
+   * instead of three, and no temporary left on the device's storage for the next tenant to find.
+   * uiautomator appends a human line after the document, so everything past `</hierarchy>` is cut.
+   *
+   * THE FAILURE WORTH NAMING IS THE ONE PEOPLE WILL HIT. `uiautomator dump` needs the accessibility
+   * pipeline to itself, and Appium's UiAutomator2 server holds it for the length of a WebDriver
+   * session — so on a device that is mid-suite this returns "could not get idle state" or nothing
+   * at all. That is not a broken inspector, it is two tools wanting the same lock, and the message
+   * says so rather than leaving someone to wonder why the panel is empty.
+   */
+  async uiHierarchy(): Promise<string> {
+    const out = (await runBinary(
+      'adb', ['-s', this.adbSerial, 'exec-out', 'uiautomator', 'dump', '/dev/tty'], 45_000,
+    )).toString('utf8');
+
+    const end = out.lastIndexOf('</hierarchy>');
+    if (end === -1) {
+      const said = out.replace(/\s+/g, ' ').trim().slice(0, 200);
+      if (/idle|Killed|ERROR/i.test(said)) {
+        throw new Error(
+          `uiautomator could not read the screen on ${this.info.localId}. This usually means an `
+          + `Appium session is driving this device and holds the accessibility service. adb said: ${said}`);
+      }
+      throw new Error(`uiautomator returned no hierarchy on ${this.info.localId}: ${said || '(nothing)'}`);
+    }
+    const start = out.indexOf('<');
+    return out.slice(start === -1 ? 0 : start, end + '</hierarchy>'.length);
   }
 
   /**

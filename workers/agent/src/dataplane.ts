@@ -31,7 +31,8 @@ type ClientMessage =
   | { t: 'signal-open' }
   | { t: 'signal'; payload: unknown }
   | { t: 'logcat'; action: 'start' | 'stop' }
-  | { t: 'screenshot'; id?: string };
+  | { t: 'screenshot'; id?: string }
+  | { t: 'ui-dump'; id?: string };
 
 /** Input verbs, and the only messages the coalesce/queue machinery below applies to. */
 const INPUT = new Set(['tap', 'swipe', 'key', 'text', 'rotate']);
@@ -192,6 +193,7 @@ export class DataPlane {
       case 'signal':      return this.onSignal(ws, conn, msg.payload);
       case 'logcat':      return this.onLogcat(ws, conn, msg.action);
       case 'screenshot':  return this.onScreenshot(ws, conn, msg.id);
+      case 'ui-dump':     return this.onUiDump(ws, conn, msg.id);
       default: break;
     }
     // An unknown verb is a client speaking a newer protocol than this worker. Answering rather than
@@ -391,6 +393,28 @@ export class DataPlane {
       });
     } catch (e) {
       this.send(ws, { t: 'screenshot-error', id, message: (e as Error).message });
+    }
+  }
+
+  /**
+   * The view tree on screen, on demand.
+   *
+   * Out of the coalescing queue for the same reason a screenshot is: it costs an adb round trip,
+   * and putting it behind the input queue would let one slow dump stall every tap behind it.
+   *
+   * The XML travels as-is. It is a few tens of kilobytes on a busy screen, it is text on a socket
+   * that is already JSON, and parsing it in the worker would put a second copy of Android's layout
+   * format somewhere it has to be kept in step.
+   */
+  private async onUiDump(ws: WebSocket, conn: Conn, id?: string): Promise<void> {
+    const control = conn.backend!.control;
+    if (!control.uiHierarchy) {
+      return this.send(ws, { t: 'ui-dump-error', id, message: 'This device does not declare the ui-hierarchy capability.' });
+    }
+    try {
+      this.send(ws, { t: 'ui-dump', id, xml: await control.uiHierarchy(), takenAt: new Date().toISOString() });
+    } catch (e) {
+      this.send(ws, { t: 'ui-dump-error', id, message: (e as Error).message });
     }
   }
 

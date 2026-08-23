@@ -1234,3 +1234,46 @@ kbd {
   background: var(--s-inset, rgba(255,255,255,.04));
   border: 1px solid var(--s-line, rgba(255,255,255,.10));
 }
+
+/* ---------------------------------------------------------------- element inspector */
+
+/* The selection box, drawn in the pointer-transparent tap layer and only while inspecting. */
+.insp-box {
+  position: absolute;
+  border: 2px solid var(--mf-accent, #755EB8);
+  background: rgba(117, 94, 184, .16);
+  border-radius: 2px;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .55);
+}
+.insp-tag {
+  position: absolute; top: -19px; left: -2px;
+  padding: 1px 6px; border-radius: 4px 4px 0 0;
+  font-size: 10px; line-height: 16px; white-space: nowrap;
+  color: #fff; background: var(--mf-accent, #755EB8);
+}
+
+/* While inspecting, the screen is something you are reading rather than pressing. */
+.devpanel[data-inspect="on"] .dev-video { cursor: cell; }
+
+.insp-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.insp-cls { font-size: 12px; color: var(--t-primary, #F1F1F1); word-break: break-all; }
+
+.insp-attrs { display: grid; gap: 4px; margin-top: 10px; }
+.insp-attr { gap: 10px; align-items: baseline; }
+/* Values are arbitrary app strings and some are long; wrap rather than push the rail wide. */
+.insp-attrv { font-size: 11px; text-align: right; word-break: break-all; max-width: 68%; }
+
+.insp-sel {
+  display: grid; gap: 5px;
+  padding: 8px 9px; border-radius: 8px;
+  background: var(--s-inset, rgba(255,255,255,.035));
+  border: 1px solid var(--s-line, rgba(255,255,255,.08));
+}
+.insp-copy { display: flex; align-items: center; gap: 8px; }
+/* `all` so one click takes the whole selector — half an xpath fails somewhere far from here. */
+.insp-val {
+  flex: 1; min-width: 0;
+  font-size: 11px; line-height: 1.5; word-break: break-all;
+  user-select: all; -webkit-user-select: all;
+}

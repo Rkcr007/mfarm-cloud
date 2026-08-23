@@ -145,6 +145,26 @@ export interface DeviceControl {
   rotate?(direction: 'left' | 'right'): Promise<void>;
 
   /**
+   * The view tree currently on screen, as the platform's own XML.
+   *
+   * EXISTS BECAUSE SELECTORS HAVE TO COME FROM SOMEWHERE. A person writing an Appium test needs to
+   * know what is on the screen and what identifies it, and on a Compose app there is nothing to
+   * guess from — Compose emits no resource-ids at all, so `findElement(By.id(...))` has nothing to
+   * match and the only usable handles are text and content-desc. Without this the answer is "dump
+   * the page source over the WebDriver API and read XML by hand", which is a thing people do and
+   * should not have to.
+   *
+   * Returns the raw document rather than a parsed tree: the shape differs per platform, the console
+   * is the only consumer, and a parser in the worker would be a second place to keep in step with
+   * whatever Android emits next.
+   *
+   * OPTIONAL, like every other capability here. A backend that implements it declares
+   * `ui-hierarchy`; one that does not, does not, and the console offers no inspector rather than an
+   * inspector that never fills.
+   */
+  uiHierarchy?(): Promise<string>;
+
+  /**
    * One frame, right now, as encoded image bytes.
    *
    * Deliberately NOT a way to build a video: it shells out, it costs a round trip and an encode,

@@ -21,7 +21,7 @@
  *      action is a job a heartbeat carries down. Nothing reports success before the worker does.
  */
 
-import { ATTACHED, LiveSession, parseLogLine } from '/live.js';
+import { ATTACHED, LiveSession, parseLogLine, parseHierarchy, nodeAt, selectorsFor } from '/live.js';
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -113,6 +113,14 @@ const state = {
    * wants delivered to a page that shows six of them.
    */
   artifacts: { sessionId: null, items: [], loaded: false },
+  /**
+   * The element inspector. `nodes` is the last dump, `picked` the node under the last click.
+   *
+   * A dump is a snapshot, not a subscription: the screen moves and the tree goes stale, so `at`
+   * records when it was taken and the panel says so rather than quietly describing a screen that
+   * is no longer there.
+   */
+  inspect: { on: false, nodes: [], picked: null, at: null, loading: false, error: null },
   /**
    * The device panel's live DOM, kept across renders so the <video> is never destroyed.
    * See `stagePanel`. Cleared only when the viewer closes.
@@ -1051,6 +1059,7 @@ function ensureLive(sess) {
       scheduleRender();
     },
     onNotice: (message) => toast('Device', message, 'warn'),
+    onInspectPick: (x, y) => inspectPick(x, y),
   });
   live.sessionId = sess.id;
   state.live = live;
@@ -1080,6 +1089,7 @@ function closeLive() {
   // pause on the last one is not an instruction about this one.
   state.log = { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0, streaming: false, paused: false };
   state.shots = [];
+  state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
   // The panel goes with the connection. Keeping it would re-show the last frame of a device
   // somebody else now holds, which is a stale screen presented as a live one.
   state.stage = null;
@@ -1673,6 +1683,14 @@ const ICONS = {
   zoomin: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5M11 8.5v5', 'stroke-linecap': 'round' })); },
   zoomout: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5', 'stroke-linecap': 'round' })); },
   fit: (g) => { g.appendChild(svgEl('path', { d: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  // A cursor over a box: pick a thing on the screen. Reads as "inspect" the way a magnifier reads
+  // as "zoom", and the bar already has two magnifiers doing that job.
+  inspect: (g) => {
+    g.appendChild(svgEl('rect', { x: 3.5, y: 3.5, width: 11, height: 11, rx: 1.5, 'stroke-dasharray': '3 2.2' }));
+    const p = svgEl('path', { d: 'M12.5 12.5 21 16l-3.4 1.4L16 21z', 'stroke-linejoin': 'round' });
+    p.setAttribute('fill', 'currentColor');
+    g.appendChild(p);
+  },
 };
 
 function icon(name) {
@@ -1809,6 +1827,10 @@ function paintToolbar(sess, live, caps) {
     h('span', { class: 'devbar-sep' }),
     caps.includes('screenshot')
       ? toolBtn('camera', 'Screenshot', Boolean(live), () => void takeScreenshot(), { kbd: 'S' })
+      : null,
+    caps.includes('ui-hierarchy')
+      ? toolBtn('inspect', state.inspect.on ? 'Stop inspecting' : 'Inspect elements',
+          streaming, () => void toggleInspect(), { active: state.inspect.on })
       : null,
     toolBtn('refresh', 'Reconnect', Boolean(live), () => reconnectLive()),
     h('span', { class: 'devbar-sep' }),
@@ -2309,6 +2331,9 @@ function screenCockpit(id) {
         evidenceCard(sess, live),
       ),
       h('div', { class: 'rail' },
+        // First in the rail while it is on: the inspector is a mode you are actively working in,
+        // and hunting for its panel under four others is the opposite of the point.
+        inspectorCard(caps),
         toolsCard(sess, live),
         vitalsCard(),
         capturesCard(),
@@ -2606,6 +2631,176 @@ function screenSessions() {
   ];
 }
 
+
+
+/* ---------------------------------------------------------------------------- element inspector */
+
+/**
+ * Turn the inspector on, and take the first dump.
+ *
+ * Off by default and never automatic: reading the tree costs an adb round trip on the device
+ * someone is using, and a mode that silently swallows taps must be one you chose.
+ */
+async function toggleInspect() {
+  if (state.inspect.on) {
+    state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
+    if (state.live) state.live.inspectMode = false;
+    paintHighlight();
+    render();
+    return;
+  }
+  state.inspect.on = true;
+  if (state.live) state.live.inspectMode = true;
+  render();
+  await refreshHierarchy();
+}
+
+async function refreshHierarchy() {
+  if (!state.live) { toast('Not connected', 'Open the live view first.', 'warn'); return; }
+  state.inspect.loading = true;
+  state.inspect.error = null;
+  render();
+  try {
+    const out = await state.live.uiDump();
+    state.inspect.nodes = parseHierarchy(out.xml);
+    state.inspect.at = out.takenAt || new Date().toISOString();
+    // The old pick describes the old screen. Keep it only if the same node is still there.
+    if (state.inspect.picked) {
+      const again = state.inspect.nodes.find((n) =>
+        n.cls === state.inspect.picked.cls && n.x1 === state.inspect.picked.x1 && n.y1 === state.inspect.picked.y1);
+      state.inspect.picked = again || null;
+    }
+  } catch (e) {
+    state.inspect.error = e.message;
+    state.inspect.nodes = [];
+  } finally {
+    state.inspect.loading = false;
+    render();
+    paintHighlight();
+  }
+}
+
+/** A click on the device while inspecting: pick the smallest node under it. */
+function inspectPick(x, y) {
+  if (!state.inspect.on) return;
+  if (!state.inspect.nodes.length) { void refreshHierarchy(); return; }
+  state.inspect.picked = nodeAt(state.inspect.nodes, x, y);
+  render();
+  paintHighlight();
+}
+
+/**
+ * Draw the selection box over the video.
+ *
+ * In the taps layer, which is `pointer-events: none`, and ONLY while inspecting — the standing rule
+ * is that nothing overlays the device screen, and this is the one deliberate exception: showing you
+ * which rectangle you picked is the entire feature, it exists only in a mode you turned on, and it
+ * disappears the moment you turn it off.
+ *
+ * Painted rather than rendered, so a poll cannot make the box flicker.
+ */
+function paintHighlight() {
+  const st = state.stage;
+  if (st?.root) st.root.dataset.inspect = state.inspect.on ? 'on' : 'off';
+  const layer = st?.frame?.querySelector('.dev-taps');
+  if (!layer) return;
+  layer.querySelector('.insp-box')?.remove();
+
+  const n = state.inspect.on ? state.inspect.picked : null;
+  const video = st.video;
+  if (!n || !video?.videoWidth) return;
+
+  // Device pixels -> rendered pixels. `videoWidth` is the device's own panel, and the element is
+  // whatever the zoom left it at, so the ratio is the only honest way to place this.
+  const k = video.offsetWidth / video.videoWidth;
+  const box = h('div', { class: 'insp-box' },
+    h('span', { class: 'insp-tag', text: n.cls.split('.').pop() }));
+  Object.assign(box.style, {
+    left: `${n.x1 * k}px`, top: `${n.y1 * k}px`,
+    width: `${(n.x2 - n.x1) * k}px`, height: `${(n.y2 - n.y1) * k}px`,
+  });
+  layer.append(box);
+}
+
+const QUALITY = {
+  stable:  { label: 'stable',  tone: 'ok' },
+  ok:      { label: 'usable',  tone: 'warn plain' },
+  brittle: { label: 'brittle', tone: 'bad' },
+};
+
+function copyRow(text, label) {
+  return h('div', { class: 'insp-copy' },
+    h('code', { class: 'insp-val', text }),
+    btn('Copy', 'tiny ghost', async () => {
+      try { await navigator.clipboard.writeText(text); toast('Copied', label || text); }
+      catch { toast('Could not copy', 'Select the text and copy it manually.', 'bad'); }
+    }),
+  );
+}
+
+/**
+ * The inspector panel.
+ *
+ * Deliberately NOT a tree view. The question is "what is under my finger and how do I name it in a
+ * test", which is a hit test and a selector — a scrolling tree of every node is what inspectors add
+ * and nobody reads. Tap the thing; get the handle.
+ */
+function inspectorCard(caps) {
+  if (!caps.includes('ui-hierarchy')) return null;
+  if (!state.inspect.on) return null;
+  const { picked, nodes, loading, error, at } = state.inspect;
+
+  const head = h('div', { class: 'row tight' },
+    h('span', { class: 'caption', text: loading ? 'reading…' : `${nodes.length} elements` }),
+    btn('Re-read', 'tiny ghost', () => void refreshHierarchy(), { disabled: loading }),
+  );
+
+  if (error) {
+    return card('Inspector', { aside: head },
+      h('p', { class: 'help', text: error }),
+      h('p', { class: 'caption mt-sm', text: 'Re-read once the screen settles, or end any Appium session driving this device.' }));
+  }
+  if (!picked) {
+    return card('Inspector', { aside: head },
+      h('p', { class: 'help', text: loading ? 'Reading the screen…' : 'Tap anything on the device to inspect it. Taps select while the inspector is on — nothing reaches the app.' }),
+      at && !loading ? h('p', { class: 'caption mt-sm', text: `Snapshot taken ${ago(at)}. Re-read after the screen changes.` }) : null,
+    );
+  }
+
+  const attr = (k, v) => (v ? h('div', { class: 'row between insp-attr' },
+    h('span', { class: 'caption', text: k }),
+    h('span', { class: 'mono insp-attrv', text: v })) : null);
+
+  const sels = selectorsFor(picked, nodes);
+  return card('Inspector', { aside: head },
+    h('div', { class: 'insp-head' },
+      h('span', { class: 'insp-cls mono', text: picked.cls }),
+      picked.clickable ? pill('clickable', 'ok', { dot: false }) : null,
+      picked.scrollable ? pill('scrollable', 'warn plain', { dot: false }) : null,
+      picked.enabled ? null : pill('disabled', 'bad', { dot: false }),
+    ),
+    h('div', { class: 'insp-attrs' },
+      attr('text', picked.text),
+      attr('content-desc', picked.desc),
+      attr('resource-id', picked.id),
+      attr('bounds', `${picked.x1},${picked.y1} → ${picked.x2},${picked.y2}`),
+    ),
+    h('p', { class: 'micro mt-md', text: 'SELECTORS — best first' }),
+    sels.length
+      ? h('div', { class: 'stack tight' }, sels.map((sel) => {
+          const q = QUALITY[sel.quality] || QUALITY.ok;
+          return h('div', { class: 'insp-sel' },
+            h('div', { class: 'row tight' },
+              h('span', { class: 'micro', text: sel.strategy }),
+              pill(q.label, q.tone, { dot: false }),
+            ),
+            copyRow(sel.value, sel.strategy),
+            sel.note ? h('p', { class: 'caption', text: sel.note }) : null,
+          );
+        }))
+      : h('p', { class: 'help', text: 'This element carries no id, no description and no text, so nothing here would identify it. Pick its parent, or ask for a testTag on it.' }),
+  );
+}
 
 /* ---------------------------------------------------------------------------- screen: queue */
 
@@ -3173,6 +3368,7 @@ function render() {
   attachVideo();
   paintLog();
   paintVitals();
+  paintHighlight();
 
   // Put the keyboard back where it was. `preventScroll` because the device panel may sit below the
   // fold on a short window, and yanking the page to it every five seconds is its own bug.
