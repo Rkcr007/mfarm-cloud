@@ -7,6 +7,13 @@ tap, in seven steps.** This file is the state of play and every known issue; tha
 https://farm.mfarm.dev; `mfarm-lab` holds the devices. Both are stopped between sessions;
 `./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
 
+**2026-08-23 — both new capabilities are VERIFIED ON HARDWARE, and doing so found issue 31.**
+`mfarm:appId` failed on every session in production while 634 tests passed, because both of the
+hub's long waits mistook "the request body has been read" for "the client hung up". Fixed;
+`deploy/verify-runs.mjs` and `deploy/verify-queue.mjs` are the checks that would have caught it.
+One open question is now closed: **`appium:appPackage` alone is enough for UiAutomator2** to launch
+the app, so no suite needs `appium:appActivity`.
+
 **2026-08-23 — `runs`: twenty tests are one run.** A suite sets `mfarm:runId` to an id its CI
 already has — `$GITHUB_RUN_ID`, a Jenkins build number, a uuid per `npm test` — and the FIRST
 session to use that name creates the run while every later one joins it. No coordination call, no
@@ -1366,6 +1373,12 @@ device is covered by the same URL. Caught by a test, not by review.
     ServerResponse fires when the response completes or when the connection is torn down early, and
     consulted while the handler is still working — before a byte has been sent — it can only mean
     the second.
+
+    **Both halves are now verified on hardware.** `deploy/verify-runs.mjs` drives `mfarm:appId` and
+    `mfarm:runId` against real Cuttlefish (session open in 12.1 s including the install), and
+    `deploy/verify-queue.mjs` fills the farm and proves a queued request is still waiting five
+    seconds later — promoted after 69 s once a device was freed. Run them after any change to the
+    hub's waits; neither can be replaced by a test using `app.inject()`.
 
     Diagnosis note for next time: the session row said `ended_at` 43 ms after `created_at` with
     `end_reason = session_not_created`, while the client had been handed a message about 240

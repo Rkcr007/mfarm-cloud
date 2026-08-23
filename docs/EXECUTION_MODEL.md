@@ -248,7 +248,17 @@ client hung up", when it actually means "the request body has been read". `mfarm
 had never queued for the same reason. Fixed with `clientGone(reply)` and a test that uses a real
 socket, since `app.inject()` cannot reproduce it.
 
-**The rest is not verified on hardware yet.** `mfarm-lab` has been stopped since before §4.1 shipped, so
+**BOTH ARE NOW VERIFIED ON HARDWARE (2026-08-23), against two real Cuttlefish devices.**
+`deploy/verify-runs.mjs` reproduces it: a build resolved from the library, installed over the
+heartbeat, and a session opened on it in **12.1 s including the install**; two sessions joining one
+run; the run resolving by the name the suite gave it. And the open question is answered —
+`current_package` came back as the app under test, so **`appium:appPackage` alone is enough for
+UiAutomator2** to bring it up. No `appium:appActivity` is needed and the doc note that was drafted
+for it is not.
+
+`deploy/verify-queue.mjs` covers the other half of issue 31: fill the farm, ask for one more with a
+timeout, and prove the request is still open five seconds later. It was promoted onto the freed
+device after 69 s. `mfarm-lab` has been stopped since before §4.1 shipped, so
 the install chain (hub queues → real worker → `adb install` → Appium session) and the run stamping
 on top of it have only ever run against the real heartbeat and events endpoints with a test playing
 the worker. The specific thing to watch on the first hardware run is whether UiAutomator2 resolves
