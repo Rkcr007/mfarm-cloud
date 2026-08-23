@@ -242,7 +242,13 @@ how many tests passed is a table of device leases with better grouping.
 a CI step, pass the id it returns, and pass `github.run_id` as `MFARM_RUN_ID`. Nothing in the
 workflow reaches the device host, and the eight tests arrive as one run.
 
-**Neither is verified on hardware yet.** `mfarm-lab` has been stopped since before §4.1 shipped, so
+**Hardware verification found a real bug, 2026-08-23 — see HANDOFF issue 31.** `mfarm:appId`
+failed on every session because both of the hub's long waits took `req.raw.destroyed` to mean "the
+client hung up", when it actually means "the request body has been read". `mfarm:queueTimeoutSeconds`
+had never queued for the same reason. Fixed with `clientGone(reply)` and a test that uses a real
+socket, since `app.inject()` cannot reproduce it.
+
+**The rest is not verified on hardware yet.** `mfarm-lab` has been stopped since before §4.1 shipped, so
 the install chain (hub queues → real worker → `adb install` → Appium session) and the run stamping
 on top of it have only ever run against the real heartbeat and events endpoints with a test playing
 the worker. The specific thing to watch on the first hardware run is whether UiAutomator2 resolves
