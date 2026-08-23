@@ -16,6 +16,7 @@ import { workerRoutes } from './routes/workers.ts';
 import { webdriverRoutes } from './routes/webdriver.ts';
 import { appRoutes } from './routes/apps.ts';
 import { runRoutes } from './routes/runs.ts';
+import { resultRoutes } from './routes/results.ts';
 import { reap } from '../allocator.ts';
 import {
   httpDuration,
@@ -491,6 +492,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(appRoutes, { prefix: '/v1' });
   await app.register(artifactRoutes, { prefix: '/v1' });
   await app.register(runRoutes, { prefix: '/v1' });
+  await app.register(resultRoutes, { prefix: '/v1' });
 
   // The WebDriver hub, mounted at both spellings the world uses: Appium 2 clients default to `/`,
   // Selenium Grid and Appium 1.x clients to `/wd/hub`. Serving both means the migration is one URL

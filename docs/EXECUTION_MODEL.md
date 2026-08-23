@@ -4,9 +4,10 @@ Written 2026-08-23 as a handoff, and updated the same day when §4.1 shipped. Re
 `docs/E2E_MVP_PLAN.md` first for the platform; this file is only about **suite execution** — how a
 person submits a run, where it goes, and how they find out what broke.
 
-**Status: §4.1 (`mfarm:appId`) and §4.2 (`runs` + `mfarm:runId`) are both built and tested. "What
-failed on build 4471?" is now a query and a screen. What is still missing is the OUTCOME — §4.3 —
-so a run reports how many sessions it had and which build they ran, not how many passed.**
+**Status: §4.1 (`mfarm:appId`), §4.2 (`runs` + `mfarm:runId`) and §4.3 (outcome reporting) are all
+built. "What failed on build 4471?" is a query, a screen, and a link to the logcat and screenshot
+from the session that failed. What is left is §4.4 (video) and §4.5 (on-demand screenshots), and
+video should stay unbuilt until it can record only failures — see the note there.**
 
 ---
 
@@ -36,10 +37,9 @@ Migration 020 and `mfarm:runId` close the grouping half (§4.2). A run is now a 
 to it, the build each session ran is an indexed column rather than a jsonb key, and the console has
 a Runs screen.
 
-**What remains is the word "failed".** WebDriver has no concept of an assertion — the farm sees a
-session open and close and cannot tell a passing test from a failing one — so a run reports its
-sessions, its window and its build, and says nothing at all about pass or fail. Making that real is
-§4.3, and it is now the one that matters most.
+**The word "failed" is now real too (§4.3, 2026-08-24).** The farm still cannot observe an
+assertion and never will — but the suite reports, and a run that does not report reads as
+"Not reported" rather than as a pass. The gap this section described is closed.
 
 ## 3. Answering the specific questions
 
@@ -184,24 +184,92 @@ Five things decided while building it that are not obvious from the capability:
 What is still missing is the outcome — see §4.3. A run today reports how many sessions it had and
 which build they ran, not how many passed.
 
-### 4.3 Outcome reporting — the farm cannot know a test failed
+### 4.3 Outcome reporting — DONE (2026-08-24)
 
 WebDriver has no concept of an assertion. The farm sees a session open and close; whether the test
-passed is invisible to it. There are only two honest options, and the first is right:
+passed is invisible to it. There were only two honest options, and the first was right:
 
 ```js
 // one line in an afterEach
 POST /v1/sessions/:id/result { status: 'failed', name: 'checkout applies a promo', failure: '...' }
 ```
 
-Anything else is inference dressed up as fact. With this plus 4.2, the Runs screen shows real
-pass/fail counts and links each failure to its own logcat and screenshot.
+Anything else is inference dressed up as fact — and it is wrong in both directions: a suite can fail
+assertions and exit zero, and a session can end dirtily because CI was cancelled.
 
-### 4.4 Video
+Migration 021 adds `test_results`, one row per TEST rather than per session — `examples/medishop-suite`
+runs eight tests on one device, which is the shape the economics force. `GET /v1/runs` now carries
+outcome counts, `GET /v1/runs/:id` lists every failure with the session that produced it, and the
+console's Runs screen shows both.
 
-`adb shell screenrecord` during the session, uploaded as an artifact on release. Three things to
-settle before building it: it costs device CPU on a software renderer, 3-minute segments need
-stitching, and retention must be shorter than logcat's or the disk conversation arrives quickly.
+Five decisions in it that are not obvious from the endpoint:
+
+- **A run that reported nothing is UNMEASURED, not passing.** The rollup carries
+  `tests.sessionsReporting` alongside the counts, and the console renders zero-reports as
+  "Not reported". A green zero on a run nobody instrumented is precisely the number that stops
+  people looking, and it is the only way this feature could make things worse than having none.
+- **`(session_id, name)` is not unique.** A retry reports the same name twice — failed, then passed —
+  and that pair IS the flakiness signal, which is the most valuable thing this table can eventually
+  show. Deduplicating would discard it and would break parameterised tests that share a name. The
+  cost is that a retried test contributes two results, and the API says so rather than guessing
+  which attempt was "real".
+- **A result is accepted for a session in any state, including one that has ended.** The case where
+  a session ended *unexpectedly* is exactly the one whose result is most worth having; refusing it
+  would drop data precisely when a test crashed.
+- **An over-long failure is truncated, not rejected** — with the cut marked in the text, because a
+  stack that silently stops gets debugged as if it were complete. Rejecting would cost the caller
+  the one thing they called to report.
+- **The rollup uses a SECOND lateral.** Sessions and results are independent one-to-many branches
+  off a run; counting both in one join multiplies them, so a run of 3 sessions with 8 results each
+  would report 24 sessions. Same trap §4.2 documents, one level down.
+
+The link that makes it worth having: each failure carries its `sessionId`, which is what the logcat
+and screenshot hang off. "What failed on build 4471, and what did the screen look like" is now one
+query and one click.
+
+### 4.4 Video — costed 2026-08-24, and deliberately still not built
+
+`adb shell screenrecord` during the session, uploaded as an artifact on release. The three concerns
+below were vague when this section was written; they have now been measured, and two of them are
+worse than they sounded.
+
+**It perturbs the thing it measures.** The lab host has no GPU (the account's free tier blocks
+accelerators), so Cuttlefish renders through SwiftShader in software and `screenrecord` encodes
+H.264 in the guest on the same CPU. `docs/RENDER_BASELINE.md` already measures a Flutter drawing
+canvas at 30 fps with 1350 ms frozen frames; adding a software encoder makes that worse on exactly
+the workload with least headroom. The baseline's own warning is that the risk "is not red suites, it
+is timing-sensitive assertions and screenshot comparisons silently reading a device three frames
+behind" — recording makes that more likely, not less.
+
+**The storage arithmetic, against real numbers.** 28 sessions of production artifacts average
+2.55 MB of logcat and 0.59 MB of screenshot — 3.1 MB per session. A 5-minute recording at a modest
+1 Mbps is **37.5 MB**, about 12x everything else combined. Against `mfarm-cp`'s 24 GB free at the
+current 14-day retention:
+
+| Load | Video/day | Disk exhausted in |
+|---|---|---|
+| 50 sessions/day | 1.9 GB | ~13 days |
+| two devices saturated (~480/day) | 18 GB | **~1.3 days** |
+
+`ARTIFACT_MAX_UPLOAD_BYTES` is 64 MB, so at 1 Mbps any session over ~8.5 minutes is rejected
+outright, and `screenrecord` caps a single recording at 3 minutes so anything longer needs
+segmenting and stitching. Content addressing does not help: no two recordings are byte-identical.
+
+**What makes it affordable is §4.3, which is why the order matters.** Video's value is explaining a
+red test; recording every session and discarding 95% pays full CPU, disk and upload for nothing. Now
+that a suite reports outcomes, "record only failures" is expressible — and that is the difference
+between a feature that fills a disk in a day and one that costs almost nothing. Build it in this
+order:
+
+1. record on the HOST, reusing the encode cvd's WebRTC streamer already does at 49–53 fps, rather
+   than a second encoder inside the guest competing with the app under test;
+2. keep only recordings for sessions that reported a failure;
+3. 10–15 fps at ~500 kbps — UI testing does not need 60 fps, and this roughly quarters both costs;
+4. retention in days, not the fortnight logcat gets.
+
+One thing still needs measuring before any of it: what `screenrecord` actually costs on this
+hardware, run against the Flutter canvas workload where there is least headroom. That is a
+lab-hours experiment, not a design question.
 
 ### 4.5 On-demand screenshots
 
@@ -230,17 +298,21 @@ launcher showed.)
 
 ## 6. Where to start
 
-~~`mfarm:appId` first~~ — **done**. ~~`runs` + `mfarm:runId`~~ — **done**. **Outcome reporting
-(§4.3) is next**, and it is the last of the three that turn "I can run tests on the farm" into "our
-team runs suites and reads results", which is the actual product.
+~~`mfarm:appId`~~, ~~`runs` + `mfarm:runId`~~, ~~outcome reporting~~ — **all three done.** Together
+they turn "I can run tests on the farm" into "our team runs suites and reads results", which is the
+actual product. The first two made a run findable and named the build it ran; the third is what
+lets it say whether anything passed.
 
-The reason it is last and not optional: the two that shipped make a run findable and tell you which
-build it ran, and then stop exactly where a person's question starts. A Runs screen that cannot say
-how many tests passed is a table of device leases with better grouping.
+`examples/medishop-suite` and its `ci-example.yml` are the worked example of all three: upload the
+APK in a CI step, pass the id it returns, pass `github.run_id` as `MFARM_RUN_ID`, and let `farmTest`
+report each outcome. Nothing in the workflow reaches the device host; the eight tests arrive as one
+run with real pass/fail counts and each failure linked to its own logcat and screenshot.
 
-`examples/medishop-suite` and its `ci-example.yml` are the worked example of both: upload the APK in
-a CI step, pass the id it returns, and pass `github.run_id` as `MFARM_RUN_ID`. Nothing in the
-workflow reaches the device host, and the eight tests arrive as one run.
+**What to build next, and it is no longer in this section's list.** §4.5 (on-demand screenshots) is
+small, useful and unblocked — the release-time screenshot still shows the launcher. §4.4 (video) is
+now costed above and should stay unbuilt until it records only failures, which §4.3 has just made
+possible. Beyond those, the honest next question is not another capability: it is whether a
+two-device farm with a working execution model is worth putting in front of a second team.
 
 **Hardware verification found a real bug, 2026-08-23 — see HANDOFF issue 31.** `mfarm:appId`
 failed on every session because both of the hub's long waits took `req.raw.destroyed` to mean "the

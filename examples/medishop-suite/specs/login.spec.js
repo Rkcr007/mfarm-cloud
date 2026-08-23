@@ -6,13 +6,18 @@
  * testing. That is a farm-shaped decision, not an Appium one, and it is the main thing that
  * changes when a suite moves off a laptop.
  */
-import { test, describe, before, after } from 'node:test';
+import { test as nodeTest, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { connect, CREDENTIALS } from '../farm.js';
+import { connect, farmTest, CREDENTIALS } from '../farm.js';
 import { LoginPage } from '../pages/login.js';
 import { HomePage } from '../pages/home.js';
 
 let driver, login, home;
+
+// `test`, plus one line telling the farm the outcome. Without it the farm sees a session open and
+// close and cannot tell a pass from a failure — so the console's Runs screen reads "Not reported"
+// for the whole run rather than showing a green tick it has not earned.
+const test = farmTest(() => driver, nodeTest);
 
 before(async () => {
   driver = await connect();

@@ -64,9 +64,39 @@ session joins it, so a suite that dies halfway leaves a run that simply stops gr
 falls back to `$GITHUB_RUN_ID` on its own, and omits the capability entirely when neither is set —
 running locally with no run is the normal case.
 
-A run does **not** yet know how many tests passed. WebDriver has no concept of an assertion, so the
-farm sees sessions open and close and cannot tell a passing test from a failing one; it reports what
-it can see and says nothing about the rest.
+**And one more line tells it how they went.** WebDriver has no concept of an assertion — the farm
+watches a session open, drive a device and close, and that looks identical whether every test passed
+or every one failed. So the suite has to say:
+
+```js
+await fetch(`${HUB}/v1/sessions/${driver.sessionId}/result`, {
+  method: 'POST',
+  headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'checkout applies a promo', status: 'failed', failure: err.stack }),
+});
+```
+
+`driver.sessionId` is the farm's own session id — the hub hands back its id rather than Appium's, so
+one id spans your test log, the API, the artifact index and the invoice, with no correlation step.
+
+Where your runner gives a hook the outcome, this really is one line. WebdriverIO:
+
+```js
+// wdio.conf.js
+afterTest: async (test, ctx, { passed, error, duration }) => {
+  await reportResult(browser, {
+    name: test.title, status: passed ? 'passed' : 'failed',
+    failure: error?.stack, durationMs: duration,
+  });
+},
+```
+
+`node:test` does not hand a hook the outcome of the test that just ran, so this suite wraps `test`
+instead — see `farmTest` in `farm.js`, and the one-line `const test = farmTest(...)` at the top of
+each spec.
+
+**A run that reports nothing shows "Not reported", not a pass.** That distinction is deliberate: a
+green zero on a run nobody instrumented is exactly the number that stops people looking.
 
 **One device per spec file, not per test.** Allocation takes seconds and the reset after release
 takes about a minute, so a device per test spends more time recycling than testing. This is the main

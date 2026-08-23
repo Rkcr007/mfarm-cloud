@@ -1277,3 +1277,21 @@ kbd {
   font-size: 11px; line-height: 1.5; word-break: break-all;
   user-select: all; -webkit-user-select: all;
 }
+
+/* A reported failure's message. Pre-wrapped because a stack trace's line breaks carry meaning, and
+   scrollable because a long one must not stretch the page — the same rule tables follow. */
+.failtext {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--t-body, #D4D4D4);
+  font-family: var(--mono);
+  background: var(--s-inset, #050506);
+  border: 1px solid var(--b-inset, #1A1A1C);
+  border-radius: 6px;
+}

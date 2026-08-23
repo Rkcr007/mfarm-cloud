@@ -7,6 +7,25 @@ tap, in seven steps.** This file is the state of play and every known issue; tha
 https://farm.mfarm.dev; `mfarm-lab` holds the devices. Both are stopped between sessions;
 `./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
 
+**2026-08-24 — outcome reporting: the farm learns whether the test passed (§4.3).** `POST
+/v1/sessions/:id/result` takes one test's name, status and failure, from an `afterEach`. Migration
+021 stores a row per TEST, not per session, because a suite runs eight tests on one device. The
+Runs screen now shows real pass/fail counts and lists every failure with a link to the session that
+produced it — which is where its logcat and screenshot live. **A run that reported nothing reads
+"Not reported", never as a pass**: a green zero on a run nobody instrumented is the number that
+stops people looking, and it is the only way this feature could have made things worse. A retry is
+two results on purpose (failed, then passed) because that pair is the flakiness signal, and the
+farm cannot tell a retry from a distinct test of the same name. `examples/medishop-suite` reports
+through `farmTest`; the README shows the WebdriverIO `afterTest` one-liner for runners whose hooks
+carry the outcome.
+
+**2026-08-24 — video is COSTED but still not built,** and the order now matters: recording only
+failures is what makes it affordable, and that was not expressible until §4.3 existed. Measured
+against production numbers, always-on video is ~12x all other artifacts combined and would exhaust
+the control plane's disk in 1.3 days at full utilisation. It also encodes in-guest on a host with
+no GPU, competing with SwiftShader for the same CPU on the workload that already has least
+headroom. See `docs/EXECUTION_MODEL.md` §4.4 for the arithmetic and the build order.
+
 **2026-08-23 — both new capabilities are VERIFIED ON HARDWARE, and doing so found issue 31.**
 `mfarm:appId` failed on every session in production while 634 tests passed, because both of the
 hub's long waits mistook "the request body has been read" for "the client hung up". Fixed;
@@ -135,18 +154,18 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**635 tests pass, 0 fail** (2026-08-24, at migration 020), against a real PostgreSQL 16. No mocks for
+**647 tests pass, 0 fail** (2026-08-24, at migration 021), against a real PostgreSQL 16. No mocks for
 anything that matters.
 
 ```
-apps/api/         control plane, app library, console,  408 tests
+apps/api/         control plane, app library, console,  420 tests
                   entrypoint, metrics
 apps/cli/         mfarm CLI                              63 tests
 workers/agent/    worker agent, Appium supervisor,      143 tests
                   automation gateway, Cuttlefish backend
 deploy/           deploy scripts and their checks         21 tests
 apps/api/public/  the web console (served by the API at /)
-apps/api/migrations/  020 of them; 020 is the newest
+apps/api/migrations/  021 of them; 021 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
