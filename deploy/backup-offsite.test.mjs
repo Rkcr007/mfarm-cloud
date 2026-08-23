@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, chmodSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,21 +68,38 @@ esac
   return { bin, bucket, calls: () => (existsSync(log) ? readFileSync(log, 'utf8') : '') };
 }
 
-/** A backup directory holding `pairs` complete backups, newest last. */
+/**
+ * A backup directory holding `pairs` complete backups, newest last.
+ *
+ * MTIMES ARE SET EXPLICITLY, one minute apart, and that is not decoration. The script picks the
+ * newest with `ls -1t`, which orders by mtime and breaks ties in a way that is not specified — so
+ * files written in the same filesystem timestamp tick can come back in any order. Writing them in
+ * a loop is fast enough to land in one tick on a fast disk: this test passed locally and failed on
+ * CI, naming the OLDEST backup. The fixture was wrong, not the script, and a fixture that depends
+ * on how long a write takes will lie again.
+ */
 function seedBackups(root, pairs, { orphanDump = false } = {}) {
   const dir = join(root, 'backups');
   mkdirSync(dir, { recursive: true });
   const names = [];
+  const base = Date.now() - 86_400_000;
+  const age = (i) => new Date(base + i * 60_000);
   for (let i = 0; i < pairs; i++) {
     const stamp = `2026010${i + 1}T000000Z`;
-    writeFileSync(join(dir, `mfarm-${stamp}.dump`), `dump-${i}`.repeat(100));
-    writeFileSync(join(dir, `mfarm-${stamp}.globals.sql`), 'CREATE ROLE mfarm_app;');
+    const dump = join(dir, `mfarm-${stamp}.dump`);
+    const globals = join(dir, `mfarm-${stamp}.globals.sql`);
+    writeFileSync(dump, `dump-${i}`.repeat(100));
+    writeFileSync(globals, 'CREATE ROLE mfarm_app;');
+    utimesSync(dump, age(i), age(i));
+    utimesSync(globals, age(i), age(i));
     names.push(`mfarm-${stamp}.dump`);
   }
   if (orphanDump) {
     // Newest by mtime, but with no companion roles file. Restoring it into a fresh cluster would
     // die on the first GRANT, so it is not a backup and must not be what the receipt names.
-    writeFileSync(join(dir, 'mfarm-29991231T000000Z.dump'), 'orphan');
+    const orphan = join(dir, 'mfarm-29991231T000000Z.dump');
+    writeFileSync(orphan, 'orphan');
+    utimesSync(orphan, age(pairs + 10), age(pairs + 10));
     names.push('mfarm-29991231T000000Z.dump');
   }
   return { dir, names };
@@ -164,9 +181,14 @@ test('a stale receipt is not refreshed when the newest backup fails to land', ()
   run({ BACKUP_DIR: dir, BACKUP_BUCKET: 'gs://b' }, ok);
   const first = readFileSync(join(dir, '.offsite-receipt'), 'utf8');
 
-  // A newer backup appears and the bucket starts refusing writes.
-  writeFileSync(join(dir, 'mfarm-20260202T000000Z.dump'), 'newer'.repeat(100));
-  writeFileSync(join(dir, 'mfarm-20260202T000000Z.globals.sql'), 'CREATE ROLE mfarm_app;');
+  // A newer backup appears and the bucket starts refusing writes. Explicit mtimes for the same
+  // reason as in seedBackups: `ls -1t` must see this as unambiguously the newest.
+  const newer = new Date();
+  for (const [f, body] of [['mfarm-20260202T000000Z.dump', 'newer'.repeat(100)],
+                           ['mfarm-20260202T000000Z.globals.sql', 'CREATE ROLE mfarm_app;']]) {
+    writeFileSync(join(dir, f), body);
+    utimesSync(join(dir, f), newer, newer);
+  }
   const broken = fakeGcloud(root, { failUpload: true });
 
   const r = run({ BACKUP_DIR: dir, BACKUP_BUCKET: 'gs://b' }, broken);
