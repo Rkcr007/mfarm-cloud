@@ -89,6 +89,46 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
+  # The second half of the backup story, and the one that survives losing this VM.
+  #
+  # A SEPARATE SERVICE rather than a step inside `backup.sh`, for one reason: that script runs in
+  # `postgres:16-alpine` because pg_dump must match the server version, and that image has no
+  # gcloud. Bolting a cloud SDK into it would couple the Postgres upgrade path to the storage tool.
+  # Two containers sharing one directory keeps each on the image it actually needs.
+  #
+  # Credentials come from the VM's own service account through the metadata server — no key file,
+  # nothing in deploy/secrets, nothing to rotate. The account needs storage.objects.create and
+  # storage.objects.list on the bucket; deploy/README.md has the two commands.
+  backup-offsite:
+    image: ${CLOUD_SDK_IMAGE:-gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BACKUP_DIR: /backups
+      BACKUP_BUCKET: ${BACKUP_BUCKET:?set BACKUP_BUCKET to gs://<bucket>, or to 'none' to accept single-disk backups}
+      OFFSITE_INTERVAL_SECONDS: ${OFFSITE_INTERVAL_SECONDS:-900}   # 15m
+    volumes:
+      - ./backup-offsite.sh:/usr/local/bin/backup-offsite.sh:ro
+      # READ-WRITE, unlike the API's mount of the same directory: this writes the receipt whose
+      # mtime becomes `mfarm_backup_offsite_age_seconds`. It writes nothing else here.
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
+    # Runs far more often than backups are taken (15m against 6h). It is cheap when there is nothing
+    # new — one existence check per file — and the frequency is what keeps the receipt a live
+    # heartbeat rather than a six-hourly one, so the staleness alert can mean something.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "[offsite] every $${OFFSITE_INTERVAL_SECONDS}s, $${BACKUP_DIR} -> $${BACKUP_BUCKET}"
+        while true; do
+          /usr/local/bin/backup-offsite.sh || echo "[offsite] FAILED — see above"
+          sleep "$${OFFSITE_INTERVAL_SECONDS}"
+        done
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
   # One-shot. Runs to completion, exits, and the API waits for it — so the schema is never behind the
   # code that assumes it. `restart: "no"` matters: a migration that fails must stay failed and visible
   # rather than looping, because the second attempt of a half-applied migration is rarely better than

@@ -276,6 +276,53 @@ describe('backup freshness', () => {
   });
 });
 
+describe('offsite backup confirmation', () => {
+  /**
+   * The state this measures is the one that looks healthiest and is not: dumps being written,
+   * verified and retained, every one of them on the same disk as the database. Local freshness
+   * cannot see it, which is why this is a second gauge rather than a condition on the first.
+   */
+  let dir: string;
+
+  const collect = async () => {
+    const { collectBackups, scrape } = await import('../src/metrics.ts');
+    await collectBackups();
+    return scrape();
+  };
+
+  before(async () => { dir = await mkdtemp(join(tmpdir(), 'mfarm-offsite-')); });
+  after(async () => { await rm(dir, { recursive: true, force: true }); delete process.env.BACKUP_DIR; });
+
+  test('no receipt is -1, not zero', async () => {
+    process.env.BACKUP_DIR = dir;
+    assert.equal(sample(await collect(), 'mfarm_backup_offsite_age_seconds'), -1,
+      'zero would claim a copy was confirmed this instant');
+  });
+
+  test('a receipt is reported as its age', async () => {
+    process.env.BACKUP_DIR = dir;
+    await writeFile(join(dir, '.offsite-receipt'), '{"newest":"mfarm-x.dump"}');
+    const age = sample(await collect(), 'mfarm_backup_offsite_age_seconds')!;
+    assert.ok(age >= 0 && age < 60, `expected a fresh age, got ${age}`);
+  });
+
+  test('an unreadable BACKUP_DIR is -1 here too, not a stale receipt', async () => {
+    process.env.BACKUP_DIR = join(dir, 'nope');
+    assert.equal(sample(await collect(), 'mfarm_backup_offsite_age_seconds'), -1);
+  });
+
+  test('offsite confirmation is independent of whether any dump is on disk', async () => {
+    // Read before the dump listing on purpose. An empty directory says nothing about the bucket,
+    // and letting one imply the other would make two separate incidents page as one.
+    process.env.BACKUP_DIR = dir;
+    await writeFile(join(dir, '.offsite-receipt'), '{"newest":"mfarm-x.dump"}');
+    const body = await collect();
+    assert.equal(sample(body, 'mfarm_backup_age_seconds'), -1, 'no dumps here');
+    assert.ok(sample(body, 'mfarm_backup_offsite_age_seconds')! >= 0,
+      'and yet the offsite confirmation is still measurable');
+  });
+});
+
 describe('fleet collectors', () => {
   test('the enum lists in metrics.ts still match the ones in the database', async () => {
     const read = (name: string) =>

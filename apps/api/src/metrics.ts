@@ -405,6 +405,29 @@ const backupAge = g(
 
 const backupCount = g('mfarm_backup_files', 'Number of backup files currently retained.');
 
+/**
+ * Seconds since the newest local backup was last CONFIRMED present off this machine.
+ *
+ * A separate measurement from `mfarm_backup_age_seconds`, because they fail independently and mean
+ * different things. Fresh local backups with a stale offsite age is the dangerous combination and
+ * the one that looks healthiest: dumps are being written, verified and retained, and every one of
+ * them is on the same disk as the database.
+ *
+ * Read from `.offsite-receipt`, which `deploy/backup-offsite.sh` rewrites only after asking the
+ * bucket how big the newest object is and getting the local size back. So this is not "the uploader
+ * is running" — a process that logs failures every fifteen minutes would keep that fresh. It is
+ * "the newest backup is known to exist somewhere else", which is the only claim worth alerting on.
+ *
+ * -1 means there is no such evidence. That covers an uploader that has never succeeded and an
+ * operator who set BACKUP_BUCKET=none, and it reports them identically ON PURPOSE — accepting
+ * single-disk backups is a real choice, and the honest way to express it is to silence an alert
+ * that is telling the truth, not to have the farm report a copy that does not exist.
+ */
+const backupOffsiteAge = g(
+  'mfarm_backup_offsite_age_seconds',
+  'Seconds since the newest backup was confirmed present in off-box storage. -1 when there is no such confirmation.',
+);
+
 const droppedSeries = g(
   'mfarm_metric_series_dropped_total',
   `Series refused because a metric exceeded ${MAX_SERIES_PER_METRIC} label combinations. Any value ` +
@@ -445,10 +468,16 @@ export function collectRuntime(): void {
  */
 export async function collectBackups(): Promise<void> {
   const dir = process.env.BACKUP_DIR?.trim();
-  if (!dir) { backupAge.set({}, -1); backupCount.set({}, 0); return; }
+  if (!dir) { backupAge.set({}, -1); backupCount.set({}, 0); backupOffsiteAge.set({}, -1); return; }
   try {
     const { readdir, stat } = await import('node:fs/promises');
     const { join } = await import('node:path');
+
+    // The offsite receipt is read FIRST and independently of the dumps, so that "no backups at all"
+    // and "backups that never left the box" stay separable. Reading it inside the dump branch would
+    // make an empty directory silently imply an offsite failure it says nothing about.
+    const receipt = await stat(join(dir, '.offsite-receipt')).catch(() => null);
+    backupOffsiteAge.set({}, receipt ? (Date.now() - receipt.mtimeMs) / 1000 : -1);
     // `mfarm-*.dump` exactly, which is what `deploy/backup.sh` writes and what its own retention
     // sweep counts. Two details make this the right filter rather than a guess:
     //
@@ -470,6 +499,7 @@ export async function collectBackups(): Promise<void> {
   } catch {
     backupAge.set({}, -1);
     backupCount.set({}, 0);
+    backupOffsiteAge.set({}, -1);
   }
 }
 
