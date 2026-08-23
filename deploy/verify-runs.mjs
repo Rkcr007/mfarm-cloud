@@ -1,4 +1,4 @@
-// Drive `mfarm:appId`, `mfarm:runId` and outcome reporting against a REAL device — §4.1 to §4.3.
+// Drive every execution-model capability against a REAL device — §4.1 to §4.5.
 //
 // WHY THIS EXISTS, separately from `verify-webdriver.mjs`. That one proves the hub, the grant, the
 // gateway, Appium and Cuttlefish agree about a plain session. These two capabilities added hops it
@@ -265,7 +265,45 @@ sess.json?.session?.run?.runId === RUN
   ? ok('the session names its run, so both directions are navigable')
   : bad(`the session does not name its run: ${JSON.stringify(sess.json?.session?.run)}`);
 
-// ---------------------------------------------------------------- 6. give the devices back
+// ---------------------------------------------------------------- 6. an on-demand screenshot
+
+say('Capturing a screenshot while the app is still on screen (§4.5)');
+
+// The whole reason this verb exists: the release-time screenshot is taken after Appium has
+// force-stopped the app, so it shows the launcher. This one is taken with the suite still holding
+// the device and the app under test in the foreground.
+const shotReq = await api(`/v1/sessions/${s1}/app-actions`, { kind: 'screenshot' });
+if (shotReq.status !== 202) {
+  bad(`queueing a screenshot failed (${shotReq.status}): ${shotReq.text.slice(0, 200)}`);
+} else {
+  ok('queued with no appId — the first verb in this pipeline that names no build');
+  const actionId = shotReq.json.action.id;
+
+  // Delivered on the next heartbeat, like every other action. The old INNER JOIN on app_builds
+  // would have left this PENDING forever with no error anywhere, so a timeout here is the loudest
+  // symptom that regression has.
+  const deadline = Date.now() + 90_000;
+  let state = 'PENDING';
+  let err = null;
+  while (Date.now() < deadline) {
+    const a = await api(`/v1/app-actions/${actionId}`);
+    state = a.json?.action?.state ?? 'PENDING';
+    err = a.json?.action?.error ?? null;
+    if (state !== 'PENDING') break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  state === 'DONE'
+    ? ok('the worker captured it')
+    : bad(`the screenshot action ended ${state}${err ? `: ${err}` : ''}`);
+
+  const arts = await api(`/v1/sessions/${s1}/artifacts`);
+  const shots = (arts.json?.artifacts ?? []).filter((a) => a.kind === 'screenshot');
+  shots.length > 0
+    ? ok(`it reached the artifact store (${shots[0].sizeBytes} bytes), not just a DONE row`)
+    : bad('the action reported DONE but no screenshot artifact exists');
+}
+
+// ---------------------------------------------------------------- 7. give the devices back
 
 say('Releasing');
 for (const id of [s1, s2].filter(Boolean)) {
