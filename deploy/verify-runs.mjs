@@ -1,4 +1,4 @@
-// Drive `mfarm:appId` and `mfarm:runId` against a REAL device, through every hop they added.
+// Drive `mfarm:appId`, `mfarm:runId` and outcome reporting against a REAL device — §4.1 to §4.3.
 //
 // WHY THIS EXISTS, separately from `verify-webdriver.mjs`. That one proves the hub, the grant, the
 // gateway, Appium and Cuttlefish agree about a plain session. These two capabilities added hops it
@@ -50,8 +50,12 @@ async function hub(method, path, body) {
   return { status: res.status, json, text };
 }
 
-async function api(path) {
-  const res = await fetch(`${HUB}${path}`, { headers: { authorization: bearer } });
+async function api(path, body) {
+  const res = await fetch(`${HUB}${path}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { authorization: bearer, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   const text = await res.text();
   let json; try { json = JSON.parse(text); } catch { /* ditto */ }
   return { status: res.status, json, text };
@@ -162,7 +166,42 @@ second.status === 200 && capsOf(second)['mfarm:runId'] === RUN
   ? ok(`session ${s2} joined run "${RUN}"`)
   : bad(`the second session did not join (${second.status}): ${why(second)}`);
 
-// ---------------------------------------------------------------- 4. what the run reports
+// ---------------------------------------------------------------- 4. outcomes
+
+say('Before anything reports, the run must read as UNMEASURED');
+
+const quiet = await api(`/v1/runs/${encodeURIComponent(RUN)}`);
+if (quiet.status === 200) {
+  const t = quiet.json.run.tests;
+  t.total === 0 && t.sessionsReporting === 0
+    ? ok('no results yet, and the run says so rather than showing zero failures')
+    : bad(`expected an unmeasured run, got ${JSON.stringify(t)}`);
+} else {
+  bad(`could not read the run before reporting (${quiet.status})`);
+}
+
+say('Reporting outcomes, the way an afterEach does');
+
+// Deliberately mixed, and deliberately including a retry: the same name failing then passing is
+// the flakiness signal, and the farm must record both rather than deduplicate one away.
+const reports = [
+  [s1, { name: 'the app opens', status: 'passed', durationMs: 1400 }],
+  [s1, { name: 'checkout applies a promo', status: 'failed', failure: 'AssertionError: expected 8, got 10\n    at checkout.spec.js:42' }],
+  [s1, { name: 'a pending case', status: 'skipped' }],
+  [s2, { name: 'flaky thing', status: 'failed', failure: 'timed out after 10000ms' }],
+  [s2, { name: 'flaky thing', status: 'passed', durationMs: 900 }],
+];
+let posted = 0;
+for (const [session, body] of reports) {
+  const r = await api(`/v1/sessions/${session}/result`, body);
+  if (r.status === 201) posted++;
+  else bad(`reporting "${body.name}" failed (${r.status}): ${r.text.slice(0, 160)}`);
+}
+posted === reports.length
+  ? ok(`${posted} results accepted`)
+  : bad(`only ${posted} of ${reports.length} results were accepted`);
+
+// ---------------------------------------------------------------- 5. what the run reports
 
 say('What the API says about the run');
 
@@ -184,6 +223,35 @@ if (byName.status !== 200) {
   run.sessions.live > 0
     ? ok(`${run.sessions.live} session(s) reported live`)
     : bad(`nothing reported live while two sessions are open`);
+
+  // The outcome rollup. 5 results across 2 sessions — and the session count must survive the
+  // results join, which a plain three-way join would multiply to 10.
+  const t = run.tests;
+  t.total === 5 && t.passed === 2 && t.failed === 2 && t.skipped === 1
+    ? ok(`outcomes counted: ${t.passed} passed, ${t.failed} failed, ${t.skipped} skipped`)
+    : bad(`outcome counts wrong: ${JSON.stringify(t)}`);
+  t.sessionsReporting === 2
+    ? ok('both sessions are recorded as having reported')
+    : bad(`sessionsReporting is ${t.sessionsReporting}, expected 2`);
+  run.sessions.total === 2
+    ? ok('the session count survived the results join, rather than being multiplied by it')
+    : bad(`session count is ${run.sessions.total} — the results join multiplied it`);
+
+  // The link that makes a failure actionable: the session id is what its logcat and screenshot
+  // hang off, so this is one click from the evidence.
+  const failures = byName.json.failures ?? [];
+  failures.length === 2
+    ? ok(`both failures listed, each naming its session`)
+    : bad(`expected 2 failures, got ${failures.length}`);
+  const promo = failures.find((f) => f.name === 'checkout applies a promo');
+  promo && promo.sessionId === s1 && /expected 8/.test(promo.failure ?? '')
+    ? ok('a failure carries its message and the session that produced it')
+    : bad(`the failure is missing its message or its session: ${JSON.stringify(promo)}`);
+
+  // A retry is two results on purpose. Collapsing them would discard the flakiness signal.
+  failures.some((f) => f.name === 'flaky thing') && t.passed === 2
+    ? ok('a retry is recorded as both a failure and a pass, not deduplicated')
+    : bad('the retry was collapsed');
 }
 
 const list = await api('/v1/runs?limit=5');
@@ -197,7 +265,7 @@ sess.json?.session?.run?.runId === RUN
   ? ok('the session names its run, so both directions are navigable')
   : bad(`the session does not name its run: ${JSON.stringify(sess.json?.session?.run)}`);
 
-// ---------------------------------------------------------------- 5. give the devices back
+// ---------------------------------------------------------------- 6. give the devices back
 
 say('Releasing');
 for (const id of [s1, s2].filter(Boolean)) {
