@@ -11,21 +11,27 @@
  */
 process.env.RATE_LIMIT_MAX = '10000';
 process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
+// `mfarm:appId` blocks the session on an install the worker performs over the heartbeat. In
+// production the budget is minutes; here the "worker" is a loop in this file, so a short deadline
+// keeps the timeout case from being the slowest test in the suite.
+process.env.MFARM_WD_APP_INSTALL_TIMEOUT_MS = '3000';
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/http/server.ts';
 import { withSystem, closePools } from '../src/db.ts';
-import { createApiKey } from '../src/auth.ts';
+import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { parseCapabilities } from '../src/http/webdriver/capabilities.ts';
 import { verifySessionToken } from '../src/tokens.ts';
 
 let app: FastifyInstance;
 let orgA: string, orgB: string, hostId: string;
 let keyA: string, keyB: string;
+/** The host's own credential, so a test can play the worker that performs an install. */
+let workerToken: string;
 const REGION = 'wd-test';
 
 const auth = (k: string) => ({ authorization: `Bearer ${k}` });
@@ -97,9 +103,15 @@ function startUpstream(): Promise<string> {
 // ---------------------------------------------------------------- fixtures
 
 /** `webdriver: false` seeds a device that is otherwise perfect but has no automation server. */
-async function seedDevices(n: number, opts: { webdriver?: boolean; platform?: string } = {}) {
+async function seedDevices(
+  n: number,
+  opts: { webdriver?: boolean; platform?: string; appInstall?: boolean } = {},
+) {
   const caps = ['screen-stream', 'input-datachannel', 'snapshot-reset'];
   if (opts.webdriver !== false) caps.push('webdriver');
+  // Off by default: `mfarm:appId` is the only thing here that needs it, and a fixture that quietly
+  // declares every capability would hide the allocator refusing a device that cannot install.
+  if (opts.appInstall) caps.push('app-install');
   return withSystem(async (c) => {
     const ids: string[] = [];
     for (let i = 0; i < n; i++) {
@@ -121,6 +133,7 @@ async function seedDevices(n: number, opts: { webdriver?: boolean; platform?: st
 }
 
 const clearFleet = () => withSystem(async (c) => {
+  await c.query('DELETE FROM app_actions WHERE org_id = ANY($1)', [[orgA, orgB]]);
   await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
   await c.query('DELETE FROM metering_events WHERE org_id = ANY($1)', [[orgA, orgB]]);
   await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
@@ -143,10 +156,13 @@ before(async () => {
                            VALUES ('wd-a','A',50) RETURNING id`)).rows[0].id;
     orgB = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent)
                            VALUES ('wd-b','B',50) RETURNING id`)).rows[0].id;
+    const wt = generateWorkerToken();
+    workerToken = wt.plaintext;
     hostId = (await c.query(
-      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint,automation_endpoint,last_heartbeat_at)
-       VALUES ($1,'wd-test-host','UP',1,64,262144,'wss://wd-worker.example:8443',$2, now()) RETURNING id`,
-      [REGION, upstreamUrl])).rows[0].id;
+      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint,automation_endpoint,
+                          token_prefix,token_hash,last_heartbeat_at)
+       VALUES ($1,'wd-test-host','UP',1,64,262144,'wss://wd-worker.example:8443',$2,$3,$4, now()) RETURNING id`,
+      [REGION, upstreamUrl, wt.prefix, wt.hash])).rows[0].id;
   });
   keyA = (await createApiKey(orgA)).plaintext;
   keyB = (await createApiKey(orgB)).plaintext;
@@ -156,9 +172,11 @@ before(async () => {
 after(async () => {
   await app.close();
   await withSystem(async (c) => {
+    await c.query('DELETE FROM app_actions WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM metering_events WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM app_builds WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM devices WHERE host_id = $1', [hostId]);
     await c.query('DELETE FROM api_keys WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM hosts WHERE id = $1', [hostId]);
@@ -233,6 +251,70 @@ describe('capability negotiation', () => {
   test('a missing region is a usable error rather than a default region', () => {
     assert.throws(() => parseCapabilities({ capabilities: { alwaysMatch: { platformName: 'android' } } }, opts),
       /mfarm:region/);
+  });
+
+  // ---------------------------------------------------------------- mfarm:appId
+
+  const withAppId = (id: unknown, extra: Record<string, unknown> = {}) => parseCapabilities({
+    capabilities: {
+      alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1', 'mfarm:appId': id, ...extra },
+      firstMatch: [{}],
+    },
+  }, opts);
+
+  test('mfarm:appId accepts an id, a package, a pinned version and @latest', () => {
+    assert.deepEqual(withAppId('3f2504e0-4f89-11d3-9a0c-0305e82c3301').appRef,
+      { kind: 'id', id: '3f2504e0-4f89-11d3-9a0c-0305e82c3301' });
+    assert.deepEqual(withAppId('com.acme.app').appRef,
+      { kind: 'package', packageName: 'com.acme.app', versionName: null },
+      'a bare package name means the newest build, the way it does in every package manager');
+    assert.deepEqual(withAppId('com.acme.app@1.4.2').appRef,
+      { kind: 'package', packageName: 'com.acme.app', versionName: '1.4.2' });
+    assert.deepEqual(withAppId('com.acme.app@latest').appRef,
+      { kind: 'package', packageName: 'com.acme.app', versionName: null });
+    // Uppercase is what a client library will hand back from its own uuid formatting.
+    assert.deepEqual(withAppId('3F2504E0-4F89-11D3-9A0C-0305E82C3301').appRef,
+      { kind: 'id', id: '3f2504e0-4f89-11d3-9a0c-0305e82c3301' });
+  });
+
+  test('a bare @latest is refused by naming the package it is missing', () => {
+    assert.throws(() => withAppId('@latest'), /does not name a package/);
+    assert.throws(() => withAppId('com.acme.app@'), /bare "@"/);
+    assert.throws(() => withAppId('not a package'), /is not an app reference/);
+    assert.throws(() => withAppId('acme'), /is not an app reference/,
+      'one segment is not a package name, and is much more likely to be a truncated id');
+    assert.throws(() => withAppId(''), /must be a non-empty string/);
+  });
+
+  test('mfarm:appId and appium:app both name the app, so together they are an error', () => {
+    assert.throws(
+      () => withAppId('com.acme.app', { 'appium:app': '/home/ci/apks/acme.apk' }),
+      /both name the app to install/,
+    );
+  });
+
+  test('an unknown mfarm: capability is refused, in both dialects', () => {
+    // The typo this exists for. Ignoring it would start a session on a device with no app on it and
+    // report whatever the launcher happened to show.
+    assert.throws(() => parseCapabilities({
+      capabilities: {
+        alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1', 'mfarm:appid': 'com.acme.app' },
+        firstMatch: [{}],
+      },
+    }, opts), /`mfarm:appid` is not a capability this hub understands/);
+
+    assert.throws(() => parseCapabilities({
+      desiredCapabilities: { platformName: 'android', 'mfarm:region': 'eu-1', 'mfarm:vidoe': true },
+    }, opts), /not a capability this hub understands/);
+
+    // A vendor prefix that is not ours is somebody else's business and stays untouched.
+    const p = parseCapabilities({
+      capabilities: {
+        alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1', 'goog:chromeOptions': {} },
+        firstMatch: [{}],
+      },
+    }, opts);
+    assert.ok('goog:chromeOptions' in p.upstream);
   });
 });
 
@@ -1019,5 +1101,321 @@ describe('the automation grant', () => {
     const v = verifySessionToken(grantOn(recorded[0]), app.signingKey.publicKeyPem, hostId);
     assert.equal(v.ok && v.claims.sid, cli.id);
     assert.equal(v.ok && v.claims.did, dev);
+  });
+});
+
+// ---------------------------------------------------------------- mfarm:appId
+
+/**
+ * `mfarm:appId` — the app under test comes from the library, not from a path on the device host.
+ *
+ * The interesting thing about this capability is that it makes session creation depend on a WORKER,
+ * asynchronously, in the middle of a request: the hub queues an install, the heartbeat carries it
+ * down, and nothing proceeds until the outcome comes back up. So these tests play the worker for
+ * real — `POST /v1/workers/heartbeat` to collect the job and `POST /v1/workers/events` to report it
+ * — rather than writing DONE into the table. What is under test is the whole loop, and the loop is
+ * where the failures are: a device left holding a lease after a bad APK, an install offered to the
+ * wrong host, a session that opens before the app is on the device.
+ */
+describe('mfarm:appId', () => {
+  /** A build in the library. The hub never reads the bytes — only a worker does — so there are none. */
+  async function seedBuild(orgId: string, opts: {
+    packageName: string; versionName?: string | null; versionCode?: number;
+    platform?: string; secondsAgo?: number;
+  }): Promise<string> {
+    return withSystem(async (c) => {
+      const { rows } = await c.query(
+        `INSERT INTO app_builds (org_id, platform, package_name, version_name, version_code,
+                                 sha256, size_bytes, filename, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() - ($9 || ' seconds')::interval) RETURNING id`,
+        [orgId, opts.platform ?? 'android', opts.packageName, opts.versionName ?? null,
+         opts.versionCode ?? 1, randomBytes(32).toString('hex'), 4096,
+         `${opts.packageName}.apk`, String(opts.secondsAgo ?? 0)],
+      );
+      return rows[0].id;
+    });
+  }
+
+  /** One heartbeat, and a report for everything it was offered. Returns what it was asked to do. */
+  async function workerBeat(outcome: { ok: boolean; error?: string }) {
+    const beat = await app.inject({
+      method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken),
+    });
+    const offered = beat.json().actions as Array<{ actionId: string; kind: string; appId: string }>;
+    if (offered.length > 0) {
+      await app.inject({
+        method: 'POST', url: '/v1/workers/events', headers: auth(workerToken),
+        payload: { actions: offered.map((a) => ({ actionId: a.actionId, ...outcome })) },
+      });
+    }
+    return offered;
+  }
+
+  /**
+   * Create a session while a worker is running beside it.
+   *
+   * The request cannot be awaited first — it blocks ON the worker — so it is started, serviced, and
+   * only then awaited. The iteration cap is what turns "the hub is waiting for something that will
+   * never happen" into a failed assertion rather than a test run that hangs.
+   */
+  async function createSession(
+    caps: Record<string, unknown>,
+    opts: { outcome?: { ok: boolean; error?: string }; work?: boolean; key?: string } = {},
+    /** For the bound path, where the credential carries the session id in its password half. */
+    headers?: Record<string, string>,
+  ) {
+    const offered: Array<{ actionId: string; kind: string; appId: string }> = [];
+    const pending = app.inject({
+      method: 'POST', url: '/wd/hub/session',
+      headers: headers ?? auth(opts.key ?? keyA), payload: caps,
+    });
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+
+    for (let i = 0; i < 400 && !settled; i++) {
+      if (opts.work !== false) offered.push(...await workerBeat(opts.outcome ?? { ok: true }));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(settled, 'the hub never answered — it is still waiting on something');
+    return { reply: await pending, offered };
+  }
+
+  test('resolves a build id, installs it, and only then opens the session', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1, { appInstall: true });
+    const appId = await seedBuild(orgA, { packageName: 'com.acme.shop', versionName: '1.4.2' });
+
+    const { reply, offered } = await createSession(androidCaps({ 'mfarm:appId': appId }));
+
+    assert.equal(reply.statusCode, 200, reply.body);
+    const value = reply.json().value;
+    assert.equal(await sessionState(value.sessionId), 'ACTIVE');
+    assert.equal(await deviceState(dev), 'SESSION_ACTIVE');
+
+    // The worker was asked to install exactly this build, once.
+    assert.equal(offered.length, 1);
+    assert.equal(offered[0].kind, 'install');
+    assert.equal(offered[0].appId, appId);
+
+    // Appium is told which app to bring up, and is NOT handed a path — that coupling is the whole
+    // thing this capability removes.
+    const created = recorded.find((r) => r.method === 'POST' && r.url === '/session')!;
+    const sent = (created.body as { capabilities: { alwaysMatch: Record<string, unknown> } })
+      .capabilities.alwaysMatch;
+    assert.equal(sent['appium:appPackage'], 'com.acme.shop');
+    assert.ok(!('appium:app' in sent), 'no host path reaches the automation server');
+    assert.ok(!('appium:appActivity' in sent), 'the launchable activity is the driver\'s to resolve');
+    assert.ok(!('mfarm:appId' in sent), 'our vendor caps are stripped upstream as always');
+
+    // The build that actually ran is reported back, and recorded on the session.
+    assert.equal(value.capabilities['mfarm:appId'], appId);
+    const stored = await withSystem(async (c) => (await c.query(
+      'SELECT capabilities FROM webdriver_sessions WHERE session_id = $1', [value.sessionId],
+    )).rows[0].capabilities);
+    assert.equal(stored['mfarm:appId'], appId);
+  });
+
+  test('the install happens before the automation session is created, not after', async () => {
+    await clearFleet();
+    await seedDevices(1, { appInstall: true });
+    const appId = await seedBuild(orgA, { packageName: 'com.acme.order' });
+
+    // One beat, deliberately withheld until after a moment of nothing: if the hub created the
+    // Appium session first, the upstream would already have been called by now.
+    const pending = app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:appId': appId }),
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(recorded.filter((r) => r.url === '/session').length, 0,
+      'the session must not open against a device that has no app on it yet');
+
+    for (let i = 0; i < 100; i++) {
+      if ((await workerBeat({ ok: true })).length > 0) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const reply = await pending;
+    assert.equal(reply.statusCode, 200, reply.body);
+    assert.equal(recorded.filter((r) => r.url === '/session').length, 1);
+  });
+
+  test('@latest takes the newest upload, and a pinned version takes that one', async () => {
+    await clearFleet();
+    await seedDevices(2, { appInstall: true });
+    const old = await seedBuild(orgA, { packageName: 'com.acme.nightly', versionName: '1.0.0', secondsAgo: 600 });
+    const fresh = await seedBuild(orgA, { packageName: 'com.acme.nightly', versionName: '1.1.0', secondsAgo: 1 });
+
+    const latest = await createSession(androidCaps({ 'mfarm:appId': 'com.acme.nightly@latest' }));
+    assert.equal(latest.reply.statusCode, 200, latest.reply.body);
+    assert.equal(latest.reply.json().value.capabilities['mfarm:appId'], fresh);
+    assert.equal(latest.offered[0].appId, fresh);
+
+    const pinned = await createSession(androidCaps({ 'mfarm:appId': 'com.acme.nightly@1.0.0' }));
+    assert.equal(pinned.reply.statusCode, 200, pinned.reply.body);
+    assert.equal(pinned.reply.json().value.capabilities['mfarm:appId'], old,
+      'a pinned version is how a run is made reproducible, so it must not drift to the newest');
+  });
+
+  test('a bare package name means the newest build of it', async () => {
+    await clearFleet();
+    await seedDevices(1, { appInstall: true });
+    await seedBuild(orgA, { packageName: 'com.acme.bare', versionName: '0.9', secondsAgo: 600 });
+    const fresh = await seedBuild(orgA, { packageName: 'com.acme.bare', versionName: '1.0' });
+
+    const { reply } = await createSession(androidCaps({ 'mfarm:appId': 'com.acme.bare' }));
+    assert.equal(reply.json().value.capabilities['mfarm:appId'], fresh);
+  });
+
+  test('a build that is not in the library costs no device at all', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1, { appInstall: true });
+
+    for (const ref of [randomUUID(), 'com.acme.never@latest', 'com.acme.shop@9.9.9']) {
+      const r = await app.inject({
+        method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+        payload: androidCaps({ 'mfarm:appId': ref }),
+      });
+      assert.equal(r.json().value.error, 'session not created', ref);
+      assert.equal(r.json().value['mfarm:code'], 'no_such_app', ref);
+      // Resolution happens before allocation on purpose: a typo must not spend a lease, and on a
+      // busy farm must not spend a queue wait either.
+      assert.equal(await deviceState(dev), 'READY', ref);
+    }
+  });
+
+  test("another org's build is not nameable, even by its exact id", async () => {
+    await clearFleet();
+    await seedDevices(1, { appInstall: true });
+    const theirs = await seedBuild(orgB, { packageName: 'com.rival.app', versionName: '2.0' });
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:appId': theirs }),
+    });
+    // Indistinguishable from a build that never existed — RLS scopes the lookup, so there is no
+    // answer here that confirms the id to a stranger.
+    assert.equal(r.json().value['mfarm:code'], 'no_such_app');
+  });
+
+  test('a failed install fails the session with adb\'s own words, and gives the device back', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1, { appInstall: true });
+    const appId = await seedBuild(orgA, { packageName: 'com.acme.broken' });
+
+    const { reply } = await createSession(
+      androidCaps({ 'mfarm:appId': appId }),
+      { outcome: { ok: false, error: 'INSTALL_FAILED_NO_MATCHING_ABIS' } },
+    );
+
+    assert.equal(reply.statusCode, 500);
+    assert.equal(reply.json().value['mfarm:code'], 'app_install_failed');
+    assert.match(reply.json().value.message, /INSTALL_FAILED_NO_MATCHING_ABIS/,
+      'the reason names the caller\'s APK, because that is what is actually wrong');
+    // No automation session was ever started, so there is nothing upstream to clean up — but the
+    // device is ours to give back, and leaving it reserved would eat the fleet one bad build at a time.
+    assert.equal(recorded.filter((r) => r.url === '/session').length, 0);
+    assert.equal(await deviceState(dev), 'CLEANING', 'released, not left reserved');
+  });
+
+  test('an install that never finishes times out instead of holding the request open', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1, { appInstall: true });
+    const appId = await seedBuild(orgA, { packageName: 'com.acme.slow' });
+
+    // A worker that beats but never reports — a host that took the job and died mid-install.
+    const { reply } = await createSession(androidCaps({ 'mfarm:appId': appId }), { work: false });
+
+    assert.equal(reply.json().value['mfarm:code'], 'app_install_timeout');
+    assert.equal(await deviceState(dev), 'CLEANING');
+  });
+
+  test('a device that cannot install apps is not allocated for a session that needs one', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);  // webdriver, but no app-install
+    const appId = await seedBuild(orgA, { packageName: 'com.acme.shop' });
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:appId': appId }),
+    });
+
+    assert.equal(r.json().value['mfarm:code'], 'no_capacity');
+    assert.match(r.json().value.message, /can install apps/,
+      'the message has to say which requirement went unmet, or the farm just looks full');
+    assert.equal(await deviceState(dev), 'READY', 'never touched, so still allocatable');
+  });
+
+  test('an android reference does not resolve an ios build', async () => {
+    await clearFleet();
+    await seedDevices(1, { appInstall: true });
+    await seedBuild(orgA, { packageName: 'com.acme.ios', versionName: '1.0', platform: 'ios' });
+
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:appId': 'com.acme.ios@latest' }),
+    });
+    assert.equal(r.json().value['mfarm:code'], 'no_such_app');
+  });
+
+  test('a bound session installs too, and its device is checked here, not by the allocator', async () => {
+    const hubAuth = (key: string, sessionId: string) => ({
+      authorization: `Basic ${Buffer.from(`${key}:${sessionId}`).toString('base64')}`,
+    });
+    const bindable = (appId: string) => ({
+      capabilities: { alwaysMatch: { platformName: 'android', 'mfarm:appId': appId }, firstMatch: [{}] },
+    });
+    const allocate = async (requireCapabilities: string[]) => {
+      const r = await app.inject({
+        method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+        payload: { region: REGION, platform: 'android', requireCapabilities },
+      });
+      assert.equal(r.statusCode, 201, r.body);
+      return r.json().session.id as string;
+    };
+
+    await clearFleet();
+    await seedDevices(1);
+    let appId = await seedBuild(orgA, { packageName: 'com.acme.bound' });
+
+    // `mfarm run` allocated this one and asked for nothing but WebDriver, so the device it holds may
+    // well be unable to install — the allocator was never told an install was coming. That is why
+    // the capability is checked again on the device actually in hand.
+    const plain = await allocate(['webdriver']);
+    const refused = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: hubAuth(keyA, plain), payload: bindable(appId),
+    });
+    assert.equal(refused.json().value['mfarm:code'], 'no_app_install');
+    // Left for its owner. `mfarm run` releases this session, and ending it here would stop a run
+    // that is still going, from under a process that believes it holds the device.
+    assert.equal(await sessionState(plain), 'ALLOCATING');
+
+    await clearFleet();
+    await seedDevices(1, { appInstall: true });
+    appId = await seedBuild(orgA, { packageName: 'com.acme.bound' });
+    const capable = await allocate(['webdriver', 'app-install']);
+    const { reply, offered } = await createSession(bindable(appId), {}, hubAuth(keyA, capable));
+
+    assert.equal(reply.statusCode, 200, reply.body);
+    assert.equal(reply.json().value.sessionId, capable, 'it drives the session its owner allocated');
+    assert.equal(reply.json().value.capabilities['mfarm:appId'], appId);
+    assert.equal(offered.length, 1, 'the install is queued against the borrowed session');
+  });
+
+  test('an explicit appium:appPackage wins — preloading a build is not the same as launching it', async () => {
+    await clearFleet();
+    await seedDevices(1, { appInstall: true });
+    const appId = await seedBuild(orgA, { packageName: 'com.acme.helper' });
+
+    const { reply } = await createSession(androidCaps({
+      'mfarm:appId': appId,
+      'appium:appPackage': 'com.acme.hostapp',
+      'appium:appActivity': '.MainActivity',
+    }));
+
+    assert.equal(reply.statusCode, 200, reply.body);
+    const sent = (recorded.find((r) => r.url === '/session')!
+      .body as { capabilities: { alwaysMatch: Record<string, unknown> } }).capabilities.alwaysMatch;
+    assert.equal(sent['appium:appPackage'], 'com.acme.hostapp');
+    assert.equal(sent['appium:appActivity'], '.MainActivity');
   });
 });

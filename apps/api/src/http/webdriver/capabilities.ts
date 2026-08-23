@@ -1,3 +1,4 @@
+import { AppRefError, parseAppRef, type AppRef } from '../../appref.ts';
 import { invalidArgument } from './errors.ts';
 
 /**
@@ -25,6 +26,29 @@ const STANDARD = new Set([
 /** Ours. Stripped before forwarding upstream — an Appium server would reject unknown vendor keys. */
 const MFARM_PREFIX = 'mfarm:';
 
+/**
+ * Every `mfarm:` key this hub understands. An unrecognised one is REFUSED, and that rule is the
+ * reason the vendor prefix exists at all: `mfarm:appid` differs from `mfarm:appId` by one character,
+ * and the alternative to refusing it is a session that starts happily on a device with no app on it.
+ * A capability is an instruction, and silently discarding an instruction is the worst answer
+ * available — worse than failing, because the run continues and reports something.
+ */
+const MFARM_KEYS = new Set([
+  'region', 'tier', 'ttlMinutes', 'queueTimeoutSeconds', 'sessionId', 'appId',
+]);
+
+function rejectUnknownMfarmKeys(caps: Record<string, unknown>): void {
+  for (const key of Object.keys(caps)) {
+    if (!key.startsWith(MFARM_PREFIX)) continue;
+    const name = key.slice(MFARM_PREFIX.length);
+    if (MFARM_KEYS.has(name)) continue;
+    throw invalidArgument(
+      `\`${key}\` is not a capability this hub understands. Known: ` +
+      `${[...MFARM_KEYS].map((k) => `${MFARM_PREFIX}${k}`).join(', ')}.`,
+    );
+  }
+}
+
 export interface ParsedCapabilities {
   platform: 'android' | 'ios';
   /**
@@ -34,6 +58,14 @@ export interface ParsedCapabilities {
   region?: string;
   tier?: string;
   ttlMinutes?: number;
+  /**
+   * `mfarm:appId` — a build in the org's app library to put on the device BEFORE the automation
+   * session opens. Parsed here, resolved against `app_builds` by the caller, because resolution
+   * needs the tenant's database scope and this file is pure.
+   */
+  appRef?: AppRef;
+  /** The reference exactly as the caller wrote it, for error messages that quote them back. */
+  appRefRaw?: string;
   /** How long to wait for capacity before giving up. 0 = fail immediately. */
   queueTimeoutSeconds: number;
   /**
@@ -119,6 +151,7 @@ function fromW3c(caps: Record<string, unknown>, opts: ParseOptions): ParsedCapab
 }
 
 function validateKeys(caps: Record<string, unknown>): void {
+  rejectUnknownMfarmKeys(caps);
   for (const key of Object.keys(caps)) {
     if (STANDARD.has(key) || key.includes(':')) continue;
     throw invalidArgument(
@@ -156,6 +189,10 @@ function interpret(
     throw invalidArgument(`platformName "${platformRaw}" is not supported. Use "android" or "ios".`);
   }
 
+  // Both dialects converge here, and the JSONWP path never went through `validateKeys` — so this
+  // is the call that actually covers every request.
+  rejectUnknownMfarmKeys(caps);
+
   const bindSessionId = bindTarget(caps, opts);
 
   const region = str(caps, `${MFARM_PREFIX}region`) ?? opts.defaultRegion;
@@ -172,6 +209,28 @@ function interpret(
   const TIERS = ['cuttlefish', 'avd', 'container', 'simulator', 'physical'];
   if (tier !== undefined && !TIERS.includes(tier)) {
     throw invalidArgument(`mfarm:tier "${tier}" is unknown. One of: ${TIERS.join(', ')}.`);
+  }
+
+  const appRefRaw = str(caps, `${MFARM_PREFIX}appId`);
+  let appRef: AppRef | undefined;
+  if (appRefRaw !== undefined) {
+    // Refused, not ordered. `appium:app` is Appium installing a file it can reach; `mfarm:appId` is
+    // the farm installing a build from the library. Both name the app under test, and a suite that
+    // sets both has one of them left over from the migration — picking either would install
+    // something the author did not mean and would look like it worked.
+    if (caps['appium:app'] !== undefined) {
+      throw invalidArgument(
+        `\`${MFARM_PREFIX}appId\` and \`appium:app\` both name the app to install. Keep ` +
+        `\`${MFARM_PREFIX}appId\` and drop \`appium:app\` — the library build is installed before ` +
+        'your session starts, and needs no path on the device host.',
+      );
+    }
+    try {
+      appRef = parseAppRef(appRefRaw);
+    } catch (e) {
+      if (e instanceof AppRefError) throw invalidArgument(`\`${MFARM_PREFIX}appId\`: ${e.message}`);
+      throw e;
+    }
   }
 
   const ttlMinutes = int(caps, `${MFARM_PREFIX}ttlMinutes`, 1, 240);
@@ -202,7 +261,10 @@ function interpret(
   }
   upstream.platformName = platform;
 
-  return { platform, region, tier, ttlMinutes, queueTimeoutSeconds, upstream, protocol, bindSessionId };
+  return {
+    platform, region, tier, ttlMinutes, queueTimeoutSeconds, upstream, protocol, bindSessionId,
+    appRef, appRefRaw,
+  };
 }
 
 /** Exactly the shape Postgres will accept for a uuid, checked here so a bad id is a 400, not a 500. */

@@ -14,8 +14,9 @@
 #   1. Mint an API key in the console: Settings → API keys. Give CI its OWN key — revoking it must
 #      not break anyone else, which is the entire reason keys are per-purpose rather than per-farm.
 #   2. Add it as a repository secret named MFARM_API_KEY.
-#   3. Put your APK somewhere the DEVICE HOST can read it, and set MEDISHOP_APK to that path.
-#      Uploading a build per run belongs in the app library (`POST /v1/apps`) — see the note below.
+#   3. Upload the build you want tested and name it with `mfarm:appId` — the "Upload the build"
+#      step below does it in one curl. The farm installs it before the session opens, so nothing
+#      here has to reach the device host, and a build that has not changed costs no bytes.
 
 name: Device tests
 
@@ -48,13 +49,32 @@ jobs:
         working-directory: examples/medishop-suite
         run: npm ci
 
+      # Content-addressed, so re-uploading an unchanged build costs one row and no bytes — which is
+      # what makes "upload on every run" the simple thing rather than the wasteful thing. The
+      # response carries the build id, and that id is what the suite names.
+      #
+      # The `--data-binary` path below is YOUR build's output; this one is the Gradle default.
+      - name: Upload the build
+        id: upload
+        env:
+          MFARM_API_KEY: ${{ secrets.MFARM_API_KEY }}
+        run: |
+          curl -sSf -X POST "https://farm.mfarm.dev/v1/apps?filename=app.apk" \
+            -H "authorization: Bearer $MFARM_API_KEY" \
+            -H "content-type: application/vnd.android.package-archive" \
+            --data-binary @app/build/outputs/apk/debug/app-debug.apk \
+            > upload.json
+          echo "app-id=$(node -p 'require("./upload.json").app.id')" >> "$GITHUB_OUTPUT"
+
       - name: Run on real devices
         working-directory: examples/medishop-suite
         env:
           MFARM_API_KEY: ${{ secrets.MFARM_API_KEY }}
           MFARM_HUB: https://farm.mfarm.dev
           MFARM_REGION: lab
-          MEDISHOP_APK: /home/rkcr070707/apks/way2automation.apk
+          # The exact build this commit produced. A nightly that wants "whatever was built last"
+          # uses `com.example.app@latest` instead; either way the session records which build ran.
+          MEDISHOP_APP_ID: ${{ steps.upload.outputs.app-id }}
         run: npm test
 
       # Screenshots the suite captured at the moment a test failed. The farm keeps its own logcat

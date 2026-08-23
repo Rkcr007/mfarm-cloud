@@ -4,8 +4,26 @@ Last updated 2026-08-19. **New here? Read `docs/START_HERE.md` — closed laptop
 tap, in seven steps.** This file is the state of play and every known issue; that one is the path.
 
 **Two machines (ADR-0006): `mfarm-cp` holds the control plane and console at
-https://34-100-138-213.sslip.io; `mfarm-lab` holds the devices. Both are stopped between sessions;
+https://farm.mfarm.dev; `mfarm-lab` holds the devices. Both are stopped between sessions;
 `./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
+
+**2026-08-23 — `mfarm:appId`: a suite names its build instead of a path on the device host.** A
+WebDriver session can set `mfarm:appId` to a build in the org's app library — a uuid,
+`com.acme.app@1.4.2`, `com.acme.app@latest`, or a bare package name — and the farm installs it over
+the existing `app_actions` heartbeat pipeline **before** the Appium session opens. The resolved build
+id comes back in the returned capabilities and is stored on the session row, so a `@latest` run
+records which build it actually ran. `appium:app` still works; setting both is an error rather than a
+coin toss. Unknown `mfarm:` keys are now REFUSED — they used to be stripped and forgotten, so
+`mfarm:appid` would have run a whole suite against a launcher screen. `examples/medishop-suite` and
+its `ci-example.yml` now upload and name a build rather than pointing at `/home/rkcr070707/apks/`.
+Design notes and what is next in `docs/EXECUTION_MODEL.md` §4.1 — §4.2 (`runs` + `mfarm:runId`) is
+the next piece and still the one that matters most.
+
+**2026-08-20 — the farm has its own domain.** `mfarm.dev`, registered through Cloud Domains, Cloud
+DNS authoritative, both A records on reserved addresses. `farm.mfarm.dev` (console, API, hub, `/dp`)
+and `turn.mfarm.dev` (the relay). The old sslip.io name still answers — Caddy serves both, each with
+its own certificate — until `HOSTNAME_LEGACY=` retires it. `deploy/farm.env` holds both names and is
+the only place either appears. See issue 29.
 
 **2026-08-19 — the interactive device view is BUILT AND VERIFIED ON HARDWARE** (issue 28, ADR-0007):
 a Launch flow, a live device-mirroring cockpit at ~50 fps, touch, logcat and screenshots, plus a
@@ -94,17 +112,18 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**445 tests pass, 0 fail** (2026-08-19, at migration 016), against a real PostgreSQL 16. No mocks for
+**609 tests pass, 0 fail** (2026-08-23, at migration 019), against a real PostgreSQL 16. No mocks for
 anything that matters.
 
 ```
-apps/api/         control plane, app library, console,  267 tests
+apps/api/         control plane, app library, console,  382 tests
                   entrypoint, metrics
 apps/cli/         mfarm CLI                              63 tests
-workers/agent/    worker agent, Appium supervisor,      115 tests
+workers/agent/    worker agent, Appium supervisor,      143 tests
                   automation gateway, Cuttlefish backend
+deploy/           deploy scripts and their checks         21 tests
 apps/api/public/  the web console (served by the API at /)
-apps/api/migrations/  016 of them; 016 is the newest
+apps/api/migrations/  019 of them; 019 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
@@ -1222,6 +1241,47 @@ device is covered by the same URL. Caught by a test, not by review.
     **A device that cannot stream was losing its whole connection.** `signal-error` was treated as a
     connection failure, which took logcat and input down with the missing video. It is now a distinct
     `nostream` state: attached, driveable, no picture.
+
+29. **THE DOMAIN, THE RESERVED ADDRESSES, AND THREE BUGS THAT ONLY A DEPLOYMENT FINDS.** 2026-08-20.
+
+    `mfarm.dev` was registered through Cloud Domains ($12/yr, auto-renew, expires 2027-08-19) with
+    Cloud DNS as authoritative. Both records point at RESERVED addresses, so neither name can drift:
+
+        farm.mfarm.dev -> 34.100.138.213 (mfarm-cp)    console, /v1, the hub, /dp
+        turn.mfarm.dev -> 34.100.159.34  (mfarm-lab)   coturn, and nothing else
+
+    **The addresses were the more valuable half.** `mfarm-ip` had been sitting RESERVED and unused
+    since the single-box era — billed the whole time, at the *higher* rate GCP charges an address
+    attached to nothing — so attaching it cost nothing and removed the ugliest failure this project
+    has produced: the device host's IP changed on every stop/start, coturn advertised the old one,
+    and the console worked perfectly while video silently never arrived, with an empty relay log
+    because nobody ever called it.
+
+    **The CSP got simpler, not more complex.** Under the new domain the live-view socket is
+    `wss://farm.mfarm.dev/dp` — same origin as the console — so `connect-src` is back to plain
+    `'self'` with no external origin named. That is ADR-0007's design working as intended.
+
+    Three bugs, all found by deploying rather than by review:
+
+    **coturn's `external-ip` does not accept a hostname.** `setup-turn.sh` had started defaulting it
+    from `MFARM_TURN_HOST`, which had just become `turn.mfarm.dev`. It would have produced a relay
+    that starts cleanly and hands every client an unusable address. The name is resolved first now.
+
+    **`docker compose up -d api` silently serves `:latest`.** It does not set `MFARM_IMAGE`, the
+    compose file falls back, and the API comes back on an older build having reported success. This
+    trap caught the person who documented it, mid-migration. Fixed where it cannot break anything:
+    `mfarm-deploy.sh` writes `MFARM_IMAGE` into `deploy/.env`, which compose reads on its own.
+    Removing the `:latest` default instead would break `farm-up.sh` on a fresh box.
+
+    **`CF_RESET_MODE=powerwash` governed the reset path and not the boot path.** `restartExisting()`
+    still consulted `snapshotOnDisk()`, so a snapshot left from before the mode was set was restored
+    on startup — the farm came up restored, published no display, and lost the live view for exactly
+    the reason the mode exists. Now `snapshotOnDisk()` returns nothing in powerwash mode.
+
+    Also: `verify-live.sh` was reporting a green "live view available" for a farm with **no devices**,
+    because it grepped an empty response. A check that reports success on no data is worse than no
+    check. It now also treats "no devices AND /dp with no upstream" as the normal stopped-device-host
+    state rather than three failures, and fails if the API is running a floating image tag.
 
 ## Working notes for whoever picks this up
 

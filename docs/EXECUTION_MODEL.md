@@ -1,8 +1,12 @@
 # Running test suites on MFARM — what exists, what does not, and what to build
 
-Written 2026-08-23 as a handoff. Read `HANDOFF.md` and `docs/E2E_MVP_PLAN.md` first for the
-platform; this file is only about **suite execution** — how a person submits a run, where it goes,
-and how they find out what broke.
+Written 2026-08-23 as a handoff, and updated the same day when §4.1 shipped. Read `HANDOFF.md` and
+`docs/E2E_MVP_PLAN.md` first for the platform; this file is only about **suite execution** — how a
+person submits a run, where it goes, and how they find out what broke.
+
+**Status: §4.1 (`mfarm:appId`) is built and tested. §4.2 (`runs` + `mfarm:runId`) is next, and it is
+still the one that matters most — there is no "run", so "what failed on build 4471?" remains
+unanswerable.**
 
 ---
 
@@ -12,9 +16,10 @@ A stock WebdriverIO suite runs against the farm from a laptop. `examples/medisho
 worked example: 8 tests green against real Cuttlefish, and `ci-example.yml` is a GitHub Actions
 workflow that needs no MFARM CLI at all.
 
-The path is: `remote()` → hub (`/wd/hub/session`) → `allocate_device()` → Ed25519 grant → worker
-gateway → Appium → device. `deleteSession()` releases it, the device powerwashes, and the worker
-captures a logcat and a final screenshot as **artifacts** before the wipe.
+The path is: `remote()` → hub (`/wd/hub/session`) → `allocate_device()` → **`mfarm:appId` install,
+if asked for** → Ed25519 grant → worker gateway → Appium → device. `deleteSession()` releases it,
+the device powerwashes, and the worker captures a logcat and a final screenshot as **artifacts**
+before the wipe.
 
 **One WebDriver session = one device lease.** That is the whole execution model right now.
 
@@ -33,16 +38,13 @@ Everything else below is downstream of this.
 
 ### Which app gets installed?
 
-Today `appium:app` takes **a path on the device host**. That is why the example suite passes
-`/home/rkcr070707/apks/way2automation.apk` — a real user cannot use that.
+**Answered by `mfarm:appId` — built 2026-08-23, see §4.1.** A suite names a build in the app library
+and the farm installs it before the session opens. `appium:app` still works and still takes a path
+on the device host; the two are mutually exclusive and the hub refuses both rather than picking one.
 
-The app library already exists and is good: `app_builds` is content-addressed (`POST /v1/apps`,
-re-uploading an unchanged build costs one row and no bytes), and install/launch/uninstall run
-through `app_actions` over the worker heartbeat. But it is reachable **only from the console and the
-CLI**. There is no way for a WebDriver session to say "install build X".
-
-The whole recognised vendor namespace is: `mfarm:region`, `mfarm:tier`, `mfarm:sessionId`,
-`mfarm:queueTimeoutSeconds`. That is it.
+The recognised vendor namespace is now: `mfarm:region`, `mfarm:tier`, `mfarm:ttlMinutes`,
+`mfarm:sessionId`, `mfarm:queueTimeoutSeconds`, `mfarm:appId`. Anything else under the `mfarm:`
+prefix is **refused** — that rule was documented below before it was true, and is now enforced.
 
 ### Where are sessions stored, and how are they viewed?
 
@@ -66,28 +68,53 @@ priority, and no fair share between people. Correct, and slow.
 
 ## 4. What to build, in order
 
-### 4.1 `mfarm:appId` — the smallest change with the largest effect
+### 4.1 `mfarm:appId` — DONE (2026-08-23)
 
-Let a suite name a build from the library instead of a path on a host:
+A suite names a build from the library instead of a path on a host:
 
 ```js
 capabilities: {
   platformName: 'Android',
   'appium:automationName': 'UiAutomator2',
   'mfarm:region': 'lab',
-  'mfarm:appId': process.env.APP_ID,        // or 'com.acme.app@1.4.2', or '@latest'
+  'mfarm:appId': process.env.APP_ID,        // or 'com.acme.app@1.4.2', or 'com.acme.app@latest'
 }
 ```
 
-The hub resolves it against `app_builds` **scoped to the caller's org**, and the worker installs it
-from the library before handing the session over — the same content-addressed blob the console
-installs, so a build already on the device is a no-op.
+The hub resolves it against `app_builds` **scoped to the caller's org** (RLS, so another org's build
+id is indistinguishable from one that never existed), then queues an ordinary `app_actions` install
+and blocks until the worker reports it done. Four forms resolve:
 
-This removes the host-path coupling entirely and makes the CI story natural: upload the APK, get an
-id, pass the id. It is also the piece the user asked for by name.
+| `mfarm:appId` | resolves to |
+|---|---|
+| a uuid | that exact build — the reproducible form |
+| `com.acme.app@1.4.2` | the newest build with that `versionName` |
+| `com.acme.app@latest` | the newest build of the package |
+| `com.acme.app` | the same as `@latest` |
 
-Accept a package coordinate too (`com.acme.app@1.4.2`, `com.acme.app@latest`) — an id in a config
-file is opaque, and `@latest` is what a nightly wants.
+Six things that were decided while building it and are not obvious from the capability alone:
+
+- **Resolution happens before allocation.** A typo must not spend a device lease, or on a busy farm
+  a queue wait, to say "no such build".
+- **The install goes before `POST /session` upstream.** Appium's `createSession` is what launches
+  the app, so a session opened first would have run its first command against the launcher.
+- **`app-install` joins `webdriver` in `requireCapabilities`,** so a device that cannot install is
+  never allocated for a session that needs one — and the no-capacity message says which requirement
+  went unmet, instead of making the farm look full.
+- **The resolved build id comes back** as `mfarm:appId` in the returned capabilities, and is stored
+  on the `webdriver_sessions` row. `@latest` is deliberately not reproducible; recording what it
+  resolved to is what keeps a nightly's result explicable. This is also the first column that will
+  matter to the Runs screen in §4.2.
+- **The hub sets `appium:appPackage`** to the resolved package so Appium foregrounds it, and does
+  not set `appium:appActivity` — the driver resolves the launchable activity, and guessing at the
+  caller's manifest would be worse than letting it. An explicit `appium:appPackage` from the suite
+  wins, because preloading a build is not the same as launching it.
+- **It costs up to one heartbeat (10 s) plus the install, on every session.** Nothing is ever already
+  installed: a device is powerwashed between leases. The control plane cannot dial a worker, so the
+  job goes down on the next beat — reusing that pipeline is what buys the fence re-check at delivery,
+  the host-scoped blob authorisation and the worker's digest verification for free. If the latency
+  starts to hurt, the fix is a shorter beat or a nudge on the automation endpoint, **not** a second
+  install path.
 
 ### 4.2 `mfarm:runId` and a `runs` table — makes a hundred executions legible
 
@@ -136,7 +163,7 @@ host scoping and the fence check for free (migration 015 generalised the pipelin
 | capability | why |
 |---|---|
 | `mfarm:runId` | see 4.2 — the one that matters |
-| `mfarm:appId` / `mfarm:app` | see 4.1 |
+| ~~`mfarm:appId`~~ | built, see 4.1 |
 | `mfarm:name` | a human label per session, so the Sessions list reads as test names |
 | `mfarm:build` | commit sha / branch, for "which commit broke it" |
 | `mfarm:video` | opt in per session, since it costs CPU |
@@ -144,11 +171,17 @@ host scoping and the fence check for free (migration 015 generalised the pipelin
 | `mfarm:shard` / `mfarm:priority` | only meaningful past two devices; design now, build later |
 
 Keep the namespace small and typed, and keep rejecting unknown `mfarm:` keys — a silently ignored
-capability is the failure mode the whole vendor prefix exists to prevent.
+capability is the failure mode the whole vendor prefix exists to prevent. (That rejection did not
+actually exist until `mfarm:appId` shipped; an unrecognised `mfarm:` key was stripped and forgotten.
+`mfarm:appid` would have started a session on a device with no app on it and reported whatever the
+launcher showed.)
 
 ## 6. Where to start
 
-`mfarm:appId` first: it is self-contained, it unblocks real CI, and it needs no schema change beyond
-resolving an existing table. Then `runs` + `mfarm:runId`, then outcome reporting. Those three turn
-"I can run tests on the farm" into "our team runs suites and reads results", which is the actual
-product.
+~~`mfarm:appId` first~~ — **done**. `runs` + `mfarm:runId` is next, then outcome reporting. Those
+three turn "I can run tests on the farm" into "our team runs suites and reads results", which is the
+actual product.
+
+`examples/medishop-suite` and its `ci-example.yml` are the worked example of the first one: upload
+the APK in a CI step, pass the id it returns. Nothing in the workflow reaches the device host any
+more.
