@@ -1,0 +1,13 @@
+{
+  "name": "medishop-suite",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A demonstration Appium suite for the MediShop practice app, run against an MFARM farm.",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 specs/*.spec.js"
+  },
+  "dependencies": {
+    "webdriverio": "^9.0.0"
+  }
+}
