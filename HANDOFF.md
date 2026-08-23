@@ -1,7 +1,9 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-19. **New here? Read `docs/START_HERE.md` — closed laptop to a device you can
-tap, in seven steps.** This file is the state of play and every known issue; that one is the path.
+Last updated 2026-08-24. **New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:
+what is built, every decision and what it rejected, the roads not taken, and every measured number.
+For the hands-on path instead, `docs/START_HERE.md` goes from a closed laptop to a device you can
+tap in seven steps.** This file is the state of play and every known issue.
 
 **Two machines (ADR-0006): `mfarm-cp` holds the control plane and console at
 https://farm.mfarm.dev; `mfarm-lab` holds the devices. Both are stopped between sessions;
