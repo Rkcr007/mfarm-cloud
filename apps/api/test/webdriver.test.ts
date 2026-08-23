@@ -1256,6 +1256,63 @@ describe('mfarm:appId', () => {
       'a pinned version is how a run is made reproducible, so it must not drift to the newest');
   });
 
+  /**
+   * OVER A REAL SOCKET, because `app.inject()` cannot see the bug this guards.
+   *
+   * The install wait took `req.raw.destroyed` to mean "the client hung up". It does not. `req.raw`
+   * is the IncomingMessage, and its readable side is destroyed once Fastify has read the body —
+   * which happens before the handler runs. Over a real connection it is false on entry and TRUE at
+   * the first await, with the client still waiting; under `app.inject()` it stays false forever.
+   *
+   * So every test above passed while `mfarm:appId` failed on every session in production: the wait
+   * abandoned itself on its first poll and reported "still installing after 240s" having waited
+   * about a millisecond. The same signal was doing the same thing to `mfarm:queueTimeoutSeconds`,
+   * which had therefore never queued.
+   *
+   * The install is deliberately WITHHELD for several poll cycles here. A worker that answers on the
+   * first beat cannot distinguish a wait that works from a wait that gave up instantly.
+   */
+  describe('over a real socket', () => {
+    let base: string | null = null;
+    async function listening(): Promise<string> {
+      if (base) return base;
+      await app.listen({ port: 0, host: '127.0.0.1' });
+      const addr = app.server.address();
+      base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+      return base;
+    }
+
+    test('a client that is still waiting is not mistaken for one that hung up', async () => {
+      await clearFleet();
+      await seedDevices(1, { appInstall: true });
+      const appId = await seedBuild(orgA, { packageName: 'com.acme.socket' });
+      const url = await listening();
+
+      const pending = fetch(`${url}/wd/hub/session`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${keyA}`, 'content-type': 'application/json' },
+        body: JSON.stringify(androidCaps({ 'mfarm:appId': appId })),
+      });
+
+      // Longer than one POLL_INTERVAL_MS (500ms), so the wait has to survive polls on which the
+      // action is still PENDING — which is exactly what the old predicate could not do.
+      await new Promise((r) => setTimeout(r, 700));
+
+      let offered: Array<{ actionId: string }> = [];
+      for (let i = 0; i < 100 && offered.length === 0; i++) {
+        offered = await workerBeat({ ok: true });
+        if (offered.length === 0) await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(offered.length, 1, 'the worker was never offered the install');
+
+      const res = await pending;
+      const body = await res.json() as { value: { capabilities: Record<string, unknown> } };
+      assert.equal(res.status, 200, JSON.stringify(body));
+      assert.equal(body.value.capabilities['mfarm:appId'], appId,
+        'the session opened and named the build it installed');
+    });
+  });
+
   test('a bare package name means the newest build of it', async () => {
     await clearFleet();
     await seedDevices(1, { appInstall: true });

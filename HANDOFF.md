@@ -128,11 +128,11 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**633 tests pass, 0 fail** (2026-08-23, at migration 020), against a real PostgreSQL 16. No mocks for
+**634 tests pass, 0 fail** (2026-08-23, at migration 020), against a real PostgreSQL 16. No mocks for
 anything that matters.
 
 ```
-apps/api/         control plane, app library, console,  406 tests
+apps/api/         control plane, app library, console,  407 tests
                   entrypoint, metrics
 apps/cli/         mfarm CLI                              63 tests
 workers/agent/    worker agent, Appium supervisor,      143 tests
@@ -1336,6 +1336,41 @@ device is covered by the same URL. Caught by a test, not by review.
     rows before it counts them, so a run whose sessions each hold several artifacts would report its
     session count times its artifact count — the classic shape of a number that is wrong by a factor
     nobody notices until it is quoted in an invoice.
+
+31. **`req.raw.destroyed` DOES NOT MEAN THE CLIENT HUNG UP, AND TWO FEATURES SHIPPED BROKEN ON IT.**
+    2026-08-23. Found on the first hardware run of `mfarm:appId`, not by any test.
+
+    `req.raw` is the IncomingMessage. Its readable side is destroyed once the body has been
+    consumed — which Fastify does BEFORE the handler runs — so on a perfectly healthy request it is
+    false on entry and **true at the first `await`**, while the client is still waiting for its
+    response. Measured over a real socket: `destroyed` true after 50 ms, with
+    `req.raw.socket.destroyed` and `reply.raw.destroyed` both still false.
+
+    Both of the hub's long waits used it as their "give up, nobody is listening" predicate:
+
+    * `mfarm:appId` abandoned its install wait on the FIRST poll and reported *"still installing
+      after 240s"* having waited about a millisecond. It failed on every session. The message named
+      240s because that is the configured timeout, not because anything waited that long — which is
+      why it read as a slow device rather than as a bug.
+    * `mfarm:queueTimeoutSeconds` returned "no device became free" immediately, so the queue
+      capability had **never queued**, on any deployment, since it was written.
+
+    **NO TEST COULD HAVE CAUGHT IT**, and that is the part worth keeping. Every hub test drives
+    `app.inject()`, whose request object is not socket-backed: `destroyed` stays false forever
+    there. 410 lines of new tests, all green, against a feature that worked zero percent of the time
+    in production. `test/webdriver.test.ts` now has one test that binds a real port and speaks HTTP
+    over a real socket, and it withholds the install for longer than one poll interval — a worker
+    that answers on the first beat cannot tell a working wait from one that gave up instantly.
+
+    The fix is `clientGone(reply)`: the RESPONSE is what tracks the connection. `close` on a
+    ServerResponse fires when the response completes or when the connection is torn down early, and
+    consulted while the handler is still working — before a byte has been sent — it can only mean
+    the second.
+
+    Diagnosis note for next time: the session row said `ended_at` 43 ms after `created_at` with
+    `end_reason = session_not_created`, while the client had been handed a message about 240
+    seconds. **Trust the timestamps over the error text.** That gap is what identified this in one
+    step after the logs had suggested a device problem.
 
 ## Working notes for whoever picks this up
 

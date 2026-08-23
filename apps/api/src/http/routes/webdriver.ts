@@ -1,4 +1,4 @@
-import type { FastifyError, FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, activate, release } from '../../allocator.ts';
 import { requireTenant } from '../server.ts';
@@ -219,6 +219,10 @@ export async function webdriverRoutes(app: FastifyInstance) {
 
   app.post('/session', routeOpts, async (req, reply) => {
     const { orgId } = requireTenant(req);
+    // Registered before the first await, because that is the window it has to cover: both waits
+    // below can run for minutes, and a client that hangs up during one of them should give its
+    // device back rather than hold it for the session's whole TTL. See `clientGone`.
+    const gone = clientGone(reply);
     const caps = parseCapabilities(req.body, {
       defaultRegion: process.env.MFARM_DEFAULT_REGION,
       urlSessionId: sessionBindingFromBasic(req.headers.authorization),
@@ -281,7 +285,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
       fence = alloc.fence;
 
       if (deviceId === null) {
-        const promoted = await waitForCapacity(req, orgId, sessionId, caps.queueTimeoutSeconds);
+        const promoted = await waitForCapacity(gone, orgId, sessionId, caps.queueTimeoutSeconds);
         if (!promoted) {
           await release(orgId, sessionId, 'no_capacity');
           throw sessionNotCreated(
@@ -358,7 +362,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
       // the failure path: if the app cannot be installed, no automation session was ever started, so
       // the error the suite gets is about its APK rather than about Appium.
       if (build) {
-        await installBeforeSession(req, orgId, sessionId, deviceId!, target.capabilities, build);
+        await installBeforeSession(req, gone, orgId, sessionId, deviceId!, target.capabilities, build);
       }
 
       const base = target.automation_endpoint.replace(/\/+$/, '');
@@ -747,6 +751,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
    */
   async function installBeforeSession(
     req: FastifyRequest,
+    gone: () => boolean,
     orgId: string,
     sessionId: string,
     deviceId: string,
@@ -787,7 +792,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
       // A cancelled CI job is the common case for a long wait ending early. Nothing aborts the
       // handler when the socket closes, and the caller's catch releases the device — so stopping
       // here gives it back seconds rather than minutes.
-      abandoned: () => req.raw.destroyed,
+      abandoned: gone,
     });
 
     if (outcome.state === 'DONE') return;
@@ -880,8 +885,36 @@ export async function webdriverRoutes(app: FastifyInstance) {
    * (see buildServer's `reaperIntervalMs`), so a deployment that leaves it off makes this wait
    * always time out.
    */
+  /**
+   * Has the CLIENT gone away — as opposed to the request body simply having been read?
+   *
+   * `req.raw.destroyed` is the obvious-looking answer, it is what both waits used, and it is wrong
+   * in a way that NO test using `app.inject()` can see. `req.raw` is the IncomingMessage, and its
+   * readable side is destroyed once the body has been consumed — which Fastify does before the
+   * handler runs. On a perfectly healthy request it therefore flips to true at the first `await`,
+   * while the client is still sitting there waiting for its response.
+   *
+   * Measured rather than reasoned about: over a real socket `destroyed` is false on entry to the
+   * handler and true 50 ms later, with `req.raw.socket.destroyed` and `reply.raw.destroyed` both
+   * still false. Under `app.inject()` it stays false forever.
+   *
+   * What that cost: `mfarm:appId` failed on EVERY session — the install wait abandoned itself on
+   * its first poll and reported "still installing after 240s" having waited about a millisecond —
+   * and `mfarm:queueTimeoutSeconds` never queued, returning "no device became free" immediately.
+   * Both looked like infrastructure problems and neither was.
+   *
+   * The RESPONSE is what tracks the connection. `close` on a ServerResponse fires when the response
+   * completes or when the connection is torn down early; consulted only while the handler is still
+   * working — before a byte has been sent — it can only mean the second.
+   */
+  function clientGone(reply: FastifyReply): () => boolean {
+    let gone = false;
+    reply.raw.on('close', () => { gone = true; });
+    return () => gone;
+  }
+
   async function waitForCapacity(
-    req: FastifyRequest,
+    gone: () => boolean,
     orgId: string,
     sessionId: string,
     timeoutSeconds: number,
@@ -895,7 +928,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
       // A cancelled CI job is the common case for a long wait ending early. Nothing aborts the
       // handler when the socket closes, so without this the promotion still lands and a device is
       // held for the session's whole TTL for a client that stopped listening minutes ago.
-      if (req.raw.destroyed) return null;
+      if (gone()) return null;
 
       const row = await withTenant(orgId, async (c) => {
         const { rows } = await c.query(
