@@ -1,0 +1,70 @@
+# A GitHub Actions workflow that runs this suite on real devices, on every pull request.
+#
+# COPY THIS INTO YOUR APP'S REPOSITORY as `.github/workflows/device-tests.yml`. It is a plain job
+# that runs `npm test` — there is nothing to install on the runner beyond Node, because the devices
+# are not on the runner. That is the whole point: a GitHub runner has no Android emulator worth
+# using, and this replaces it with two real Cuttlefish devices reached over HTTPS.
+#
+# NO MFARM CLI IS NEEDED. The suite allocates and releases its own device through the WebDriver hub,
+# the same way it does on a laptop. `mfarm run` exists to wrap a command that CANNOT do that for
+# itself; a WebdriverIO suite can.
+#
+# ---------------------------------------------------------------- what to set up first
+#
+#   1. Mint an API key in the console: Settings → API keys. Give CI its OWN key — revoking it must
+#      not break anyone else, which is the entire reason keys are per-purpose rather than per-farm.
+#   2. Add it as a repository secret named MFARM_API_KEY.
+#   3. Put your APK somewhere the DEVICE HOST can read it, and set MEDISHOP_APK to that path.
+#      Uploading a build per run belongs in the app library (`POST /v1/apps`) — see the note below.
+
+name: Device tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# One device-test run at a time per branch. A two-device farm cannot serve four concurrent jobs, and
+# queuing at the workflow level gives a clearer signal than four suites contending for capacity and
+# timing out in turn.
+concurrency:
+  group: device-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  medishop:
+    runs-on: ubuntu-latest
+    # A real device suite is slower than a unit suite and should be. The default 360 minutes is not
+    # a timeout, it is an invitation to burn an afternoon on a hung session.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the suite
+        working-directory: examples/medishop-suite
+        run: npm ci
+
+      - name: Run on real devices
+        working-directory: examples/medishop-suite
+        env:
+          MFARM_API_KEY: ${{ secrets.MFARM_API_KEY }}
+          MFARM_HUB: https://farm.mfarm.dev
+          MFARM_REGION: lab
+          MEDISHOP_APK: /home/rkcr070707/apks/way2automation.apk
+        run: npm test
+
+      # Screenshots the suite captured at the moment a test failed. The farm keeps its own logcat
+      # and a screenshot for every session, but its screenshot is taken after Appium has stopped the
+      # app, so the failure state only exists in these.
+      - name: Keep the failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-failure-screenshots
+          path: examples/medishop-suite/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

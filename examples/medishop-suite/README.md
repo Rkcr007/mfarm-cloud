@@ -76,3 +76,40 @@ is still open.
 
 The farm's own logcat artifact is unaffected and covers the whole run — find it in the console under
 the session's **Evidence** card.
+
+## Running it in CI
+
+`ci-example.yml` is a working GitHub Actions workflow — copy it into your app's repository as
+`.github/workflows/device-tests.yml` and set one secret.
+
+**No MFARM CLI is needed.** The suite allocates and releases its own device through the WebDriver
+hub, exactly as it does on a laptop. `mfarm run` exists to wrap a command that *cannot* do that for
+itself; a WebdriverIO suite can.
+
+Nothing Android is installed on the runner. That is the point: a GitHub runner has no emulator worth
+testing on, and this replaces it with real Cuttlefish devices reached over HTTPS.
+
+Three things the workflow does that are easy to leave out:
+
+- **Its own API key.** Give CI a key nobody else uses — revoking it must not break a colleague, which
+  is why keys are per-purpose rather than per-farm.
+- **A concurrency group.** A two-device farm cannot serve four concurrent jobs; queueing at the
+  workflow level gives a clearer signal than four suites contending and timing out in turn.
+- **Uploading `artifacts/` on failure.** The farm keeps a logcat and a screenshot for every session,
+  but its screenshot is taken after Appium stops the app — the failure state only exists in the ones
+  this suite captures.
+
+### Getting your build onto the device host
+
+`MEDISHOP_APK` is a path on the **device host**, which suits a fixed demo app and not a build that
+changes every commit. For a real app, upload it to the farm's app library instead and install it
+from there:
+
+```bash
+curl -X POST "$MFARM_HUB/v1/apps?filename=app.apk" \
+  -H "authorization: Bearer $MFARM_API_KEY" \
+  -H "content-type: application/vnd.android.package-archive" \
+  --data-binary @app/build/outputs/apk/debug/app-debug.apk
+```
+
+Uploads are content-addressed, so pushing an unchanged build costs one row and no bytes.
