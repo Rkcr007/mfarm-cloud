@@ -3,6 +3,9 @@
 Everything, in order, with what each step actually proves. Written for the person who has not
 touched this in a fortnight and does not want to reconstruct it.
 
+> Looking for the *why* rather than the *how*? [`INDEX.md`](INDEX.md) is the one curated page —
+> decisions, roads not taken, and every measured number.
+
 The farm lives on two Google Cloud VMs and is **stopped between sessions**. Nothing here needs the
 repo except step 2 onwards, and nothing needs a decision except step 6.
 
