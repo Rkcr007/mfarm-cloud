@@ -3080,6 +3080,22 @@ function render() {
   if (pointerDown) { renderQueued = true; return; }
   renderChrome();
   const main = $('main');
+
+  /**
+   * WAS THE PERSON TYPING ON THE DEVICE?
+   *
+   * `replaceChildren` below detaches every child, and detaching a focused element BLURS it. The
+   * device video survives a render — `state.stage` keeps the node and its stream alive — but its
+   * focus does not, so the keyboard silently stopped being routed to Android on whatever render
+   * happened next. With a five-second poll that means typing worked only in the gap between
+   * renders: the first few characters of an email address landed, the rest went nowhere, and the
+   * screen gave no sign which was which.
+   *
+   * Checked before and restored after, rather than always focusing the video — stealing focus from
+   * someone filling in a dialog would be a worse bug than the one this fixes.
+   */
+  const wasTypingOnDevice = document.activeElement?.classList?.contains('dev-video');
+
   main.replaceChildren();
   add(main, [(SCREENS[state.route.name] || SCREENS.devices)()]);
   // Everything below re-attaches live state to the nodes that were just created. A render throws
@@ -3089,6 +3105,12 @@ function render() {
   attachVideo();
   paintLog();
   paintVitals();
+
+  // Put the keyboard back where it was. `preventScroll` because the device panel may sit below the
+  // fold on a short window, and yanking the page to it every five seconds is its own bug.
+  if (wasTypingOnDevice) {
+    document.querySelector('.dev-video')?.focus({ preventScroll: true });
+  }
 }
 
 /**
