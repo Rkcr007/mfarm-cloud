@@ -1156,9 +1156,25 @@ function buildPickRow(a) {
 
 function screenLaunch() {
   const profiles = deviceProfiles();
+
+  // One profile is the normal case on a small farm, and making someone click the only option
+  // before the button turns on is a step that teaches nothing. Chosen here rather than in state
+  // setup because the list arrives with the fleet, after the screen first renders.
+  if (!state.launch.profileKey && profiles.length === 1) state.launch.profileKey = profiles[0].key;
+
   const profile = profiles.find((p) => p.key === state.launch.profileKey) || null;
   const app = state.apps.find((a) => a.id === state.launch.appId) || null;
-  const canInstall = !app || (profile?.capabilities || []).includes('app-install');
+
+  /**
+   * Only meaningful once a profile is actually chosen.
+   *
+   * This used to be `!app || (profile?.capabilities || []).includes('app-install')`, which is false
+   * whenever NOTHING IS SELECTED — so picking a build and not yet a device produced "These devices
+   * do not declare app-install", a flat statement about the hardware that was untrue. The farm's
+   * devices declare it; the person simply had not clicked one yet. An error message that blames the
+   * fleet for the reader's next step is worse than no message.
+   */
+  const canInstall = !app || !profile || (profile.capabilities || []).includes('app-install');
   const ready = Boolean(profile) && canInstall;
 
   return [
@@ -1211,7 +1227,7 @@ function screenLaunch() {
           : empty('No devices are registered.', 'A worker has to register a host before anything can be launched. Check Health.'),
         h('p', { class: 'caption mt-sm', text: 'The allocator picks a free device matching this profile — there is no way to reserve a particular one, so nothing here pretends otherwise.' }),
         !canInstall
-          ? h('p', { class: 'help mt-sm', text: 'These devices do not declare app-install, so the API would refuse the install. Choose “No build”, or another profile.' })
+          ? h('p', { class: 'help mt-sm', text: `This profile does not declare app-install, so the API would refuse to install ${app?.packageName ?? 'a build'} on it. Choose “No build”, or another profile.` })
           : null,
       ),
     ),
