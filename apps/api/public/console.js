@@ -314,7 +314,9 @@ function paintBar(i) {
 function pill(label, tone, opts = {}) {
   return h('span', { class: `pill ${tone || ''}`.trim(), title: opts.title || null },
     opts.dot === false ? null : h('span', { class: `dot ${tone || ''} ${opts.live ? 'live' : ''}`.trim() }),
-    label,
+    // `labelId` makes the text paintable. Anything that changes every second belongs in a painter,
+    // not in a render — see `renderIfChanged`.
+    opts.labelId ? h('span', { id: opts.labelId, text: label }) : label,
   );
 }
 
@@ -2017,6 +2019,9 @@ function paintVitals() {
   set('vit-kbps', s.kbps ? `${s.kbps} kbit/s` : '—');
   set('vit-rtt', s.rtt == null ? '—' : `${s.rtt} ms`);
   set('vit-path', s.ice ? (s.ice === 'relay' ? 'relayed (TURN)' : `direct (${s.ice})`) : '—');
+  // The header pill, painted for the same reason the rows above are: it changes every second, and
+  // re-rendering the screen to move one number is what made the cockpit hitch.
+  set('live-fps-pill', `LIVE · ${s.fps || '—'} fps`);
 }
 
 function vitalsCard() {
@@ -2249,7 +2254,8 @@ function screenCockpit(id) {
         state.liveState === 'streaming'
           // Never a hard-coded "LIVE · 60 fps". The number is sampled off the peer connection, and
           // on a software-rendered device it is honestly small.
-          ? pill(`LIVE · ${state.liveStats.fps || '—'} fps`, 'bad', { live: true, title: 'Measured from the media stream' })
+          ? pill(`LIVE · ${state.liveStats.fps || '—'} fps`, 'bad',
+              { live: true, title: 'Measured from the media stream', labelId: 'live-fps-pill' })
           : null,
         pill(st.label, st.tone, { live: sess.state === 'ACTIVE' }),
         live ? btn('Release', 'danger', () => askRelease(sess), { kbd: 'R' }) : null,
@@ -3206,11 +3212,53 @@ function startTick() {
  * get stuck half-connected the way a socket can. Paused while the tab is hidden so a forgotten tab
  * does not bill the API all weekend.
  */
+/**
+ * What the POLL is allowed to change, reduced to a comparable string.
+ *
+ * The five-second poll used to call `render()` unconditionally, and `render()` throws the whole
+ * screen away and rebuilds it. On the cockpit that meant a full teardown every five seconds while
+ * someone watched video and read a log — the source of the periodic hitch, of the focus loss fixed
+ * earlier, and of the pointer-down guard that exists because a render can eat the click travelling
+ * to a button.
+ *
+ * Almost every poll changes nothing: two devices, the same session, the same actions. So compare
+ * first and skip.
+ *
+ * SCOPED TO THE POLL'S OWN WRITES, deliberately, and that is what makes this safe rather than
+ * clever. `refreshDevices`, `refreshSessions`, `refreshActions`, `refreshApps`, `refreshHeld` and
+ * `loadSessionDetail` write exactly these fields and nothing else. Every OTHER thing the screen
+ * depends on — the route, the live connection state, the org screens, a dialog — is changed by code
+ * that calls `render()` itself, so none of it can go stale behind this check. A general "did
+ * anything change" over all of `state` would be both slower and wrong: it would keep re-rendering
+ * for `liveStats`, which is sampled every second and is painted, not rendered.
+ *
+ * `fetchedAt` and the data-plane token are excluded: both change on every fetch and neither is
+ * drawn. Including them would make the signature differ every time and quietly disable this.
+ */
+function pollSignature() {
+  const stable = (o) => {
+    if (!o) return null;
+    const { fetchedAt, dataPlane, ice, ...rest } = o;
+    return { ...rest, dp: dataPlane?.browserEndpoint ?? null };
+  };
+  return JSON.stringify({
+    devices: state.devices,
+    available: state.available,
+    sessions: state.sessions,
+    apps: state.apps,
+    actions: state.actions,
+    held: stable(state.held),
+    detail: stable(state.detail),
+    error: state.error,
+  });
+}
+
 function startPoll() {
   if (state.poll) clearInterval(state.poll);
   state.poll = setInterval(async () => {
     if (document.hidden || !state.me) return;
     try {
+      const before = pollSignature();
       await Promise.all([refreshDevices(), refreshSessions(), refreshActions()]);
       if (state.route.name === 'apps') await refreshApps();
       await refreshHeld();
@@ -3219,7 +3267,10 @@ function startPoll() {
         await loadSessionDetail(state.route.id);
       }
       state.error = null;
-      render();
+      // Only rebuild the screen when the poll actually brought something new. The header counters
+      // and every elapsed-time field are repainted by the one-second tick regardless, so a skipped
+      // render leaves nothing stale — it just leaves the DOM alone.
+      if (pollSignature() !== before) render();
     } catch (err) {
       // A failed poll must not blank a working page or spam a toast every five seconds.
       if (state.error !== err.message) { state.error = err.message; toast('Lost contact with the API', err.message, 'bad'); }
