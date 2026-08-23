@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": ["packages/*", "apps/*", "workers/*"],
   "scripts": {
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present && npm run test:deploy",
+    "test:deploy": "node --test deploy/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "backup:drill": "./deploy/restore-drill.sh"
   },
