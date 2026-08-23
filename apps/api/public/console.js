@@ -1677,20 +1677,33 @@ function stagePanel(sess, live) {
       autoplay: true, playsinline: true, tabindex: '0',
     });
     const overlay = h('div', { class: 'dev-overlay' });
-    // Local echo of your own taps, and the badge that says the keyboard is pointed at Android.
-    // Both are pure feedback: neither asserts anything about what the device did.
+    // Local echo of your own taps. `pointer-events: none`, so it can never intercept a gesture.
     const taps = h('div', { class: 'dev-taps' });
-    const kbd = h('span', { class: 'dev-kbd', text: 'Keyboard → device' });
-    const frame = h('div', { class: 'dev-frame' }, video, overlay, taps, kbd);
+    const frame = h('div', { class: 'dev-frame' }, video, overlay, taps);
     const screenWrap = h('div', { class: 'dev-fit' }, frame);
     const toolbar = h('div', { class: 'devbar' });
-    const caption = h('p', { class: 'caption dev-caption' });
+
+    /**
+     * The keyboard hint lives BELOW the phone, never on it.
+     *
+     * It was briefly drawn inside the bezel, and that was wrong twice over: it covered Android's
+     * own navigation bar, and it sat exactly in the swipe-up gesture zone — so the one affordance
+     * added to explain input was standing on top of the input. Nothing overlays the device screen;
+     * the screen is the thing being tested and it has to be seen exactly as the device draws it.
+     *
+     * A sibling of the caption rather than a child, because the caption is written with
+     * `textContent` on every paint and would wipe it out.
+     */
+    const caption = h('p', { class: 'caption dev-caption-text' });
+    const kbd = h('span', { class: 'dev-kbd', text: 'keyboard → device' });
+    const captionRow = h('div', { class: 'dev-caption' }, caption, kbd);
+
     const root = h('div', { class: 'devpanel' },
       toolbar,
       h('div', { class: 'dev-stage' }, screenWrap),
     );
     state.stage = { root, video, overlay, frame, toolbar, caption, zoom: 1 };
-    root.appendChild(caption);
+    root.appendChild(captionRow);
   }
 
   const st = state.stage;
