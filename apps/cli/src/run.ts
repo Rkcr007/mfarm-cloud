@@ -68,7 +68,22 @@ export interface RunOptions {
 }
 
 class InterruptedError extends Error {}
-class QueueTimeoutError extends Error {}
+/**
+ * Gave up waiting for a device. Carries the MEASURED wait, not the configured one.
+ *
+ * `--wait 0` gives up before the first poll, so the elapsed time and the budget are routinely
+ * different here — and reporting the budget would state a wait that never happened. The API side
+ * made exactly that mistake and it cost an afternoon: see HANDOFF issue 31.
+ */
+class QueueTimeoutError extends Error {
+  // A plain field rather than a parameter property: `erasableSyntaxOnly` is on, and parameter
+  // properties are the one bit of TypeScript that emits runtime code.
+  readonly waitedMs: number;
+  constructor(waitedMs: number) {
+    super('queue timeout');
+    this.waitedMs = waitedMs;
+  }
+}
 
 export async function run(opts: RunOptions): Promise<number> {
   // Progress on stderr, results on stdout. `mfarm run --json | jq` has to stay a working sentence.
@@ -192,7 +207,8 @@ export async function run(opts: RunOptions): Promise<number> {
     if (err instanceof InterruptedError) {
       exitCode = EXIT_INTERRUPTED;
     } else if (err instanceof QueueTimeoutError) {
-      failure = `no device became available within ${opts.waitSeconds}s`;
+      // Measured. With `--wait 0` this correctly reads "after 0s" rather than claiming a wait.
+      failure = `no device became available after waiting ${Math.round(err.waitedMs / 1000)}s`;
       warn(`${failure}. Releasing the queued session; the job is safe to retry.`);
       exitCode = EXIT_QUEUE_TIMEOUT;
     } else {
@@ -290,14 +306,15 @@ async function waitForDevice(
   sessionId: string,
   ctx: { interrupted: () => boolean; sleep: (ms: number) => Promise<void> },
 ): Promise<SessionResult> {
-  const deadline = Date.now() + opts.waitSeconds * 1_000;
+  const startedAt = Date.now();
+  const deadline = startedAt + opts.waitSeconds * 1_000;
   let delay = POLL_MIN_MS;
 
   for (;;) {
     if (ctx.interrupted()) throw new InterruptedError();
     // `--wait 0` lands here before the first poll, which is the point: a job that would rather fail
     // fast and be retried by CI should not sit in a queue holding a runner slot.
-    if (Date.now() >= deadline) throw new QueueTimeoutError();
+    if (Date.now() >= deadline) throw new QueueTimeoutError(Date.now() - startedAt);
 
     await ctx.sleep(Math.min(delay, Math.max(0, deadline - Date.now())));
     if (ctx.interrupted()) throw new InterruptedError();
