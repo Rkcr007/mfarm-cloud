@@ -82,6 +82,14 @@ if [ "$WITH_WORKER" = 1 ]; then
   [ -x "$ANDROID_HOME/platform-tools/adb" ] \
     || die "no Android SDK at $ANDROID_HOME (need platform-tools/adb). apt-get install -y adb, or set ANDROID_HOME."
   note "android sdk $ANDROID_HOME ($("$ANDROID_HOME/platform-tools/adb" version | head -1))"
+  # Build tools are what `appium:app` needs — aapt2 to read the APK's manifest, apksigner to check
+  # its signature. A note rather than a die: a farm without them still serves every session that
+  # names an already-installed package, which is how this box ran for days before anyone shipped an
+  # APK. But that failure surfaces as `upstream_rejected` from inside the driver, so say it here
+  # while the cause is still obvious.
+  if ! ls "$ANDROID_HOME"/build-tools/*/lib/apksigner.jar >/dev/null 2>&1; then
+    note "no Android build-tools at $ANDROID_HOME — sessions using appium:app (an APK) will fail. Fix: ./deploy/install-build-tools.sh"
+  fi
   command -v appium >/dev/null || note "appium not on PATH — the worker will start without WebDriver. Install: sudo npm install -g appium && appium driver install uiautomator2"
 fi
 note "ok"
