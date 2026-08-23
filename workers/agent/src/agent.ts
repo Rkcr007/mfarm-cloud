@@ -849,15 +849,22 @@ export class Agent {
       }
       // Refused rather than defaulted: without a digest there is nothing to check the download
       // against, and installing an unverified blob is the one thing this path exists to prevent.
-      const { sha256 } = r;
+      const { sha256, appId } = r;
       if (!sha256) throw new Error('the control plane offered an install with no digest to verify against');
-      await control.installApp(await this.fetchApk({ ...r, sha256 }));
+      // Both became optional when `screenshot` joined the pipeline. The digest is what makes the
+      // download safe and the id is what makes it reachable; neither has a sane default, so an
+      // install missing either is refused by name rather than attempted.
+      if (!appId) throw new Error('the control plane offered an install with no app to install');
+      await control.installApp(await this.fetchApk({ ...r, sha256, appId }));
       return;
     }
     if (r.kind === 'launch') {
       if (!control.launchApp) {
         throw new Error(`${control.info.localId} cannot launch apps: this device tier has no launch path.`);
       }
+      // `packageName` became optional when `screenshot` arrived. Named explicitly rather than
+      // passed through as undefined, which adb would turn into a baffling usage error.
+      if (!r.packageName) throw new Error('the control plane offered a launch with no package name');
       await control.launchApp(r.packageName);
       return;
     }
@@ -865,7 +872,20 @@ export class Agent {
       if (!control.uninstallApp) {
         throw new Error(`${control.info.localId} cannot uninstall apps: this device tier has no uninstall path.`);
       }
+      if (!r.packageName) throw new Error('the control plane offered an uninstall with no package name');
       await control.uninstallApp(r.packageName);
+      return;
+    }
+    if (r.kind === 'screenshot') {
+      if (!control.screenshot) {
+        throw new Error(`${control.info.localId} cannot take screenshots: this device tier has no capture path.`);
+      }
+      // THE POINT OF THIS VERB. The release-time screenshot is taken when the device is handed
+      // back, by which time Appium's `deleteSession()` has force-stopped the app — so it shows the
+      // launcher rather than the failure. This one is taken while the suite still holds the device
+      // and the screen still shows whatever went wrong.
+      const shot = await control.screenshot();
+      await this.uploadArtifact(r.sessionId, r.deviceId, 'screenshot', shot.bytes, `${r.actionId}.png`);
       return;
     }
     // A verb from a newer control plane. Reported as a failure rather than ignored: the row would
@@ -890,7 +910,7 @@ export class Agent {
    * and not a problem; it becomes one on a long-lived host, and the fix is a sweep by last-access,
    * not a smaller cache.
    */
-  private async fetchApk(r: AppActionRequest & { sha256: string }): Promise<string> {
+  private async fetchApk(r: AppActionRequest & { sha256: string; appId: string }): Promise<string> {
     const dir = this.appCacheDir();
     await mkdir(dir, { recursive: true });
     const finalPath = join(dir, `${r.sha256}.apk`);

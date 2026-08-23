@@ -638,3 +638,87 @@ describe('install', () => {
     );
   });
 });
+
+describe('the screenshot action', () => {
+  /**
+   * WHY THIS VERB EXISTS. The release-time screenshot is captured when the device is handed back,
+   * and by then Appium's `deleteSession()` has force-stopped the app — so the artifact a person
+   * opens to see why a test failed shows the launcher. This one is taken while the suite still
+   * holds the device.
+   */
+  test('needs no appId, and reaches the worker with the session to file the artifact against', async () => {
+    await clearFleet();
+    // Its OWN device, rather than the shared fixture. An earlier test re-registers hostA's device
+    // without `screenshot`, and registration is the source of truth for capabilities — so relying
+    // on the fixture made this pass alone and fail in file order, which is the worst way to find out.
+    const shooter = await seedDevice(hostA, ['screen-stream', 'snapshot-reset', 'app-install', 'screenshot']);
+    const { sessionId } = await liveSession(keyA, shooter);
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`,
+      headers: auth(keyA), payload: { kind: 'screenshot' },
+    });
+    assert.equal(res.statusCode, 202, res.body);
+    assert.equal(res.json().action.kind, 'screenshot');
+    assert.equal(res.json().action.appId, null, 'a screenshot names no build');
+
+    // THE REGRESSION THIS PINS. The heartbeat used to INNER JOIN app_builds, so an action with no
+    // app matched nothing: the row stayed PENDING, was re-offered every beat, and was swept as an
+    // orphan when the session ended — with no error anywhere. A worker that is never offered the
+    // job is indistinguishable from a farm that is simply slow.
+    const beat = await app.inject({
+      method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerA),
+    });
+    const offered = beat.json().actions as Array<Record<string, unknown>>;
+    assert.equal(offered.length, 1, 'the screenshot must actually be offered to the worker');
+    assert.equal(offered[0].kind, 'screenshot');
+    assert.equal(offered[0].sessionId, sessionId,
+      'the worker cannot file the artifact without being told which session it belongs to');
+    assert.ok(!('appId' in offered[0]), 'omitted rather than sent as null');
+    assert.ok(!('sha256' in offered[0]), 'a screenshot moves no bytes and is not authorised to');
+
+    await withSystem((c) => c.query('DELETE FROM app_actions WHERE device_id = $1', [shooter]));
+    await withSystem((c) => c.query('DELETE FROM sessions WHERE device_id = $1', [shooter]));
+    await withSystem((c) => c.query('DELETE FROM devices WHERE id = $1', [shooter]));
+  });
+
+  test('an app verb still requires an appId, and says which verb needs it', async () => {
+    await clearFleet();
+    const { sessionId } = await liveSession(keyA, deviceA);
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`,
+      headers: auth(keyA), payload: { kind: 'launch' },
+    });
+    assert.equal(res.statusCode, 400, res.body);
+    assert.match(res.json().error.message, /`launch` needs an `appId`/);
+  });
+
+  test('a device that cannot capture is refused by the capability it actually lacks', async () => {
+    await clearFleet();
+    // Installs fine, cannot screenshot. Demanding `app-install` for a screenshot would have let
+    // this through and demanded the wrong thing of every other tier.
+    const blind = await seedDevice(hostA, ['screen-stream', 'snapshot-reset', 'app-install']);
+    const { sessionId } = await liveSession(keyA, blind);
+
+    const res = await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`,
+      headers: auth(keyA), payload: { kind: 'screenshot' },
+    });
+    assert.equal(res.statusCode, 409, res.body);
+    assert.match(res.json().error.message, /`screenshot` capability/);
+
+    await withSystem((c) => c.query('DELETE FROM sessions WHERE device_id = $1', [blind]));
+    await withSystem((c) => c.query('DELETE FROM devices WHERE id = $1', [blind]));
+  });
+
+  test('an unknown verb is refused rather than queued for a worker to puzzle over', async () => {
+    await clearFleet();
+    const { sessionId } = await liveSession(keyA, deviceA);
+    const res = await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/app-actions`,
+      headers: auth(keyA), payload: { kind: 'reboot' },
+    });
+    assert.equal(res.statusCode, 400);
+  });
+});

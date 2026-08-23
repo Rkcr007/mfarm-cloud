@@ -225,12 +225,15 @@ export async function workerRoutes(app: FastifyInstance) {
        * response — a liveness signal — grow with its backlog. The rest arrive on the next beat.
        */
       const { rows: pending } = await c.query(
-        `SELECT i.id, i.kind::text AS kind, i.device_id, i.app_id, i.fence,
+        // LEFT JOIN on the build, because `screenshot` names none. As an inner join this silently
+        // returned nothing for every screenshot action — the row would stay PENDING, be re-offered
+        // on every beat, and be swept as an orphan when the session ended, with no error anywhere.
+        `SELECT i.id, i.kind, i.device_id, i.app_id, i.session_id, i.fence,
                 a.sha256, a.size_bytes, a.package_name
            FROM app_actions i
-           JOIN devices d    ON d.id = i.device_id
-           JOIN sessions s   ON s.id = i.session_id
-           JOIN app_builds a ON a.id = i.app_id
+           JOIN devices d         ON d.id = i.device_id
+           JOIN sessions s        ON s.id = i.session_id
+           LEFT JOIN app_builds a ON a.id = i.app_id
           WHERE d.host_id = $1
             AND i.state = 'PENDING'
             AND s.state IN ('ALLOCATING','ACTIVE')
@@ -253,8 +256,14 @@ export async function workerRoutes(app: FastifyInstance) {
           actionId: i.id as string,
           kind: i.kind as AppActionKind,
           deviceId: i.device_id as string,
-          appId: i.app_id as string,
-          packageName: i.package_name as string,
+          // The artifact a `screenshot` produces is filed against this session by the control
+          // plane, host-scoped. A worker that inferred it from the device it holds would attach
+          // evidence to the wrong tenant the moment a device changed hands mid-beat.
+          sessionId: i.session_id as string,
+          // Omitted rather than sent as null for a screenshot, so a worker reading `appId` gets
+          // `undefined` and not the string "null" — the shape that bit ADR-0004's grant once.
+          ...(i.app_id ? { appId: i.app_id as string } : {}),
+          ...(i.package_name ? { packageName: i.package_name as string } : {}),
           fence: Number(i.fence),
           // Install only. Sent for every kind would be harmless, but a launch that carries a digest
           // invites a worker to think it may fetch one.

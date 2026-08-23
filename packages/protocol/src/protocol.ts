@@ -175,11 +175,15 @@ export interface WorkerHeartbeatResponse {
 /**
  * What a worker may be asked to do to an app on one of its devices.
  *
- * One pipeline for three verbs, because each is a job the control plane cannot push and therefore
+ * One pipeline for four verbs, because each is a job the control plane cannot push and therefore
  * needs the same delivery, the same host scoping, the same fence check and the same sweep. Only
- * `install` moves bytes, and that is the single place the three diverge.
+ * `install` moves bytes, and that is the single place they diverge.
+ *
+ * `screenshot` is the odd one and the reason the pipeline was generalised: it names no app. It
+ * exists because the release-time screenshot is taken after Appium has force-stopped the app, so
+ * the artifact a person opens to see why a test failed shows the launcher instead.
  */
-export type AppActionKind = 'install' | 'launch' | 'uninstall';
+export type AppActionKind = 'install' | 'launch' | 'uninstall' | 'screenshot';
 
 /**
  * One app action for one device, as offered to the worker.
@@ -195,12 +199,20 @@ export interface AppActionRequest {
   kind: AppActionKind;
   /** Control-plane uuid, not a local id. The worker maps it through its registration response. */
   deviceId: string;
-  appId: string;
   /**
-   * Present for every kind, and the ONLY thing `launch` and `uninstall` need — neither moves bytes,
-   * so neither downloads anything and neither is authorised to.
+   * Which session this action belongs to. Needed because a `screenshot` uploads an artifact, and an
+   * artifact is filed against a session — the control plane knows which one, and a worker that
+   * guessed from the device it holds would attach evidence to the wrong tenant the moment a device
+   * changed hands mid-beat.
    */
-  packageName: string;
+  sessionId: string;
+  /** Absent for `screenshot`, which is a picture of the screen rather than an act on an app. */
+  appId?: string;
+  /**
+   * Present for every APP kind, and the ONLY thing `launch` and `uninstall` need — neither moves
+   * bytes, so neither downloads anything and neither is authorised to. Absent for `screenshot`.
+   */
+  packageName?: string;
   /** Install only: the digest the worker verifies before handing the file to adb. */
   sha256?: string;
   sizeBytes?: number;
