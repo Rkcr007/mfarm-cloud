@@ -271,12 +271,38 @@ One thing still needs measuring before any of it: what `screenrecord` actually c
 hardware, run against the Flutter canvas workload where there is least headroom. That is a
 lab-hours experiment, not a design question.
 
-### 4.5 On-demand screenshots
+### 4.5 On-demand screenshots — DONE (2026-08-24)
 
-The release-time screenshot is taken **after Appium force-stops the app**, so it shows the launcher,
-not the failure. `examples/medishop-suite` works around this by screenshotting locally in
-`withDevice()`. The fix is a `screenshot` kind on `app_actions`, which inherits heartbeat delivery,
-host scoping and the fence check for free (migration 015 generalised the pipeline for exactly this).
+The release-time screenshot is taken **after Appium force-stops the app**, so the artifact a person
+opens to see why a test failed reliably shows the launcher. `examples/medishop-suite` worked around
+it by screenshotting locally inside `withDevice()` — which works, and which every other suite would
+have had to reinvent.
+
+`POST /v1/sessions/:id/app-actions {"kind":"screenshot"}` captures one while the suite still holds
+the device, and it lands in the artifact store beside the logcat. It inherits heartbeat delivery,
+host scoping, the fence re-check at delivery and the orphan sweep from the pipeline migration 015
+generalised for exactly this.
+
+Four things it turned up:
+
+- **The heartbeat INNER JOINed `app_builds`.** A screenshot names no app, so as written it matched
+  nothing: the row would stay PENDING, be re-offered on every beat, and be swept as an orphan when
+  the session ended — with no error anywhere, and a worker that is never offered a job looking
+  exactly like a farm that is merely slow. Now a LEFT JOIN, pinned by a test.
+- **`app_action_kind` was a Postgres enum,** which is the trap 019 wrote down before this migration
+  needed it: `ALTER TYPE ... ADD VALUE` cannot be used in the transaction that adds it, so a new
+  verb plus a constraint mentioning it takes two migrations. 022 converts `kind` to `text` + CHECK,
+  so the next verb is one line. Doing it at the fourth verb cost one rewrite of a small table.
+- **The capability a verb needs depends on the verb.** The precondition demanded `app-install` for
+  everything; a tier can capture a screen without being able to install anything, so a screenshot
+  now requires `screenshot` and the error names whichever is missing.
+- **The worker needs the session id.** An artifact is filed against a session, and a worker that
+  inferred it from the device it holds would attach evidence to the wrong tenant the moment a device
+  changed hands mid-beat. `AppActionRequest` carries `sessionId` now.
+
+The local workaround in `examples/medishop-suite` stays, deliberately: it needs no round trip and no
+capability, and a suite that wants a screenshot at an exact instant is better served by taking one
+itself. This exists for everything that cannot — CI with no tab open, and the console.
 
 ## 5. Other capabilities worth having
 

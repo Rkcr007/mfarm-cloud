@@ -87,7 +87,12 @@ class FakeDevice extends NoInstallDevice {
 
   constructor(localId: string) {
     super(localId);
-    this.info.capabilities = ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install'];
+    this.info.capabilities = ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install', 'screenshot'];
+  }
+
+  /** A real PNG header, so the control plane's content sniffing sees what it expects. */
+  async screenshot() {
+    return { bytes: Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), contentType: 'image/png' };
   }
 
   async installApp(apkPath: string) {
@@ -434,6 +439,40 @@ describe('install over the heartbeat', () => {
     // The case a farm hits constantly: a service-only or test APK has no launcher activity, and
     // monkey reports it on stdout with a ZERO exit code.
     assert.match(action.error ?? '', /No activities found/);
+    await agent.shutdown();
+  });
+
+  test('a screenshot is captured on demand and filed against the session', async () => {
+    // THE POINT. The release-time screenshot is taken after Appium force-stops the app, so it shows
+    // the launcher rather than the failure. This one is taken while the suite still holds the
+    // device — and it is the first verb in this pipeline that names no app, so it exercises the
+    // path that the heartbeat's old INNER JOIN on app_builds silently swallowed.
+    await clearFleet();
+    const device = new FakeDevice(`shot-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([backendFor(device)], `shot-${randomUUID().slice(0, 8)}`);
+    await agent.start();
+
+    const sessionId = await allocate();
+
+    // No appId, which is the whole difference: the first verb in this pipeline that names no app.
+    const queued = await api(`/v1/sessions/${sessionId}/app-actions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'screenshot' }),
+    });
+    const actionId = (await json<{ action: { id: string } }>(queued, 202)).action.id;
+
+    await agent.heartbeat();
+    const action = await settled(actionId);
+    assert.equal(action.state, 'DONE', action.error ?? '');
+
+    // The artifact is what makes the verb worth having, and it must be filed against the SESSION —
+    // the control plane derives the owning org from it, so a worker cannot misfile one.
+    const arts = await api(`/v1/sessions/${sessionId}/artifacts`);
+    const { artifacts } = await json<{ artifacts: Array<{ kind: string }> }>(arts, 200);
+    assert.equal(artifacts.filter((a) => a.kind === 'screenshot').length, 1,
+      'the capture must reach the artifact store, not just report DONE');
+
     await agent.shutdown();
   });
 

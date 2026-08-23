@@ -7,6 +7,15 @@ tap, in seven steps.** This file is the state of play and every known issue; tha
 https://farm.mfarm.dev; `mfarm-lab` holds the devices. Both are stopped between sessions;
 `./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
 
+**2026-08-24 — on-demand screenshots (§4.5).** `POST /v1/sessions/:id/app-actions
+{"kind":"screenshot"}` captures the screen while the suite still holds the device, instead of the
+release-time one that shows the launcher because Appium force-stopped the app first. Building it
+found that the heartbeat **INNER JOINed `app_builds`**, so a verb naming no app matched nothing and
+would have sat PENDING forever with no error anywhere. Migration 022 also converts
+`app_actions.kind` from a Postgres enum to `text` + CHECK — 019 wrote down why enums are the wrong
+choice here, and this is the migration that paid for it; the next verb is now one line. The
+capability check is per-verb too: a tier can capture a screen without being able to install.
+
 **2026-08-24 — outcome reporting: the farm learns whether the test passed (§4.3).** `POST
 /v1/sessions/:id/result` takes one test's name, status and failure, from an `afterEach`. Migration
 021 stores a row per TEST, not per session, because a suite runs eight tests on one device. The
@@ -154,18 +163,18 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**647 tests pass, 0 fail** (2026-08-24, at migration 021), against a real PostgreSQL 16. No mocks for
+**652 tests pass, 0 fail** (2026-08-24, at migration 022), against a real PostgreSQL 16. No mocks for
 anything that matters.
 
 ```
-apps/api/         control plane, app library, console,  420 tests
+apps/api/         control plane, app library, console,  424 tests
                   entrypoint, metrics
 apps/cli/         mfarm CLI                              63 tests
-workers/agent/    worker agent, Appium supervisor,      143 tests
+workers/agent/    worker agent, Appium supervisor,      144 tests
                   automation gateway, Cuttlefish backend
 deploy/           deploy scripts and their checks         21 tests
 apps/api/public/  the web console (served by the API at /)
-apps/api/migrations/  021 of them; 021 is the newest
+apps/api/migrations/  022 of them; 022 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action

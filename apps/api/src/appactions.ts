@@ -26,7 +26,7 @@ export const LIVE_SESSION_STATES = ['ALLOCATING', 'ACTIVE'];
 export interface AppActionRow {
   id: string;
   kind: string;
-  app_id: string;
+  app_id: string | null;
   session_id: string;
   device_id: string;
   state: string;
@@ -45,17 +45,25 @@ export interface AppActionRow {
  */
 export async function requestAppAction(
   c: PoolClient,
-  opts: { sessionId: string; appId: string; kind: AppActionKind },
+  opts: { sessionId: string; appId?: string | null; kind: AppActionKind },
 ): Promise<AppActionRow | null> {
   const { rows } = await c.query<AppActionRow>(
+    // LEFT JOIN plus an explicit guard, rather than the comma join this used to be. `screenshot`
+    // names no build, so the build has to be optional — but "no appId was asked for" and "the
+    // appId asked for does not exist (or belongs to another org, which RLS makes the same thing)"
+    // must stay distinguishable. The guard is what keeps the second one returning zero rows
+    // instead of quietly inserting a NULL app_id that the CHECK would then reject with a
+    // constraint error nobody can act on.
     `INSERT INTO app_actions (org_id, app_id, session_id, device_id, fence, kind)
-     SELECT s.org_id, a.id, s.id, s.device_id, s.fence, $4::app_action_kind
-       FROM sessions s, app_builds a
-      WHERE s.id = $1 AND a.id = $2
+     SELECT s.org_id, a.id, s.id, s.device_id, s.fence, $4
+       FROM sessions s
+       LEFT JOIN app_builds a ON a.id = $2::uuid
+      WHERE s.id = $1
+        AND ($2::uuid IS NULL OR a.id IS NOT NULL)
         AND s.state = ANY($3::session_state[])
         AND s.device_id IS NOT NULL AND s.fence IS NOT NULL
      RETURNING *`,
-    [opts.sessionId, opts.appId, LIVE_SESSION_STATES, opts.kind],
+    [opts.sessionId, opts.appId ?? null, LIVE_SESSION_STATES, opts.kind],
   );
   return rows[0] ?? null;
 }

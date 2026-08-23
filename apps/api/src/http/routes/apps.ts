@@ -295,12 +295,15 @@ export async function appRoutes(app: FastifyInstance) {
    * from the session rather than from the request — so there is no field a caller could set to aim
    * an action at hardware it does not hold.
    */
-  app.post<{ Params: { id: string }; Body: { appId: string; kind?: AppActionKind } }>(
+  app.post<{ Params: { id: string }; Body: { appId?: string; kind?: AppActionKind } }>(
     '/sessions/:id/app-actions',
     {
       schema: {
         body: {
-          type: 'object', required: ['appId'], additionalProperties: false,
+          // `appId` is no longer required BY THE SCHEMA, because `screenshot` names no app. The
+          // handler enforces it per-kind instead, so the error says which verb needs what rather
+          // than "must have required property appId" for a request that correctly omitted it.
+          type: 'object', additionalProperties: false,
           properties: {
             // `pattern`, not `format: 'uuid'` — nothing else in this API relies on ajv-formats being
             // registered, and a schema that silently accepts anything is worse than no schema.
@@ -310,7 +313,11 @@ export async function appRoutes(app: FastifyInstance) {
             },
             // Defaulted rather than required, so the shape that existed before launch and uninstall
             // did keeps working and reads the same.
-            kind: { type: 'string', enum: ['install', 'launch', 'uninstall'], default: 'install' },
+            kind: {
+              type: 'string',
+              enum: ['install', 'launch', 'uninstall', 'screenshot'],
+              default: 'install',
+            },
           },
         },
       },
@@ -321,31 +328,44 @@ export async function appRoutes(app: FastifyInstance) {
       const { appId } = req.body;
       const kind: AppActionKind = req.body.kind ?? 'install';
 
+      // Per-kind, so the message names the verb. A `screenshot` with an appId is ACCEPTED rather
+      // than refused — recording which build was on screen is a reasonable thing to want, and the
+      // schema's job is to stop nonsense, not to stop specificity.
+      if (kind !== 'screenshot' && !appId) {
+        throw badRequest(`A \`${kind}\` needs an \`appId\` — the build to act on. Only \`screenshot\` acts on no app.`);
+      }
+
       const row = await withTenant(orgId, async (c) => {
         // Checked first, and separately from the INSERT, purely so the caller learns WHICH
         // precondition failed. A single INSERT ... SELECT returning zero rows is correct and
         // useless to the person reading the error.
-        const { rows: pre } = await c.query<{ state: string; device_id: string | null; can_install: boolean | null }>(
+        // The capability a verb needs depends on the verb. `screenshot` is not an app action in
+        // the capability sense — a tier can capture a screen without being able to install
+        // anything — so demanding `app-install` for it would refuse the one device that could
+        // actually serve it.
+        const needs = kind === 'screenshot' ? 'screenshot' : 'app-install';
+        const { rows: pre } = await c.query<{ state: string; device_id: string | null; capable: boolean | null }>(
           `SELECT s.state::text AS state, s.device_id,
-                  (d.capabilities ? 'app-install') AS can_install
+                  (d.capabilities ? $2) AS capable
              FROM sessions s LEFT JOIN devices d ON d.id = s.device_id
             WHERE s.id = $1`,
-          [sessionId],
+          [sessionId, needs],
         );
         if (!pre[0]) throw notFound('Session');
         if (!LIVE_SESSION_STATES.includes(pre[0].state) || !pre[0].device_id) {
           throw conflict('session_not_live', `Session ${sessionId} is ${pre[0].state} and holds no device. App actions need a live session.`);
         }
-        if (pre[0].can_install !== true) {
+        if (pre[0].capable !== true) {
           throw conflict(
             'capability_missing',
-            'The device on this session does not declare the `app-install` capability.',
+            `The device on this session does not declare the \`${needs}\` capability.`,
           );
         }
 
         const action = await requestAppAction(c, { sessionId, appId, kind });
         // The session passed its checks a statement ago, so the only row the SELECT can be missing
-        // now is the build — which RLS hides when it belongs to another org.
+        // now is the build — which RLS hides when it belongs to another org. A screenshot names no
+        // build, so for that kind this cannot fire at all.
         if (!action) throw notFound('App');
         return action;
       });
