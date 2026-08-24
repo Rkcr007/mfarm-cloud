@@ -173,7 +173,24 @@ for i in $(seq 1 20); do
 done
 
 say "What is listening publicly"
-sudo ss -tlnp | grep -E '0\.0\.0\.0|\[::\]' | awk '{print "    " $4 "  " $7}'
+#
+# THIS LINE IS AN AUDIT, so it has to be right in both directions, and it was wrong in both.
+#
+# It grepped for `0.0.0.0` or `[::]` anywhere on the line. `ss` prints a PEER column of `0.0.0.0:*`
+# on every listening socket, so that pattern matched EVERY ROW — Postgres on 127.0.0.1:5432, the
+# metrics port, the API, Caddy's own admin endpoint on 2019. A section headed "what is listening
+# publicly" was listing the things whose whole defence is that they are NOT.
+#
+# And it missed the two that are. Caddy binds dual-stack, which `ss` renders as `*:443`, matching
+# neither spelling — so a perfectly healthy box printed a list with no 443 in it, which reads as
+# "TLS is down" to anyone checking why the console is unreachable.
+#
+# So: filter on the LOCAL address column alone, and exclude loopback rather than trying to
+# enumerate the ways a wildcard can be spelled. `$7` was empty too — the process is `$6`.
+sudo ss -tlnpH | awk '$4 !~ /^(127\.|\[::1\])/ {
+  proc = $6; sub(/^users:/, "", proc);
+  printf "    %-22s %s\n", $4, proc
+}'
 
 say "Done"
 echo "    https://$HOSTNAME_PUBLIC"
