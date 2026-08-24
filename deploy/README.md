@@ -659,16 +659,58 @@ published by adding it.
 
 - **The metrics listener on `:9464` is deliberately not proxied.** Its gauges are fleet-wide and
   collected on the owner pool, so RLS does not hide them — publishing it would leak across tenants.
-- **`/dp/*` is a second upstream, and it is the live view** (ADR-0007). It proxies to the device
-  host's data plane so a browser can hold that socket over this same TLS name — which is what keeps
-  it same-origin and the console's CSP unwidened. `WORKER_DATA_PLANE=` (empty) omits the route
-  entirely rather than proxying to nothing, because a 502 in a browser reads as a broken live view.
-  **This proxy is a route, not authorisation**: every connection through it still presents an
-  Ed25519 grant the worker verifies offline.
+- **`/dp/*` is the live view** (ADR-0007), and where it points is a choice. By **default** it goes
+  to the API, which terminates the browser's WebSocket and relays it down a tunnel the **agent
+  dialled out** (ADR-0008). That is what makes a device host reachable when it has no address
+  anyone can write down — a phone on a laptop behind NAT — and it is also the only way a **second**
+  device host is possible at all, since a static upstream can name exactly one.
+  `WORKER_DATA_PLANE=<host:port>` restores the old direct proxy for a host that genuinely is
+  dialable; it is kept so an existing farm moves when it is ready rather than on a flag day.
+  Either way the browser's socket is same-origin, so the console's CSP is unwidened, and either way
+  **this proxy is a route, not authorisation**: every connection through it still presents an
+  Ed25519 grant the *agent* verifies offline.
+
+  A plain `GET /dp/anything` answers **426 `websocket only`** on both paths, byte for byte — the
+  worker's own listener and the control-plane route agree on purpose, because `verify-live.sh`
+  probes exactly that and a check that can tell the two transports apart would be reporting on the
+  transport rather than on the farm.
 - **The automation gateway is still NOT proxied.** The hub reaches it host-locally and it has no
   business being public — an open Appium is unauthenticated device control.
 - **The WebDriver hub is now internet-facing.** It is built for that — Basic auth carries an API key
   and every proxied hop needs a signed grant — but it is worth knowing that it changed audience.
+
+### Moving a device host onto the tunnel
+
+The order is the whole procedure, and getting it backwards is not obvious from the console.
+
+```sh
+# 1. The AGENT first. It dials out, so it has to be running new code before anything routes to it.
+ssh mfarm-lab 'cd ~/mfarm && git pull && sudo systemctl restart mfarm-worker'
+
+# 2. Confirm the tunnel is actually up. BOTH ends, because either one alone can lie:
+ssh mfarm-lab 'journalctl -u mfarm-worker -n50 | grep "tunnel connected"'
+ssh mfarm-cp  'docker logs mfarm-api-1 --tail 200 | grep "worker tunnel connected"'
+
+# 3. ONLY THEN the ingress.
+ssh mfarm-cp 'cd ~/mfarm && WORKER_DATA_PLANE= bash deploy/setup-ingress.sh'
+
+# 4. The gate.
+ssh mfarm-cp 'cd ~/mfarm && bash deploy/verify-live.sh'
+```
+
+**Flip the ingress first and you get a farm that looks fine and has no video.** The device list, the
+console, the session API and the WebDriver hub all keep working — none of them touch `/dp` — so
+every dashboard stays green while every live view is dead. Doing the agent first costs nothing:
+both paths are live at once by design, and a tunnel with nothing routed to it simply sits idle.
+
+Rolling back is one command and about ten seconds, which is why this is safe to try:
+
+```sh
+ssh mfarm-cp 'cd ~/mfarm && WORKER_DATA_PLANE=10.160.0.2:8080 bash deploy/setup-ingress.sh'
+```
+
+Set `MFARM_TUNNEL=0` in `deploy/.state/worker.env` to stop an agent dialling out at all — for a host
+whose inbound path is known-good and where an extra long-lived connection is not wanted.
 
 ### Cuttlefish binds all interfaces, and only the firewall is stopping it
 

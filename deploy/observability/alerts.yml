@@ -272,6 +272,29 @@ groups:
             for the two IAM commands it needs — or BACKUP_BUCKET is deliberately `none`, in which
             case silence this alert explicitly so the choice is visible to whoever inherits it.
 
+      - alert: MfarmLiveViewHasNoAgent
+        # THE CONDITION IS THE CONJUNCTION, and the second half is what makes this alertable at all.
+        # `mfarm_tunnel_hosts_connected == 0` on its own is the farm's NORMAL state: the device host
+        # is off between sessions by design and is 95% of the bill, so an alert on that alone would
+        # fire every day, be silenced within a week, and be gone when it mattered.
+        #
+        # Devices READY with no tunnel is a different thing entirely, and it is invisible everywhere
+        # else. The host registers, beats and reports its devices over plain HTTPS; automation and
+        # the WebDriver hub keep working; every other gauge in this file stays green. The tunnel is a
+        # SECOND connection, and only a live view rides it — so this fires exactly when the console
+        # shows a healthy fleet and every screen is black.
+        expr: mfarm_devices{state="READY"} > 0 and on() mfarm_tunnel_hosts_connected == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Devices are READY but no agent tunnel is connected — every live view is dead
+          description: >-
+            The fleet is healthy and unreachable for interactive use. The agent dials the control
+            plane out; nothing dials it. Check `journalctl -u mfarm-worker -n50 | grep tunnel` on the
+            device host, and that the API is reachable from it at CONTROL_PLANE_URL. If /dp is still
+            pointed at a direct worker address (WORKER_DATA_PLANE), the live view may work anyway —
+            see "Moving a device host onto the tunnel" in deploy/README.md.
+
       - alert: MfarmMetricSeriesDropped
         expr: mfarm_metric_series_dropped_total > 0
         for: 0m

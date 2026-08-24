@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { assertAppRoleIsRlsBound, closePools } from './db.ts';
 import { buildServer } from './http/server.ts';
 import { startMetricsServer, type MetricsServer } from './http/metrics-server.ts';
+import { setTunnelSource } from './metrics.ts';
 import { ConfigError, describeConfig, loadConfig, type Config } from './config.ts';
 
 /**
@@ -80,6 +81,10 @@ export async function start(cfg: Config): Promise<Service> {
   // The token is read from the environment here rather than carried on Config, exactly like the
   // signing key: `describeConfig()` is logged, and the cheapest way to keep a secret out of a log
   // line is for the logged object never to hold it.
+  // Read at scrape time, not sampled here: the count changes whenever a laptop opens or closes,
+  // and a number captured at startup would be a permanent zero.
+  setTunnelSource(() => app.tunnels.size);
+
   let metrics: MetricsServer | undefined;
   if (cfg.metricsEnabled) {
     metrics = await startMetricsServer({

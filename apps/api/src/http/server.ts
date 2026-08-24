@@ -280,7 +280,21 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   // an anonymous caller cannot make us parse a megabyte. The rejection stays GLOBAL rather than a
   // per-route guard, which keeps the property that a route added without an explicit check is not
   // reachable anonymously.
-  const isPublic = (req: FastifyRequest) => PUBLIC_PATHS.has(req.url.split('?')[0]);
+  //
+  // `/dp/*` is the one PREFIX rather than an exact path, and it is public in the same sense
+  // `/v1/workers/register` is: it carries its own credential, just not one this hook can read. The
+  // live-view socket authenticates with an Ed25519 grant inside its `hello` frame, verified offline
+  // by the AGENT (ADR-0004) — the control plane relays bytes and decides nothing. The upgrade
+  // itself never reaches here at all; it is served from the raw `upgrade` event, before routing.
+  // What is left under this prefix is a single route that answers a constant 426, so "public" costs
+  // exactly that constant.
+  //
+  // ANYTHING ELSE MOUNTED UNDER /dp/ WOULD INHERIT THIS and be reachable anonymously. Nothing
+  // should be: the prefix belongs to the data plane, whose authority lives on the other end.
+  const isPublic = (req: FastifyRequest) => {
+    const path = req.url.split('?')[0];
+    return PUBLIC_PATHS.has(path) || path.startsWith('/dp/');
+  };
 
   app.addHook('onRequest', async (req) => {
     if (isPublic(req)) return;

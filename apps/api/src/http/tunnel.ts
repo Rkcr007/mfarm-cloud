@@ -45,7 +45,14 @@ interface HostTunnel {
 export class TunnelRegistry {
   private readonly hosts = new Map<string, HostTunnel>();
 
-  /** Whether a host can currently be reached. The console reads this to explain a dead live view. */
+  /**
+   * Whether a host can currently be reached.
+   *
+   * NOT YET READ BY THE CONSOLE, which is where it belongs: a device card that says READY while its
+   * host has no tunnel is telling a viewer the opposite of what they are about to experience. Until
+   * then the fleet-wide count is exported as `mfarm_tunnel_hosts_connected` and alerted on, so the
+   * condition is at least visible to an operator, if not to the person clicking the device.
+   */
   has(hostId: string): boolean {
     return this.hosts.get(hostId)?.agent.readyState === WebSocket.OPEN;
   }
@@ -165,6 +172,34 @@ export class TunnelRegistry {
 export function attachTunnel(app: FastifyInstance, registry: TunnelRegistry): void {
   const agentWss = new WebSocketServer({ noServer: true, maxPayload: TUNNEL_MAX_FRAME_BYTES });
   const browserWss = new WebSocketServer({ noServer: true, maxPayload: TUNNEL_MAX_FRAME_BYTES });
+
+  /**
+   * A PLAIN GET of `/dp/<anything>` answers 426, exactly as the worker's own listener does
+   * (`workers/agent/src/dataplane.ts`).
+   *
+   * This is not decoration. Moving `/dp/*` from the worker to here changes what a non-upgrade
+   * request meets: the upgrade handler below never fires for one, so without this route Fastify
+   * answers 404 and `deploy/verify-live.sh` — which probes `/dp/probe` and requires 426 — reports
+   * "the live view has no route to the worker" over a live view that is working perfectly. A gate
+   * that fails on a healthy farm gets muted, and a muted gate is not a gate.
+   *
+   * Byte-identical to the worker's answer ON PURPOSE. The claim this whole tunnel makes is that
+   * the two transports are indistinguishable to everything above them; a probe that can tell them
+   * apart is that claim being false in the one place anybody checks it.
+   *
+   * It says nothing about whether the host exists. `/dp/*` takes no credential, so a status code
+   * that varied with a real host id would hand an unauthenticated caller a fleet enumerator — the
+   * upgrade path is equally uniform, and closes with 1013 only after the socket is established.
+   *
+   * UNLIMITED, like `/health`, and for the same reason rather than by copying it: this handler
+   * touches no database, allocates nothing, and returns a constant shorter than the request that
+   * asked for it, so there is no amplification to rate limit. Stated explicitly instead of left to
+   * the plugin, because whether a globally-registered limiter reaches a route declared before it is
+   * a question about Fastify's boot order — and a probe that 429s is a farm reported broken.
+   */
+  app.all('/dp/*', { config: { rateLimit: false } }, async (_req, reply) =>
+    reply.code(426).header('connection', 'close').type('text/plain').send('websocket only'),
+  );
 
   const refuse = (socket: Duplex, status: string) => {
     socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);

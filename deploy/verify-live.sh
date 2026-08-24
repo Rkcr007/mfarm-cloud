@@ -73,9 +73,32 @@ else
   FAIL=1
 fi
 
-# 426 is the data plane's own "websocket only" answer, which is the proof that Caddy reaches the
-# WORKER over the VPC. Anything else means the live view has no route, however healthy it looks.
+# 426 is the data plane's "websocket only" answer. It proves the ROUTE exists — nothing more, and
+# less than it used to. When /dp went straight to the worker, only a reachable worker could produce
+# it, so one number answered both questions. On the tunnel path the control plane answers it
+# whether or not any agent is connected (deliberately: a probe that could tell the two transports
+# apart would be reporting on the transport instead of on the farm), so reachability has to be
+# asked separately.
 DP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$HOST_PUBLIC/dp/probe" 2>/dev/null)"
+
+# THAT SEPARATE QUESTION. `mfarm_tunnel_hosts_connected` counts agents holding a live tunnel, and it
+# is the only thing here that observes the connection a live view actually rides — a host beats over
+# plain HTTPS, so it can report every device READY with its tunnel dead and look perfect.
+#
+# Works on BOTH ingress paths, which is why the check below can stop caring which one is configured:
+# the agent dials out regardless of where /dp points (workers/agent/src/index.ts), so a healthy
+# agent means a tunnel whether or not anything is routed down it.
+#
+# Loopback and best-effort. The listener is deliberately unproxied and this script may be run
+# somewhere without the secret; an unreadable gauge downgrades the verdict rather than failing it.
+METRICS_PORT="${METRICS_PORT:-9464}"
+METRICS_TOKEN_FILE="${METRICS_TOKEN_FILE:-$REPO_ROOT/deploy/secrets/metrics_token}"
+TUNNELS=""
+if [ -f "$METRICS_TOKEN_FILE" ]; then
+  TUNNELS="$(curl -s --max-time 5 -H "Authorization: Bearer $(cat "$METRICS_TOKEN_FILE")" \
+    "http://127.0.0.1:${METRICS_PORT}/metrics" 2>/dev/null \
+    | sed -n 's/^mfarm_tunnel_hosts_connected \([0-9][0-9]*\).*/\1/p' | head -1)"
+fi
 
 # ---------------------------------------------------------------- 2. the fleet
 say "Fleet (waiting up to ${DEVICE_WAIT_SECONDS}s — devices cold boot after a host start)"
@@ -97,17 +120,35 @@ else
   # it is 95% of the bill. Reported as a note so that `farm-check.sh` after starting only the control
   # plane does not print a wall of red for a farm that is behaving exactly as intended.
   #
-  # The two symptoms together are what identify it: no devices AND /dp with no upstream. Either one
-  # alone means something else — devices without /dp is a routing problem, /dp without devices is a
-  # worker that is up but has no hardware.
-  if [ "$AVAIL" -eq 0 ] && [ "$DP" = "502" ]; then
-    warn "the device host looks STOPPED — no devices, and /dp has no upstream"
+  # TWO SYMPTOMS TOGETHER identify it, and the second one now has two spellings. No devices, AND
+  # either /dp with no upstream (the direct path, where a stopped worker takes the route with it) or
+  # no agent tunnel (the tunnel path, where the control plane keeps answering 426 on its own).
+  # Either symptom alone still means something else: devices with no route is a routing problem, a
+  # route with no devices is a worker that is up but has no hardware.
+  if [ "$AVAIL" -eq 0 ] && { [ "$DP" = "502" ] || [ "$TUNNELS" = "0" ]; }; then
+    warn "the device host looks STOPPED — no devices, and no agent reachable"
     warn "that is the normal idle state; start it with ./deploy/farm-online.sh"
   else
     if [ "$DP" = "426" ]; then
-      ok "/dp reaches the device host's data plane (426 = websocket only)"
+      ok "/dp serves the data plane (426 = websocket only)"
+    elif [ "$DP" = "502" ]; then
+      bad "/dp has no upstream — the ingress names a worker address that is not answering"
+      FAIL=1
     else
-      bad "/dp answered $DP, not 426 — the live view has no route to the worker"
+      bad "/dp answered $DP, not 426 — the live view has no route at all"
+      FAIL=1
+    fi
+
+    # The route existing and an agent being on the end of it are two facts, and only this one is
+    # about whether a person can see a screen.
+    if [ -z "$TUNNELS" ]; then
+      warn "could not read mfarm_tunnel_hosts_connected — agent reachability unverified"
+      warn "(needs deploy/secrets/metrics_token; the metrics listener is loopback-only by design)"
+    elif [ "$TUNNELS" -ge 1 ]; then
+      ok "$TUNNELS agent tunnel(s) connected — the live view has somewhere to go"
+    else
+      bad "no agent tunnel connected — every live view is dead, however healthy the fleet looks"
+      bad "check: journalctl -u mfarm-worker -n50 | grep tunnel   (on the device host)"
       FAIL=1
     fi
 
@@ -134,7 +175,9 @@ fi
 say "Media relay"
 if command -v nc >/dev/null 2>&1 && nc -z -w 5 "$TURN_HOST" 3478 2>/dev/null; then
   ok "coturn answering on $TURN_HOST:3478/tcp"
-elif [ "$AVAIL" = "0" ] && [ "$DP" = "502" ]; then
+elif [ "$AVAIL" = "0" ] && { [ "$DP" = "502" ] || [ "$TUNNELS" = "0" ]; }; then
+  # Same stopped-host reading as above, and it has to agree with it — coturn lives on that box, so
+  # a farm correctly reported idle up there must not be reported broken down here.
   warn "$TURN_HOST not answering — expected, coturn is on the stopped device host"
 else
   warn "could not reach $TURN_HOST:3478 while the device host is up — check coturn there"
