@@ -45,7 +45,14 @@ interface HostTunnel {
 export class TunnelRegistry {
   private readonly hosts = new Map<string, HostTunnel>();
 
-  /** Whether a host can currently be reached. The console reads this to explain a dead live view. */
+  /**
+   * Whether a host can currently be reached.
+   *
+   * NOT YET READ BY THE CONSOLE, which is where it belongs: a device card that says READY while its
+   * host has no tunnel is telling a viewer the opposite of what they are about to experience. Until
+   * then the fleet-wide count is exported as `mfarm_tunnel_hosts_connected` and alerted on, so the
+   * condition is at least visible to an operator, if not to the person clicking the device.
+   */
   has(hostId: string): boolean {
     return this.hosts.get(hostId)?.agent.readyState === WebSocket.OPEN;
   }
