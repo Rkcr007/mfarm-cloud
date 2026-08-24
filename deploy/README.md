@@ -696,6 +696,11 @@ ssh mfarm-cp 'cd ~/mfarm && bash deploy/setup-ingress.sh'
 
 # 4. The gate.
 ssh mfarm-cp 'cd ~/mfarm && bash deploy/verify-live.sh'
+
+# 5. And that a viewer reaches the AGENT, not just the route — including what happens when the
+#    viewer is hostile. `/dp` takes no credential by design, so this is the one check where the
+#    thing being tested is what an anonymous stranger can do to the machine holding the devices.
+ssh mfarm-cp 'cd ~/mfarm && node deploy/verify-dataplane.mjs <hostId>'
 ```
 
 **Flip the ingress first and you get a farm that looks fine and has no video.** The device list, the
