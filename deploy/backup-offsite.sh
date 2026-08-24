@@ -69,14 +69,22 @@ done
 # must each stop the run before the receipt is touched, because the receipt is the only thing
 # anyone will look at.
 UPLOADED=0
+FAILED=0
 for f in $(ls -1t "${BACKUP_DIR}"/mfarm-*.dump 2>/dev/null || true); do
   g="${f%.dump}.globals.sql"
   [ -f "$g" ] || continue
-  if gcloud storage cp -n "$f" "$g" "${BACKUP_BUCKET}/" 2>&1 | grep -qi 'Copying'; then
+  # THE EXIT CODE IS THE SIGNAL, not the output. This used to grep stdout for "Copying", which is
+  # what gcloud prints when it STARTS a transfer — so a failed upload counted as a success and the
+  # log cheerfully reported "uploaded 3" against an empty bucket. Observed on the first real run.
+  if gcloud storage cp -n "$f" "$g" "${BACKUP_BUCKET}/" >/dev/null 2>&1; then
     UPLOADED=$((UPLOADED + 1))
+  else
+    FAILED=$((FAILED + 1))
+    log "upload FAILED for $(basename "$f")"
   fi
 done
-[ "${UPLOADED}" -gt 0 ] && log "uploaded ${UPLOADED} new backup(s)"
+[ "${UPLOADED}" -gt 0 ] && log "uploaded ${UPLOADED} backup pair(s)"
+[ "${FAILED}" -gt 0 ] && die "${FAILED} upload(s) failed — not recording a receipt"
 
 # ---------------------------------------------------------------- prove the newest one landed
 #
@@ -85,9 +93,24 @@ done
 # transfer that failed halfway can still leave a plausible name behind.
 NAME="$(basename "${NEWEST}")"
 LOCAL_SIZE="$(wc -c < "${NEWEST}" | tr -d ' ')"
-REMOTE_SIZE="$(gcloud storage ls -l "${BACKUP_BUCKET}/${NAME}" 2>/dev/null | awk 'NR==1{print $1}')"
 
-[ -n "${REMOTE_SIZE}" ] || die "${NAME} is not in ${BACKUP_BUCKET} after the upload — check the service account has storage.objects.create and storage.objects.list on that bucket"
+# RETRIED, because object listing is not immediately consistent after a write. The first real run
+# uploaded correctly and then declared the object missing, because the confirmation ran in the same
+# second as the upload — a false alarm that, had the receipt been written on a weaker check, would
+# have been a silent one in the other direction.
+#
+# Six attempts over ~30s. A genuinely absent object still fails, just half a minute later, and this
+# runs every 15 minutes.
+REMOTE_SIZE=""
+i=0
+while [ "$i" -lt 6 ]; do
+  REMOTE_SIZE="$(gcloud storage ls -l "${BACKUP_BUCKET}/${NAME}" 2>/dev/null | awk 'NR==1{print $1}')"
+  [ -n "${REMOTE_SIZE}" ] && break
+  i=$((i + 1))
+  [ "$i" -lt 6 ] && sleep 5
+done
+
+[ -n "${REMOTE_SIZE}" ] || die "${NAME} is not listable in ${BACKUP_BUCKET} after 30s — check the service account has storage.objects.create and storage.objects.list on that bucket"
 [ "${REMOTE_SIZE}" = "${LOCAL_SIZE}" ] || die "${NAME} is ${LOCAL_SIZE} bytes here and ${REMOTE_SIZE} there — the copy is truncated, refusing to record it as done"
 
 # ---------------------------------------------------------------- the receipt
