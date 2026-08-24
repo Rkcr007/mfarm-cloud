@@ -29,6 +29,7 @@ import {
   collectRuntime,
   registry,
   scrape,
+  setTunnelSource,
 } from '../src/metrics.ts';
 import { startMetricsServer } from '../src/http/metrics-server.ts';
 import { withSystem, closePools } from '../src/db.ts';
@@ -467,5 +468,47 @@ describe('metrics listener', () => {
     const again = await startMetricsServer({ host: '127.0.0.1', port });
     assert.equal(again.port, port);
     await again.close();
+  });
+});
+
+// ---------------------------------------------------------------- the tunnel gauge
+
+/**
+ * `mfarm_tunnel_hosts_connected` exists because nothing else in this file observes the connection a
+ * live view rides. A host beats over plain HTTPS, so it can report every device READY, pass every
+ * other gauge here, and still have every live view dead.
+ */
+describe('mfarm_tunnel_hosts_connected', () => {
+  after(() => setTunnelSource(undefined));
+
+  test('reports what the source says', () => {
+    setTunnelSource(() => 3);
+    collectRuntime();
+    assert.equal(sample(registry.render(), 'mfarm_tunnel_hosts_connected'), 3);
+  });
+
+  test('is present as an explicit zero, not absent', () => {
+    setTunnelSource(() => 0);
+    collectRuntime();
+    // The whole point of the gauge is the == 0 case. A series that disappears when it reaches zero
+    // makes that condition unalertable, which is the failure DEVICE_STATES exists to avoid.
+    assert.equal(sample(registry.render(), 'mfarm_tunnel_hosts_connected'), 0);
+  });
+
+  test('reads at scrape time, so a tunnel opening or closing shows up', () => {
+    // A laptop opens and closes its lid. A count captured once at startup would be a permanent zero.
+    let live = 0;
+    setTunnelSource(() => live);
+    collectRuntime();
+    assert.equal(sample(registry.render(), 'mfarm_tunnel_hosts_connected'), 0);
+    live = 2;
+    collectRuntime();
+    assert.equal(sample(registry.render(), 'mfarm_tunnel_hosts_connected'), 2);
+  });
+
+  test('with no source wired, reports zero rather than vanishing', () => {
+    setTunnelSource(undefined);
+    collectRuntime();
+    assert.equal(sample(registry.render(), 'mfarm_tunnel_hosts_connected'), 0);
   });
 });

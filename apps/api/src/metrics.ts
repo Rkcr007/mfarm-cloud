@@ -289,6 +289,39 @@ const queueOldest = g(
 
 const hosts = g('mfarm_hosts', 'Worker hosts by state.', ['state']);
 
+/**
+ * Agent tunnels currently connected (ADR-0008).
+ *
+ * NOT DERIVABLE FROM ANY OF THE GAUGES ABOVE, which is the reason it exists. A host beats over
+ * plain HTTPS and a device reports READY over the same beat, so `mfarm_hosts{state="UP"}` and
+ * `mfarm_devices{state="READY"}` are both perfectly healthy on a farm where every live view is
+ * dead — the tunnel is a SECOND connection, and nothing else observes it.
+ *
+ * Process-local, not a query: this counts sockets held by THIS instance. With more than one API
+ * replica the fleet total is the sum across them, and a viewer can only be relayed by the replica
+ * holding that host's tunnel — worth knowing before this farm grows a second one.
+ */
+const tunnelHosts = g(
+  'mfarm_tunnel_hosts_connected',
+  'Device hosts with a live agent tunnel to THIS control-plane instance. A host with no tunnel ' +
+    'can still register, beat, run automation and report devices READY — it just cannot serve a ' +
+    'live view.',
+);
+
+/**
+ * Where that count comes from, injected rather than imported.
+ *
+ * The registry is module-global and the tunnel registry is decorated per Fastify instance, so a
+ * direct import would either force a second module-global or make two servers in one test process
+ * share a fleet. `main.ts` points this at the running app.
+ */
+let tunnelSource: (() => number) | undefined;
+
+/** Called once at startup. Passing `undefined` detaches it, which is what tests want between cases. */
+export function setTunnelSource(fn: (() => number) | undefined): void {
+  tunnelSource = fn;
+}
+
 const hostHeartbeat = g(
   'mfarm_host_last_heartbeat_timestamp_seconds',
   'Unix time of a host\'s last heartbeat; 0 if it has registered and never beaten. A timestamp ' +
@@ -445,6 +478,11 @@ export function collectRuntime(): void {
   const mem = process.memoryUsage();
   rss.set({}, mem.rss);
   heapUsed.set({}, mem.heapUsed);
+
+  // Zero when nothing is connected, never absent: `mfarm_tunnel_hosts_connected == 0` is the
+  // interesting condition, and an alert on a series that disappears is silent exactly when it
+  // matters. Same reasoning as DEVICE_STATES.
+  tunnelHosts.set({}, tunnelSource?.() ?? 0);
 
   for (const [name, pool] of [['app', appPool], ['system', systemPool]] as const) {
     poolConns.set({ pool: name, state: 'total' }, pool.totalCount);
