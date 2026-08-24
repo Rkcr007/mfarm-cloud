@@ -28,7 +28,7 @@ const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'backup-offsite.sh'
  * only way to simulate the failure the size check exists for — a transfer that left a plausible
  * name behind. Every invocation is logged so a test can assert what was NOT called.
  */
-function fakeGcloud(root, { truncateTo = null, failUpload = false } = {}) {
+function fakeGcloud(root, { truncateTo = null, failUpload = false, hideFromLsTimes = 0 } = {}) {
   const bin = join(root, 'bin');
   mkdirSync(bin, { recursive: true });
   const bucket = join(root, 'bucket');
@@ -42,7 +42,7 @@ shift
 case "$1" in
   cp)
     shift
-    ${failUpload ? 'echo "AccessDeniedException" >&2; exit 1' : ''}
+    ${failUpload ? 'echo "Copying file:///x to gs://y"; echo "AccessDeniedException: 403" >&2; exit 1' : ''}
     # everything but the last argument is a source
     LAST=""
     for a in "$@"; do LAST="$a"; done
@@ -57,6 +57,10 @@ case "$1" in
     shift
     [ "$1" = "-l" ] && shift
     NAME="$(basename "$1")"
+    HIDE=${hideFromLsTimes}
+    N=$(cat ${root}/ls.count 2>/dev/null || echo 0)
+    N=$((N + 1)); echo $N > ${root}/ls.count
+    [ "$N" -le "$HIDE" ] && exit 1
     [ -f "${bucket}/$NAME" ] || exit 1
     ${truncateTo === null ? 'echo "$(wc -c < "' + bucket + '/$NAME" | tr -d " ") 2026-01-01T00:00:00Z $1"'
                           : `echo "${truncateTo} 2026-01-01T00:00:00Z $1"`}
@@ -163,12 +167,44 @@ test('a truncated remote copy is refused, and leaves no receipt', () => {
 });
 
 test('a failed upload is refused, and leaves no receipt', () => {
+  // THE FAKE PRINTS "Copying" AND THEN FAILS, which is what real gcloud does: that word means a
+  // transfer STARTED. The first version of this script grepped stdout for it and so counted every
+  // failure as a success — on the first real run it reported "uploaded 3 new backup(s)" against a
+  // bucket that was empty. The exit code is the only signal that means anything.
   const root = workspace();
   const { dir } = seedBackups(root, 1);
   const g = fakeGcloud(root, { failUpload: true });
 
   const r = run({ BACKUP_DIR: dir, BACKUP_BUCKET: 'gs://b' }, g);
   assert.notEqual(r.code, 0);
+  assert.doesNotMatch(r.out, /uploaded 1 backup/,
+    'a transfer that printed "Copying" and then died is not an upload');
+  assert.ok(!existsSync(join(dir, '.offsite-receipt')));
+});
+
+test('an object that is not listable yet is retried, not declared missing', () => {
+  // Object listing is not immediately consistent after a write. The first real run uploaded
+  // correctly, checked in the same second, saw nothing, and refused — a false alarm. The fake
+  // withholds the object from `ls` for the first two calls to reproduce it.
+  const root = workspace();
+  const { dir, names } = seedBackups(root, 1);
+  const g = fakeGcloud(root, { hideFromLsTimes: 2 });
+
+  const r = run({ BACKUP_DIR: dir, BACKUP_BUCKET: 'gs://b' }, g);
+  assert.equal(r.code, 0, r.out);
+  const receipt = JSON.parse(readFileSync(join(dir, '.offsite-receipt'), 'utf8'));
+  assert.equal(receipt.newest, names.at(-1));
+});
+
+test('an object that never appears still fails', () => {
+  // The retry must not turn a real absence into a pass — it only buys time.
+  const root = workspace();
+  const { dir } = seedBackups(root, 1);
+  const g = fakeGcloud(root, { hideFromLsTimes: 99 });
+
+  const r = run({ BACKUP_DIR: dir, BACKUP_BUCKET: 'gs://b' }, g);
+  assert.notEqual(r.code, 0);
+  assert.match(r.out, /not listable/);
   assert.ok(!existsSync(join(dir, '.offsite-receipt')));
 });
 
