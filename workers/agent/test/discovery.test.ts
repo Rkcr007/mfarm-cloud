@@ -41,6 +41,32 @@ describe('parseAdbDevices', () => {
     assert.match(out[0].remedy ?? '', /udev/i, 'and the remedy names the thing to fix');
   });
 
+  /**
+   * THE LINE THAT BROKE IT, copied verbatim from `adb devices -l` on macOS 24.6 with
+   * platform-tools 34.0.5 and a Samsung SM-S918B attached.
+   *
+   * Darwin prints the USB path as a bare `1-1`; Linux prints it as `usb:1-1`. Every test above uses
+   * the Linux form, so the suite was fully green while no physical device could enroll on a Mac at
+   * all — the state parsed as "device 1-1", matched nothing, and the phone was refused as being in
+   * an unrecognised state. ADR-0009's gate is a stranger's laptop, and half of those are this one.
+   */
+  test('a bare USB path, as macOS prints it, is a descriptor and not part of the state', () => {
+    const out = parseAdbDevices(
+      'List of devices attached\n'
+      + 'RZCX61ANKGE            device 1-1 product:dm3qxxx model:SM_S918B device:dm3q transport_id:1\n');
+    assert.equal(out.length, 1);
+    assert.equal(out[0].serial, 'RZCX61ANKGE');
+    assert.equal(out[0].state, 'device');
+    assert.equal(out[0].remedy, undefined, 'a usable device needs no remedy');
+  });
+
+  test('a bare USB path does not swallow a non-usable state either', () => {
+    const out = parseAdbDevices(
+      'List of devices attached\nRZCX61ANKGE            unauthorized 1-1 transport_id:1\n');
+    assert.equal(out[0].state, 'unauthorized');
+    assert.match(out[0].remedy ?? '', /Allow USB debugging/);
+  });
+
   test('reads unauthorized, and says to tap Allow', () => {
     const out = parseAdbDevices('List of devices attached\n39121FDH2003VK\tunauthorized\n');
     assert.equal(out[0].state, 'unauthorized');

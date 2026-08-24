@@ -99,13 +99,36 @@ export function parseAdbDevices(stdout: string): DiscoveredDevice[] {
     if (!line || line.startsWith('List of devices') || line.startsWith('*')) continue;
 
     // `no permissions` contains a space, so splitting on whitespace and taking [1] mislabels it.
-    // Serial first, everything after it is the state plus optional `key:value` descriptors.
+    // Serial first, everything after it is the state plus optional descriptors.
     const m = /^(\S+)\s+(.*)$/.exec(line);
     if (!m) continue;
     const serial = m[1];
     const rest = m[2];
-    // Descriptors like `usb:1-1 product:x model:Pixel_9` follow the state; cut at the first of them.
-    const stateText = rest.split(/\s+\w+:/)[0].trim().toLowerCase();
+
+    /**
+     * The state is every token before the descriptors begin — and the descriptors are NOT all
+     * `key:value`, which is what this used to assume.
+     *
+     * ON macOS ADB PRINTS THE USB PATH BARE. Linux gives `device usb:1-1 product:x`, so cutting at
+     * the first `\w+:` left "device" and worked. Darwin gives `device 1-1 product:x`, with no
+     * `usb:` prefix — so the cut happened at ` product:` instead, `stateText` became "device 1-1",
+     * matched none of the known states, and the device was classified `unknown` and refused.
+     *
+     * The effect was total: on macOS NO physical Android device could ever enroll, whatever was
+     * wrong or right with it, and the agent told the user their phone was in a state it did not
+     * recognise while `adb devices` showed a perfectly ordinary `device`. Found the first time this
+     * ran on a Mac, which is the machine ADR-0009's gate is written about.
+     *
+     * So stop at the first token that is a descriptor by SHAPE — one carrying a colon, or a bare
+     * USB path — rather than by a pattern only one platform happens to produce.
+     */
+    const stateWords: string[] = [];
+    for (const token of rest.split(/\s+/)) {
+      if (token.includes(':')) break;          // usb:1-1, product:x, transport_id:1
+      if (/^[\d][\d.-]*$/.test(token)) break;  // a bare USB path: `1-1` on macOS, `2.4.3` elsewhere
+      stateWords.push(token);
+    }
+    const stateText = stateWords.join(' ').trim().toLowerCase();
 
     let state: AdbState;
     if (stateText === 'device') state = 'device';
