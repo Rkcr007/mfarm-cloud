@@ -9,12 +9,13 @@ import {
   type AppActionRequest,
   type AppActionResult,
   type Capability,
+  type FailureReason,
   type RegistrationResponse,
   type WorkerHeartbeatResponse,
   type WorkerRegistration,
 } from '@mfarm/protocol';
 import { derivePort } from './appium.ts';
-import type { DeviceBackend } from './device.ts';
+import type { DeviceBackend, DeviceHealth } from './device.ts';
 
 /**
  * Bases for the two ports UiAutomator2 otherwise defaults to a single fixed number.
@@ -157,6 +158,9 @@ export class Agent {
   /** Last `hostState` the control plane reported, so the log carries transitions, not a metronome. */
   private lastHostState?: string;
   private meterTimer?: NodeJS.Timeout;
+  private healthTimer?: NodeJS.Timeout;
+  /** Last health status per device, so only TRANSITIONS become incidents. */
+  private readonly lastHealth = new Map<string, DeviceHealth['status']>();
   private readonly active = new Map<string, ActiveSession>();
   private readonly buffer = new Map<string, MeterEvent>();
   private readonly pendingResets: Array<{ deviceId: string; fence: number }> = [];
@@ -178,6 +182,20 @@ export class Agent {
    * invisible; a round trip before the first frame is not.
    */
   private readonly pendingAttaches: Array<{ sessionId: string; fence: number }> = [];
+
+  /**
+   * Infrastructure and device-health failures waiting to be reported (spec §18, migration 024).
+   *
+   * Unbounded, unlike `buffer`, and deliberately so. Metering is capped because a partitioned host
+   * emits a tick per device per second forever and would exhaust memory; incidents are emitted on
+   * TRANSITIONS — a device going unhealthy, an Appium dying — which a broken host produces a
+   * handful of, not thousands. Capping them would drop exactly the evidence explaining why the host
+   * was broken, to save memory that was never at risk.
+   */
+  private readonly pendingIncidents: Array<{
+    eventId: string; deviceId: string; sessionId: string | null;
+    reason: FailureReason; detail?: string; occurredAt: string;
+  }> = [];
 
   private readonly opts: AgentOptions;
   /**
@@ -652,11 +670,113 @@ export class Agent {
     this.buffer.set(e.eventId, e);
   }
 
+  /**
+   * Record something the FARM saw go wrong (spec §18, migration 024).
+   *
+   * The suite cannot know any of these: it sees one WebDriver call fail and has no vocabulary for
+   * why. So the agent says it, and the control plane keeps it beside — never on top of — whatever
+   * the suite reported.
+   *
+   * Buffered like metering rather than POSTed directly, because the incidents most worth having are
+   * the ones that happen when the network is bad, which is exactly when a fire-and-forget request
+   * is lost. `eventId` makes the inevitable re-send idempotent.
+   */
+  reportIncident(deviceLocalId: string, reason: FailureReason, detail?: string): void {
+    const deviceId = this.deviceIdFor(deviceLocalId);
+    if (!deviceId) {
+      // Before registration, or a device the control plane does not know. Logged rather than
+      // queued: an incident naming a device id we cannot supply can never be accepted.
+      console.warn(`[agent] incident '${reason}' on ${deviceLocalId} not reported — no device id yet`);
+      return;
+    }
+    const occurredAt = new Date().toISOString();
+    this.pendingIncidents.push({
+      eventId: randomUUID(),
+      deviceId,
+      // The session holding the device right now, if any. An incident outside a session is normal
+      // and is stored with a null — a phone can go unhealthy while idle.
+      sessionId: this.sessionForDevice(deviceId),
+      reason,
+      detail: detail?.slice(0, 4000),
+      occurredAt,
+    });
+    console.warn(`[agent] incident on ${deviceLocalId}: ${reason}${detail ? ` — ${detail}` : ''}`);
+  }
+
+  /**
+   * Which live session holds this device, for attributing an incident to it.
+   *
+   * Keyed on the CONTROL-PLANE uuid, because that is what `ActiveSession` carries — the local id is
+   * this host's private name for the device and appears nowhere in the session bookkeeping.
+   */
+  private sessionForDevice(deviceId: string): string | null {
+    for (const s of this.active.values()) {
+      if (s.deviceId === deviceId) return s.sessionId;
+    }
+    return null;
+  }
+
+  /**
+   * Watch every device's health, and report the transitions (spec §18/§19).
+   *
+   * WHY THIS EXISTS AT ALL. `DeviceControl.health()` was implemented by every backend and called by
+   * NOTHING — dead code since it was written. So a phone that fell off the USB, filled its storage
+   * or dropped below a usable battery produced no signal anywhere: the next WebDriver command
+   * failed, the suite recorded its own test as broken, and the farm had nothing to say. That is the
+   * exact failure §18 exists to end, and no taxonomy fixes it without something actually looking.
+   *
+   * ONLY TRANSITIONS ARE REPORTED. A device that is offline stays offline, and a probe every 30s
+   * would file a hundred incidents an hour for one pulled cable — burying the one that matters and
+   * making "how many incidents last week" a measure of how long nobody noticed. The recovery is
+   * logged too, because "it came back on its own" is the other half of the story and the reason not
+   * to send somebody to the lab.
+   *
+   * CHEAP ON PURPOSE. The probe is `true` down the already-open shell plus, on a handset, two
+   * `dumpsys`-class reads. It is not free, so it runs on a slow timer and never during a reset —
+   * a device mid-`pm clear` is legitimately unresponsive and reporting that would be noise.
+   */
+  startHealthMonitor(intervalMs = Number(process.env.DEVICE_HEALTH_INTERVAL_MS ?? 30_000)): void {
+    if (this.healthTimer) return;
+    this.healthTimer = setInterval(() => { void this.probeHealth(); }, intervalMs);
+    this.healthTimer.unref?.();
+  }
+
+  /** One pass over every device. Exported for tests and for a probe on demand. */
+  async probeHealth(): Promise<void> {
+    for (const backend of this.opts.devices) {
+      const localId = backend.control.info.localId;
+      // A device being reset is expected to be unresponsive; probing it would report the cleanup
+      // as a fault. `resetsInFlight` is keyed by control-plane uuid, which is what we have here.
+      const deviceId = this.deviceIdFor(localId);
+      if (deviceId && this.resetsInFlight.has(deviceId)) continue;
+
+      let health: DeviceHealth;
+      try {
+        health = await backend.control.health();
+      } catch (e) {
+        // A health check that THROWS is itself a health signal — the backend could not even ask.
+        health = { status: 'offline', reasonCode: 'agent-failure', reason: (e as Error).message };
+      }
+
+      const previous = this.lastHealth.get(localId) ?? 'healthy';
+      this.lastHealth.set(localId, health.status);
+      if (health.status === previous) continue;
+
+      if (health.status === 'healthy') {
+        console.log(`[agent] ${localId} is healthy again (was ${previous})`);
+        continue;
+      }
+      // `device-unresponsive` is the honest default: something is wrong and the backend did not say
+      // what, which is different from claiming to know it was the cable.
+      this.reportIncident(localId, health.reasonCode ?? 'device-unresponsive', health.reason);
+    }
+  }
+
   /** Called on a timer; also safe to call directly. Buffered events survive a failed flush. */
   async flush(): Promise<{ recorded: number; ok: boolean }> {
     for (const s of this.active.values()) this.emitTick(s, Date.now());
     if (this.buffer.size === 0 && this.pendingResets.length === 0 && this.pendingActions.length === 0
-        && this.pendingAttaches.length === 0) {
+        && this.pendingAttaches.length === 0 && this.pendingIncidents.length === 0) {
       return { recorded: 0, ok: true };
     }
     if (!this.state) return { recorded: 0, ok: false };
@@ -665,12 +785,13 @@ export class Agent {
     const resets = [...this.pendingResets];
     const actions = [...this.pendingActions];
     const attaches = [...this.pendingAttaches];
+    const incidents = [...this.pendingIncidents];
 
     try {
       const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/events`, {
         method: 'POST',
         headers: { authorization: `Bearer ${this.state.workerToken}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ metering, resets, actions, attaches }),
+        body: JSON.stringify({ metering, resets, actions, attaches, incidents }),
       });
       if (!res.ok) return { recorded: 0, ok: false };
       const body = await res.json() as {
@@ -698,6 +819,13 @@ export class Agent {
       for (const a of attaches) {
         const i = this.pendingAttaches.findIndex((p) => p.sessionId === a.sessionId && p.fence === a.fence);
         if (i >= 0) this.pendingAttaches.splice(i, 1);
+      }
+      // Dropped whether or not accepted, for the same reason as actions and attaches: `false` here
+      // means "already recorded" (the event id collided) or "not this host's device", and both give
+      // the same answer forever. Keeping them would make one bad device id a permanent buffer leak.
+      for (const i of incidents) {
+        const at = this.pendingIncidents.findIndex((p) => p.eventId === i.eventId);
+        if (at >= 0) this.pendingIncidents.splice(at, 1);
       }
       for (const r of body.resets ?? []) {
         if (!r.accepted) {
@@ -729,6 +857,11 @@ export class Agent {
   stopMetering(): void {
     if (this.meterTimer) clearInterval(this.meterTimer);
     this.meterTimer = undefined;
+  }
+
+  stopHealthMonitor(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = undefined;
   }
 
   // ---------------------------------------------------------------- reset
@@ -1101,7 +1234,10 @@ export class Agent {
   async shutdown(): Promise<void> {
     this.stopHeartbeat();
     this.stopMetering();
+    this.stopHealthMonitor();
     for (const id of [...this.active.keys()]) this.endSession(id);
+    // The final flush carries any incident recorded on the way down — including the one explaining
+    // why the agent is shutting down at all, which is the one somebody will come looking for.
     await this.flush();
   }
 }

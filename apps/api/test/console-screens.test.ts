@@ -350,3 +350,79 @@ describe('real and virtual devices are told apart', () => {
     assert.match(textOf(mod.SCREENS.device()), /session-reset/);
   });
 });
+
+/**
+ * §18 in the console: a farm fault must be visibly NOT a test failure.
+ *
+ * The taxonomy is worth nothing if the screen renders both identically — the whole point is that a
+ * person reading a red run can tell "your app is broken" from "our cable fell out".
+ */
+describe('failure classification on the run detail', () => {
+  function withIncidents() {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.failures = [
+      {
+        id: 'tr-1', sessionId: 'sess-1', name: 'checkout applies a promo',
+        failure: 'AssertionError: expected 8 got 10', durationMs: 1200,
+        failureClass: 'test', failureReason: 'assertion-failure',
+        reportedAt: new Date().toISOString(),
+      },
+      {
+        id: 'tr-2', sessionId: 'sess-1', name: 'cart survives a reload',
+        failure: 'no such session', durationMs: 900,
+        failureClass: null, failureReason: null,
+        reportedAt: new Date().toISOString(),
+      },
+    ];
+    mod.state.runDetail.incidents = [{
+      id: 'si-1', sessionId: 'sess-1', class: 'infrastructure',
+      reason: 'device-disconnected', detail: 'adb: device offline',
+      device: 'phone-ABC123', occurredAt: new Date().toISOString(),
+    }];
+  }
+
+  test('what the farm saw is its own card, not mixed into the failures', () => {
+    withIncidents();
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /What the farm saw/);
+    assert.match(text, /adb: device offline/);
+    assert.match(text, /phone-ABC123/);
+    // The failures card still reports only what the SUITE said.
+    assert.match(text, /Failures \(2\)/);
+  });
+
+  test('an infrastructure incident is labelled as such, never as a test failure', () => {
+    withIncidents();
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /Infrastructure/);
+  });
+
+  test('a classified test failure carries its class', () => {
+    withIncidents();
+    assert.match(textOf(mod.SCREENS.run()), /Test/);
+  });
+
+  /** The run still renders when the farm saw nothing — the common, healthy case. */
+  test('no incidents means no card, not an empty one', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.incidents = [];
+    assert.doesNotMatch(textOf(mod.SCREENS.run()), /What the farm saw/);
+  });
+
+  /**
+   * The state this card exists for: nothing failed, but the farm had a problem. A run like this
+   * looks perfectly green and should not be trusted without a second look.
+   */
+  test('incidents show even when every test passed', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.failures = [];
+    mod.state.runDetail.incidents = [{
+      id: 'si-1', sessionId: 'sess-1', class: 'device-health',
+      reason: 'low-battery', detail: 'battery at 9%',
+      device: 'phone-ABC123', occurredAt: new Date().toISOString(),
+    }];
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /What the farm saw/);
+    assert.match(text, /Device health/);
+  });
+});

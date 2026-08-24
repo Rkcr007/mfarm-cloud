@@ -379,19 +379,32 @@ export class PhysicalDevice implements DeviceControl {
       // shape must not make an otherwise healthy phone look broken.
       const battery = await this.batteryPercent().catch(() => undefined);
       if (battery !== undefined && battery < 15) {
-        return { status: 'degraded', reason: `battery at ${battery}% — installs and launches fail below ~10%`, inputLatencyMs };
+        return {
+          status: 'degraded', reasonCode: 'low-battery', inputLatencyMs,
+          reason: `battery at ${battery}% — installs and launches fail below ~10%`,
+        };
       }
       const freeMb = await this.freeStorageMb().catch(() => undefined);
       if (freeMb !== undefined && freeMb < 500) {
-        return { status: 'degraded', reason: `${freeMb} MB free — an APK install needs headroom`, inputLatencyMs };
+        return {
+          status: 'degraded', reasonCode: 'low-storage', inputLatencyMs,
+          reason: `${freeMb} MB free — an APK install needs headroom`,
+        };
       }
       if (inputLatencyMs > 100) {
         return { status: 'degraded', reason: 'input latency above budget', inputLatencyMs };
       }
       return { status: 'healthy', inputLatencyMs };
     } catch (e) {
-      // A pulled cable lands here, and `offline` is what withdraws the device from scheduling.
-      return { status: 'offline', reason: (e as Error).message };
+      /**
+       * A pulled cable lands here, and `offline` is what withdraws the device from scheduling.
+       *
+       * `device-disconnected` rather than `usb-failure`, even though USB is how it is attached. The
+       * agent cannot tell a pulled cable from a phone that rebooted or one whose adb died, and
+       * `usb-failure` would be a claim about a cause it did not observe. §18 wants a reason that is
+       * true, not the most specific one available.
+       */
+      return { status: 'offline', reasonCode: 'device-disconnected', reason: (e as Error).message };
     }
   }
 

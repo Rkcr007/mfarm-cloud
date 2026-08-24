@@ -231,11 +231,37 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
      */
     const failures = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
-        `SELECT tr.id, tr.session_id, tr.name, tr.failure, tr.duration_ms, tr.reported_at
+        `SELECT tr.id, tr.session_id, tr.name, tr.failure, tr.duration_ms, tr.reported_at,
+                tr.failure_class, tr.failure_reason
            FROM test_results tr
            JOIN sessions s ON s.id = tr.session_id
           WHERE s.run_id = $1 AND tr.status = 'failed'
           ORDER BY tr.reported_at, tr.id
+          LIMIT 200`,
+        [run.id],
+      );
+      return rows;
+    });
+
+    /**
+     * What the FARM saw during this run, alongside what the suite reported (spec §18).
+     *
+     * A SEPARATE LIST, not merged into `failures`, and that is the decision worth defending. The
+     * merged version would attach an incident to whichever test was running when it happened and
+     * call that test infrastructure — which is inference, and wrong often enough to matter: a test
+     * can genuinely fail its assertion during a session that also had a cable glitch. Presented
+     * side by side, a person can see "eleven tests failed and the phone dropped off USB twice" and
+     * draw the conclusion themselves, which is a claim they can weigh rather than one made for them.
+     */
+    const incidents = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query(
+        `SELECT si.id, si.session_id, si.class, si.reason, si.detail, si.occurred_at,
+                d.local_id AS device_local_id, d.model AS device_model
+           FROM session_incidents si
+           JOIN sessions s ON s.id = si.session_id
+           LEFT JOIN devices d ON d.id = si.device_id
+          WHERE s.run_id = $1
+          ORDER BY si.occurred_at, si.id
           LIMIT 200`,
         [run.id],
       );
@@ -268,8 +294,20 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         sessionId: f.session_id,
         name: f.name,
         failure: f.failure,
+        // null means the suite did not classify, which is different from "the product's fault".
+        failureClass: f.failure_class ?? null,
+        failureReason: f.failure_reason ?? null,
         durationMs: f.duration_ms,
         reportedAt: f.reported_at,
+      })),
+      incidents: incidents.map((i: Record<string, unknown>) => ({
+        id: i.id,
+        sessionId: i.session_id,
+        class: i.class,
+        reason: i.reason,
+        detail: i.detail,
+        device: i.device_local_id ?? i.device_model ?? null,
+        occurredAt: i.occurred_at,
       })),
     };
   });

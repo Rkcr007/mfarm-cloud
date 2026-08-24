@@ -206,6 +206,54 @@ const KIND_LABEL = { install: 'Install', launch: 'Launch', uninstall: 'Uninstall
 const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'session-reset', 'screen-stream', 'logcat', 'screenshot'];
 
 /**
+ * Failure classification (spec §18).
+ *
+ * The point of showing this at all is that "failed" has meant two unrelated things — your app is
+ * broken, and our farm is broken — and a report that cannot tell them apart teaches people to
+ * ignore red. So the class is what gets the colour: `test` is the only one that is the product's
+ * fault, and the other two are visually the farm admitting something.
+ */
+const FAILURE_CLASS_LABEL = {
+  'test': 'Test',
+  'infrastructure': 'Infrastructure',
+  'device-health': 'Device health',
+};
+
+const FAILURE_REASON_LABEL = {
+  'assertion-failure': 'an assertion failed',
+  'application-crash': 'the app under test crashed',
+  'adb-failure': 'adb stopped responding',
+  'appium-failure': 'the automation server failed',
+  'device-disconnected': 'the device disconnected',
+  'usb-failure': 'the USB connection failed',
+  'agent-failure': 'the MFARM agent failed',
+  'network-failure': 'the network failed',
+  'low-storage': 'the device ran out of storage',
+  'low-battery': 'the device battery was too low',
+  'device-locked': 'the device was locked',
+  'device-unresponsive': 'the device stopped responding',
+};
+
+/**
+ * One tag naming a failure's class, with the specific reason as its tooltip.
+ *
+ * Class in the label and reason in the title rather than both inline: a list of twelve failures is
+ * scanned for the SHAPE of the problem, and twelve different reason strings defeat that. The reason
+ * is one hover away for the row that turns out to matter.
+ */
+function failureTag(cls, reason) {
+  const label = FAILURE_CLASS_LABEL[cls] || cls;
+  return h('span', {
+    // `test` is the product's problem and stays neutral — it is the ordinary case a red pill
+    // already covers. The farm's own faults are marked, because those are the ones a person is
+    // being asked to discount.
+    class: `failtag ${cls === 'test' ? '' : 'farm'}`.trim(),
+    title: reason ? `${label}: ${FAILURE_REASON_LABEL[reason] || reason}` : label,
+    text: label,
+  });
+}
+
+/**
  * Real device or virtual one (spec §25).
  *
  * Derived from `tier` rather than stored, because the tier is already the truth and a second field
@@ -2905,6 +2953,9 @@ function screenRun(id) {
             h('p', { class: 'row tight' },
               pill('failed', 'bad'),
               h('strong', { text: f.name }),
+              // What KIND of failure, when the suite said (spec §18). Absent when it did not, and
+              // absent is NOT the same as "the product's fault" — see `failureLabel`.
+              f.failureClass ? failureTag(f.failureClass, f.failureReason) : null,
             ),
             f.failure
               ? h('pre', { class: 'failtext', text: f.failure })
@@ -2913,6 +2964,33 @@ function screenRun(id) {
               h('span', { class: 'caption', text: 'Evidence:' }),
               btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
             ),
+          ))))
+      : null,
+
+    /**
+     * What the FARM saw, as its own card (spec §18).
+     *
+     * SEPARATE FROM THE FAILURES ABOVE, deliberately. Merging them would mean attaching each
+     * incident to whichever test happened to be running and calling that test infrastructure —
+     * a claim the farm cannot support, and wrong often enough to matter: a test can genuinely fail
+     * an assertion during a session that also had a cable glitch. Side by side, a person reads
+     * "eleven failures, and the phone dropped off USB twice" and draws their own conclusion.
+     *
+     * It renders even when there are no failures at all, because "nothing failed but the farm had
+     * three incidents" is a real and important state — it is a run that should be re-read with
+     * suspicion rather than trusted.
+     */
+    d.incidents?.length
+      ? card(`What the farm saw (${d.incidents.length})`, { class: 'mb-gap' },
+          h('p', { class: 'help' },
+            'Problems MFARM detected with the device or the harness during this run. These are not '
+            + 'test failures, and they are not counted as any. A failure above that overlaps one of '
+            + 'these is worth re-running before it is believed.'),
+          h('div', { class: 'stack mt-md' }, d.incidents.map((i) => h('div', { class: 'row tight' },
+            failureTag(i.class, i.reason),
+            h('span', { class: 'caption mono', text: i.device || '—' }),
+            h('span', { class: 'caption', text: i.detail || FAILURE_REASON_LABEL[i.reason] || i.reason }),
+            h('span', { class: 'caption', text: ago(i.occurredAt) }),
           ))))
       : null,
 

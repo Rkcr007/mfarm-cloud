@@ -440,6 +440,10 @@ async function main(): Promise<void> {
 
   agent.startHeartbeat();
   agent.startMetering();
+  // Nothing polled device health before this (spec §18): every backend implemented `health()` and
+  // no caller ever asked. A phone that falls off the USB mid-suite is now an incident with a reason,
+  // instead of a WebDriver error the suite records as its own test failing.
+  agent.startHealthMonitor();
 
   let shuttingDown = false;
   const shutdown = async (signal: string, exitCode = 0) => {
@@ -549,6 +553,14 @@ async function main(): Promise<void> {
       'advertises `webdriver`. WebDriver sessions allocated to it will fail at the proxy hop. ' +
       `Withdrawing by draining in ${UNHEALTHY_GRACE_MS}ms unless it recovers first.`,
     );
+    /**
+     * §18. This is the moment a test is about to fail for a reason that is not the test's fault.
+     *
+     * Reported HERE rather than when the WebDriver call fails, because by then the only thing left
+     * is a proxy error the suite will faithfully record as its own failure. The agent is the only
+     * party that knows Appium went away, and this is the only place it knows it.
+     */
+    agent.reportIncident(localId, 'appium-failure', `Appium became unready (state: ${sup.state})`);
     // Still a whole-agent drain, for the reason in the block comment above: capabilities are written
     // at registration only, so one device's `webdriver` cannot be withdrawn without re-registering
     // the host. Per-device endpoints make the RE-registration honest — the agent returns advertising
@@ -569,6 +581,10 @@ async function main(): Promise<void> {
 
   onGiveUp = (localId: string, reason: string): void => {
     console.error(`[agent] Appium for ${localId} is permanently unhealthy: ${reason}`);
+    agent.reportIncident(localId, 'appium-failure', `permanently unhealthy: ${reason}`);
+    // Flushed before the drain below can exit the process, or the incident explaining WHY this host
+    // went away dies with it — which is precisely the case somebody will be trying to reconstruct.
+    void agent.flush();
     if (!advertisedWebdriver.has(localId)) return; // never advertised it; already honest
     console.error(`[agent] ${localId} registered \`webdriver\` and can no longer serve it — draining`);
     void shutdown('appium-permanent-failure', 1);

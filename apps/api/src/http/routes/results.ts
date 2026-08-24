@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import { ALL_FAILURE_REASONS, classifyReason } from '@mfarm/protocol';
 import { withTenant } from '../../db.ts';
 import { requireTenant } from '../server.ts';
-import { notFound } from '../errors.ts';
+import { badRequest, notFound } from '../errors.ts';
 
 /**
  * What the SUITE says happened — the only source of pass and fail there is.
@@ -42,6 +43,19 @@ interface ResultBody {
   name: string;
   failure?: string;
   durationMs?: number;
+  /**
+   * WHY the test failed, in the taxonomy of spec §18 — `assertion-failure`, `application-crash`,
+   * and the infrastructure and device-health reasons a sufficiently aware suite can recognise.
+   *
+   * OPTIONAL, and its absence means UNCLASSIFIED rather than "the product's fault". Defaulting it
+   * would manufacture on the caller's behalf exactly the claim this taxonomy exists to stop being
+   * manufactured — and would make every suite written before §18 retroactively assert something it
+   * never said.
+   *
+   * The CLASS is not accepted. It is derived from the reason, because the two must agree and only
+   * one of them can be wrong.
+   */
+  failureReason?: string;
 }
 
 interface ResultRow {
@@ -50,6 +64,8 @@ interface ResultRow {
   name: string;
   status: string;
   failure: string | null;
+  failure_class: string | null;
+  failure_reason: string | null;
   duration_ms: number | null;
   reported_at: Date;
 }
@@ -60,6 +76,8 @@ const resultJson = (r: ResultRow) => ({
   name: r.name,
   status: r.status,
   failure: r.failure,
+  failureClass: r.failure_class,
+  failureReason: r.failure_reason,
   durationMs: r.duration_ms,
   reportedAt: r.reported_at,
 });
@@ -95,6 +113,10 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
             // result. See `boundFailure`.
             failure: { type: 'string' },
             durationMs: { type: 'integer', minimum: 0 },
+            // Enumerated in the schema so an unknown reason is a 400 naming the valid set, rather
+            // than a CHECK violation surfacing as a 500. The list lives in `packages/protocol` so
+            // the constraint, this schema and the console cannot drift apart.
+            failureReason: { type: 'string', enum: [...ALL_FAILURE_REASONS] },
           },
         },
       },
@@ -102,17 +124,36 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const { orgId } = requireTenant(req);
       const sessionId = req.params.id;
-      const { status, name } = req.body;
+      const { status, name, failureReason } = req.body;
+
+      /**
+       * Only a failed test has a failure to classify.
+       *
+       * Refused rather than ignored. A suite sending `status: 'passed'` with a reason attached has a
+       * bug in its reporting hook, and silently dropping half of a contradictory pair would let that
+       * bug live forever while quietly skewing every count built on the column. The database has the
+       * same constraint; this is the version that says so in words the caller can act on.
+       */
+      if (failureReason !== undefined && status !== 'failed') {
+        throw badRequest(
+          `failureReason is only meaningful on a failed test; this one is "${status}".`,
+        );
+      }
+      // Derived, never accepted — see ResultBody. `classifyReason` is total over the schema's enum,
+      // so this cannot be undefined here, but the fallback keeps that from being a silent assumption.
+      const failureClass = failureReason === undefined ? null : classifyReason(failureReason) ?? null;
 
       const row = await withTenant(orgId, async (c) => {
         // The org comes from the SESSION, and the INSERT ... SELECT is what ties them together in
         // one statement: there is no window in which a caller could name a session it does not own
         // and have the row written under an org it does.
         const { rows } = await c.query<ResultRow>(
-          `INSERT INTO test_results (org_id, session_id, name, status, failure, duration_ms)
-           SELECT s.org_id, s.id, $2, $3, $4, $5 FROM sessions s WHERE s.id = $1
+          `INSERT INTO test_results
+             (org_id, session_id, name, status, failure, duration_ms, failure_class, failure_reason)
+           SELECT s.org_id, s.id, $2, $3, $4, $5, $6, $7 FROM sessions s WHERE s.id = $1
            RETURNING *`,
-          [sessionId, name.trim(), status, boundFailure(req.body.failure), req.body.durationMs ?? null],
+          [sessionId, name.trim(), status, boundFailure(req.body.failure), req.body.durationMs ?? null,
+           failureClass, failureReason ?? null],
         );
         return rows[0] ?? null;
       });

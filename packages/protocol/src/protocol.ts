@@ -474,3 +474,78 @@ export function isTunnelFrame(v: unknown): v is TunnelFrame {
   if (f.t === 'open' || f.t === 'close') return true;
   return f.t === 'data' && typeof f.d === 'string';
 }
+
+/* --------------------------------------------------------------- why something failed (spec §18)
+ *
+ * WHY THIS EXISTS. A test that failed because the assertion was wrong and a test that "failed"
+ * because somebody's foot caught the USB cable are the same row today: `status: 'failed'`, with
+ * whatever WebDriver error the suite happened to catch in the text. So a run's failure count mixes
+ * the product's problems with the farm's, and the number that is supposed to answer "is my app
+ * broken" cannot be trusted to. §18 calls this essential, and it is right — a physical-device farm
+ * that reports infrastructure as product defects teaches people to ignore red.
+ *
+ * TWO SOURCES, AND THEY KNOW DIFFERENT THINGS. That split is the whole design:
+ *
+ *   The SUITE knows whether an assertion failed or the app under test crashed. It is the only thing
+ *   that knows, and it says so on `POST /sessions/:id/result`.
+ *
+ *   The FARM knows the adb connection dropped, Appium had to be restarted, the phone fell below a
+ *   usable battery. The suite CANNOT know these — it sees a WebDriver call fail and nothing more —
+ *   so the agent records them itself, as incidents against the session.
+ *
+ * NEITHER OVERWRITES THE OTHER, and that is deliberate. The tempting version reclassifies a failed
+ * test as infrastructure when an incident overlaps it, and that is inference dressed as fact in
+ * exactly the way migration 021 refuses to infer pass/fail: a test can genuinely fail an assertion
+ * during a session that also had a cable glitch, and silently relabelling it hides a real defect.
+ * So both are recorded and the console shows the correlation, which is a claim a person can weigh.
+ */
+
+/** The three buckets §18 asks for. `test` is the only one that is the product's fault. */
+export const FAILURE_CLASSES = ['test', 'infrastructure', 'device-health'] as const;
+export type FailureClass = (typeof FAILURE_CLASSES)[number];
+
+/**
+ * The specific reason, within its class.
+ *
+ * A closed list, because the point of this is aggregation — "how many runs did this farm lose to
+ * USB last week" is unanswerable over free text. Unknown reasons from a newer agent are ignored
+ * rather than rejected, the same rule as capabilities, so a new one can roll out worker-first.
+ */
+export const FAILURE_REASONS = {
+  test: ['assertion-failure', 'application-crash'],
+  infrastructure: [
+    'adb-failure', 'appium-failure', 'device-disconnected', 'usb-failure',
+    'agent-failure', 'network-failure',
+  ],
+  'device-health': ['low-storage', 'low-battery', 'device-locked', 'device-unresponsive'],
+} as const satisfies Record<FailureClass, readonly string[]>;
+
+export type FailureReason = (typeof FAILURE_REASONS)[FailureClass][number];
+
+/** Every reason, flattened — what a CHECK constraint and a body schema both need. */
+export const ALL_FAILURE_REASONS: readonly string[] =
+  Object.values(FAILURE_REASONS).flat();
+
+/**
+ * Which class a reason belongs to.
+ *
+ * Derived rather than stored alongside it, so the two cannot disagree. A caller that sends
+ * `device-disconnected` with class `test` is not making a judgement call this system should
+ * respect — it is sending a contradiction, and `classifyReason` is what the API checks it against.
+ */
+export function classifyReason(reason: string): FailureClass | undefined {
+  for (const cls of FAILURE_CLASSES) {
+    if ((FAILURE_REASONS[cls] as readonly string[]).includes(reason)) return cls;
+  }
+  return undefined;
+}
+
+/**
+ * Is this failure the farm's fault rather than the product's?
+ *
+ * The question every report ultimately asks, in one place so the console, the run rollup and any
+ * future alerting cannot each answer it slightly differently.
+ */
+export function isFarmFault(cls: FailureClass): boolean {
+  return cls !== 'test';
+}
