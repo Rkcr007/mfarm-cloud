@@ -691,8 +691,8 @@ ssh mfarm-lab 'cd ~/mfarm && git pull && sudo systemctl restart mfarm-worker'
 ssh mfarm-lab 'journalctl -u mfarm-worker -n50 | grep "tunnel connected"'
 ssh mfarm-cp  'docker logs mfarm-api-1 --tail 200 | grep "worker tunnel connected"'
 
-# 3. ONLY THEN the ingress.
-ssh mfarm-cp 'cd ~/mfarm && WORKER_DATA_PLANE= bash deploy/setup-ingress.sh'
+# 3. ONLY THEN the ingress. Unset is the tunnel, so there is nothing to pass.
+ssh mfarm-cp 'cd ~/mfarm && bash deploy/setup-ingress.sh'
 
 # 4. The gate.
 ssh mfarm-cp 'cd ~/mfarm && bash deploy/verify-live.sh'
