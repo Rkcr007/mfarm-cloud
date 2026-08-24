@@ -37,6 +37,8 @@ The two machines are separate on purpose — [ADR-0006](adrs/0006-control-plane-
 | **run my test suite on it** | [../examples/medishop-suite/README.md](../examples/medishop-suite/README.md) | [ci.md](ci.md) for CI |
 | **understand how execution works** | [EXECUTION_MODEL.md](EXECUTION_MODEL.md) | §4 is the built/unbuilt list |
 | **understand the architecture** | [../HANDOFF.md](../HANDOFF.md) | [adrs/](adrs/) for the reasoning |
+| **build the installable agent** | [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md) | Phased, with a hardware gate on every phase |
+| **run a physical device** | [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md) | Prerequisites, enrollment, what a reset does |
 | **operate or deploy it** | [RUNBOOK.md](RUNBOOK.md) | §7 below for the invariants |
 | **know what is safe to change** | §7 below | then the ADR that owns the area |
 
@@ -54,7 +56,7 @@ The two machines are separate on purpose — [ADR-0006](adrs/0006-control-plane-
 | [RUNBOOK.md](RUNBOOK.md) | Start it, ship to it, stop it. The reference under START_HERE. |
 | [RENDER_BASELINE.md](RENDER_BASELINE.md) | What SwiftShader can and cannot test. Measured, not assumed. |
 | [ci.md](ci.md) | Running your suite from CI, with the GitHub Action. |
-| [adrs/](adrs/) | Seven accepted decisions, each with its rejected alternatives. §5 below summarises them. |
+| [adrs/](adrs/) | Ten accepted decisions, each with its rejected alternatives. §5 below summarises them. |
 | [../examples/medishop-suite/README.md](../examples/medishop-suite/README.md) | The worked example: 8 tests, one build, one run, real outcomes. |
 | [../apps/api/README.md](../apps/api/README.md), [../apps/cli/README.md](../apps/cli/README.md), [../workers/agent/README.md](../workers/agent/README.md), [../deploy/README.md](../deploy/README.md) | Per-package detail. |
 
@@ -109,6 +111,8 @@ useful half.
 | [0006](adrs/0006-control-plane-and-device-host-are-separate.md) | Two machines | One box. The control plane must survive the device host being stopped — and it is stopped most of the time, because it is the expensive one. |
 | [0007](adrs/0007-live-view-signaling-relay.md) | Signaling relayed through the data plane; **media is not proxied** | Proxying media. It would put every frame through the control plane and make CSP a permanent fight. |
 | [0008](adrs/0008-physical-devices-behind-the-existing-agent.md) | Physical devices are a third **backend** behind the existing agent, reached over a tunnel the agent dials out | A second standalone agent, and a statically-routed `/dp/*`. A phone arrives on a laptop behind NAT, where neither works. |
+| [0009](adrs/0009-the-agent-is-a-product.md) | The agent is **one signed binary with a loopback window** — no installer, no admin rights | A container (USB passthrough is unsupported on macOS/Windows), WebUSB (cannot run Appium or reach iOS), and a platform installer as the *first* path (needs elevation, which QA laptops do not grant). |
+| [0010](adrs/0010-ios-without-xcode.md) | iOS runs on **every host**: WebDriverAgent is built once by us, re-signed, and installed anywhere | Appium's XCUITest driver, which drags the macOS requirement back in. WDA already speaks WebDriver, and the gateway already proxies it. |
 
 ---
 
