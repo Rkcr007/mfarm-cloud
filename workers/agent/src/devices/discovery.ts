@@ -23,7 +23,20 @@ import type { Screen } from '../device.ts';
  * these states has a specific instruction attached to it.
  */
 
-const ADB = process.env.ADB_PATH ?? (process.env.ANDROID_HOME ? `${process.env.ANDROID_HOME}/platform-tools/adb` : 'adb');
+/**
+ * Where adb is, resolved PER CALL rather than captured at module load.
+ *
+ * The constant form — `const ADB = process.env.ADB_PATH ?? …` — reads the environment once, when
+ * the module is first imported. That is fine in production, where the environment is set before
+ * node starts, and quietly wrong everywhere else: anything that sets `ADB_PATH` after import is
+ * ignored with no error, which is a confusing enough failure to be worth the function call. It also
+ * makes discovery testable without a phone, which is most of why these functions are separable at
+ * all.
+ */
+function adbPath(): string {
+  return process.env.ADB_PATH
+    ?? (process.env.ANDROID_HOME ? `${process.env.ANDROID_HOME}/platform-tools/adb` : 'adb');
+}
 
 export type AdbState = 'device' | 'unauthorized' | 'offline' | 'no permissions' | 'unknown';
 
@@ -117,7 +130,7 @@ export function parseAdbDevices(stdout: string): DiscoveredDevice[] {
  * device." An OEM that omits `ro.product.manufacturer` must still enroll.
  */
 export async function readProps(serial: string): Promise<DeviceProps> {
-  const dump = await run(ADB, ['-s', serial, 'shell', 'getprop'], 20_000);
+  const dump = await run(adbPath(), ['-s', serial, 'shell', 'getprop'], 20_000);
   // getprop prints `[key]: [value]`, one per line.
   const props = new Map<string, string>();
   for (const line of dump.split('\n')) {
@@ -146,8 +159,8 @@ export async function readProps(serial: string): Promise<DeviceProps> {
  */
 async function readScreen(serial: string): Promise<Screen | undefined> {
   const [size, density] = await Promise.all([
-    run(ADB, ['-s', serial, 'shell', 'wm', 'size'], 10_000),
-    run(ADB, ['-s', serial, 'shell', 'wm', 'density'], 10_000),
+    run(adbPath(), ['-s', serial, 'shell', 'wm', 'size'], 10_000),
+    run(adbPath(), ['-s', serial, 'shell', 'wm', 'density'], 10_000),
   ]);
   const sizes = [...size.matchAll(/(\d+)x(\d+)/g)];
   if (sizes.length === 0) return undefined;
@@ -161,7 +174,7 @@ async function readScreen(serial: string): Promise<Screen | undefined> {
 export async function discover(): Promise<DiscoveredDevice[]> {
   let stdout: string;
   try {
-    stdout = await run(ADB, ['devices', '-l'], 20_000);
+    stdout = await run(adbPath(), ['devices', '-l'], 20_000);
   } catch (e) {
     // adb not installed, or its server refused to start. One line, not a stack: this runs on a
     // timer and a crash loop would bury everything else in the log.
@@ -198,4 +211,82 @@ export async function discover(): Promise<DiscoveredDevice[]> {
  */
 export function localIdForSerial(serial: string): string {
   return `phone-${serial.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+}
+
+/**
+ * Watch USB for phones appearing, and call back when the usable set CHANGES (spec §6).
+ *
+ * WHY THIS IS A POLL AND NOT `adb track-devices`. The tracking socket is a lower-level protocol
+ * that reports raw device states and requires speaking adb's own framing over a socket the server
+ * owns — a second adb client implementation in this repo, to save a `adb devices -l` every ten
+ * seconds. The poll costs one short-lived process per interval and reuses the exact parser that
+ * discovery already has to have. If USB latency ever matters here, that trade is worth revisiting;
+ * plugging in a phone is a human action measured in seconds, so today it is not.
+ *
+ * ONLY THE USABLE SET IS COMPARED. A phone sitting at `unauthorized` flips to `device` the moment
+ * somebody taps Allow, and that IS an arrival — it is the most common one, in fact. Comparing every
+ * state instead would fire on `offline` -> `unauthorized` churn from a failing cable, which is not
+ * a fleet change and would restart the agent in a loop.
+ */
+export function watchForChanges(
+  known: readonly string[],
+  onChange: (added: string[], removed: string[]) => void,
+  intervalMs = Number(process.env.PHYSICAL_DISCOVERY_INTERVAL_MS ?? 10_000),
+  /**
+   * How to look. Defaults to `discover`, and is a parameter so the change detection can be tested
+   * against a scripted sequence of worlds instead of a scripted `adb` on PATH.
+   *
+   * That seam is worth naming because the alternative was tried and is worse: a fake adb has to be
+   * a real executable in a real temp directory selected by a process-wide environment variable, so
+   * the tests cannot run concurrently, they leak a directory if one fails, and a probe still in
+   * flight when the directory is removed logs an alarming error from a test that has already
+   * passed. None of that was testing this function.
+   */
+  probe: () => Promise<DiscoveredDevice[]> = discover,
+): { stop: () => void } {
+  let current = new Set(known);
+  let stopped = false;
+  /**
+   * One pass at a time.
+   *
+   * `discover()` spawns adb several times and a slow or wedged USB stack can make one pass outlast
+   * the interval. Without this guard the next timer tick starts a second pass over the same
+   * hardware, both finish out of order, and `current` is updated by whichever lost — so a steady
+   * fleet can report a phantom arrival, which drains and restarts the agent. Rare at a ten-second
+   * interval and not rare at all on the box where adb is already unhappy, which is the worst
+   * possible time to start bouncing the host.
+   */
+  let inFlight = false;
+
+  const tick = async (): Promise<void> => {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    try {
+      await pass();
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const pass = async (): Promise<void> => {
+    if (stopped) return;
+    let found: DiscoveredDevice[];
+    try {
+      found = await probe();
+    } catch {
+      // adb hiccupped. Returning without touching `current` means the next tick compares against
+      // the same baseline — a transient failure must not read as "every phone was unplugged".
+      return;
+    }
+    const usable = new Set(found.filter((d) => d.state === 'device').map((d) => d.serial));
+    const added = [...usable].filter((s) => !current.has(s));
+    const removed = [...current].filter((s) => !usable.has(s));
+    if (added.length === 0 && removed.length === 0) return;
+    current = usable;
+    onChange(added, removed);
+  };
+
+  const timer = setInterval(() => { void tick(); }, intervalMs);
+  timer.unref?.();
+  return { stop: () => { stopped = true; clearInterval(timer); } };
 }

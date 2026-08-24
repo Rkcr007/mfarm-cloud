@@ -89,14 +89,27 @@ with no explanation is the most common support ticket there is:
 
 ## 5. Adding or removing a phone
 
-Discovery runs **at agent startup**. Plug the phone in first, then start the agent; to add a second
-phone later, plug it in and restart the agent. Hot-plug mid-run is not wired up yet — the agent
-resolves its device set once and registers it.
+**Just plug it in.** The agent watches USB and picks up a new phone on its own — including a phone
+that was already plugged in and becomes usable the moment somebody taps *Allow USB debugging*.
 
-The enrollment token is spent by then, and that is fine: a host that has registered once keeps its
-own worker token (`mwk_…`) and re-registers with that whenever its device set changes. You do not
-need a second enrollment token to add a second phone, and the enrollment token should not stay in
-the environment after the first successful start.
+Arrival and departure are handled differently, on purpose:
+
+- **A phone arrives.** It cannot be added in place — `hosts.capabilities` and the device list are
+  written by registration and nothing else — so the agent **drains and exits**, and systemd's
+  `Restart=always` brings it back with both phones. The drain waits for live sessions to finish, so
+  plugging in a second phone does not interrupt a suite running on the first.
+- **A phone leaves.** Nothing restarts. Health checks report it offline, an incident is recorded,
+  and the control plane stops scheduling it — while every other device on the host keeps working.
+
+If you run the agent by hand rather than under systemd, an arrival will exit the process and it is
+on you to start it again. Under the supplied unit this is invisible.
+
+Tune the poll with `PHYSICAL_DISCOVERY_INTERVAL_MS` (default 10000).
+
+A host that has registered once keeps its own worker token (`mwk_…`) and re-registers with that
+whenever its device set changes — so you do **not** need a second enrollment token to add a second
+phone, and the enrollment token should not stay in the environment after the first successful
+start.
 
 Device ids are derived from the adb serial (`phone-39121FDH2003VK`), so they survive a replug and an
 agent restart. An index would not: `phone-1` would become a different handset the moment someone
@@ -144,16 +157,44 @@ To pin a suite to real devices, ask for the tier:
 { "platformName": "Android", "mfarm:region": "lab", "mfarm:tier": "physical" }
 ```
 
-## 8. Known limitations
+## 8. When something goes wrong, who gets blamed
+
+An ADB drop, a dead Appium, a flat battery or a full disk are **not** test failures, and MFARM does
+not report them as any (spec §18). The agent watches every device and records what it saw as an
+*incident* against the session; the run detail shows these on their own card, "What the farm saw",
+beside the failures your suite reported.
+
+The two are deliberately never merged. A test can genuinely fail its assertion during a session that
+also had a cable glitch, so relabelling it would hide a real defect. You see both and decide.
+
+Your suite can classify its own failures too, which is the half only it can know:
+
+```js
+await fetch(`${MFARM}/v1/sessions/${sessionId}/result`, {
+  method: 'POST',
+  headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+  body: JSON.stringify({
+    name: 'checkout applies a promo',
+    status: 'failed',
+    failure: String(err?.stack ?? err),
+    failureReason: 'application-crash',   // or 'assertion-failure'
+  }),
+});
+```
+
+Omitting `failureReason` is fine and means *unclassified* — never "the app's fault".
+
+## 9. Known limitations
 
 - **No live view or interactive control.** §20/§21 are unbuilt for this tier. Screenshots and the
   UI inspector work; a moving picture does not.
-- **No hot-plug.** Restart the agent to pick up a new phone.
 - **No Windows agent.**
 - **Input latency is unmeasured over USB.** The held-shell path measures ~39ms p50 on an emulator;
   nobody has measured it on a handset. `health()` reports it, so the first real phone will say.
 - **`dumpLogcat` is not session-scoped.** A phone's log buffer carries lines from before the
   session — unlike a powerwashed Cuttlefish, whose buffer starts empty. Read timestamps with that
   in mind.
-- **Failure classification (§18) is not built.** An ADB drop mid-test currently reports as a test
-  failure, not as an infrastructure failure. This is the next thing worth building.
+- **Adding a phone restarts the agent.** It drains first, so nothing in flight is lost, but a host
+  serving other devices does bounce. Adding a device in place needs the heartbeat to carry
+  capabilities, which the protocol does not do yet.
+- **Input latency is reported but not yet enforced.** Nothing refuses a device for being slow.

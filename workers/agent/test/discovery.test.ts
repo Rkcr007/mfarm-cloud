@@ -8,7 +8,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAdbDevices, localIdForSerial } from '../src/devices/discovery.ts';
+import { parseAdbDevices, localIdForSerial, watchForChanges } from '../src/devices/discovery.ts';
 
 describe('parseAdbDevices', () => {
   test('reads a plain usable device', () => {
@@ -101,5 +101,129 @@ describe('localIdForSerial', () => {
 
   test('distinct serials stay distinct', () => {
     assert.notEqual(localIdForSerial('AAA'), localIdForSerial('BBB'));
+  });
+});
+
+/**
+ * The USB watch (spec §6).
+ *
+ * The failure this guards against is not "a phone was missed" — it is a RESTART LOOP. An arrival
+ * drains and exits the agent, so anything that reports a spurious arrival takes the whole host
+ * down every ten seconds, and it would do so only on a machine with a flaky cable: exactly the
+ * machine nobody can easily debug.
+ *
+ * `discover()` shells out to adb, so these drive the comparison through a stubbed `adb devices`
+ * rather than a real one. The subject is the change detection, not the parser — that is tested
+ * above.
+ */
+describe('watchForChanges', () => {
+  /** A scripted sequence of worlds — `adb devices` output, already parsed. */
+  const worlds = (...states: string[][]) => {
+    let i = 0;
+    return async () => {
+      const now = states[Math.min(i, states.length - 1)];
+      i += 1;
+      return now.map((serial) => ({ serial, state: 'device' as const }));
+    };
+  };
+
+  /** Long enough for several ticks at the 10ms interval these use. */
+  const settle = () => new Promise((r) => setTimeout(r, 120));
+
+  test('a phone appearing is reported as added', async () => {
+    const seen: Array<[string[], string[]]> = [];
+    const w = watchForChanges(['AAA'], (a, r) => seen.push([a, r]), 10, worlds(['AAA'], ['AAA', 'BBB']));
+    await settle();
+    w.stop();
+    assert.equal(seen.length, 1, 'exactly one arrival, however many times it was polled');
+    assert.deepEqual(seen[0][0], ['BBB']);
+    assert.deepEqual(seen[0][1], []);
+  });
+
+  test('a phone leaving is reported as removed', async () => {
+    const seen: Array<[string[], string[]]> = [];
+    const w = watchForChanges(['AAA', 'BBB'], (a, r) => seen.push([a, r]), 10, worlds(['AAA']));
+    await settle();
+    w.stop();
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0][1], ['BBB']);
+    assert.deepEqual(seen[0][0], []);
+  });
+
+  /**
+   * THE RESTART-LOOP TEST. An arrival drains and exits the agent, so a watch that re-reported a
+   * steady fleet would take the host down every interval — and would do it only on the machine
+   * with the flaky cable, which is the one nobody can easily debug.
+   */
+  test('an unchanged set never fires, however often it is polled', async () => {
+    let calls = 0;
+    const w = watchForChanges(['AAA'], () => { calls += 1; }, 10, worlds(['AAA']));
+    await settle();
+    w.stop();
+    assert.equal(calls, 0);
+  });
+
+  /**
+   * Tapping "Allow USB debugging" is the most common way a phone becomes usable, and it is a state
+   * transition rather than a plug event — a watch built on plug events would miss it entirely.
+   */
+  test('unauthorized becoming device counts as an arrival', async () => {
+    const seen: string[][] = [];
+    let i = 0;
+    const probe = async () => {
+      const state = i++ === 0 ? 'unauthorized' as const : 'device' as const;
+      return [{ serial: 'AAA', state }];
+    };
+    const w = watchForChanges([], (a) => seen.push(a), 10, probe);
+    await settle();
+    w.stop();
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0], ['AAA']);
+  });
+
+  /** An unusable phone is not an arrival. Reporting one would restart the agent for nothing. */
+  test('a phone that is merely plugged in is not an arrival', async () => {
+    let calls = 0;
+    const w = watchForChanges([], () => { calls += 1; }, 10,
+      async () => [{ serial: 'AAA', state: 'unauthorized' as const }]);
+    await settle();
+    w.stop();
+    assert.equal(calls, 0);
+  });
+
+  /**
+   * A failing probe must not read as "every phone was unplugged". adb hiccups, and a transient
+   * failure that reported the whole fleet gone would be acted on as real.
+   */
+  test('a probe that throws changes nothing', async () => {
+    let calls = 0;
+    const w = watchForChanges(['AAA'], () => { calls += 1; }, 10,
+      async () => { throw new Error('adb server died'); });
+    await settle();
+    w.stop();
+    assert.equal(calls, 0, 'a broken probe is not evidence of a fleet change');
+  });
+
+  /** And the baseline survives it: the phone is still known once the probe recovers. */
+  test('the baseline survives a failed probe', async () => {
+    const seen: Array<[string[], string[]]> = [];
+    let i = 0;
+    const probe = async () => {
+      i += 1;
+      if (i === 1) throw new Error('adb server died');
+      return [{ serial: 'AAA', state: 'device' as const }];
+    };
+    const w = watchForChanges(['AAA'], (a, r) => seen.push([a, r]), 10, probe);
+    await settle();
+    w.stop();
+    assert.deepEqual(seen, [], 'AAA was known before and is present after — nothing changed');
+  });
+
+  test('stop() means stop', async () => {
+    let calls = 0;
+    const w = watchForChanges(['AAA'], () => { calls += 1; }, 10, worlds(['AAA'], ['AAA', 'BBB']));
+    w.stop();
+    await settle();
+    assert.equal(calls, 0);
   });
 });

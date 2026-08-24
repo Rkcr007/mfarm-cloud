@@ -9,7 +9,7 @@ import { AgentTunnel } from './tunnel.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
 import { createAvdBackend } from './devices/avd.ts';
 import { createPhysicalBackend } from './devices/physical.ts';
-import { discover, localIdForSerial } from './devices/discovery.ts';
+import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DeviceBackend } from './device.ts';
 
 /**
@@ -446,9 +446,14 @@ async function main(): Promise<void> {
   agent.startHealthMonitor();
 
   let shuttingDown = false;
+  /** The USB watch, when this host has phones. Stopped first on drain. */
+  let discoveryWatch: { stop: () => void } | undefined;
   const shutdown = async (signal: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    // First, so a discovery tick landing mid-drain cannot call shutdown again or log an arrival
+    // nobody can act on.
+    discoveryWatch?.stop();
     console.log(`[agent] ${signal} — draining`);
     // A drain reached from uncaughtException runs on a process whose invariants are already broken,
     // so any step here may hang or throw. Without this deadline the `shuttingDown` guard turns a
@@ -592,6 +597,52 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+  /**
+   * USB hot-plug (spec §6) — plug a phone in and it joins the farm without anyone typing anything.
+   *
+   * ARRIVAL AND DEPARTURE ARE NOT SYMMETRIC, and that asymmetry is the design rather than a gap:
+   *
+   *   A DEVICE THAT LEAVES needs nothing from here. The health monitor above already probes it,
+   *   sees the adb calls fail, files a `device-disconnected` incident and reports it offline — and
+   *   the control plane stops scheduling it. Restarting the agent because a phone was unplugged
+   *   would take down every OTHER device on the host to react to one that is already handled.
+   *
+   *   A DEVICE THAT ARRIVES cannot be added in place. `hosts.capabilities` and the device list are
+   *   written by `POST /workers/register` and by nothing else — the heartbeat has no field for
+   *   them — so a new phone becomes visible only by registering again. That is precisely what
+   *   draining and exiting does: the unit's `Restart=always` brings the agent straight back, it
+   *   discovers both phones, and registration tells the truth about both. It is the same mechanism
+   *   ADR-0003 already uses to withdraw `webdriver`, for the same reason.
+   *
+   * THE DRAIN IS WHAT MAKES THIS SAFE. `shutdown` waits for live sessions to end before exiting, so
+   * plugging in a second phone does not interrupt a suite running on the first.
+   *
+   * A phone sitting at `unauthorized` counts as an arrival the moment somebody taps Allow — which
+   * is the most common way a device becomes usable, and would be missed by watching plug events.
+   */
+  if (flag('PHYSICAL_ENABLED')) {
+    const knownSerials = backends
+      .map((b) => b.control.info.adbSerial)
+      .filter((x): x is string => typeof x === 'string');
+
+    discoveryWatch = watchForChanges(knownSerials, (added, removed) => {
+      // Logged, never acted on — see the block comment. The health monitor owns departures.
+      if (removed.length > 0) {
+        console.warn(
+          `[agent] no longer on USB: ${removed.join(', ')}. Health checks will report them offline; `
+          + 'the agent stays up for the devices it still has.',
+        );
+      }
+      if (added.length === 0) return;
+      console.log(
+        `[agent] new device(s) on USB: ${added.join(', ')}. Draining to re-register — live sessions `
+        + 'finish first, then the agent restarts with them.',
+      );
+      void shutdown('usb-device-added', 0);
+    });
+  }
+
 
   // Without these the agent died on any unexpected throw WITHOUT draining, and Appium — a detached
   // process group — outlived it holding the device's adb connection and the port. Because
