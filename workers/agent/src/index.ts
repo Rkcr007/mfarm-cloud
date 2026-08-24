@@ -8,6 +8,8 @@ import { DataPlane } from './dataplane.ts';
 import { AgentTunnel } from './tunnel.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
 import { createAvdBackend } from './devices/avd.ts';
+import { createPhysicalBackend } from './devices/physical.ts';
+import { discover, localIdForSerial } from './devices/discovery.ts';
 import type { DeviceBackend } from './device.ts';
 
 /**
@@ -32,7 +34,55 @@ function env(key: string, fallback?: string): string {
 
 const flag = (key: string): boolean => /^(1|true|yes|on)$/i.test(process.env[key] ?? '');
 
+/**
+ * The phones on this machine's USB, as backends (ADR-0008, spec §6).
+ *
+ * OPT-IN VIA `PHYSICAL_ENABLED`, deliberately. Discovery is a read — `adb devices` — but enrolling
+ * what it finds is not: it puts a handset into a farm where a stranger's session can drive it. A
+ * developer with a phone plugged in for unrelated reasons must not have it silently join a fleet
+ * because they started an agent.
+ *
+ * WHAT IT DOES WITH A PHONE IT CANNOT USE. Says so, with the fix. An unauthorized or badly-cabled
+ * device is the single most common physical-farm support ticket, and the version of this that
+ * filters them out silently turns "tap Allow on the screen" into an afternoon.
+ */
+async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
+  const found = await discover();
+  if (found.length === 0) {
+    console.warn('[agent] PHYSICAL_ENABLED is set but adb sees no devices at all — check the cable and that adb is installed');
+    return [];
+  }
+
+  const usable = found.filter((d) => d.state === 'device');
+  for (const d of found) {
+    if (d.state === 'device') continue;
+    // One line per unusable device, naming the device, the state and what to do about it.
+    console.warn(`[agent] ${d.serial} is ${d.state} and will NOT be enrolled — ${d.remedy}`);
+  }
+
+  return usable.map((d) => {
+    const localId = localIdForSerial(d.serial);
+    console.log(
+      `[agent] enrolling ${localId}: ${d.props?.manufacturer ?? '?'} ${d.props?.model ?? d.serial}`
+      + `, Android ${d.props?.osVersion ?? '?'} (sdk ${d.props?.sdkVersion ?? '?'})`,
+    );
+    return createPhysicalBackend({
+      serial: d.serial,
+      localId,
+      model: d.props?.model,
+      osVersion: d.props?.osVersion,
+      manufacturer: d.props?.manufacturer,
+      sdkVersion: d.props?.sdkVersion,
+      screen: d.props?.screen,
+      keepPackages: (process.env.PHYSICAL_KEEP_PACKAGES ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    });
+  });
+}
+
 async function chooseBackends(): Promise<DeviceBackend[]> {
+  // Additive rather than exclusive: a host may legitimately have both, and the tiers do not
+  // interact — they are separate devices with separate lifecycles behind one abstraction (§32).
+  const physical = flag('PHYSICAL_ENABLED') ? await choosePhysicalBackends() : [];
   const avail = await CuttlefishDevice.available();
 
   if (avail.ok) {
@@ -49,7 +99,7 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
     // `bin/launch_cvd` and `super.img`, and a 4 GB snapshot under imageDir would confuse that.
     const snapshotRoot = process.env.CF_SNAPSHOT_DIR ?? join(imageDir, '..', 'snapshots');
     console.log(`[agent] Cuttlefish available — starting ${count} instance(s), snapshots under ${snapshotRoot}`);
-    return Array.from({ length: count }, (_, i) =>
+    return [...physical, ...Array.from({ length: count }, (_, i) =>
       createCuttlefishBackend({
         localId: `cf-${i + 1}`,
         instanceNum: i + 1,
@@ -66,10 +116,24 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
         resetMode: process.env.CF_RESET_MODE === 'powerwash' ? 'powerwash' : 'snapshot',
         gpuMode: process.env.GPU_MODE === 'none' ? 'none' : 'guest_swiftshader',
       }),
-    );
+    )];
   }
 
   console.warn(`[agent] Cuttlefish unavailable: ${avail.reason}`);
+
+  /**
+   * A laptop with phones on it is a COMPLETE host, not a degraded one.
+   *
+   * This return exists so the AVD fallback below is not reached in that case. Falling through would
+   * demand `AVD_NAME` — `env()` throws without it — so an agent doing exactly what ADR-0008 designed
+   * it for would exit at startup asking for an emulator nobody wants, with the phones it had already
+   * found going unmentioned.
+   */
+  if (physical.length > 0) {
+    console.log(`[agent] serving ${physical.length} physical device(s); no virtual tier on this host`);
+    return physical;
+  }
+
   console.warn('[agent] falling back to the AVD tier — it cannot meet the 100ms target and has no WebRTC path');
   return [createAvdBackend({ avdName: env('AVD_NAME'), localId: 'avd-1' })];
 }

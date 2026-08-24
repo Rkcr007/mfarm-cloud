@@ -401,13 +401,42 @@ describe('worker protocol negotiation', () => {
     assert.equal(r.ok && r.version, PROTOCOL_VERSION, 'speak our version; workers upgrade first during a rollout');
   });
 
-  test('a device that cannot snapshot-reset registers but is not schedulable', () => {
+  test('a device that can reset by NEITHER mechanism registers but is not schedulable', () => {
     const r = negotiate({
       ...base,
       devices: [{ ...base.devices[0], capabilities: ['screen-stream', 'input-datachannel'] }],
     });
     assert.equal(r.ok, true, 'still visible and monitorable');
     assert.deepEqual(r.ok && r.schedulable, [], 'but never handed to a tenant — it leaks prior state');
+  });
+
+  /**
+   * ADR-0008. A handset cannot restore an image, and the gate used to demand `snapshot-reset`
+   * literally — so a phone registered, appeared in the console, and was never scheduled, with
+   * nothing anywhere saying why. This is the test that would have caught that, and the one that
+   * fails if anyone flattens REQUIRED_FOR_TENANT_USE back into a plain `.every()`.
+   */
+  test('a physical device resets by session-reset and IS schedulable', () => {
+    const r = negotiate({
+      ...base,
+      devices: [{
+        localId: 'phone-1', platform: 'android', tier: 'physical', model: 'Pixel 9', osVersion: '16',
+        capabilities: ['input-datachannel', 'session-reset', 'app-install', 'screenshot'],
+      }],
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.ok && r.schedulable, ['phone-1'],
+      'session-reset satisfies the reset requirement; org-pinning is what keeps it honest');
+  });
+
+  /** The weaker reset is an ALTERNATIVE to snapshot-reset, never a substitute for persistent input. */
+  test('session-reset does not excuse a device from the input requirement', () => {
+    const r = negotiate({
+      ...base,
+      devices: [{ ...base.devices[0], capabilities: ['session-reset', 'app-install'] }],
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.ok && r.schedulable, [], 'every group must be satisfied, not just one');
   });
 
   test('a retired protocol version is refused', () => {

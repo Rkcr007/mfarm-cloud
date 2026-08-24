@@ -1295,3 +1295,31 @@ kbd {
   border: 1px solid var(--b-inset, #1A1A1C);
   border-radius: 6px;
 }
+
+/**
+ * REAL / VIRTUAL device badge (spec §25).
+ *
+ * Reads as a label, not as a status: the state pill beside it already owns colour-as-meaning, and a
+ * second saturated element in the same card would compete with the one thing a person scans for.
+ * So this is a quiet outline, and the two kinds differ in hue only enough to be told apart at a
+ * glance in a grid — REAL borrows the accent because it is the rarer, more expensive device and the
+ * one whose presence changes how a result should be read.
+ *
+ * Letter-spaced caps rather than a coloured dot: it has to survive being one item in a dense grid,
+ * where a dot is indistinguishable from the state dot two lines below it.
+ */
+.kindtag {
+  display: inline-flex; align-items: center;
+  padding: 2px 7px;
+  border: 1px solid var(--b-inset, #1A1A1C);
+  border-radius: 2px;
+  font-size: 9.5px; font-weight: 600;
+  letter-spacing: .08em;
+  color: var(--t-label, #8A8A8A);
+  background: transparent;
+}
+.kindtag.real {
+  color: #C9BCF0;
+  border-color: var(--mf-accent-line, rgba(117, 94, 184, .42));
+  background: var(--mf-accent-soft, rgba(117, 94, 184, .16));
+}

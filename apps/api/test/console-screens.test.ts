@@ -273,3 +273,80 @@ describe('outcome reporting in the console', () => {
     assert.match(textOf(mod.SCREENS.run()), /Only 2 of 5 sessions reported/);
   });
 });
+
+/**
+ * Real devices in the fleet screen (ADR-0008, spec §25).
+ *
+ * The thing worth testing is not that a badge exists — it is that the two kinds are DISTINGUISHED.
+ * A physical handset and a Cuttlefish differ in what a result from them means, and a console that
+ * renders them identically quietly invites someone to trust an emulator run as if it were a phone.
+ */
+describe('real and virtual devices are told apart', () => {
+  /** A handset as the agent registers one: physical tier, session-reset, and no stream. */
+  function withPhone() {
+    seed({ name: 'devices' });
+    mod.state.devices = [
+      ...mod.state.devices,
+      {
+        id: 'dev-2', region: 'lab', platform: 'android', tier: 'physical',
+        model: 'Pixel 9', osVersion: '16', state: 'READY', dedicated: true,
+        capabilities: ['input-datachannel', 'session-reset', 'app-install', 'logcat',
+          'screenshot', 'ui-hierarchy', 'webdriver'],
+        screen: { width: 1080, height: 2400, density: 420 },
+      },
+    ];
+    mod.state.available = 2;
+  }
+
+  test('a handset is labelled REAL and a cuttlefish VIRTUAL', () => {
+    withPhone();
+    const text = textOf(mod.SCREENS.devices());
+    assert.match(text, /REAL DEVICE/);
+    assert.match(text, /VIRTUAL DEVICE/);
+    assert.match(text, /Pixel 9/);
+  });
+
+  test('the kind filter narrows to one kind', () => {
+    withPhone();
+    mod.state.deviceKind = 'real';
+    const real = textOf(mod.SCREENS.devices());
+    assert.match(real, /Pixel 9/);
+    assert.doesNotMatch(real, /cf_x86_64/, 'a virtual device must not survive the real filter');
+
+    mod.state.deviceKind = 'virtual';
+    const virtual = textOf(mod.SCREENS.devices());
+    assert.match(virtual, /cf_x86_64/);
+    assert.doesNotMatch(virtual, /Pixel 9/);
+
+    mod.state.deviceKind = 'all';
+  });
+
+  /**
+   * A filter that can only produce an empty screen is a control that should not be there. This is
+   * the state every existing Cuttlefish-only farm is in, and offering "Real (0)" on it would be an
+   * invitation to click into a blank page and wonder what broke.
+   */
+  test('the filter is not offered on a fleet of one kind', () => {
+    seed({ name: 'devices' });
+    assert.doesNotMatch(textOf(mod.SCREENS.devices()), /Virtual|Real/,
+      'one kind in the fleet means nothing to choose between');
+  });
+
+  test('filtering to a kind the farm does not have explains itself', () => {
+    seed({ name: 'devices' });
+    mod.state.deviceKind = 'real';
+    const text = textOf(mod.SCREENS.devices());
+    // Never the "no devices are registered" copy — there ARE devices, just not of this kind.
+    assert.doesNotMatch(text, /No devices are registered/);
+    assert.match(text, /Clear the filter/);
+    mod.state.deviceKind = 'all';
+  });
+
+  test('the device detail names session-reset rather than showing it as missing', () => {
+    withPhone();
+    mod.state.route = { name: 'device', id: 'dev-2' };
+    // KNOWN_CAPS drives the chip row; a capability absent from it renders as an unknown extra and
+    // a phone's only reset would read as "this device cannot reset at all".
+    assert.match(textOf(mod.SCREENS.device()), /session-reset/);
+  });
+});

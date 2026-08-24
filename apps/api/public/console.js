@@ -109,6 +109,13 @@ export const state = {
   liveStats: { fps: 0, kbps: 0, rtt: null, ice: null },
   /** Ring buffer of parsed logcat lines, plus what the dock is filtering to. */
   log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 },
+  /**
+   * Which kind of device the fleet screen is showing (spec §25).
+   *
+   * View state, not a query: the fleet is already in memory and small, so filtering here costs
+   * nothing and — unlike a server-side filter — cannot disagree with the counts in the page head.
+   */
+  deviceKind: 'all',
   /** Screenshots taken this session. Data urls, in memory only — nothing persists them yet. */
   shots: [],
   /**
@@ -196,7 +203,24 @@ const KIND_LABEL = { install: 'Install', launch: 'Launch', uninstall: 'Uninstall
  * POST /sessions/:id/app-actions before it will queue anything, so a device without it needs to say
  * so in the UI or the disabled Install button has no explanation.
  */
-const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'screen-stream', 'logcat', 'screenshot'];
+const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'session-reset', 'screen-stream', 'logcat', 'screenshot'];
+
+/**
+ * Real device or virtual one (spec §25).
+ *
+ * Derived from `tier` rather than stored, because the tier is already the truth and a second field
+ * saying the same thing is a second field that can disagree with it. Everything that is not a
+ * handset is virtual — a new virtual tier should appear as VIRTUAL without anyone remembering to
+ * add it here, while a new PHYSICAL tier is a decision someone must make deliberately.
+ */
+const isRealDevice = (d) => d.tier === 'physical';
+const deviceKindOf = (d) => (isRealDevice(d) ? 'real' : 'virtual');
+
+const DEVICE_KINDS = [
+  ['all', 'All'],
+  ['virtual', 'Virtual'],
+  ['real', 'Real'],
+];
 
 /* ---------------------------------------------------------------------------- transport */
 
@@ -878,6 +902,24 @@ function deviceCard(d) {
       pill(st.label, st.tone, { live: d.state === 'READY' }),
     ),
 
+    /**
+     * REAL or VIRTUAL, said outright rather than left to be inferred from the tier (spec §25).
+     *
+     * `cuttlefish` means nothing to someone who did not build this, and the difference is the one
+     * thing about a device a tester most needs to know before trusting a result — a render bug that
+     * reproduces on a handset and not on an emulator is the whole reason the real one is there.
+     * The tier stays visible below; this is the word for it, not a replacement.
+     */
+    h('div', { class: 'row tight' },
+      h('span', {
+        class: `kindtag ${deviceKindOf(d)}`,
+        title: isRealDevice(d)
+          ? 'A physical handset on an agent host. Pinned to your organisation — it is never shared.'
+          : 'A virtual device. Reset to a clean snapshot between tenants.',
+        text: isRealDevice(d) ? 'REAL DEVICE' : 'VIRTUAL DEVICE',
+      }),
+    ),
+
     // Dot + word + context. Never the dot alone.
     h('p', { class: 'help row tight' }, h('span', { class: `dot ${st.tone}` }), st.note),
 
@@ -960,13 +1002,30 @@ function activityCard(filter) {
 
 function screenDevices() {
   const n = state.devices.length;
+  const kind = state.deviceKind;
+  const shown = kind === 'all' ? state.devices : state.devices.filter((d) => deviceKindOf(d) === kind);
+  // Only offered once there is something to choose between. A filter on a fleet with one kind in it
+  // is a control that can only ever produce an empty screen.
+  const mixed = new Set(state.devices.map(deviceKindOf)).size > 1;
+
   return [
     pageHead([{ label: 'Farm' }], 'Devices',
       `${n} device${n === 1 ? '' : 's'} · ${state.available} ready to allocate`),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
+        mixed
+          ? h('div', { class: 'row tight mb-gap' }, DEVICE_KINDS.map(([k, label]) => h('button', {
+              class: `levelchip${kind === k ? ' on' : ''}`,
+              onclick: () => { state.deviceKind = k; render(); },
+            }, k === 'all' ? label : `${label} (${state.devices.filter((d) => deviceKindOf(d) === k).length})`)))
+          : null,
         n
-          ? h('div', { class: 'autogrid' }, state.devices.map(deviceCard))
+          ? (shown.length
+              ? h('div', { class: 'autogrid' }, shown.map(deviceCard))
+              // Reachable only by filtering, so it says which filter and offers the way back —
+              // rather than the "no devices are registered" copy below, which would be a lie.
+              : card(null, {}, empty(`No ${kind} devices in this region.`,
+                  'Every device here is of the other kind. Clear the filter to see them.')))
           : card(null, {}, empty('No devices are registered in this region yet.',
               'Start a worker and it appears here within a heartbeat.')),
       ),

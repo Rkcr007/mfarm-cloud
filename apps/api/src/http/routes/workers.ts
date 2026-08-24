@@ -228,8 +228,8 @@ export async function workerRoutes(app: FastifyInstance) {
            RETURNING id`,
           [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,
            JSON.stringify(d.capabilities), d.localId,
-           // A device missing snapshot-reset or persistent input registers so it stays visible and
-           // monitorable, but starts OFFLINE — it is never handed to a tenant.
+           // A device that can reset by neither mechanism, or lacks persistent input, registers so
+           // it stays visible and monitorable, but starts OFFLINE — it is never handed to a tenant.
            schedulable.has(d.localId) ? 'READY' : 'OFFLINE',
            // v1 workers name one server for the whole host; v2 names one per device. Resolved in
            // `packages/protocol` so the hub's COALESCE and this write cannot drift apart.

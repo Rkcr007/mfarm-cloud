@@ -1371,3 +1371,92 @@ describe('the data-plane tunnel', () => {
     await waitFor(() => tunnel.connected, 'the tunnel to reconnect');
   });
 });
+
+/**
+ * Re-registering a host that enrolled with a SINGLE-USE token (ADR-0008).
+ *
+ * `POST /workers/register` has accepted three credential kinds since migration 023, and the `mwk_`
+ * branch — the host's own worker token — was unreachable in practice, because the agent only ever
+ * presented the value it was configured with. On an operator-owned Cuttlefish box that value is the
+ * fleet secret and nothing was wrong. On the laptop enrollment was built for, it is an `mae_` token
+ * that is spent the moment the first registration succeeds.
+ *
+ * The agent re-registers whenever its capability fingerprint changes — which is precisely what
+ * plugging in a second phone does. So without this, every enrolled host could be started exactly
+ * once, and adding a phone or restarting the agent would need a freshly minted enrollment token.
+ */
+describe('re-registration presents the host\'s own credential', () => {
+  /** Mint a real single-use enrollment token for the test org. */
+  async function enrollmentToken(): Promise<string> {
+    const { createEnrollment } = await import('@mfarm/api/enrollment');
+    const { plaintext } = await createEnrollment(orgId, null, 'agent-test laptop', 24);
+    return plaintext;
+  }
+
+  test('a spent enrollment token does not strand the host it enrolled', async () => {
+    const host = `enrolled-${randomUUID().slice(0, 8)}`;
+    const token = await enrollmentToken();
+    const statePath = join(stateDir, `${host}.json`);
+
+    const first = new Agent({
+      controlPlaneUrl: baseUrl,
+      registrationToken: token,
+      hostname: host, region: REGION,
+      endpoint: 'wss://agent-test.example:8080',
+      devices: [fakeBackend()],
+      statePath, cores: 8, memoryMb: 16384,
+    });
+    const s1 = await first.start();
+    assert.ok(s1.workerToken.startsWith('mwk_'), 'enrolling yields a worker token of its own');
+    await first.shutdown();
+
+    // The fingerprint changes — a second phone, in the shape this test can express. The agent must
+    // re-register, and the enrollment token in its environment is now spent.
+    const b2 = fakeBackend('second-device');
+    const second = new Agent({
+      controlPlaneUrl: baseUrl,
+      registrationToken: token, // the SAME spent token, exactly as it would still be in the env
+      hostname: host, region: REGION,
+      endpoint: 'wss://agent-test.example:8080',
+      devices: [fakeBackend(), b2],
+      statePath, cores: 8, memoryMb: 16384,
+    });
+
+    const s2 = await second.start();
+    assert.equal(s2.hostId, s1.hostId, 'the same host, not a second one');
+    assert.ok(s2.workerToken.startsWith('mwk_'));
+    await second.shutdown();
+
+    // And the device it could only have registered by re-registering successfully is really there.
+    const found = await withSystem(async (c) =>
+      (await c.query('SELECT local_id FROM devices WHERE host_id = $1 ORDER BY local_id', [s1.hostId])).rows);
+    assert.deepEqual(found.map((r) => r.local_id), ['fake-1', 'second-device']);
+  });
+
+  /**
+   * The fallback. A stored worker token can be genuinely dead — host row deleted, database restored
+   * from before this host existed — and `start()` reaches re-registration exactly when a heartbeat
+   * has just failed, which is one of the ways that happens. Refusing the stored credential must not
+   * end the attempt.
+   */
+  test('a dead worker token falls back to the configured credential', async () => {
+    const host = `stale-${randomUUID().slice(0, 8)}`;
+    const statePath = join(stateDir, `${host}.json`);
+
+    const first = makeAgent([fakeBackend()], host);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (first as any).opts.statePath = statePath;
+    const s1 = await first.start();
+    await first.shutdown();
+
+    // The host disappears from under the agent, taking its token's validity with it.
+    await withSystem((c) => c.query('DELETE FROM hosts WHERE id = $1', [s1.hostId]));
+
+    const revived = makeAgent([fakeBackend()], host);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (revived as any).opts.statePath = statePath;
+    const s2 = await revived.start();
+    assert.notEqual(s2.hostId, s1.hostId, 'a new host row, reached via the fleet secret');
+    await revived.shutdown();
+  });
+});

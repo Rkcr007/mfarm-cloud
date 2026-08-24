@@ -32,6 +32,10 @@ export const CAPABILITIES = [
   'input-datachannel',   // input over a persistent channel — NOT per-event adb shell (v2 lever L3)
   'snapshot-reset',      // reset by snapshot restore (v2 decision 5); without it the device
                          // cannot be offered to a second tenant
+  'session-reset',       // reset by package-level cleanup, NOT by restoring an image (ADR-0008).
+                         // Weaker than 'snapshot-reset' and named so the difference cannot be
+                         // read as a synonym — see REQUIRED_FOR_TENANT_USE for what it does and
+                         // does not promise.
   'app-install',
   'recording',
   'logcat',
@@ -45,8 +49,46 @@ export const CAPABILITIES = [
 
 export type Capability = (typeof CAPABILITIES)[number];
 
-/** Capabilities without which a device must never be scheduled for a tenant session. */
-export const REQUIRED_FOR_TENANT_USE: Capability[] = ['snapshot-reset', 'input-datachannel'];
+/**
+ * What a device must be able to do before a tenant session may be scheduled on it.
+ *
+ * A LIST OF ALTERNATIVE GROUPS, not a flat list: a device must satisfy every group, and satisfies
+ * one group by declaring ANY capability in it. It was a flat list until ADR-0008, and the shape is
+ * the whole of the change.
+ *
+ * WHY IT HAD TO STOP BEING FLAT. The old list demanded `snapshot-reset` literally, which is a
+ * mechanism, while what the gate actually means is "the next tenant will not inherit the last
+ * one's state". Those coincided for exactly as long as every device was a Cuttlefish. A physical
+ * handset cannot restore an image — so it would register, appear in the console, and never be
+ * scheduled, with nothing anywhere saying why. Silence is the failure mode this shape removes:
+ * a phone now fails the gate only if it declares NEITHER reset, which is a device that genuinely
+ * cannot be handed on.
+ *
+ * WHAT `session-reset` DOES NOT PROMISE, and why it is a separate name rather than a second way of
+ * spelling the same one. `resetToSnapshot`'s own doc comment rejects package-level cleanup as
+ * insufficient between tenants, and it is right: uninstalling an app leaves accounts, keychain
+ * items, clipboard contents, WebView caches and granted permissions behind. That argument is not
+ * softened here. It is answered by tenancy instead — a `session-reset` device inherits
+ * `hosts.org_id` at registration and never enters the shared pool (migration 023), so "the next
+ * tenant" is the same org that used it last. Anything that puts a `session-reset` device in front
+ * of a second org must re-open this decision, not route around it.
+ */
+export const REQUIRED_FOR_TENANT_USE: readonly (readonly Capability[])[] = [
+  ['snapshot-reset', 'session-reset'],
+  ['input-datachannel'],
+];
+
+/**
+ * Does this capability set clear the gate above?
+ *
+ * Exported as a function because every caller wants the answer, not the rule, and a caller that
+ * re-implements `.every(...)` over the groups is one refactor away from implementing it as a flat
+ * `.every(...)` again — which is the bug this replaced, and which would come back as a device that
+ * silently never schedules.
+ */
+export function canTakeTenantSession(capabilities: readonly string[]): boolean {
+  return REQUIRED_FOR_TENANT_USE.every((group) => group.some((c) => capabilities.includes(c)));
+}
 
 export interface WorkerRegistration {
   protocolVersion: number;
@@ -306,9 +348,9 @@ export type NegotiationResult =
  * Decide whether to accept a worker, at which protocol version, and which of its devices may
  * actually take tenant traffic.
  *
- * Deliberately strict about REQUIRED_FOR_TENANT_USE: a device that cannot snapshot-reset is not a
- * cheap device, it is a device that leaks the previous tenant's state. It registers fine — you want
- * it visible and monitorable — but it is not schedulable.
+ * Deliberately strict about REQUIRED_FOR_TENANT_USE: a device that can reset by NEITHER mechanism
+ * is not a cheap device, it is a device that leaks the previous tenant's state. It registers fine —
+ * you want it visible and monitorable — but it is not schedulable.
  */
 export function negotiate(reg: WorkerRegistration): NegotiationResult {
   if (!Number.isInteger(reg.protocolVersion)) {
@@ -345,7 +387,7 @@ export function negotiate(reg: WorkerRegistration): NegotiationResult {
   const unknown = reg.capabilities.filter((c) => !known.has(c));
 
   const schedulable = reg.devices
-    .filter((d) => REQUIRED_FOR_TENANT_USE.every((c) => d.capabilities.includes(c)))
+    .filter((d) => canTakeTenantSession(d.capabilities))
     .map((d) => d.localId);
 
   if (unknown.length > 0) {

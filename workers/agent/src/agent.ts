@@ -133,6 +133,24 @@ async function digestOf(path: string): Promise<string> {
   return hash.digest('hex');
 }
 
+/**
+ * Registration was refused for the CREDENTIAL, as opposed to failing for any other reason.
+ *
+ * A distinct type rather than a status check at the call site: the retry in `register()` turns on
+ * this distinction, and "did the control plane reject who we are, or reject what we said" is
+ * exactly the question a bare `Error` with a status glued into its message makes easy to get wrong.
+ */
+class RegistrationRefused extends Error {
+  // A plain field, not a parameter property: this package runs under Node's type stripping, where
+  // `constructor(readonly status: number)` is syntax that cannot simply be erased.
+  status: number;
+  constructor(status: number, body: string) {
+    super(`registration refused: ${status} ${body}`);
+    this.name = 'RegistrationRefused';
+    this.status = status;
+  }
+}
+
 export class Agent {
   private state?: AgentState;
   private heartbeatTimer?: NodeJS.Timeout;
@@ -256,7 +274,32 @@ export class Agent {
     // device, and a tier that has one and not the others is not a shape that exists today. The
     // per-method checks in `performAction` are what keep that assumption honest if it ever stops
     // being true — they name the missing verb instead of failing obscurely.
-    return ['screen-stream', 'input-datachannel', 'snapshot-reset', ...install, ...automation];
+
+    /**
+     * ALSO AN ANY, and it was three hardcoded literals until ADR-0008.
+     *
+     * `['screen-stream', 'input-datachannel', 'snapshot-reset']` was true by construction while
+     * every device on every host was a Cuttlefish. It stops being true the moment a host serves
+     * phones: a handset publishes no stream and cannot restore an image, so a phone-only laptop
+     * registered claiming both. Nothing scheduled on it — `negotiate` reads the PER-DEVICE lists —
+     * so the damage was confined to `degradedCapabilities` and `hosts.capabilities` telling an
+     * operator the opposite of the truth about their own fleet.
+     *
+     * Derived the same way as `install` beside it, so the rule is one rule: the host can do what at
+     * least one of its devices can do. Behaviour is unchanged for a Cuttlefish host, which is what
+     * makes this safe to land ahead of the hardware — every cf device declares all three.
+     */
+    const anyDevice = (c: Capability): Capability[] =>
+      this.opts.devices.some((d) => d.control.info.capabilities.includes(c)) ? [c] : [];
+
+    return [
+      ...anyDevice('screen-stream'),
+      ...anyDevice('input-datachannel'),
+      ...anyDevice('snapshot-reset'),
+      ...anyDevice('session-reset'),
+      ...install,
+      ...automation,
+    ];
   }
   get sessionPublicKey(): string | undefined { return this.state?.sessionPublicKey; }
 
@@ -321,13 +364,62 @@ export class Agent {
       if (restored && restored.registered !== fingerprint) {
         console.warn('[agent] capabilities differ from what was last registered — re-registering');
       }
-      this.state = await this.register();
+      // `restored?.workerToken` explicitly, because `this.state` is undefined on every path that
+      // reaches here — including the one where a heartbeat just failed. Without passing it, a
+      // re-registering laptop would fall back to its configured credential, which for an enrolled
+      // host is a single-use token that was spent the first time it started.
+      this.state = await this.register(restored?.workerToken);
       await this.saveState(this.state);
     }
     return this.state;
   }
 
-  private async register(): Promise<AgentState> {
+  /**
+   * The credential to present at REGISTRATION — which is not always the configured one.
+   *
+   * WHY THIS EXISTS. `POST /workers/register` accepts three credential kinds on one header, told
+   * apart by prefix: the fleet secret, a single-use `mae_` enrollment token, and the host's own
+   * `mwk_` worker token. The agent only ever sent the configured value, and for an operator-owned
+   * Cuttlefish host — where that value is the fleet secret, which never expires — nothing was
+   * wrong with that.
+   *
+   * It breaks completely on the machine ADR-0008 built enrollment FOR. A laptop enrolls with an
+   * `mae_` token that is spent by the end of the first registration. The agent re-registers
+   * whenever its capability fingerprint changes — plugging in a second phone is exactly that — and
+   * it also re-registers on any restart where the fingerprint moved. Every one of those would
+   * re-present the spent token and fail, so a person would have to mint a fresh enrollment token to
+   * restart their own agent. That defeats the point of the credential being single-use: it would
+   * force the thing to be minted so routinely that nobody would treat it as precious.
+   *
+   * So: once this host HAS its own worker token, that is what re-registration presents. The API has
+   * accepted it since migration 023 — this is the agent side that was missing, and without it the
+   * `mwk_` branch in `resolveCredential` was unreachable in practice.
+   *
+   * The configured token stays the credential for the FIRST registration, and for a host whose
+   * stored state is gone (rebuilt machine, cleared state file) — which is correctly a re-enrollment.
+   *
+   * AND IT FALLS BACK. A prior worker token can be genuinely dead — the host row was deleted, the
+   * token rotated, the database restored from before this host existed — and `start()` reaches
+   * re-registration precisely when a heartbeat has just failed, which is one of the ways that
+   * happens. Presenting a dead `mwk_` and giving up would turn a recoverable state into a host that
+   * never comes back, so an auth refusal falls through to the configured credential and tries once
+   * more. Anything that is not an auth refusal is a real error and is not retried.
+   */
+  private async register(priorToken?: string): Promise<AgentState> {
+    const stored = priorToken ?? this.state?.workerToken;
+    if (!stored) return this.registerWith(this.opts.registrationToken);
+    try {
+      return await this.registerWith(stored);
+    } catch (e) {
+      if (!(e instanceof RegistrationRefused)) throw e;
+      console.warn(
+        `[agent] this host's own worker token was refused (${e.status}) — re-registering with the configured credential`,
+      );
+      return this.registerWith(this.opts.registrationToken);
+    }
+  }
+
+  private async registerWith(credential: string): Promise<AgentState> {
     const registration: WorkerRegistration = {
       protocolVersion: PROTOCOL_VERSION,
       hostname: this.opts.hostname,
@@ -370,10 +462,17 @@ export class Agent {
 
     const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/register`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-worker-registration-token': this.opts.registrationToken },
+      headers: { 'content-type': 'application/json', 'x-worker-registration-token': credential },
       body: JSON.stringify(registration),
     });
-    if (!res.ok) throw new Error(`registration failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      // Told apart so `register()` knows which failures are worth retrying with another credential.
+      // A 401/403 says "not this credential"; a 400 or a 500 says something else is wrong and
+      // presenting a second secret would only produce the same error twice.
+      if (res.status === 401 || res.status === 403) throw new RegistrationRefused(res.status, body);
+      throw new Error(`registration failed: ${res.status} ${body}`);
+    }
     const body = await res.json() as RegistrationResponse;
 
     // The control plane decides which devices may take tenant traffic. Anything it withheld is
