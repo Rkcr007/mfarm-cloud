@@ -31,6 +31,18 @@ export function verifySessionToken(
   expectedAudience?: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): VerifyResult {
+  // THE TYPE IS NOT A GUARANTEE HERE. Every caller of this function is handing it something a
+  // stranger sent — a JSON field, a header, a query parameter — and `token: string` is a promise
+  // TypeScript makes at compile time about a value that arrives at runtime from JSON.parse. A
+  // missing field is `undefined`, `.split` throws, and in an async caller that becomes an
+  // unhandled rejection rather than a rejected token.
+  //
+  // That is not hypothetical: a data-plane hello with no `token` field crashed the whole worker
+  // agent — devices, Appium, gateway and all — on an endpoint that takes no credential by design.
+  // A verifier is the last place that may throw on hostile input; its whole job is to be the thing
+  // that says no.
+  if (typeof token !== 'string') return { ok: false, reason: 'malformed' };
+
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== TOKEN_ALG) return { ok: false, reason: 'malformed' };
 
