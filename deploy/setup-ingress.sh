@@ -25,8 +25,15 @@
 # one upstream.
 #
 # Setting WORKER_DATA_PLANE restores the old direct proxy for a host that genuinely is dialable.
-# Kept so this ships without a flag day: an existing farm can move to the tunnel when it is ready
-# rather than at the moment this script is next run.
+#
+# THAT MEANS RE-RUNNING THIS SCRIPT MOVES A FARM ONTO THE TUNNEL unless it names an address. There
+# is no flag day left to avoid: the tunnel is the deployed path, and a default that still preferred
+# the direct proxy is how a farm ends up on a route nobody chose. A host that wants the old one has
+# to say so, which is the way round that makes the unusual case visible.
+#
+# The AGENT dials out on both settings, so moving is safe in this order and only this order: restart
+# the agent, confirm the tunnel at both ends, then run this. Backwards leaves every dashboard green
+# and every live view dead. See "Moving a device host onto the tunnel" in deploy/README.md.
 #
 # Either way the worker publishes no port of its own — it binds loopback or the VPC address — and
 # either way the console's socket stays same-origin, so its strict CSP is unwidened.
@@ -51,10 +58,16 @@ HOSTNAME_PUBLIC="${HOSTNAME_PUBLIC:-${MFARM_PUBLIC_HOST:-34-100-138-213.sslip.io
 HOSTNAME_LEGACY="${HOSTNAME_LEGACY:-34-100-138-213.sslip.io}"
 [ "$HOSTNAME_LEGACY" = "$HOSTNAME_PUBLIC" ] && HOSTNAME_LEGACY=""
 UPSTREAM="127.0.0.1:3000"
-# The device host's data plane, reached over the VPC (ADR-0006 put it on its own machine). Empty
-# disables the /dp route entirely, which is the right setting for a control plane with no worker
-# behind it — a route to nothing answers 502 and looks like a broken live view.
-WORKER_DATA_PLANE="${WORKER_DATA_PLANE:-10.160.0.2:8080}"
+# The device host's data plane, reached over the VPC (ADR-0006 put it on its own machine).
+#
+# UNSET IS THE TUNNEL, which is the default this file's header has described since the tunnel
+# landed and the code did not implement. Set it to a host:port to restore the direct proxy.
+#
+# `:-` WAS THE BUG. It substitutes the default when the variable is unset OR EMPTY, so
+# `WORKER_DATA_PLANE= bash deploy/setup-ingress.sh` — the documented way to move a farm onto the
+# tunnel — quietly put the worker's address back and rewrote the same Caddyfile it already had.
+# It fails by doing nothing, while printing the line that says it worked.
+WORKER_DATA_PLANE="${WORKER_DATA_PLANE-}"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
