@@ -372,7 +372,20 @@ export class PhysicalDevice implements DeviceControl {
   async health(): Promise<DeviceHealth> {
     const t0 = performance.now();
     try {
-      await this.send('true', 5_000);
+      /**
+       * MEASURED THROUGH THE `input` BINARY, not through the shell, and the difference is the
+       * whole value of the number. This used to time `true`, which measures how fast the held
+       * shell echoes a marker — on a Samsung SM-S918B over USB that is **1ms p50**, while an
+       * actual input event through the same shell is **24-55ms p50**. Reporting the former as
+       * `inputLatencyMs` understated the thing it names by twenty to fifty times, and made the
+       * 100ms budget below unreachable: no device could ever be slow enough to trip it, because
+       * the quantity being compared was a shell round trip.
+       *
+       * Keycode 0 is `KEYCODE_UNKNOWN`. It travels the entire path a real tap does — spawn
+       * `input`, into InputManager — and does nothing when it arrives, which is what makes it
+       * safe to run on every health check against somebody's phone.
+       */
+      await this.send('input keyevent 0', 5_000);
       const inputLatencyMs = performance.now() - t0;
 
       // Both probes are best-effort: an OEM that does not answer `dumpsys battery` in the expected
@@ -415,14 +428,34 @@ export class PhysicalDevice implements DeviceControl {
     return Number(m[1]);
   }
 
+  /**
+   * Free space on the partition installs land on.
+   *
+   * THIS WAS BROKEN TWO WAYS, and both were invisible because `health()` catches the throw and
+   * carries on — so the low-storage check simply never fired, on any device, and looked fine.
+   * Found on a Samsung SM-S918B running Android 16:
+   *
+   *   `df -m` IS NOT PORTABLE. The old comment asserted that `-m` means megabytes on Android's
+   *   toybox df; this device answers `df: Unknown option 'm'`. Plain `df` reports 1K blocks
+   *   everywhere and has since forever, so the conversion belongs here rather than in an argument.
+   *
+   *   THE MOUNT POINT IS NOT `/data`. Asking about `/data` reports the row mounted at
+   *   `/data/user/0`, so matching the line that ends in `/data` discarded the only row there was.
+   *   Nothing is matched by path now — the last row of the table is the answer to the question that
+   *   was asked, whatever the kernel chooses to call it.
+   */
   private async freeStorageMb(): Promise<number> {
-    // `-m` is megabytes on Android's toybox df. The data partition is the one installs land on.
-    const out = await this.adb(['shell', 'df', '-m', '/data'], 10_000);
-    const line = out.split('\n').find((l) => l.trim().endsWith('/data'));
-    const cols = line?.trim().split(/\s+/) ?? [];
-    const avail = Number(cols[3]);
-    if (!Number.isFinite(avail)) throw new Error('df did not report available space');
-    return avail;
+    const out = await this.adb(['shell', 'df', '/data'], 10_000);
+    const rows = out.split('\n').map((l) => l.trim()).filter(Boolean);
+    // Drop the header; the remaining row describes the filesystem backing /data.
+    const cols = rows.at(-1)?.split(/\s+/) ?? [];
+    // Counted from the right — Filesystem, 1K-blocks, Used, Available, Use%, Mounted on — because
+    // the left-hand device name is the column most likely to differ between OEMs.
+    const availKb = Number(cols.at(-3));
+    if (rows.length < 2 || !Number.isFinite(availKb)) {
+      throw new Error(`df did not report available space for /data: ${JSON.stringify(out.slice(0, 200))}`);
+    }
+    return Math.round(availKb / 1024);
   }
 }
 

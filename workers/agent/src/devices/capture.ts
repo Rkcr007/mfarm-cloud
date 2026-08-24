@@ -33,6 +33,19 @@ export interface CaptureOptions {
   maxSize?: number;
   bitRate?: number;
   maxFps?: number;
+  /**
+   * How often the encoder is asked for a keyframe, in seconds. scrcpy only.
+   *
+   * THIS IS THE NUMBER A LATE VIEWER WAITS. Everything between keyframes is undecodable to somebody
+   * who just opened the device, so it is the delay between pressing Open and seeing a picture — not
+   * an encoding detail. scrcpy's own default is 10s, which is fine for scrcpy (its client is there
+   * from the first frame) and wrong for a console where viewers arrive whenever they like.
+   *
+   * Measured on a Samsung SM-S918B: at the default, a 20s capture contained ONE keyframe. The cost
+   * of lowering it is bitrate, since keyframes are far larger than the frames between them, which
+   * is why this is 2 rather than 1.
+   */
+  keyFrameIntervalSeconds?: number;
 }
 
 export interface CaptureStats {
@@ -110,16 +123,46 @@ export class NalSplitter {
  * `SCRCPY_SERVER_PATH` and `SCRCPY_SERVER_VERSION` name them. Absent, `createCapture` falls back to
  * `screenrecord`, which needs nothing.
  *
- * UNVERIFIED AGAINST A HANDSET. This was written from the protocol and has never run against a real
- * phone or a real jar — see `deploy/verify-capture.mjs`, which exists to be the first thing that
- * does. The handshake is where version drift shows up, so that is where the diagnostics are.
+ * VERIFIED AGAINST A HANDSET on 2026-08-25 — Samsung SM-S918B, Android 16, scrcpy 4.1 — and the
+ * first run produced zero frames while reporting success. Three things were wrong, and all three
+ * are worth stating because each one is a trap the next person would fall into identically:
+ *
+ *   1. `adb forward` IS NOT A READINESS CHECK. It registers a local listener and returns 0 whether
+ *      or not anything is listening on the device end, so retrying it retried a command that could
+ *      not fail. Readiness is now the first byte off the socket, which is the only evidence that
+ *      the server is actually serving.
+ *   2. CONNECTING PROVED NOTHING EITHER. adb accepts the TCP connection, then tries to open the
+ *      device-side socket, and closes the connection when it cannot. `net.createConnection`'s
+ *      callback had already fired by then, so `start()` resolved ~10ms before the socket died
+ *      empty. Measured: connect at +0ms, closed at +10ms, zero bytes.
+ *   3. THE STREAM WAS NOT WHAT THE PARSER EXPECTED. Without `raw_stream`, scrcpy prefixes a dummy
+ *      byte, a 64-byte device name and codec metadata — which this parsed — and then a 12-byte
+ *      header on EVERY frame, which it did not. Those headers would have been fed to the NAL
+ *      splitter as if they were video. `raw_stream=true` turns all of it off and delivers a bare
+ *      Annex-B elementary stream, which is exactly what the splitter wants and what `screenrecord`
+ *      already produces. It also deletes the header-parsing code entirely, and with it a whole
+ *      class of version drift: the metadata layout is a thing that changes between scrcpy majors,
+ *      and now we do not read it.
+ *
+ * The handshake is still where version drift shows up, so that is still where the diagnostics are —
+ * and the server's own log goes to STDOUT, not stderr, which is why both are surfaced now.
  */
+/** Where the jar lands on the device. */
+const DEVICE_JAR = '/data/local/tmp/scrcpy-server.jar';
+/** How long to keep trying before calling it a dead stream rather than a slow one. */
+const CONNECT_TIMEOUT_MS = 10_000;
+const CONNECT_RETRY_MS = 150;
+/** See `CaptureOptions.keyFrameIntervalSeconds`. scrcpy's own default is 10s. */
+const DEFAULT_KEYFRAME_SECONDS = 2;
+
 export class ScrcpyCapture implements ScreenCapture {
   readonly kind = 'scrcpy';
   readonly stats: CaptureStats = { frames: 0, bytes: 0, startedAt: 0 };
   private server?: ChildProcess;
   private socket?: import('node:net').Socket;
   private port = 0;
+  /** Distinguishes a stream we ended from one that died, so only the latter is reported. */
+  private stopped = false;
   private readonly splitter = new NalSplitter();
 
   // A plain field, not a parameter property: this package runs under Node's type stripping, where
@@ -128,68 +171,102 @@ export class ScrcpyCapture implements ScreenCapture {
   constructor(opts: CaptureOptions & { jarPath: string; version: string }) { this.opts = opts; }
 
   async start(onNal: (nal: Buffer, receivedAt: number) => void): Promise<void> {
-    const { createConnection } = await import('node:net');
     const adb = adbPath();
     const serial = this.opts.serial;
     this.stats.startedAt = Date.now();
+    this.stopped = false;
 
     // 1. The jar has to be on the device. Pushed every time rather than checked: the check costs an
     //    adb round trip anyway, and a stale jar from an older agent is a version mismatch that
     //    presents as an unreadable stream.
-    await run(adb, ['-s', serial, 'push', this.opts.jarPath, '/data/local/tmp/scrcpy-server.jar'], 60_000);
+    await run(adb, ['-s', serial, 'push', this.opts.jarPath, DEVICE_JAR], 60_000);
 
     // 2. Start the server. `tunnel_forward=true` makes it listen on an abstract socket we then
     //    forward to, which is the direction that works without the device dialling out.
     const args = [
       '-s', serial, 'shell',
-      'CLASSPATH=/data/local/tmp/scrcpy-server.jar',
+      `CLASSPATH=${DEVICE_JAR}`,
       'app_process', '/', 'com.genymobile.scrcpy.Server', this.opts.version,
       'tunnel_forward=true',
       'audio=false',            // video only; audio is a second socket and a second problem
       'control=false',          // input goes over the held adb shell, not through scrcpy
       'cleanup=false',
+      // Bare Annex-B, no framing of scrcpy's own. See the class comment: this is what makes the
+      // stream identical to `screenrecord`'s and what removes the metadata layout — which differs
+      // between scrcpy majors — from the set of things that can drift under us.
+      'raw_stream=true',
       `video_bit_rate=${this.opts.bitRate ?? 8_000_000}`,
+      // Passed straight to MediaFormat. The syntax is `key:type=value` and scrcpy rejects anything
+      // else with `'=' expected` — which is only visible at all because the server's log is now
+      // surfaced. See `keyFrameIntervalSeconds` for why the default is not scrcpy's.
+      `video_codec_options=i-frame-interval:int=${this.opts.keyFrameIntervalSeconds ?? DEFAULT_KEYFRAME_SECONDS}`,
       ...(this.opts.maxSize ? [`max_size=${this.opts.maxSize}`] : []),
       ...(this.opts.maxFps ? [`max_fps=${this.opts.maxFps}`] : []),
     ];
-    this.server = spawn(adb, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    // The server's own stderr is the only place a version mismatch explains itself, so it is
-    // surfaced rather than swallowed — this is the failure people will actually hit.
-    this.server.stderr?.on('data', (d) => console.warn(`[scrcpy:${serial}] ${String(d).trim()}`));
-    this.server.on('error', (e) => console.error(`[scrcpy:${serial}] could not start: ${e.message}`));
-
-    // 3. Forward a local port to the server's abstract socket. It takes a moment to appear, so this
-    //    retries rather than racing it.
-    this.port = 27183 + (hashPort(serial) % 500);
-    await withRetries(20, 250, () =>
-      run(adb, ['-s', serial, 'forward', `tcp:${this.port}`, 'localabstract:scrcpy'], 5_000));
-
-    // 4. Connect and read. With `tunnel_forward=true` the server writes one dummy byte first, then
-    //    a 64-byte device name, then the codec metadata, then frames.
-    await new Promise<void>((resolve, reject) => {
-      const sock = createConnection({ port: this.port, host: '127.0.0.1' }, () => resolve());
-      sock.on('error', reject);
-      this.socket = sock;
+    const server = spawn(adb, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    this.server = server;
+    // scrcpy's server logs to STDOUT, not stderr. Reading only stderr — which is what this did —
+    // discards the one place a version mismatch explains itself, and leaves a failed start looking
+    // like a device that simply produced nothing.
+    const say = (d: Buffer): void => {
+      const line = String(d).trim();
+      if (line) console.warn(`[scrcpy:${serial}] ${line}`);
+    };
+    server.stdout?.on('data', say);
+    server.stderr?.on('data', say);
+    server.on('error', (e) => console.error(`[scrcpy:${serial}] could not start: ${e.message}`));
+    // A server that exits during the connect loop must fail fast. Without this the loop below runs
+    // its full deadline against a process that is already gone, and reports a timeout rather than
+    // the exit that caused it.
+    let serverExit: string | undefined;
+    server.on('close', (code, signal) => {
+      if (!this.stopped) serverExit = `scrcpy server exited (code ${code}, signal ${signal})`;
     });
 
-    let header = Buffer.alloc(0);
-    const HEADER_BYTES = 1 + 64 + 12;   // dummy + device name + codec/width/height
-    this.socket!.on('data', (chunk: Buffer) => {
-      const at = Date.now();
-      if (header.length < HEADER_BYTES) {
-        header = Buffer.concat([header, chunk]);
-        if (header.length < HEADER_BYTES) return;
-        chunk = header.subarray(HEADER_BYTES);
-        header = Buffer.alloc(HEADER_BYTES);      // marker: header consumed
-        if (chunk.length === 0) return;
-      }
+    // 3. Forward a local port to the server's abstract socket.
+    //
+    //    NOT retried, and NOT a readiness check — see the class comment. `adb forward` succeeds
+    //    whether or not the device end exists, so a failure here is a real adb failure and retrying
+    //    it only hides how long we waited. The socket is named `scrcpy` because no `scid` is passed;
+    //    scrcpy's own client passes one and gets `scrcpy_<scid>`, which is a different name.
+    this.port = 27183 + (hashPort(serial) % 500);
+    await run(adb, ['-s', serial, 'forward', `tcp:${this.port}`, 'localabstract:scrcpy'], 5_000);
+
+    // 4. Connect, and keep connecting until bytes actually arrive. The first byte is the readiness
+    //    signal because it is the only one that cannot lie: everything earlier — the forward, the
+    //    TCP handshake — succeeds against a server that is not yet listening.
+    const { socket, first } = await connectWhenServing({
+      port: this.port,
+      describe: serial,
+      exited: () => serverExit,
+    });
+
+    this.socket = socket;
+    const consume = (chunk: Buffer, at: number): void => {
       this.stats.bytes += chunk.length;
       if (this.stats.firstFrameMs === undefined) this.stats.firstFrameMs = at - this.stats.startedAt;
       this.splitter.push(chunk, (nal) => { this.stats.frames += 1; onNal(nal, at); });
+    };
+    socket.on('data', (chunk: Buffer) => consume(chunk, Date.now()));
+    // A stream that dies mid-session used to go silent and stay silent, with `stats.frames` frozen
+    // and nobody told. Saying so is the difference between "the view froze" and a diagnosable fault.
+    socket.on('close', () => {
+      if (!this.stopped) {
+        console.error(`[scrcpy:${serial}] stream ended after ${this.stats.frames} NALs`
+          + `${serverExit ? ` — ${serverExit}` : ''}`);
+      }
     });
+    socket.on('error', (e) => {
+      if (!this.stopped) console.error(`[scrcpy:${serial}] stream error: ${e.message}`);
+    });
+
+    // The bytes that proved readiness are video, and dropping them would lose the SPS/PPS that
+    // begin the stream — which presents as a permanently black picture rather than as an error.
+    consume(first, Date.now());
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     this.socket?.destroy();
     this.socket = undefined;
     this.server?.kill('SIGTERM');
@@ -200,6 +277,74 @@ export class ScrcpyCapture implements ScreenCapture {
         .catch(() => { /* the forward goes with the adb server anyway */ });
     }
   }
+}
+
+/**
+ * Connect to a port and keep reconnecting until it genuinely serves data.
+ *
+ * THE FIRST BYTE IS THE ONLY HONEST READINESS SIGNAL when the other end is an `adb forward`, and
+ * this function exists as a separate, testable unit because getting that wrong is what made the
+ * first hardware run of this file report a working capture that delivered nothing. adb accepts the
+ * TCP connection on its own account and only then tries to reach the device; when the device-side
+ * socket is not listening yet it closes the connection having sent nothing. A caller that treats
+ * `connect` as success has been told a truth about adb and nothing at all about the phone.
+ *
+ * An attempt that closes empty is therefore NOT an error — it is the expected state for the first
+ * few hundred milliseconds. Measured against a Samsung SM-S918B: the fourth attempt succeeds.
+ *
+ * Returns the first chunk alongside the socket. It must not be dropped: it carries the SPS and PPS
+ * that begin the stream, and a decoder that never sees them shows a black rectangle rather than an
+ * error.
+ */
+export async function connectWhenServing(opts: {
+  port: number;
+  host?: string;
+  timeoutMs?: number;
+  retryMs?: number;
+  /** Returns a reason if the process we are waiting on has already died, to fail fast. */
+  exited?: () => string | undefined;
+  /** Named in the error, so a failure says which device it was about. */
+  describe?: string;
+}): Promise<{ socket: import('node:net').Socket; first: Buffer }> {
+  const { createConnection } = await import('node:net');
+  const host = opts.host ?? '127.0.0.1';
+  const timeoutMs = opts.timeoutMs ?? CONNECT_TIMEOUT_MS;
+  const retryMs = opts.retryMs ?? CONNECT_RETRY_MS;
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+  let lastError = 'the server never delivered a byte';
+
+  while (Date.now() < deadline) {
+    const gone = opts.exited?.();
+    if (gone) throw new Error(`${gone}; check the version string matches the jar exactly`);
+    attempts++;
+
+    const outcome = await new Promise<{ socket: import('node:net').Socket; first: Buffer } | null>((resolve) => {
+      const sock = createConnection({ port: opts.port, host });
+      const give = (why: string): void => {
+        lastError = why;
+        sock.removeAllListeners();
+        sock.destroy();
+        resolve(null);
+      };
+      sock.once('data', (first: Buffer) => {
+        // Only the failure listeners are removed. The caller installs its own 'close' and 'error'
+        // handlers on the returned socket, and needs them to fire for a mid-stream death.
+        sock.removeAllListeners('close');
+        sock.removeAllListeners('error');
+        resolve({ socket: sock, first });
+      });
+      sock.on('close', () => give('the connection closed before any data arrived'));
+      sock.on('error', (e) => give(e.message));
+    });
+
+    if (outcome) return outcome;
+    await new Promise((r) => setTimeout(r, retryMs));
+  }
+
+  throw new Error(
+    `no data within ${timeoutMs}ms over ${attempts} attempt(s)`
+    + `${opts.describe ? ` on ${opts.describe}` : ''}: ${lastError}`);
 }
 
 /* -------------------------------------------------------------------------------- screenrecord */
@@ -219,6 +364,9 @@ export class ScrcpyCapture implements ScreenCapture {
  * Latency is also materially worse: the encoder buffers for recording quality rather than for
  * liveness. Good enough to see what a test is doing; not good enough to call interactive.
  */
+/** How long `screenrecord` may take to produce its first byte before it counts as broken. */
+const FIRST_FRAME_TIMEOUT_MS = 10_000;
+
 export class ScreenrecordCapture implements ScreenCapture {
   readonly kind = 'screenrecord';
   readonly stats: CaptureStats = { frames: 0, bytes: 0, startedAt: 0 };
@@ -233,6 +381,24 @@ export class ScreenrecordCapture implements ScreenCapture {
     this.stats.startedAt = Date.now();
     this.stopped = false;
     this.spawnSegment(onNal);
+
+    // `ScreenCapture.start` promises to resolve only once a frame has genuinely arrived, and this
+    // used to return the instant the process was spawned. The difference matters for the same
+    // reason it mattered in the scrcpy path: a device that produces nothing — a locked screen on
+    // some OEMs, a `screenrecord` that refuses the requested size — would report a working capture
+    // and then stay silent forever.
+    await new Promise<void>((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        reject(new Error(
+          `screenrecord produced no data within ${FIRST_FRAME_TIMEOUT_MS}ms on ${this.opts.serial}`));
+      }, FIRST_FRAME_TIMEOUT_MS);
+      const poll = setInterval(() => {
+        if (this.stats.bytes > 0) { clearTimeout(deadline); clearInterval(poll); resolve(); }
+      }, 25);
+      // Neither timer should hold the process open on its own.
+      deadline.unref?.();
+      poll.unref?.();
+    });
   }
 
   private spawnSegment(onNal: (nal: Buffer, receivedAt: number) => void): void {
@@ -290,15 +456,6 @@ function run(bin: string, args: string[], timeoutMs: number): Promise<string> {
       resolve(stdout.trim());
     });
   });
-}
-
-async function withRetries(attempts: number, delayMs: number, fn: () => Promise<unknown>): Promise<void> {
-  let last: Error | undefined;
-  for (let i = 0; i < attempts; i++) {
-    try { await fn(); return; } catch (e) { last = e as Error; }
-    await new Promise((r) => setTimeout(r, delayMs));
-  }
-  throw last ?? new Error('retries exhausted');
 }
 
 /** A stable per-device port offset, so two phones on one host never collide. */

@@ -3,6 +3,18 @@
 //   node deploy/verify-capture.mjs                       # first device adb sees
 //   node deploy/verify-capture.mjs --serial 39121FDH…    # a specific one
 //   node deploy/verify-capture.mjs --seconds 30 --bitrate 4000000
+//   node deploy/verify-capture.mjs --motion off          # do not touch the device
+//
+// IT MOVES THE SCREEN WHILE IT MEASURES, and that is not incidental — it is what makes the numbers
+// mean anything. A video encoder emits frames when the picture CHANGES. Pointed at an idle phone
+// this script reported 2.2 fps and a single keyframe in twenty seconds, and both of those were
+// facts about a stationary home screen rather than about the capture path. A live view is only ever
+// watched while something is happening, so that is the condition worth measuring.
+//
+// The motion is a scroll up and down inside Settings, chosen because it is somewhere every Android
+// has, nothing on the screen is destructive to touch, and a list scroll changes most of the frame —
+// which is the demanding case for an encoder. `--motion off` disables it, and the script then says
+// out loud that its frame numbers describe an idle device.
 //
 //   SCRCPY_SERVER_PATH=/path/scrcpy-server.jar SCRCPY_SERVER_VERSION=2.4 node deploy/verify-capture.mjs
 //
@@ -35,13 +47,18 @@ for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replac
 const SECONDS = Number(args.get('seconds') ?? 20);
 const BITRATE = Number(args.get('bitrate') ?? 8_000_000);
 const MAX_SIZE = args.get('maxSize') ? Number(args.get('maxSize')) : 1080;
+const MOTION = (args.get('motion') ?? 'on') !== 'off';
 
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 let failures = 0;
 const ok = (m, d = '') => console.log(`  ${green('✓')} ${m}${d ? dim(` — ${d}`) : ''}`);
 const bad = (m, d = '') => { failures++; console.log(`  ${red('✗')} ${m}${d ? dim(` — ${d}`) : ''}`); };
+// A result that is not a pass but is not evidence of a broken capture either — the idle-screen
+// case. Reporting it as a failure would train people to ignore this script's failures.
+const warn = (m, d = '') => console.log(`  ${yellow('!')} ${m}${d ? dim(` — ${d}`) : ''}`);
 
 const adb = process.env.ADB_PATH
   ?? (process.env.ANDROID_HOME ? `${process.env.ANDROID_HOME}/platform-tools/adb` : 'adb');
@@ -82,6 +99,72 @@ async function pickSerial() {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Awake, Dozing, Asleep — the state that decides whether any of the frame numbers mean anything.
+ *
+ * A DOZING PHONE STILL PRODUCES A STREAM, and that is the trap. scrcpy connects, the encoder runs,
+ * SPS and PPS arrive, and every check about decodability passes — while the picture is a frozen
+ * always-on-display clock. The first hardware run of this script reported 2.2 fps, one keyframe and
+ * 0.01 Mbps, and all three were facts about a screen in `DOZE_SUSPEND` rather than about capture.
+ */
+async function wakefulness(serial) {
+  const out = await run(adb, ['-s', serial, 'shell', 'dumpsys', 'power'], 10_000).catch(() => '');
+  return /mWakefulness=(\w+)/.exec(out)?.[1] ?? 'unknown';
+}
+
+/**
+ * Keep the screen changing for the duration of the capture.
+ *
+ * Returns a stop function. Every command is fire-and-forget through its own `adb shell`: a swipe
+ * that fails because the phone locked itself mid-run must not fail the measurement, it must show up
+ * as the frame rate dropping, which is the truth.
+ */
+const shellOn = (serial) => (cmd) => new Promise((resolve) => {
+  execFile(adb, ['-s', serial, 'shell', cmd], { timeout: 10_000 }, () => resolve());
+});
+
+/**
+ * Wake the phone and put something scrollable on it — BEFORE the capture starts.
+ *
+ * The ordering is the whole point. Waking a dozing device inside the measurement window puts the
+ * doze-to-awake transition into the numbers: the encoder emits almost nothing until the panel is
+ * live, which showed up as a 6-second worst-case keyframe gap in an otherwise perfectly regular
+ * 1-second cadence. That gap was this script's own doing. Measuring a device in the state a viewer
+ * would actually find it means getting it there first.
+ */
+async function prepareScreen(serial) {
+  const shell = shellOn(serial);
+  await shell('input keyevent KEYCODE_WAKEUP');
+  // Somewhere predictable, present on every Android, and harmless to scroll.
+  await shell('am start -a android.settings.SETTINGS');
+  await new Promise((r) => setTimeout(r, 1500));
+}
+
+/**
+ * Keep the screen changing for the duration of the capture.
+ *
+ * Returns a stop function. Every command is fire-and-forget through its own `adb shell`: a swipe
+ * that fails because the phone locked itself mid-run must not fail the measurement, it must show up
+ * as the frame rate dropping, which is the truth.
+ */
+function driveMotion(serial) {
+  const shell = shellOn(serial);
+  let stopped = false;
+
+  const loop = (async () => {
+    let down = true;
+    while (!stopped) {
+      // A long list scroll changes most of the frame, which is the case an encoder finds hardest
+      // and therefore the honest one to measure.
+      await shell(down ? 'input swipe 540 1600 540 600 300' : 'input swipe 540 600 540 1600 300');
+      down = !down;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  })();
+
+  return async () => { stopped = true; await loop.catch(() => {}); };
+}
+
 async function main() {
   const serial = await pickSerial();
 
@@ -98,7 +181,8 @@ async function main() {
   console.log(`\ndevice   ${model} · Android ${release} · ${serial}`);
   console.log(`source   ${capture.kind}${capture.kind === 'screenrecord'
     ? dim('  (no SCRCPY_SERVER_PATH — expect worse latency and a hitch every ~175s)') : ''}`);
-  console.log(`asking   ${(BITRATE / 1e6).toFixed(1)} Mbps, long edge ${MAX_SIZE}px, for ${SECONDS}s\n`);
+  console.log(`asking   ${(BITRATE / 1e6).toFixed(1)} Mbps, long edge ${MAX_SIZE}px, for ${SECONDS}s`);
+  console.log(`screen   ${MOTION ? 'scrolling Settings while measuring' : dim('left alone (--motion off) — frame numbers describe an IDLE device')}\n`);
 
   const frameAt = [];       // arrival time of each frame's FIRST NAL
   const nalTypes = new Map();
@@ -106,6 +190,8 @@ async function main() {
   let bytes = 0;
   let sawSps = false, sawPps = false;
   let lastFrameTs = 0;
+
+  if (MOTION) await prepareScreen(serial);
 
   const started = Date.now();
   try {
@@ -131,9 +217,21 @@ async function main() {
     process.exit(1);
   }
 
+  const stopMotion = MOTION ? driveMotion(serial) : null;
   await new Promise((r) => setTimeout(r, SECONDS * 1000));
+  // Read this BEFORE stopping the motion: the question is what the screen was doing while the
+  // measurement was being taken, not what it settled into afterwards.
+  const wokeState = await wakefulness(serial);
+  if (stopMotion) await stopMotion();
   await capture.stop();
   const elapsed = (Date.now() - started) / 1000;
+
+  // Said before any frame number, because it changes how every one of them should be read.
+  if (wokeState !== 'Awake') {
+    console.log(`${red('The screen was ' + wokeState + ' during this capture.')}`);
+    console.log(dim('  Every frame number below describes a still picture, not the capture path.'));
+    console.log(dim('  Enable Developer Options → "Stay awake" and re-run — see PHYSICAL_DEVICES.md §1.\n'));
+  }
 
   console.log('Stream');
   if (capture.stats.frames > 0) ok('the device produced a stream', `${capture.stats.frames} NALs`);
@@ -153,7 +251,10 @@ async function main() {
   const fps = frameAt.length / elapsed;
   console.log(`\nFrames  ${dim(`${frameAt.length} frames in ${elapsed.toFixed(1)}s`)}`);
   if (fps >= 10) ok('frame rate', `${fps.toFixed(1)} fps`);
-  else bad('frame rate is too low to look live', `${fps.toFixed(1)} fps`);
+  else if (!MOTION) {
+    warn('frame rate is low, but nothing was moving',
+      `${fps.toFixed(1)} fps — an encoder emits frames when the picture changes; re-run without --motion off`);
+  } else bad('frame rate is too low to look live', `${fps.toFixed(1)} fps`);
 
   if (intervals.length > 0) {
     const p50 = pct(intervals, 50), p95 = pct(intervals, 95), worst = Math.max(...intervals);
@@ -184,10 +285,15 @@ async function main() {
   }
 
   const mbps = (bytes * 8) / 1e6 / elapsed;
-  console.log(`\nBitrate ${dim(`${mbps.toFixed(1)} Mbps against ${(BITRATE / 1e6).toFixed(1)} asked`)}`);
+  console.log(`\nBitrate ${dim(`${mbps.toFixed(2)} Mbps against ${(BITRATE / 1e6).toFixed(1)} asked`)}`);
   // Devices routinely ignore the request; that is not a failure, but a wild overshoot is a
   // bandwidth problem for anyone watching over a network and is worth saying out loud.
-  if (mbps <= (BITRATE / 1e6) * 1.5) ok('bitrate is near what was requested');
+  //
+  // The zero case is checked FIRST because it used to pass: 0 is comfortably under any ceiling, so
+  // a capture that produced nothing at all reported a green tick here. A check that passes hardest
+  // when nothing happened is worse than no check.
+  if (bytes === 0) bad('no bitrate to measure', 'nothing arrived');
+  else if (mbps <= (BITRATE / 1e6) * 1.5) ok('bitrate is near what was requested');
   else bad('the device is ignoring the bitrate request', `${mbps.toFixed(1)} Mbps`);
 
   const types = [...nalTypes.entries()].sort((a, b) => b[1] - a[1])

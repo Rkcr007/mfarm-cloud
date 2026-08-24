@@ -189,8 +189,15 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
 - **No live view or interactive control.** §20/§21 are unbuilt for this tier. Screenshots and the
   UI inspector work; a moving picture does not.
 - **No Windows agent.**
-- **Input latency is unmeasured over USB.** The held-shell path measures ~39ms p50 on an emulator;
-  nobody has measured it on a handset. `health()` reports it, so the first real phone will say.
+- **Input latency over USB is ~33-55ms p50.** Measured 2026-08-25 on a Samsung SM-S918B (Android
+  16): 33ms p50 / 55ms p95 over 100 key events, well inside the 100ms budget `health()` degrades at.
+
+  Getting that number required fixing what `health()` was timing. It ran `true` down the held shell
+  and reported the result as `inputLatencyMs` — that is **1ms p50**, because it measures how fast
+  the shell echoes a marker, not how fast an input event lands. The real path costs 20-50× more,
+  nearly all of it spawning Android's `input` binary. The budget was therefore unreachable: no
+  device could be slow enough to trip a threshold applied to a shell round trip. It now times
+  `input keyevent 0` (`KEYCODE_UNKNOWN`), which travels the whole path and does nothing on arrival.
 - **`dumpLogcat` is not session-scoped.** A phone's log buffer carries lines from before the
   session — unlike a powerwashed Cuttlefish, whose buffer starts empty. Read timestamps with that
   in mind.
@@ -198,3 +205,28 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   serving other devices does bounce. Adding a device in place needs the heartbeat to carry
   capabilities, which the protocol does not do yet.
 - **Input latency is reported but not yet enforced.** Nothing refuses a device for being slow.
+- **Nothing checks the §1 prerequisites.** "Stay awake" and an unlocked screen are asked of a human
+  in §1 and then confirmed by no code anywhere. A locked, dozing handset enrolls, schedules, and
+  fails everything — and §18 files those as test failures, because nothing knows better. On the
+  first handset this was run against, three capture runs reported 2.2 fps, a single keyframe and
+  0.01 Mbps, and all three were measurements of an always-on-display clock rather than of anything
+  in the agent. `deploy/verify-physical.mjs` reports all three states; the agent still does not.
+  This is what the phase-1 window in [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md) exists to show.
+
+---
+
+## 10. Verifying a handset before you enroll it
+
+`deploy/verify-physical.mjs` runs the physical backend against a phone **without clearing
+anything** — it exists because the honest way to test §6 is to run it, and running it on somebody's
+daily driver wipes 133 applications:
+
+```bash
+node deploy/verify-physical.mjs              # first device adb sees
+node deploy/verify-physical.mjs --all        # list every package a reset would clear
+```
+
+It reports the reset's blast radius with the launcher, keyboard, device-admin and accessibility
+packages called out by name; whether a failed `pm clear` is actually detected; held-shell latency;
+and each read path with the OEM output its regex has to survive. Read it before `PHYSICAL_ENABLED=1`
+on a machine whose phone you care about.
