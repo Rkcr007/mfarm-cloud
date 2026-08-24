@@ -270,6 +270,27 @@ describe('session creation', () => {
     assert.equal(v.ok && v.claims.fence, body.session.fence);
   });
 
+  /**
+   * The verifier is the last thing that may throw on hostile input, because throwing is how it
+   * stops being a verifier. Every caller hands it a value a stranger chose — the `token: string`
+   * in its signature is a compile-time promise about a runtime value out of JSON.parse — and one
+   * caller ran inside an async handler on an endpoint that takes no credential, where a throw
+   * became an unhandledRejection and took a whole device host down with it.
+   */
+  for (const [name, bad] of [
+    ['undefined', undefined],
+    ['null', null],
+    ['a number', 12345],
+    ['an object', { sig: 'x' }],
+    ['an array', ['v1', 'a', 'b']],
+  ] as const) {
+    test(`${name} is malformed, not an exception`, () => {
+      const v = verifySessionToken(bad as unknown as string, app.signingKey.publicKeyPem);
+      assert.equal(v.ok, false);
+      assert.equal(v.ok === false && v.reason, 'malformed');
+    });
+  }
+
   test('a token minted for one host is rejected by another', async () => {
     await clearDevices();
     await seedDevices(1);

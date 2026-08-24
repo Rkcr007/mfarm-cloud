@@ -20,6 +20,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildServer } from '@mfarm/api/server';
 import { withSystem, closePools } from '@mfarm/api/db';
 import { createApiKey } from '@mfarm/api/auth';
+import { TOKEN_ALG } from '@mfarm/protocol';
 import { Agent, deterministicUuid } from '../src/agent.ts';
 import { DataPlane } from '../src/dataplane.ts';
 import { AgentTunnel } from '../src/tunnel.ts';
@@ -747,6 +748,67 @@ describe('data plane', () => {
     const msg = await nextMessage(ws2);
     assert.equal(msg.code, 'stale_fence', 'the old client must not drive a device given to someone else');
     ws2.close();
+  });
+
+  /**
+   * A HOSTILE HELLO MUST COST THE SENDER ITS SOCKET AND NOTHING ELSE.
+   *
+   * This endpoint takes NO credential — deliberately, because the credential is the Ed25519 grant
+   * inside the hello, which only the agent can verify. So "whoever sends this" is anyone who can
+   * reach the port, and on a published farm that is the internet.
+   *
+   * `ClientMessage` declares `token: string`. It comes out of JSON.parse. When the field was
+   * missing, `verifySessionToken(undefined)` threw inside an async handler, the throw became an
+   * unhandledRejection, and index.ts answered the way it answers a broken invariant: drain and
+   * exit. One frame took down two Cuttlefish devices, two Appium servers, the automation gateway
+   * and the tunnel — and with StartLimitBurst=5 five frames in five minutes stop the service until
+   * a human intervenes. Found on live hardware, by sending one.
+   *
+   * Each case asserts the same two things, and the SECOND is the one that matters: the sender is
+   * rejected, and the agent is still serving afterwards.
+   */
+  for (const [name, hello] of [
+    ['no token field at all', { t: 'hello' }],
+    ['a null token', { t: 'hello', token: null }],
+    ['a number where the token goes', { t: 'hello', token: 12345 }],
+    ['an object where the token goes', { t: 'hello', token: { nested: 'thing' } }],
+    ['an array where the token goes', { t: 'hello', token: ['a', 'b'] }],
+  ] as const) {
+    test(`survives ${name}`, async () => {
+      const hostile = await connect();
+      hostile.send(JSON.stringify(hello));
+      const reply = await nextMessage(hostile);
+      assert.equal(reply.t, 'error', 'the sender is told no');
+      // `malformed` AND NOT `auth_timeout` is the whole assertion. On the unfixed code the handler
+      // threw before it could answer, so the only thing that ever arrived on this socket was the
+      // 5s no-hello timeout — a reply that says "you never spoke" to a client that did. Asserting
+      // the code, rather than merely that something arrived, is what makes this test able to fail:
+      // the test runner catches unhandledRejection, so the crash that ends the agent in production
+      // is invisible in here. The symptom that IS visible is being answered by a timer instead of
+      // by the verifier.
+      assert.equal(reply.code, 'malformed', 'answered by the verifier, not by the auth timeout');
+      hostile.close();
+
+      // THE REAL ASSERTION. If the frame above killed the process, nothing here can connect — and
+      // on the old code nothing could, because there was no process left to connect to.
+      const after = await connect();
+      after.send(JSON.stringify({ t: 'hello', token: 'still.here.though' }));
+      const stillServing = await nextMessage(after);
+      assert.equal(stillServing.t, 'error');
+      assert.equal(stillServing.code, 'malformed', 'the agent is still verifying tokens, not dead');
+      after.close();
+    });
+  }
+
+  test('a hello whose token is a well-formed lie is rejected on its signature', async () => {
+    // The boundary either side of the crash: a string token gets as far as the CRYPTO, which is
+    // where a bad one is supposed to be caught. Rejecting shapes must not have moved that line.
+    const ws = await connect();
+    ws.send(JSON.stringify({ t: 'hello', token: `${TOKEN_ALG}.eyJzaWQiOiJ4In0.bm90YXNpZw` }));
+    const msg = await nextMessage(ws);
+    assert.equal(msg.t, 'error');
+    assert.equal(msg.code, 'bad_signature', 'a syntactically valid token must reach the verifier');
+    ws.close();
   });
 });
 

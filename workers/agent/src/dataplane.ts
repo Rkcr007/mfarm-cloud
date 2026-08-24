@@ -170,7 +170,22 @@ export class DataPlane {
       if (!this.conns.get(ws)?.claims) this.reject(ws, 'auth_timeout', 'No hello within 5s.');
     }, 5_000);
 
-    ws.on('message', (raw) => { void this.onMessage(ws, raw.toString()); });
+    // THE `.catch` IS LOAD-BEARING. `void`-ing this promise sent any throw in a message handler to
+    // `unhandledRejection`, which index.ts treats as a broken invariant and answers by draining the
+    // agent and exiting — correct for a broken invariant, catastrophic for a malformed frame. One
+    // hostile client cost the host both devices, both Appium servers, the gateway and the tunnel,
+    // and with systemd's StartLimitBurst five of them in five minutes stop the service for good.
+    //
+    // A message handler failing is a statement about that MESSAGE. Containing it to the connection
+    // that sent it is the difference between one viewer losing its socket and every tenant on the
+    // host losing their devices.
+    ws.on('message', (raw) => {
+      void this.onMessage(ws, raw.toString()).catch((e: unknown) => {
+        const why = e instanceof Error ? e.message : String(e);
+        console.error(`[dataplane] message handler failed, closing the connection: ${why}`);
+        this.reject(ws, 'internal_error', 'This connection failed and has been closed.');
+      });
+    });
     // Both paths go through teardown. Forgetting the connection is not enough: a dropped viewer
     // would otherwise leave an `adb logcat` child and an operator socket running against a device
     // that is about to be snapshot-restored for somebody else.
@@ -211,6 +226,10 @@ export class DataPlane {
       // client swap to a different device mid-connection without the fence ever being re-checked
       // against the first one. Neither is a shape a real client produces.
       if (conn.claims) return this.reject(ws, 'already_authenticated', 'This connection already has a session.');
+      // `ClientMessage` says `token: string`. It arrived from JSON.parse, so that is a compile-time
+      // promise about a runtime value a stranger chose — and this endpoint takes no credential, so
+      // the stranger is anyone who can reach it. Checked here rather than trusted.
+      if (typeof msg.token !== 'string') return this.reject(ws, 'malformed', 'hello needs a token.');
       return this.onHello(ws, conn, msg.token);
     }
     // Nothing but hello is accepted before authentication — not even a no-op.
