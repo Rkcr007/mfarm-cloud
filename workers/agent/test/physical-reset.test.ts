@@ -221,7 +221,10 @@ describe('an install the device refuses', () => {
     const d = device();
     const apk = await makeApk('com.acme.tests');
     await writeFile(`${apk}.blocked`, '');
-    const err = await d.installApp(apk).catch((e) => e as InstanceType<typeof InstallBlockedError>);
+    // `installApp` resolves to void, so the catch value is a union until it is narrowed — and the
+    // narrowing is the assertion worth making anyway: the caller classifies on the type.
+    const err = await d.installApp(apk).then(() => undefined, (e: unknown) => e);
+    assert.ok(err instanceof InstallBlockedError, 'a refusal must arrive as InstallBlockedError');
     assert.match(err.remedy, /Harmful app blocked/);
     assert.match(err.remedy, /FAKESERIAL/, 'a remedy you cannot copy-paste is half a remedy');
     assert.match(err.remedy, /PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF/);
