@@ -78,195 +78,193 @@ Built, and **not** to be rebuilt:
 Known-unverified, and P0 exists to fix it: **the physical backend has never completed a round trip
 against a real handset.**
 
+
+---
+
+## What is now done, and the measurement that reshaped the rest
+
+**P0 is closed and shipped.** A Samsung SM-S918B on a macOS laptop, behind NAT, appears in
+`farm.mfarm.dev`, takes a WebDriver session in 9.0s, serves its data plane through the console's
+ingress, and returns to `READY` — over a socket the laptop dialled out. Deployed as `d4c4172`.
+
+Three items from the previous ordering are gone: the physical backend was already built, automation
+over the tunnel shipped (ADR-0011), and the data-plane endpoint it had left behind was fixed on
+hardware. The reset default was inverted (ADR-0012), and the console's hardware buttons were unstuck
+from a video stream they never needed.
+
+**And one measurement changed the shape of everything after it.** The owner's own app — the reason
+this farm exists — sets `FLAG_SECURE`. Measured on the handset, same device, seconds apart:
+
+| Capture path | Alaan staging | Settings |
+|---|---|---|
+| `adb screencap` | 27 KB, blank | 213 KB, real |
+| `scrcpy` (display mirroring) | **blank** | real |
+
+`scrcpy` was the hope: it mirrors the display rather than reading a surface, and on some devices that
+sees through a secure window. On this one it does not — only the status bar, a system window,
+survives. **So a finished WebRTC live view would render a black rectangle on every screen of the app
+this was built for.**
+
+What is *not* blanked is the accessibility tree. The passcode screen reads back completely: every
+label, every clickable node, real bounds. **The way to operate a secure app is its hierarchy, not its
+pixels** — and that is far cheaper to build than WebRTC.
+
 ---
 
 ## Priority order
 
-| # | Phase | Why here | Est. |
-|---|---|---|---|
-| **P0** | Prove Android end-to-end | Everything below assumes it works. Nothing is built. | ~1 day |
-| **S1** | Spike: iPhone on this Mac | Cheapest possible answer to the biggest product claim. | 1–2 days |
-| **S2** | Spike: the WebRTC peer | The last unmeasured engineering risk in the tree. | 1–2 days |
-| **P1** | The window | Largest change in how the product *feels*; needs no new device support. | 3–5 days |
-| **P2** | Pairing + per-device sharing | Turns "run this command" into "sign in and tick a box". | 3–5 days |
-| **P3** | Live view — Android | One implementation; iOS inherits it in P4 for almost nothing. | 5–8 days |
-| **P4** | iOS as a first-class device | The big surface, now de-risked by S1. | 8–12 days |
-| **P5** | The devices tab | Makes sense of a fleet that is now two platforms and two owners. | 2–4 days |
-| **P6** | The signed binary | Cert lead time is *already paid* — this is now a short phase. | 3–5 days |
+Ordered by what a user hits first, not by what is architecturally interesting.
 
-Estimates are engineering days for a focused single track, not calendar. Roughly **5–7 weeks** end to
-end.
+| # | Milestone | Why here | Est. |
+|---|---|---|---|
+| **M1** | Installing an app actually works | "Test your app on a real device" fails at step one today. | 2–4 d |
+| **M2** | The window | Turns a terminal command into something a person runs. | 3–5 d |
+| **M3** | Pairing + per-device sharing | The other half of "somebody else can use this". | 3–5 d |
+| **M4** | Operate a device without video | Works on secure apps, where video never will. | 4–6 d |
+| **S1** | Spike: iPhone on this Mac | Days, gates a quarter of the product. Run it alongside. | 1–2 d |
+| **M5** | The signed binary | Makes M2 and M3 a download instead of a checkout. | 3–5 d |
+| **M6** | Live video | Known to be useless for secure apps; still right for most. | 5–8 d |
+| **M7** | iOS as a first-class device | The big surface, de-risked by S1. | 8–12 d |
 
 ---
 
-## P0 — Prove what exists
+## M1 — Installing an app actually works
 
-Nothing is built in this phase. It de-risks every phase after it, and it is the one gate in this
-document that has been open the longest.
+**Found by trying it, planned by nobody.** Every `adb install` on the test handset is refused —
+`INSTALL_FAILED_VERIFICATION_FAILURE`, with Play Protect showing *"Harmful app blocked"*. It blocked
+all three Appium helpers and a sample APK. The product's core loop — install my app, drive it, throw
+it away — **does not work on a stock Android phone**, and it surfaces as `upstream_rejected` after a
+60-second adb timeout, several hops from the cause.
 
-**Do:**
+**Build:**
+- **Detect it.** A verification failure is a known state with a known remedy, not an unknown error.
+  File it as an infrastructure incident (§18), never as a test failure.
+- **Explain it before it happens.** The window says plainly that Android will warn about a testing
+  helper, and what that helper is — a beat before the phone shows the dialog, not 90 seconds into
+  somebody's first run.
+- **Offer the device-prep step, with consent.** `verifier_verify_adb_installs 0` is the standard
+  device-farm answer and it is the owner's decision about their own phone: shown, never done
+  silently, restored on unpair.
+- **Pre-install the automation helpers at pairing**, so prompts happen once during setup.
 
-```bash
-node deploy/verify-capture.mjs                 # H.264 off the device, no jar needed
-PHYSICAL_ENABLED=1 CONTROL_PLANE_URL=… WORKER_REGISTRATION_TOKEN=mae_… APPIUM_ENABLED=1 \
-  npm start -w @mfarm/agent
-MFARM_API_KEY=mfk_… node deploy/verify-webdriver.mjs
-```
+**Gate:** on a phone that has never seen MFARM, a session installs an APK, drives it, and the release
+removes it — with no dialog appearing mid-test.
 
-**Also:** commit the ADR-0011 work sitting uncommitted on `feat/physical-device-backend`. It is
-822-tests green and it is the thing that makes a NAT'd laptop work at all — it should not be
-uncommitted while six phases are built on top of it.
+**It closes ADR-0012's open hardware gap for free.** Cases 1 and 3 are unrun purely because no APK
+can be installed; `deploy/verify-reset.mjs` is written and waiting.
 
-**Gate:** the phone appears in the console, takes a WebDriver session, installs an APK, and returns
-to `READY` after a reset — **through the tunnel**, with no `APPIUM_ADVERTISE_HOST` set.
+---
 
-**Expect to find things.** Last contact with this handset produced six defects that 197 green tests
-had missed, one of which meant no phone could enroll on macOS at all. `resetToSnapshot` has never
-run against a real phone in a real session; `deploy/verify-physical.mjs` reports its blast radius
-without clearing anything, and **it must not be pointed at a daily driver.**
+## M2 — The window
+
+The single largest gap between "a farm" and "a product", and it needs no new device support.
+
+**Build:** an HTTP server on `127.0.0.1` serving a small web app. **Security in the first commit, not
+retrofitted:** loopback bind, a session token minted at start-up and passed in the URL, and `Origin`
+**and** `Host` validated on every request — all three, for the reasons in ADR-0009 §3. The device
+list with the human remedy for every unusable adb state. Live updates.
+
+Everything it shows is already computed inside the agent. This is presentation over existing
+machinery, which is why it is small.
+
+**Gate:** plug a phone in with the window open and watch the row appear. Unplug it, watch it go.
+Leave it unauthorised and read the line that tells you to tap Allow.
+
+---
+
+## M3 — Pairing, and per-device sharing
+
+**Build:** a pairing code from the console, exchanged for the `mae_` token the API already mints —
+retiring the two-step `curl` with a session cookie and a CSRF header that is the only way to enroll a
+host today. Credentials into the macOS Keychain. **Discovered is not shared**: a per-device toggle,
+off by default, reversible instantly.
+
+**The reset mode is chosen here too** (ADR-0012 §4) — same screen, same trust decision, with the
+blast radius shown before anyone picks the sweep.
+
+**Gate:** on a machine that has never seen MFARM, pair, tick one of two phones, and see exactly that
+one in the console.
+
+---
+
+## M4 — Operate a device without video
+
+**The phase the `FLAG_SECURE` measurement created**, and for this customer it is worth more than M6.
+
+A tester needs to find an element, tap it, and know what it is called. None of that needs pixels. The
+console already receives the full hierarchy from a secure app; what it lacks is a way to show it and
+a way to touch it.
+
+**Build:**
+- Render the hierarchy as boxes — the inspector, unstuck from the video backdrop it requires today
+  (`streaming` gates it).
+- Tap and swipe by coordinate over the data plane, which already carries both verbs.
+- A screenshot backdrop where the app permits one, and an honest empty frame where it does not.
+- Selector suggestions, which `selectorsFor` already computes.
+
+**Gate:** open the Alaan staging build in the console and tap "Forgot Passcode?" without ever seeing
+a pixel of it.
 
 ---
 
 ## S1 — Spike: an iPhone on this Mac
 
-Days, and it replaces ADR-0010's signing spike outright.
+Plug the iPhone in, get one WebDriver command through Appium's XCUITest driver against the paid team
+ID, and check whether `ffmpeg -f avfoundation` enumerates the device. Deliverable besides the answer:
+**ADR-0013**, recording the macOS-first narrowing of ADR-0010 and what would un-narrow it.
 
-**Do:** plug the iPhone in, trust the Mac, and get one WebDriver command through it via Appium's
-XCUITest driver against the paid team ID. Then check whether `ffmpeg -f avfoundation` enumerates the
-device and emits H.264 — a plugged-in iPhone is an AVFoundation capture source on macOS, which is
-what QuickTime's screen recording uses, and it is the same subprocess-and-NAL shape `capture.ts`
-already consumes from scrcpy.
-
-**Deliverable besides the answer:** ADR-0013, recording the macOS-first narrowing and what
-un-narrows it.
-
-**Gate:** the WebDriver command returns, and `ffmpeg` produces NALs. If the second half fails,
-`quicktime_video_hack` is the fallback and P4's live view grows by a couple of days — it does not
-change the shape of anything.
+**Run it alongside M1–M3.** It is days, and it decides whether a quarter of the product is ordinary
+work or a re-plan.
 
 ---
 
-## S2 — Spike: can the agent be a WebRTC peer?
+## M5 — The signed binary
 
-Spike 3 proved Node can *packetize* fast enough (0.8% of a core). It explicitly did **not** cover
-SRTP encryption, the actual send, or a real handset. That is what remains unproven.
+Node SEA (stable since Node 22 — ADR-0009 §4), signed with Developer ID and notarised. The automation
+runtime is fetched on first use with visible progress, not bundled. `--install-service` behind a flag.
 
-**Do:** `werift` — pure TypeScript, no native build, which is the entire point on a stranger's
-laptop — fed by the existing splitter from a real scrcpy stream, rendered in a `<video>` in Chrome.
+**The scheduling risk here is already retired:** ADR-0009 warned certificates would become the
+critical path if left to the end, and the Apple account is paid and active, so a Developer ID
+certificate is self-service.
 
-**Gate:** a moving phone screen in a browser, with the glass-to-glass latency **measured and written
-down**, not described as "responsive".
-
----
-
-## P1 — The window
-
-**Build:**
-- An HTTP server on `127.0.0.1` in the agent, serving a small web app. Third server in the process;
-  `gateway.ts` is the pattern. Reuse `console.css` — the design system already exists.
-- **Security, in the first commit, not retrofitted:** loopback bind; a session token minted at
-  start-up, passed in the URL the agent opens, never persisted; `Origin` **and** `Host` validated on
-  every request. All three, for the reasons in ADR-0009 §3 — a localhost server is reachable by every
-  process on the machine *and* by every website the user visits.
-- The device list: everything discovery and the health monitor already know — model, OS, serial,
-  state, and the human remedy for each unusable adb state. **None of this is new computation.**
-- Live updates. SSE or poll; somebody watching a device boot should not have to refresh.
-
-**Gate:** plug a phone in with the window open and watch the row appear. Unplug it, watch it go.
-Leave it unauthorised and read the instruction that tells you to tap Allow.
+**Gate — the one that matters:** someone who has never seen MFARM, on a machine we do not control,
+plugs in a phone and sees it in the console **inside two minutes, without typing a command or
+entering a password**.
 
 ---
 
-## P2 — Pairing, and per-device sharing
+## M6 — Live video
 
-**Build:**
-- **Sign-in:** a pairing code shown in the console, exchanged by the agent for the `mae_` enrollment
-  token the API already mints. The credential model does not change — this is a front end onto
-  something already correct. It also retires the two-step `curl` with a session cookie and a CSRF
-  header that is the only way to enroll a host today.
-- Credentials into the macOS Keychain, `0600` file fallback.
-- **Discovered is not shared** (ADR-0009 §2). The one behavioural change to existing code: today
-  everything discovery finds is registered. A per-device toggle, **off by default**, reversible
-  instantly.
+Still worth building, and no longer the centrepiece. Right for most apps, useless for secure screens
+— a sentence that now has to appear in the product, not only in this document.
 
-**Gate:** on a machine that has never seen MFARM, pair, tick the Android and leave the iPhone
-unticked, and see exactly one device in the console. Untick it and watch it leave.
+`werift` is the peer (pure TypeScript, no native build, which is the whole point on a stranger's
+laptop). The capture layer, the Annex-B splitter and the RTP packetizer exist and are measured at
+p99 0.36 ms. **Spike SRTP and the actual send before committing the phase** — that is the half spike
+3 explicitly did not cover.
+
+**Gate:** open a non-secure app in the console, interact with it, and publish the latency rather than
+calling it responsive.
 
 ---
 
-## P3 — Live view, Android
+## M7 — iOS as a first-class device
 
-Half-built: capture exists, throughput is cleared, and S2 has proved the peer. What remains is
-wiring and the viewer.
+`go-ios` sits where `adb` sits; WDA is supervised the way `appium.ts` supervises UiAutomator2; the
+WebDriver proxy goes into the existing gateway, which is platform-agnostic since ADR-0011. The live
+view, where it applies, is the implementation M6 already built. **Provisioning-profile expiry is
+product work** — explained, never reported as a broken device.
 
-**Build:** the werift peer in the agent; signalling over the data-plane socket the browser already
-holds (ADR-0007 built that relay and it passes frames through opaque); `screen-stream` and
-`input-datachannel` advertised for physical devices; the viewer reusing `live.js`.
-
-**Note what this unlocks beyond the screen:** those two capabilities are what make a physical device
-*interactive* rather than automation-only. Today the console tells the truth — a real device shows no
-screen and takes no taps.
-
-**Gate:** open the Samsung in the console, tap something, and have it respond. Publish the latency.
+**Gate:** an iPhone and the Samsung, on the *same* Mac, both in the console, both running a suite.
 
 ---
 
-## P4 — iOS as a first-class device
+## If a demo is needed sooner than the whole plan
 
-**Build:**
-- An iOS backend behind the existing `DeviceControl` interface — `go-ios` sits exactly where `adb`
-  sits. Discovery, metadata, hot-plug.
-- App install and launch; WDA lifecycle supervised the way `appium.ts` supervises UiAutomator2.
-- The WebDriver proxy into the existing automation gateway. The hub already speaks WebDriver and
-  ADR-0011's tunnel path is platform-agnostic.
-- The live view, via the capture source S1 chose. **One implementation, already built in P3.**
-- **Provisioning profiles as product work.** Expiry is explained, never reported as a device fault.
-
-**Gate:** an iPhone and the Samsung, on the *same* Mac, both in the console, both running a suite,
-both showing a live screen.
-
----
-
-## P5 — The devices tab
-
-The console's device list was designed for a homogeneous pool of virtual devices. After P2 and P4 it
-is showing two platforms, two tiers, and two kinds of ownership — devices in the shared pool, and
-devices somebody is lending from the laptop in front of them.
-
-**Build:** physical devices grouped by their agent host; which host, and whether it is online;
-sharing state, changeable from the console as well as the window; entry to the live screen;
-provisioning-profile status for iOS. The REAL/VIRTUAL tag and filter already exist and stay.
-
-**Gate:** somebody who did not build this can look at the page and say which phone is on whose desk.
-
----
-
-## P6 — Ship it
-
-**Build:** a single executable via Node SEA (stable since Node 22 — ADR-0009 §4), signed with
-Developer ID and notarised. Automation runtime fetched on first use with visible progress, not
-bundled — somebody who only wants to *look* at a device should not download a couple of hundred
-megabytes of driver. `--install-service` behind a flag.
-
-**The scheduling risk here is already retired.** ADR-0009 warned that certificates take weeks and
-would become the critical path if started at this phase. The paid Apple account is active, and a
-Developer ID Application certificate is self-service — so this is a short phase rather than a wall.
-
-**Gate — the one that matters, unchanged from ADR-0009:** someone who has never seen MFARM, on a
-machine we do not control, plugs in a phone and sees it in the console **inside two minutes, without
-typing a command or entering a password.**
-
----
-
-## If you need a demo sooner than the whole plan
-
-**P0 → S1 → P1 → P2**, roughly two weeks, gives: download nothing, run the agent, a real window
-opens, sign in with a pairing code, tick one of two phones, and it appears in the console and runs a
-suite. No live screen, no iOS automation depth, no signed binary — the demo is a terminal launch of a
-GUI, which is a very different thing from a terminal *product*.
-
-That is the shortest path to something a stranger can be shown. Everything after it is the
-difference between a demo and a product.
+**M1 → M2 → M3**, roughly two weeks: run the agent, a real window opens, sign in with a pairing code,
+tick one of two phones, and it appears in the console and installs and runs your app. No live screen,
+no signed binary — the demo is a terminal launch of a GUI, which is a different thing from a terminal
+free product, but it is the shortest path to something a stranger can be shown.
 
 ---
 
