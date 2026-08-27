@@ -36,6 +36,12 @@ export const CAPABILITIES = [
                          // Weaker than 'snapshot-reset' and named so the difference cannot be
                          // read as a synonym — see REQUIRED_FOR_TENANT_USE for what it does and
                          // does not promise.
+  'install-reset',       // reset by uninstalling exactly what THIS SESSION installed, and nothing
+                         // else (ADR-0012). Weaker again, and the default for a borrowed handset:
+                         // a device whose owner is a person, not the fleet, cannot have its
+                         // third-party packages swept — that is somebody's banking app. An app the
+                         // owner already had, driven by a session, keeps whatever state that
+                         // session left in it, and the console has to say so.
   'app-install',
   'recording',
   'logcat',
@@ -72,9 +78,19 @@ export type Capability = (typeof CAPABILITIES)[number];
  * `hosts.org_id` at registration and never enters the shared pool (migration 023), so "the next
  * tenant" is the same org that used it last. Anything that puts a `session-reset` device in front
  * of a second org must re-open this decision, not route around it.
+ *
+ * WHAT `install-reset` DOES NOT PROMISE, which is less again, and is the DEFAULT for a handset
+ * somebody lends from their own laptop (ADR-0012). It undoes exactly what the session installed.
+ * An app the owner already had — their mail, their browser — keeps whatever state a session left
+ * in it, and the next session in the same org can see that. That is not a weakness introduced by
+ * the mechanism; it is the irreducible property of borrowing a personal phone, and the only
+ * alternative is wiping the owner's apps, which is what `session-reset` does and why it stopped
+ * being the default. It stays in this group because the tenancy answer above covers it identically:
+ * the device is org-pinned and never enters the shared pool. What it additionally requires is that
+ * the person sharing the device is TOLD, at the moment they share it, what colleagues will see.
  */
 export const REQUIRED_FOR_TENANT_USE: readonly (readonly Capability[])[] = [
-  ['snapshot-reset', 'session-reset'],
+  ['snapshot-reset', 'session-reset', 'install-reset'],
   ['input-datachannel'],
 ];
 
@@ -455,9 +471,20 @@ export const TUNNEL_PATH = '/v1/workers/tunnel';
  * away from editing them.
  */
 export type TunnelFrame =
-  | { ch: number; t: 'open' }
+  | { ch: number; t: 'open'; kind?: TunnelChannelKind }
   | { ch: number; t: 'data'; d: string }
   | { ch: number; t: 'close'; reason?: string };
+
+/**
+ * What a channel carries.
+ *
+ * ABSENT MEANS `dp`, and that is a compatibility rule rather than a default worth having: an agent
+ * built before ADR-0011 hands every channel it is opened to the data plane, so a control plane that
+ * omits the field keeps working against it unchanged. A new agent reads it, and the only reason a
+ * new control plane ever sends `automation` is that the device advertised a `mfarm+tunnel:`
+ * endpoint — which only a new agent does. The skew resolves itself without a version check.
+ */
+export type TunnelChannelKind = 'dp' | 'automation';
 
 /**
  * A frame is small: data-plane messages are input events, signalling payloads and batched log
@@ -471,8 +498,134 @@ export function isTunnelFrame(v: unknown): v is TunnelFrame {
   if (!v || typeof v !== 'object') return false;
   const f = v as Record<string, unknown>;
   if (typeof f.ch !== 'number' || !Number.isInteger(f.ch) || f.ch < 0) return false;
-  if (f.t === 'open' || f.t === 'close') return true;
+  if (f.t === 'open') {
+    // An unrecognised kind is REFUSED rather than read as `dp`. Falling back would hand a future
+    // channel type to the data plane, which answers it with a five-second hello timeout instead of
+    // an error anybody can read.
+    return f.kind === undefined || f.kind === 'dp' || f.kind === 'automation';
+  }
+  if (f.t === 'close') return true;
   return f.t === 'data' && typeof f.d === 'string';
+}
+
+/* ------------------------------------------------------- automation over the tunnel (ADR-0011)
+ *
+ * WHY. ADR-0004 put the automation gateway on the worker's own public listener, and ADR-0008 then
+ * inverted the data plane because a phone arrives on a laptop behind NAT with no address to dial.
+ * Automation was left on the old path, so `gatewayBase()` still demanded a publicly reachable
+ * hostname — which a laptop cannot supply, and which contradicts ADR-0009 §3's claim that nothing
+ * listens on the network. This carries automation on the socket the agent already holds open.
+ *
+ * WHAT IS UNCHANGED, and it is the whole point: the gateway. The agent replays a tunnelled request
+ * against its OWN gateway on loopback, Authorization header included, so the signature check, the
+ * audience check, the device check and the fence check all still run in `gateway.ts` and nowhere
+ * else. An authorization check that exists twice is a check that will eventually disagree with
+ * itself — ADR-0008 said that about the data plane, and it is why this is a transport change only.
+ */
+
+/**
+ * Scheme for an automation endpoint that is only reachable through the host's tunnel.
+ *
+ * A scheme rather than a flag column because `automation_endpoint` is ALREADY the one string that
+ * says how to reach a device's automation, and the hub already concatenates onto it. Anything that
+ * left it looking like an ordinary url would be a url the hub could try to `fetch` — this cannot be
+ * dialled by accident, because nothing in Node knows what to do with it.
+ */
+export const AUTOMATION_TUNNEL_SCHEME = 'mfarm+tunnel:';
+
+/**
+ * What a tunnel-only agent advertises for a device.
+ *
+ * Carries NO authority component, and that is deliberate: the agent composes this before it has
+ * registered, so it does not yet know its own host id. It does not need to — the hub reads the host
+ * from `devices.host_id`, which it has already joined for the grant's `aud`.
+ */
+export function tunnelAutomationEndpoint(localId: string): string {
+  return `${AUTOMATION_TUNNEL_SCHEME}${automationPath(localId)}`;
+}
+
+/**
+ * The origin-form request target for a tunnelled automation url, or undefined if it is an ordinary
+ * one that should be fetched directly.
+ *
+ * A prefix strip rather than `new URL`: for a non-special scheme the WHATWG parser has opinions
+ * about path normalisation that would silently rewrite an element id, and the hub's whole contract
+ * with a driver is that what it sent is what Appium sees.
+ */
+export function parseTunnelAutomationUrl(url: string): string | undefined {
+  if (!url.startsWith(AUTOMATION_TUNNEL_SCHEME)) return undefined;
+  const target = url.slice(AUTOMATION_TUNNEL_SCHEME.length);
+  return target.startsWith(`${AUTOMATION_PREFIX}/`) ? target : undefined;
+}
+
+/**
+ * What a tunnel-only agent advertises for its DATA plane — the sibling of the automation form above.
+ *
+ * `hosts.endpoint` is "where a program on the network dials this worker", and a laptop behind NAT
+ * has no answer to that. ADR-0008 had already inverted the data plane for exactly this case: the
+ * browser reaches the host at `/dp/<hostId>` through the control plane's ingress, over the socket
+ * the agent dialled out. The endpoint column simply never caught up, so `PUBLIC_ENDPOINT` stayed a
+ * hard requirement and the agent refused to start without a routable address it cannot have.
+ *
+ * Like the automation form, this carries NO authority and NO host id. The agent composes it before
+ * it has registered; the control plane already knows which host is asking, because it is the one
+ * holding the tunnel.
+ */
+export const DATA_PLANE_PREFIX = '/dp';
+export const DATA_PLANE_TUNNEL_ENDPOINT = `${AUTOMATION_TUNNEL_SCHEME}${DATA_PLANE_PREFIX}`;
+
+/** Whether a host's `endpoint` means "through my tunnel" rather than a dialable address. */
+export function isTunnelledDataPlane(endpoint: string | null | undefined): boolean {
+  return endpoint === DATA_PLANE_TUNNEL_ENDPOINT;
+}
+
+/**
+ * One message on an `automation` channel.
+ *
+ * Request and response are both streamed as a head frame, then zero or more body chunks, then an
+ * end. Chunked because a tunnel frame is capped at 8 MB while the hub's body limit is 16 MB — a
+ * `pushFile` of a large APK is a real request that a single-frame encoding would drop, and it would
+ * drop it as a mysterious closed channel rather than as a 413.
+ *
+ * Bodies are base64, so the codec never has to care whether a payload is text. `err` exists so an
+ * agent-side failure arrives as a message the hub can put in a WebDriver error, rather than as a
+ * channel that closed for no stated reason.
+ */
+export type AutomationFrame =
+  | { k: 'req'; method: string; path: string; headers: Record<string, string> }
+  | { k: 'res'; status: number; headers: Record<string, string> }
+  | { k: 'd'; b: string }
+  | { k: 'end' }
+  | { k: 'err'; message: string };
+
+/**
+ * Raw bytes per body chunk before base64.
+ *
+ * 512 KB inflates to ~683 KB encoded, an order of magnitude under `TUNNEL_MAX_FRAME_BYTES`. The
+ * headroom is the point: the frame also carries JSON overhead, and a limit that is only just met is
+ * one refactor away from not being met.
+ */
+export const AUTOMATION_CHUNK_BYTES = 512 * 1024;
+
+export function isAutomationFrame(v: unknown): v is AutomationFrame {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as Record<string, unknown>;
+  switch (f.k) {
+    case 'req':
+      return typeof f.method === 'string' && typeof f.path === 'string'
+        && typeof f.headers === 'object' && f.headers !== null;
+    case 'res':
+      return typeof f.status === 'number' && Number.isInteger(f.status)
+        && typeof f.headers === 'object' && f.headers !== null;
+    case 'd':
+      return typeof f.b === 'string';
+    case 'end':
+      return true;
+    case 'err':
+      return typeof f.message === 'string';
+    default:
+      return false;
+  }
 }
 
 /* --------------------------------------------------------------- why something failed (spec §18)

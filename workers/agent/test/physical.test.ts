@@ -34,11 +34,22 @@ describe('what a physical device declares', () => {
    * image", which is what lets the allocator hand a device to a DIFFERENT org. A handset cannot do
    * that, and declaring it here to make scheduling work would leak one tenant's logins to the next.
    */
-  test('it declares session-reset and NEVER snapshot-reset', () => {
+  test('it declares install-reset by default, and NEVER snapshot-reset', () => {
+    // The default moved from `session-reset` to `install-reset` in ADR-0012: a release undoes what
+    // the session installed rather than sweeping the owner's apps. The capability has to move with
+    // it, because it is what the scheduler reads to decide the device can be handed on.
     const caps = new PhysicalDevice(opts).info.capabilities;
-    assert.ok(caps.includes('session-reset'), 'without a reset it would never be schedulable');
+    assert.ok(caps.includes('install-reset'), 'without a reset it would never be schedulable');
+    assert.ok(!caps.includes('session-reset'),
+      'claiming the sweep while doing an install-scoped reset promises clean apps it does not deliver');
     assert.ok(!caps.includes('snapshot-reset'),
       'a phone cannot restore an image; claiming it would put it in the shared pool');
+  });
+
+  test('opting into the sweep declares session-reset instead', () => {
+    const caps = new PhysicalDevice({ ...opts, resetMode: 'full-sweep' }).info.capabilities;
+    assert.ok(caps.includes('session-reset'));
+    assert.ok(!caps.includes('install-reset'), 'a device does one of these, never both');
   });
 
   /**

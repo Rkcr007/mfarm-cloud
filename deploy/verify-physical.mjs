@@ -121,6 +121,21 @@ const NEVER_CLEAR = new Set([
   'com.android.shell',
 ]);
 
+/**
+ * The operator's own keep list, read the same way the agent reads it.
+ *
+ * THIS PROBE USED TO IGNORE IT while printing "are not on the keep list", so an operator who set
+ * the one guardrail that exists and re-ran this to confirm it was told, in the probe's own words,
+ * that the guardrail had done nothing. On a BYO handset that is the difference between "134 of the
+ * owner's apps would be wiped" and "none would" — the exact question this section exists to answer.
+ *
+ * Split identically to `chooseBackends` in workers/agent/src/index.ts, so what is reported here is
+ * what the agent would actually do rather than a second interpretation of the same string.
+ */
+const KEEP_PACKAGES = (process.env.PHYSICAL_KEEP_PACKAGES ?? '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+const KEEP = new Set([...NEVER_CLEAR, ...KEEP_PACKAGES]);
+
 async function main() {
   const serial = await pickSerial();
 
@@ -207,9 +222,15 @@ async function main() {
   const thirdParty = listed.stdout.split('\n')
     .map((l) => l.trim().replace(/^package:/, ''))
     .filter(Boolean);
-  const wouldClear = thirdParty.filter((p) => !NEVER_CLEAR.has(p));
+  const wouldClear = thirdParty.filter((p) => !KEEP.has(p));
+  const kept = thirdParty.length - wouldClear.length;
 
   console.log(`  ${dim(`pm list packages -3 returned ${thirdParty.length}; ${wouldClear.length} are not on the keep list`)}`);
+  // Named separately from the count above because "0 would be cleared" is only trustworthy if the
+  // reason is a keep list the operator actually set, rather than a phone with nothing on it.
+  if (KEEP_PACKAGES.length > 0) {
+    console.log(`  ${dim(`PHYSICAL_KEEP_PACKAGES holds ${KEEP_PACKAGES.length} entr${KEEP_PACKAGES.length === 1 ? 'y' : 'ies'}; ${kept} of the installed packages match it`)}`);
+  }
 
   // The classes of package that do not merely lose their data when cleared, but leave the phone
   // unusable or unreachable afterwards. Read from the system's own current selections rather than
@@ -254,7 +275,12 @@ async function main() {
   for (const pkg of wouldClear) if (a11y.includes(pkg)) noteDanger(pkg, 'an enabled accessibility service');
 
   if (wouldClear.length === 0) {
-    ok('nothing would be cleared', 'this device carries no third-party packages');
+    // WHY the number is zero decides whether it can be trusted: a phone with nothing installed and
+    // a phone whose 134 apps are all protected read identically here, and only one of them stays
+    // true when the owner installs something tomorrow.
+    ok('nothing would be cleared', kept > 0
+      ? `all ${kept} third-party package(s) are on the keep list — note that anything installed AFTER this list was built would still be cleared`
+      : 'this device carries no third-party packages');
   } else {
     // Not a failure — this is the designed behaviour. It is printed because the number is the
     // decision: on Cuttlefish it is ~0 and on a handset it is the owner's phone.

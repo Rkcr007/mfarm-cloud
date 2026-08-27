@@ -39,25 +39,50 @@ attached — see §4.
 - On Linux, **udev rules for the phone's vendor**, or adb reports `no permissions` and the device
   is never enrolled.
 - **Appium + UiAutomator2**, if the host is to serve WebDriver.
+- **No inbound port, no public name, no certificate.** A laptop behind NAT is the expected case:
+  the agent dials out and both the live view and WebDriver ride that one socket (ADR-0008 for the
+  data plane, ADR-0011 for automation). With no `APPIUM_ADVERTISE_HOST` set, the automation gateway
+  binds `127.0.0.1` and is advertised as `mfarm+tunnel:/automation/<localId>`. Set an advertised
+  address only on a host the control plane can genuinely dial, and only if you want the one-hop-
+  shorter direct path.
 
 ## 3. Enrolling the host
 
 The host needs a credential. **Do not paste the fleet secret into a laptop** — it never expires,
-names nobody, and revoking it revokes every machine. Mint a single-use enrollment token instead
-(admin only; there is no console screen for this yet, so it is the API):
+names nobody, and revoking it revokes every machine. Mint a single-use enrollment token instead.
+
+**Minting is admin-only and there is no console screen for it yet, so it is the API — but not with
+an API key.** `POST /v1/account/agent-enrollments` is guarded by `requireOrgAdmin`, which resolves a
+**logged-in user**: it needs the `mfarm_session` cookie from `POST /v1/auth/login`, plus that
+login's `csrfToken` echoed back in the `x-mfarm-csrf` header (the double-submit applies to every
+non-GET request a cookie authenticates). An `Authorization: Bearer mfk_…` API key is a different
+principal kind and is refused here, whatever its role.
 
 ```bash
-curl -X POST https://<farm>/v1/account/agent-enrollments \
-  -H "Authorization: Bearer <admin-api-key>" \
+FARM=https://farm.mfarm.dev
+JAR=$(mktemp)
+
+# 1. Log in as an org owner/admin. The cookie lands in the jar; the CSRF token comes back in the body.
+#    The seeded console password is in deploy/.state/console_password on the control-plane host.
+CSRF=$(curl -sS -c "$JAR" -X POST "$FARM/v1/auth/login" \
   -H 'content-type: application/json' \
-  -d '{"label":"Ravi laptop","ttlHours":24}'
+  -d '{"email":"admin@mfarm.local","password":"<console password>"}' \
+  | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).csrfToken')
+
+# 2. Mint. Cookie jar + CSRF header, and the plaintext is nested under `enrollment`.
+curl -sS -b "$JAR" -X POST "$FARM/v1/account/agent-enrollments" \
+  -H "x-mfarm-csrf: $CSRF" \
+  -H 'content-type: application/json' \
+  -d '{"label":"Ravi laptop","ttlHours":24}' \
+  | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).enrollment.plaintextShownOnce'
 ```
 
-`ttlHours` defaults to 24 and caps at 168. The plaintext comes back **exactly once**, as
-`plaintextShownOnce`, and begins `mae_`. It is single-use, expiring, revocable, and scoped to your
-org — and the host it enrolls carries that org, which is what keeps its phones out of the shared
-pool (see §6). Revoke an unused one with
-`DELETE /v1/account/agent-enrollments/<prefix>`.
+`ttlHours` defaults to 24 and caps at 168. The plaintext comes back **exactly once**, at
+`enrollment.plaintextShownOnce`, and begins `mae_`. It is single-use, expiring, revocable, and
+scoped to your org — and the host it enrolls carries that org, which is what keeps its phones out of
+the shared pool (see §6). Revoke an unused one with `DELETE /v1/account/agent-enrollments/<prefix>`,
+which needs the same cookie and the same CSRF header. Listing them
+(`GET /v1/account/agent-enrollments`) needs the cookie but no CSRF header, because it is a GET.
 
 Then run the agent. The enrollment token goes in the **same variable** the fleet secret would —
 registration tells the three credential kinds apart by prefix, so enrolling a laptop is a different
@@ -115,15 +140,45 @@ Device ids are derived from the adb serial (`phone-39121FDH2003VK`), so they sur
 agent restart. An index would not: `phone-1` would become a different handset the moment someone
 unplugged the first one.
 
-## 6. What a reset does, and does not, do (spec §17)
+## 6. What a reset does, and does not, do (spec §17, ADR-0012)
 
-Between sessions the agent runs a **package-level cleanup**: `pm clear` on every third-party
-package, minus a keep list, then HOME. It never factory-resets — §17 forbids it, and the agent could
-not re-authorize adb afterwards anyway.
+**By default, a release undoes exactly what the session installed and touches nothing else.** The
+agent keeps a ledger of the packages it installed during the session and uninstalls those, in
+reverse order, then presses HOME. If the session installed nothing, the release changes nothing.
 
-This is **weaker than a snapshot restore, and the difference is deliberate.** Clearing app data
+That default exists because of what the alternative does to a borrowed phone. On the first handset
+ever enrolled, `pm list packages -3` returned **134 packages** — banking, an Aadhaar authenticator,
+chat, ride-hailing. The old behaviour cleared the data of all of them, and a session that *fails*
+still allocates and releases, so it still reset: two failed attempts each fired a full sweep before
+the product had ever worked once. A default that is safe only when an operator remembers a variable
+is not a safe default when the failure is unrecoverable.
+
+| Mode | What a release does | Capability declared |
+|---|---|---|
+| `install-scoped` **(default)** | Uninstalls what this session installed | `install-reset` |
+| `full-sweep` | `pm clear` on every third-party package minus the keep list | `session-reset` |
+
+Opt into the sweep with `PHYSICAL_RESET_MODE=full-sweep`, and only on a device you own. Run
+`node deploy/verify-physical.mjs` first — it prints exactly what would be cleared on that handset
+and clears nothing.
+
+**Installing over an app the device already has is refused**, because a release could not undo it:
+uninstalling would take the owner's copy and their data, and there is no version to put back. The
+refusal needs `aapt2` from the SDK build-tools to read the APK's package name before installing —
+without it the agent can only report the overwrite afterwards, and says so at startup. Fix with
+`./deploy/install-build-tools.sh`.
+
+**What `install-reset` does not promise.** An app the owner already had, which a session drove,
+keeps whatever state that session left in it — and the next session in the same org can see it.
+That is the irreducible property of borrowing somebody's phone; the only alternative is wiping
+their apps. Anyone sharing a personal device should be told this.
+
+Neither mode ever factory-resets — §17 forbids it, and the agent could not re-authorize adb
+afterwards anyway.
+
+Both are **weaker than a snapshot restore, and the difference is deliberate.** Clearing app data
 leaves accounts, keychain items, clipboard contents, WebView caches and granted permissions behind.
-So a physical device declares `session-reset`, never `snapshot-reset`, and:
+So a physical device declares `session-reset` or `install-reset`, never `snapshot-reset`, and:
 
 > **A physical device is pinned to the org that enrolled its host, and never enters the shared
 > pool.** That is what makes the weaker reset safe: the next tenant is the same tenant.
@@ -131,12 +186,14 @@ So a physical device declares `session-reset`, never `snapshot-reset`, and:
 This is enforced by construction, not by policy — the host carries `org_id`, devices inherit it at
 registration, and `allocate_device` has always filtered on it.
 
-Packages never cleared, whatever you configure: `io.appium.settings`,
-`io.appium.uiautomator2.server`, `io.appium.uiautomator2.server.test`, `com.android.shell`.
-Clearing those breaks the phone's ability to run anything.
+Packages never cleared or uninstalled, whatever you configure — in either mode:
+`io.appium.settings`, `io.appium.uiautomator2.server`, `io.appium.uiautomator2.server.test`,
+`com.android.shell`. Removing those leaves a phone that enrols, schedules, and fails every session
+it is given.
 
 Add your own with `PHYSICAL_KEEP_PACKAGES` (comma-separated) — a corporate VPN client, an MDM agent,
-a test-account helper.
+a test-account helper. It matters most in `full-sweep`; in the default mode the ledger is already
+the whole blast radius.
 
 **A failed reset takes the device out of the pool.** That is the safety property: if cleanup could
 not finish, the next session must not get the device.

@@ -113,6 +113,8 @@ useful half.
 | [0008](adrs/0008-physical-devices-behind-the-existing-agent.md) | Physical devices are a third **backend** behind the existing agent, reached over a tunnel the agent dials out | A second standalone agent, and a statically-routed `/dp/*`. A phone arrives on a laptop behind NAT, where neither works. |
 | [0009](adrs/0009-the-agent-is-a-product.md) | The agent is **one signed binary with a loopback window** — no installer, no admin rights | A container (USB passthrough is unsupported on macOS/Windows), WebUSB (cannot run Appium or reach iOS), and a platform installer as the *first* path (needs elevation, which QA laptops do not grant). |
 | [0010](adrs/0010-ios-without-xcode.md) | iOS runs on **every host**: WebDriverAgent is built once by us, re-signed, and installed anywhere | Appium's XCUITest driver, which drags the macOS requirement back in. WDA already speaks WebDriver, and the gateway already proxies it. |
+| [0011](adrs/0011-automation-over-the-tunnel.md) | Automation rides the agent's outbound tunnel; the gateway binds **loopback** | Verifying the grant in the tunnel handler. A check that exists twice eventually disagrees with itself, so the agent replays the request against its own gateway. |
+| [0012](adrs/0012-borrowed-devices-reset-by-what-they-installed.md) | A release undoes **what the session installed**; the package sweep is opt-in, chosen by the device's owner | Keeping the sweep behind a mandatory keep list. An unrecoverable default that is safe only when configured — and the probe that checked it was itself wrong. |
 
 ---
 

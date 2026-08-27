@@ -1,4 +1,6 @@
 import { spawn, execFile } from 'node:child_process';
+import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Capability } from '@mfarm/protocol';
 import type {
@@ -44,6 +46,17 @@ const KEYCODES: Record<KeyName, string> = {
  * things that make the device reachable at all. Uninstalling the Appium server mid-farm leaves a
  * phone that enrolls, schedules, and fails every session with an error pointing at the test.
  */
+/**
+ * How a release cleans this device — ADR-0012.
+ *
+ * `install-scoped` IS THE DEFAULT, and the default is the whole decision. The alternative sweeps
+ * every third-party package, which on an operator-owned farm phone is nearly nothing and on a
+ * handset somebody lent from their desk is 134 apps including their bank and their authenticator.
+ * A default that is safe only when an operator remembers a variable is not a safe default, and the
+ * failure is not recoverable.
+ */
+export type ResetMode = 'install-scoped' | 'full-sweep';
+
 const NEVER_CLEAR = [
   'io.appium.settings',
   'io.appium.uiautomator2.server',
@@ -67,6 +80,19 @@ export interface PhysicalOptions {
    * factory reset.
    */
   keepPackages?: string[];
+  /**
+   * How a release cleans this device. Defaults to `install-scoped` (ADR-0012) — `full-sweep` is
+   * the pre-ADR behaviour and is a choice the device's OWNER makes, after being shown what it
+   * would clear, never a default anything falls into.
+   */
+  resetMode?: ResetMode;
+  /**
+   * Where the install ledger is persisted. Overridable so a test does not write to `$HOME`, and
+   * so two agents on one machine cannot share a file.
+   */
+  ledgerPath?: string;
+  /** `aapt2`, for reading an APK's package name before installing it. See `packageNameOf`. */
+  aapt2Path?: string;
 }
 
 function run(bin: string, args: string[], timeoutMs = 30_000): Promise<string> {
@@ -96,6 +122,19 @@ export class PhysicalDevice implements DeviceControl {
   readonly info: DeviceInfo;
   private readonly serial: string;
   private readonly keep: Set<string>;
+  private readonly resetMode: ResetMode;
+  private readonly ledgerPath: string;
+  private readonly aapt2Path?: string;
+  /**
+   * What this session installed, and therefore the entire blast radius of an `install-scoped`
+   * release.
+   *
+   * PERSISTED, not just held in memory. The agent restarting mid-session is ordinary — a phone
+   * replug re-registers it — and an in-memory ledger would forget the tester's APK, leaving it on
+   * somebody's personal phone with nothing that would ever remove it. A file costs one write per
+   * install and closes that hole.
+   */
+  private installed: string[] = [];
   /** Held open for the life of the device. Reopening per event costs 57-77ms of pure overhead. */
   private shell?: ReturnType<typeof spawn>;
   private shellSeq = 0;
@@ -103,6 +142,12 @@ export class PhysicalDevice implements DeviceControl {
   constructor(opts: PhysicalOptions) {
     this.serial = opts.serial;
     this.keep = new Set([...NEVER_CLEAR, ...(opts.keepPackages ?? [])]);
+    this.resetMode = opts.resetMode ?? 'install-scoped';
+    this.aapt2Path = opts.aapt2Path;
+    // Per DEVICE, not per host: two phones on one laptop have separate ledgers, and the serial is
+    // the identity that survives a replug.
+    this.ledgerPath = opts.ledgerPath
+      ?? join(process.env.HOME ?? '/tmp', '.mfarm', `installed-${opts.serial}.json`);
     this.info = {
       localId: opts.localId,
       platform: 'android',
@@ -121,7 +166,13 @@ export class PhysicalDevice implements DeviceControl {
        * emulator; unmeasured over USB) and `health()` says so rather than hiding it.
        */
       capabilities: [
-        'input-datachannel', 'session-reset', 'app-install', 'logcat', 'screenshot', 'ui-hierarchy',
+        'input-datachannel',
+        // WHICH RESET THIS DEVICE ACTUALLY DOES, never both and never the stronger one by default
+        // (ADR-0012). The scheduler reads this to decide the device can be handed on at all, and a
+        // device that swept nothing while claiming `session-reset` would be claiming the next
+        // session gets clean applications when it does not.
+        (opts.resetMode ?? 'install-scoped') === 'full-sweep' ? 'session-reset' : 'install-reset',
+        'app-install', 'logcat', 'screenshot', 'ui-hierarchy',
       ] as Capability[],
       // A real panel, once discovery has read it. The fallback is a common phone geometry rather
       // than zeroes, because the console divides by these to map a click to a coordinate.
@@ -226,6 +277,66 @@ export class PhysicalDevice implements DeviceControl {
    * next session a device carrying the last one's logins.
    */
   async resetToSnapshot(): Promise<void> {
+    if (this.resetMode === 'install-scoped') return this.resetByUninstall();
+    return this.resetBySweep();
+  }
+
+  /**
+   * The default: undo exactly what this session installed, and touch nothing else (ADR-0012).
+   *
+   * Uninstall rather than `pm clear`, and the difference is the whole point. `pm clear` wipes an
+   * app's data and leaves it installed, which is right for a farm phone that will run the same
+   * suite again and wrong for a borrowed one — it would leave the tester's APK sitting on
+   * somebody's home screen after they unplugged the cable.
+   *
+   * Reverse order, because a suite that installed a test harness after the app under test should
+   * see them removed the other way round.
+   *
+   * AN EMPTY LEDGER IS A SUCCESSFUL RESET, not a suspicious one. A session that failed before it
+   * installed anything has nothing to undo — which is exactly the case that, before this ADR, fired
+   * a full package sweep on the unhappy path before the product had ever worked once.
+   */
+  private async resetByUninstall(): Promise<void> {
+    const ledger = this.installed.length > 0 ? this.installed : await this.loadLedger();
+    const failed: string[] = [];
+
+    for (const pkg of [...ledger].reverse()) {
+      // NEVER_CLEAR is honoured here too. The automation helpers are installed by the driver
+      // rather than by a session, but a ledger that ever picked one up must not uninstall the
+      // thing the next session needs in order to run at all.
+      if (this.keep.has(pkg)) continue;
+      try {
+        await this.adb(['uninstall', pkg], 120_000);
+      } catch (e) {
+        failed.push(`${pkg} (${(e as Error).message})`);
+      }
+    }
+
+    try {
+      await this.adb(['shell', 'input', 'keyevent', 'KEYCODE_HOME'], 10_000);
+    } catch { /* the failure that matters is the uninstall above, not the keypress */ }
+
+    if (failed.length > 0) {
+      // The ledger is deliberately NOT cleared: what could not be removed is still on the device
+      // and still ours to remove, and the device is about to leave the pool anyway.
+      throw new Error(
+        `could not uninstall ${failed.length} package(s) this session installed on `
+        + `${this.info.localId}, so they are still on the device: `
+        + `${failed.slice(0, 3).join('; ')}${failed.length > 3 ? ' …' : ''}`);
+    }
+
+    await this.saveLedger([]);
+    await rm(this.ledgerPath, { force: true });
+  }
+
+  /**
+   * The opt-in sweep: every third-party package minus the keep list.
+   *
+   * Unchanged from what ADR-0008 shipped, and no longer the default — see ADR-0012 for why, and
+   * `deploy/verify-physical.mjs` for what it would clear on a given handset before anyone agrees
+   * to it.
+   */
+  private async resetBySweep(): Promise<void> {
     const listed = await this.adb(['shell', 'pm', 'list', 'packages', '-3'], 60_000);
     const packages = listed.split('\n')
       .map((l) => l.trim().replace(/^package:/, ''))
@@ -258,9 +369,133 @@ export class PhysicalDevice implements DeviceControl {
         `could not clear ${failed.length} package(s) on ${this.info.localId}, so it is not clean for `
         + `the next session: ${failed.slice(0, 3).join('; ')}${failed.length > 3 ? ' …' : ''}`);
     }
+
+    // A sweep supersedes the ledger — everything in it was just cleared — so leaving entries behind
+    // would have the NEXT release uninstall packages this one already dealt with.
+    await this.saveLedger([]);
+    await rm(this.ledgerPath, { force: true });
+  }
+
+  // ---------------------------------------------------------------- the install ledger (ADR-0012)
+
+  /** Third-party packages currently on the device, as a set. The one question `pm` answers cheaply. */
+  private async thirdPartyPackages(): Promise<Set<string>> {
+    const out = await this.adb(['shell', 'pm', 'list', 'packages', '-3'], 60_000);
+    return new Set(
+      out.split('\n').map((l) => l.trim().replace(/^package:/, '')).filter(Boolean),
+    );
+  }
+
+  private async loadLedger(): Promise<string[]> {
+    try {
+      const raw = JSON.parse(await readFile(this.ledgerPath, 'utf8')) as unknown;
+      return Array.isArray(raw) ? raw.filter((p): p is string => typeof p === 'string') : [];
+    } catch {
+      // Absent, unreadable or corrupt all mean the same thing and it is the SAFE thing: this device
+      // has nothing recorded, so a release uninstalls nothing. The failure direction matters —
+      // guessing from a damaged file is how you uninstall somebody's app.
+      return [];
+    }
+  }
+
+  private async saveLedger(packages: string[]): Promise<void> {
+    this.installed = packages;
+    await mkdir(dirname(this.ledgerPath), { recursive: true });
+    await writeFile(this.ledgerPath, JSON.stringify(packages), { mode: 0o600 });
+  }
+
+  /**
+   * An APK's package name, read from the file BEFORE it is installed.
+   *
+   * This is what makes the refusal in `installApp` a refusal rather than an apology: knowing the
+   * name up front is the difference between declining to overwrite the owner's app and discovering
+   * afterwards that we already did.
+   *
+   * `aapt2` ships in the Android SDK's build-tools, which the farm already treats as a dependency
+   * (`deploy/install-build-tools.sh`, and farm-up.sh warns when it is missing because `appium:app`
+   * needs it too). Returns undefined when it is absent, and the caller degrades — it does not
+   * pretend to know.
+   */
+  private async packageNameOf(apkPath: string): Promise<string | undefined> {
+    if (!this.aapt2Path) return undefined;
+    try {
+      const out = await run(this.aapt2Path, ['dump', 'packagename', apkPath], 60_000);
+      const name = out.split('\n')[0]?.trim();
+      return name && /^[A-Za-z][\w.]*$/.test(name) ? name : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async installApp(apkPath: string): Promise<void> {
+    if (this.resetMode !== 'install-scoped') {
+      await this.rawInstall(apkPath);
+      return;
+    }
+
+    if (this.installed.length === 0) this.installed = await this.loadLedger();
+    const pkg = await this.packageNameOf(apkPath);
+
+    /**
+     * THE GOOD PATH: we know what is in the APK before it touches the device.
+     *
+     * With the name in hand there is nothing to deduce afterwards — the refusal below is a refusal
+     * rather than an apology, and no second `pm list packages` is needed to find out what landed.
+     */
+    if (pkg) {
+      // Re-installing what this session already installed is ordinary; a suite that pushes its APK
+      // once per test does it constantly. The ledger already owns the package, so a release still
+      // undoes exactly one thing.
+      if (!this.installed.includes(pkg)) {
+        /**
+         * REFUSING TO INSTALL OVER AN APP THE OWNER ALREADY HAS (ADR-0012 §2).
+         *
+         * The ledger's contract is that a release undoes exactly what a session did. It cannot undo
+         * this: uninstalling takes the owner's copy AND their data, and there is no version to put
+         * back. A failed test is recoverable; silently replacing somebody's banking app is not.
+         */
+        if ((await this.thirdPartyPackages()).has(pkg)) {
+          throw new Error(
+            `refusing to install ${pkg} on ${this.info.localId}: it is already installed and was `
+            + `not put there by this session, so a release could not undo it without taking the `
+            + `owner's copy and its data. Remove it from the device first, or set this device to `
+            + `full-sweep.`,
+          );
+        }
+      }
+      await this.rawInstall(apkPath);
+      // Ledgered AFTER the install succeeds. The other order would have a release try to uninstall
+      // something that was never there, which fails, which takes a healthy device out of the pool.
+      if (!this.installed.includes(pkg)) await this.saveLedger([...this.installed, pkg]);
+      return;
+    }
+
+    /**
+     * THE DEGRADED PATH: no `aapt2`, so the package name is unknowable in advance.
+     *
+     * All that is left is to look at the device before and after and see what appeared. It cannot
+     * prevent an overwrite — by the time the difference is visible the owner's app is already
+     * gone — so it reports one loudly instead. `index.ts` warns about this at startup, where there
+     * is still time to install build-tools.
+     */
+    const before = await this.thirdPartyPackages();
+    await this.rawInstall(apkPath);
+    const fresh = [...await this.thirdPartyPackages()].filter((p) => !before.has(p));
+
+    if (fresh.length === 0) {
+      throw new Error(
+        `installed an APK on ${this.info.localId} that added no new package, so it either REPLACED `
+        + `one already on the device — which a release cannot undo — or reinstalled one this `
+        + `session had already installed. Without aapt2 the agent cannot tell those apart. Install `
+        + `build-tools so it can refuse the dangerous one before it happens: `
+        + `deploy/install-build-tools.sh`,
+      );
+    }
+    await this.saveLedger([...this.installed, ...fresh.filter((p) => !this.installed.includes(p))]);
+  }
+
+  /** The install itself, with adb's habit of reporting failure on stdout accounted for. */
+  private async rawInstall(apkPath: string): Promise<void> {
     const out = await this.adb(['install', '-r', apkPath], INSTALL_TIMEOUT_MS);
     if (/^\s*(Failure|Error)/im.test(out)) {
       throw new Error(`adb install failed on ${this.info.localId}: ${out.trim().split('\n').slice(-3).join(' ')}`);
