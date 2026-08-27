@@ -1,6 +1,10 @@
+import { access, readdir } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { cpus, hostname as osHostname, totalmem } from 'node:os';
 import { join } from 'node:path';
-import { automationPath } from '@mfarm/protocol';
+
+const { X_OK } = fsConstants;
+import { automationIsTunnelled, dataPlaneEndpoint, gatewayBase, tunnelEnabled } from './automation-endpoint.ts';
 import { Agent } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
 import { AutomationGateway } from './gateway.ts';
@@ -46,6 +50,32 @@ const flag = (key: string): boolean => /^(1|true|yes|on)$/i.test(process.env[key
  * device is the single most common physical-farm support ticket, and the version of this that
  * filters them out silently turns "tap Allow on the screen" into an afternoon.
  */
+/**
+ * `aapt2` from the Android SDK's build-tools, if this machine has any.
+ *
+ * Searched rather than configured: `ANDROID_HOME` is already required for Appium, build-tools sit
+ * at a versioned path underneath it, and asking an operator for a fifth variable naming a binary
+ * inside a directory they already told us about is how setup becomes a support ticket. Newest
+ * version wins — `readdir` sorted descending is good enough for the `NN.N.N` names these use, and
+ * any of them can read a package name.
+ */
+async function findAapt2(): Promise<string | undefined> {
+  if (process.env.AAPT2_PATH) return process.env.AAPT2_PATH;
+  const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
+  if (!sdk) return undefined;
+  try {
+    const versions = (await readdir(join(sdk, 'build-tools'))).sort().reverse();
+    for (const v of versions) {
+      const candidate = join(sdk, 'build-tools', v, 'aapt2');
+      try {
+        await access(candidate, X_OK);
+        return candidate;
+      } catch { /* try the next version */ }
+    }
+  } catch { /* no build-tools directory at all */ }
+  return undefined;
+}
+
 async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
   const found = await discover();
   if (found.length === 0) {
@@ -58,6 +88,36 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
     if (d.state === 'device') continue;
     // One line per unusable device, naming the device, the state and what to do about it.
     console.warn(`[agent] ${d.serial} is ${d.state} and will NOT be enrolled — ${d.remedy}`);
+  }
+
+  /**
+   * How a release cleans these phones — ADR-0012, and `install-scoped` unless somebody says
+   * otherwise IN THIS PROCESS's environment.
+   *
+   * There is no console setting for this yet; when there is, it belongs beside the per-device
+   * sharing toggle, because it is the same trust decision made by the same person. Until then an
+   * operator provisioning a dedicated farm phone opts in here, and a borrowed handset gets the safe
+   * mode by doing nothing at all — which is the entire point of the ADR.
+   */
+  const resetMode = process.env.PHYSICAL_RESET_MODE === 'full-sweep' ? 'full-sweep' as const : 'install-scoped' as const;
+  if (resetMode === 'full-sweep') {
+    console.warn(
+      '[agent] PHYSICAL_RESET_MODE=full-sweep — a release will `pm clear` EVERY third-party package '
+      + 'on these devices except the keep list. Correct for a dedicated farm phone; on somebody\'s '
+      + 'own handset it wipes their apps\' data. `node deploy/verify-physical.mjs` lists exactly what.',
+    );
+  }
+
+  // `aapt2` lets the agent read an APK's package name BEFORE installing it, which is what turns
+  // "we overwrote the owner's app" from a report into a refusal. Absent is survivable, and
+  // installApp says so at the moment it matters rather than here.
+  const aapt2Path = await findAapt2();
+  if (!aapt2Path && resetMode === 'install-scoped') {
+    console.warn(
+      '[agent] no aapt2 in the Android SDK build-tools — the agent cannot read an APK\'s package '
+      + 'name in advance, so installing over an app the device already has will be reported after '
+      + 'the fact instead of refused. Fix: ./deploy/install-build-tools.sh',
+    );
   }
 
   return usable.map((d) => {
@@ -75,6 +135,8 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
       sdkVersion: d.props?.sdkVersion,
       screen: d.props?.screen,
       keepPackages: (process.env.PHYSICAL_KEEP_PACKAGES ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+      resetMode,
+      aapt2Path,
     });
   });
 }
@@ -213,29 +275,6 @@ const UNHEALTHY_GRACE_MS = Number(process.env.APPIUM_UNHEALTHY_GRACE_MS ?? 60_00
 /** A drain that hangs is a host that never releases its devices, so it gets a hard deadline. */
 const DRAIN_TIMEOUT_MS = Number(process.env.AGENT_DRAIN_TIMEOUT_MS ?? 30_000);
 
-/**
- * The externally-reachable base url of this host's automation gateway.
- *
- * `AUTOMATION_ADVERTISE_BASE` wins outright and is what a TLS deployment sets
- * (`https://worker-1.example:8443`) — the worker already terminates TLS for the data plane, and
- * ADR-0004 point 3 puts automation on that same public listener rather than inventing a second
- * exposure class. Otherwise it is composed from `APPIUM_ADVERTISE_HOST`, which keeps exactly the
- * meaning ADR-0004 gives it: the externally-reachable name for the worker.
- */
-function gatewayBase(port: number): string {
-  const explicit = process.env.AUTOMATION_ADVERTISE_BASE;
-  if (explicit) return explicit.replace(/\/+$/, '');
-  const host = process.env.APPIUM_ADVERTISE_HOST ?? process.env.PUBLIC_HOST;
-  if (!host) {
-    throw new Error(
-      'APPIUM_ENABLED needs somewhere to advertise the automation gateway. Set ' +
-      'AUTOMATION_ADVERTISE_BASE to its full public base url, or APPIUM_ADVERTISE_HOST/PUBLIC_HOST ' +
-      'to this host\'s externally-reachable name. Advertising 127.0.0.1 would register an endpoint ' +
-      'only this machine can reach.',
-    );
-  }
-  return `http://${host}:${port}`;
-}
 
 /**
  * Per-device automation endpoints to register, keyed by local id.
@@ -250,7 +289,7 @@ function gatewayBase(port: number): string {
  */
 async function resolveAutomationEndpoints(
   supervisors: AppiumSupervisor[],
-  base: string,
+  endpointFor: (localId: string) => string,
 ): Promise<Record<string, string>> {
   const manual = process.env.AUTOMATION_ENDPOINT;
   // Escape hatch, unchanged: an externally-managed Appium (a systemd unit, a sidecar, one server
@@ -271,7 +310,7 @@ async function resolveAutomationEndpoints(
   const endpoints: Record<string, string> = {};
   for (const { sup, ready } of started) {
     if (ready) {
-      endpoints[sup.localId] = `${base}${automationPath(sup.localId)}`;
+      endpoints[sup.localId] = endpointFor(sup.localId);
       console.log(`[agent] Appium ready for ${sup.localId} on :${sup.port}, advertised at ${endpoints[sup.localId]}`);
     } else {
       console.error(
@@ -316,8 +355,10 @@ async function main(): Promise<void> {
   );
 
   const gatewayPort = Number(process.env.AUTOMATION_GATEWAY_PORT ?? 8090);
+  // Composed per device, and composed EAGERLY for the first one so an unadvertisable gateway is a
+  // startup failure rather than a device that quietly registers without the `webdriver` capability.
   const automationEndpoints = supervisors.length > 0
-    ? await resolveAutomationEndpoints(supervisors, gatewayBase(gatewayPort))
+    ? await resolveAutomationEndpoints(supervisors, (localId) => gatewayBase(gatewayPort, localId))
     : {};
 
   const agent = new Agent({
@@ -325,7 +366,9 @@ async function main(): Promise<void> {
     registrationToken: env('WORKER_REGISTRATION_TOKEN'),
     hostname: env('WORKER_HOSTNAME', osHostname()),
     region: env('REGION'),
-    endpoint: env('PUBLIC_ENDPOINT'),
+    // NOT `env('PUBLIC_ENDPOINT')` any more. It had no default, so an agent on a laptop refused to
+    // start over an address that a tunnelled host has never used — see `dataPlaneEndpoint`.
+    endpoint: dataPlaneEndpoint(),
     // The gateway's public path per device (ADR-0004), or — when Appium is managed outside this
     // agent — whatever AUTOMATION_ENDPOINT names, which stays host-level and must not be publicly
     // routable, because an open Appium port is unauthenticated device control.
@@ -347,6 +390,10 @@ async function main(): Promise<void> {
    * number and handed to the agent above. A failure to bind is therefore fatal rather than something
    * to work around — the alternative is registering an endpoint that resolves to nothing.
    */
+  const gatewayBindHost = process.env.AUTOMATION_BIND_HOST?.trim()
+    || process.env.BIND_HOST?.trim()
+    || (automationIsTunnelled() ? '127.0.0.1' : undefined);
+
   const gateway = supervisors.length > 0
     ? new AutomationGateway({
         agent,
@@ -361,9 +408,14 @@ async function main(): Promise<void> {
     // belongs on the docker bridge or on loopback. The data plane has to be reachable by a browser
     // and cannot live there. Sharing one variable meant satisfying the hub broke the viewer, which
     // is exactly what happened (HANDOFF known issue 15).
-    const bindHost = process.env.AUTOMATION_BIND_HOST?.trim() || process.env.BIND_HOST?.trim() || undefined;
-    await gateway.listen(gatewayPort, bindHost);
-    console.log(`[agent] automation gateway listening on ${bindHost ?? '0.0.0.0'}:${gatewayPort}`);
+    //
+    // ON THE TUNNEL PATH IT IS LOOPBACK, and not as a default an operator can drift off: the only
+    // client is this same process, replaying what arrived on the tunnel. That is what makes
+    // ADR-0009 §3's "nothing listens on the network" true of a laptop rather than aspirational —
+    // an explicit bind variable is still honoured, because an operator who set one is describing
+    // a deployment we cannot see, but nothing else can widen it by accident.
+    await gateway.listen(gatewayPort, gatewayBindHost);
+    console.log(`[agent] automation gateway listening on ${gatewayBindHost ?? '0.0.0.0'}:${gatewayPort}`);
   }
 
   const state = await agent.start();
@@ -430,10 +482,19 @@ async function main(): Promise<void> {
    * Set MFARM_TUNNEL=0 to leave it off — for a host where the inbound path is known-good and an
    * extra long-lived connection is not wanted.
    */
-  const tunnel = process.env.MFARM_TUNNEL === '0' ? undefined : new AgentTunnel({
+  const tunnel = !tunnelEnabled() ? undefined : new AgentTunnel({
     controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
     agent,
     dataPlane: dp,
+    // Only when automation is actually advertised over the tunnel (ADR-0011). A host that published
+    // a directly-dialable gateway must refuse a tunnelled automation channel rather than serve one:
+    // accepting both would mean a route its operator did not advertise still works.
+    // The BOUND address, not a hardcoded loopback: an operator who pointed AUTOMATION_BIND_HOST
+    // somewhere else has moved the only listener this is allowed to reach, and connecting to
+    // 127.0.0.1 anyway would fail every command with a message about a gateway that is running.
+    automationTarget: gateway && automationIsTunnelled()
+      ? { host: gatewayBindHost ?? '127.0.0.1', port: gatewayPort }
+      : undefined,
     log: (msg, meta) => console.log(`[agent] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
   });
   tunnel?.start();
@@ -525,7 +586,7 @@ async function main(): Promise<void> {
     // the control plane was told about, and it keeps listening either way.
     agent.setAutomationEndpoint(
       localId,
-      healthy ? `${gatewayBase(gatewayPort)}${automationPath(localId)}` : undefined,
+      healthy ? gatewayBase(gatewayPort, localId) : undefined,
     );
 
     // This device registered without `webdriver` because its Appium was not ready in time. There is

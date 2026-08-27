@@ -2,7 +2,10 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { FastifyInstance } from 'fastify';
 import type { Duplex } from 'node:stream';
 import type { IncomingMessage } from 'node:http';
-import { TUNNEL_PATH, TUNNEL_MAX_FRAME_BYTES, isTunnelFrame, type TunnelFrame } from '@mfarm/protocol';
+import {
+  TUNNEL_PATH, TUNNEL_MAX_FRAME_BYTES, isTunnelFrame,
+  type TunnelChannelKind, type TunnelFrame,
+} from '@mfarm/protocol';
 import { authenticate } from '../auth.ts';
 
 /**
@@ -36,10 +39,47 @@ import { authenticate } from '../auth.ts';
  */
 const MAX_CHANNELS_PER_HOST = 32;
 
+/**
+ * Cap on in-flight automation commands per host, counted SEPARATELY from viewers.
+ *
+ * Sharing one budget looked tidy and is wrong in both directions. `/dp/*` takes no credential, so
+ * the viewer cap is a defence against strangers; an automation channel is opened by the hub itself,
+ * for a device it has already allocated to a paying session, and is bounded by the host's device
+ * count as a result. Counting them together would let anyone who knows a host id open 32 sockets
+ * and stop that host serving WebDriver — a denial of service on the paid path, mounted from the
+ * unauthenticated one.
+ *
+ * 64 rather than a device count because a host's device count is not known here, and because the
+ * number is a backstop against a leak in this file rather than a scheduling limit. A host with more
+ * than 64 WebDriver commands genuinely in flight has more devices than any farm this has run on.
+ */
+const MAX_AUTOMATION_CHANNELS_PER_HOST = 64;
+
+/**
+ * Where a channel's inbound frames go, and how it is torn down.
+ *
+ * An indirection over `WebSocket` so that a channel does not have to be a browser. ADR-0011 adds
+ * one that is not: an automation channel's far end is the hub, in this process. The registry still
+ * only copies bytes — this is the seam that lets something other than a socket be on the near end
+ * of the copy, and nothing more.
+ */
+interface ChannelSink {
+  /** Which budget this channel is counted against. See the two caps above. */
+  kind: TunnelChannelKind;
+  deliver(d: string): void;
+  drop(reason: string): void;
+}
+
 interface HostTunnel {
   agent: WebSocket;
-  channels: Map<number, WebSocket>;
+  channels: Map<number, ChannelSink>;
   nextCh: number;
+}
+
+/** A channel this process holds itself, rather than one that terminates in a browser. */
+export interface ControlChannel {
+  send(d: string): void;
+  close(): void;
 }
 
 export class TunnelRegistry {
@@ -96,13 +136,19 @@ export class TunnelRegistry {
   openChannel(hostId: string, browser: WebSocket): boolean {
     const tunnel = this.hosts.get(hostId);
     if (!tunnel || tunnel.agent.readyState !== WebSocket.OPEN) return false;
-    if (tunnel.channels.size >= MAX_CHANNELS_PER_HOST) return false;
+    if (this.countOf(tunnel, 'dp') >= MAX_CHANNELS_PER_HOST) return false;
 
     // Monotonic and never reused for the life of the tunnel, so a late frame from a channel that
     // has closed cannot land on its replacement.
     const ch = tunnel.nextCh++;
-    tunnel.channels.set(ch, browser);
-    this.sendToAgent(tunnel, { ch, t: 'open' });
+    tunnel.channels.set(ch, {
+      kind: 'dp',
+      deliver: (d) => { try { browser.send(d); } catch { /* the close handler cleans up */ } },
+      drop: (reason) => { try { browser.close(1011, reason); } catch { /* already gone */ } },
+    });
+    // `kind` is stated rather than left to default so that reading this line answers what the
+    // channel carries. An agent built before ADR-0011 ignores the field and gets what it expects.
+    this.sendToAgent(tunnel, { ch, t: 'open', kind: 'dp' });
 
     browser.on('message', (raw) => {
       const d = raw.toString();
@@ -120,6 +166,49 @@ export class TunnelRegistry {
     return true;
   }
 
+  /**
+   * Open a channel this process holds itself — ADR-0011, the hub's automation path.
+   *
+   * Same allocation, same relay, same cap as a browser's channel. The ONLY differences are that
+   * the near end is a callback rather than a socket, and that the open frame names its kind so the
+   * agent routes it to its gateway instead of to the data plane.
+   *
+   * `undefined` when the host has no tunnel, which the hub turns into `automation_unreachable` —
+   * the same error a dead direct endpoint produces, because to a suite it is the same fact.
+   *
+   * This does not make the registry an authorization boundary any more than `openChannel` does. It
+   * still copies opaque strings; the grant inside them is minted by the hub and checked by the
+   * agent, and this class remains unable to read either.
+   */
+  openControlChannel(
+    hostId: string,
+    handlers: { onData: (d: string) => void; onClose: (reason: string) => void },
+  ): ControlChannel | undefined {
+    const tunnel = this.hosts.get(hostId);
+    if (!tunnel || tunnel.agent.readyState !== WebSocket.OPEN) return undefined;
+    if (this.countOf(tunnel, 'automation') >= MAX_AUTOMATION_CHANNELS_PER_HOST) return undefined;
+
+    const ch = tunnel.nextCh++;
+    tunnel.channels.set(ch, {
+      kind: 'automation',
+      deliver: (d) => handlers.onData(d),
+      drop: (reason) => handlers.onClose(reason),
+    });
+    this.sendToAgent(tunnel, { ch, t: 'open', kind: 'automation' });
+
+    return {
+      send: (d) => {
+        // Only while it is still ours. A channel the agent closed has been deleted from the map
+        // already, and writing to its id would land on whatever the agent reuses it for — which is
+        // nothing, because ids are monotonic, but the check is what makes that true here too.
+        if (tunnel.channels.has(ch)) this.sendToAgent(tunnel, { ch, t: 'data', d });
+      },
+      close: () => {
+        if (tunnel.channels.delete(ch)) this.sendToAgent(tunnel, { ch, t: 'close' });
+      },
+    };
+  }
+
   /** Close every tunnel. Called on server shutdown. */
   closeAll(): void {
     for (const hostId of [...this.hosts.keys()]) this.dropHost(hostId, 'control plane shutting down');
@@ -130,12 +219,18 @@ export class TunnelRegistry {
     if (!tunnel) return;
     this.hosts.delete(hostId);
     // Every viewer on this tunnel loses its device with it. Telling them is what turns a frozen
-    // picture into a reconnect.
-    for (const browser of tunnel.channels.values()) {
-      try { browser.close(1011, reason); } catch { /* already gone */ }
-    }
+    // picture into a reconnect — and, for an automation channel, a WebDriver error instead of a
+    // command that hangs until the hub's own timeout.
+    for (const sink of tunnel.channels.values()) sink.drop(reason);
     tunnel.channels.clear();
     try { tunnel.agent.close(); } catch { /* already gone */ }
+  }
+
+  /** How many of one kind this host currently has open. Both maps are tens of entries at most. */
+  private countOf(tunnel: HostTunnel, kind: TunnelChannelKind): number {
+    let n = 0;
+    for (const sink of tunnel.channels.values()) if (sink.kind === kind) n++;
+    return n;
   }
 
   private sendToAgent(tunnel: HostTunnel, frame: TunnelFrame): void {
@@ -148,17 +243,17 @@ export class TunnelRegistry {
     try { frame = JSON.parse(raw); } catch { return; }
     if (!isTunnelFrame(frame)) return;
 
-    const browser = tunnel.channels.get(frame.ch);
-    if (!browser) return;
+    const sink = tunnel.channels.get(frame.ch);
+    if (!sink) return;
 
     if (frame.t === 'data') {
-      try { browser.send(frame.d); } catch { /* the close handler cleans up */ }
+      sink.deliver(frame.d);
       return;
     }
     // 'open' from an agent is not a thing — the control plane is the only side that opens — so it
     // falls through to the same teardown as 'close' rather than being given a meaning.
     tunnel.channels.delete(frame.ch);
-    try { browser.close(); } catch { /* already gone */ }
+    sink.drop(frame.t === 'close' ? (frame.reason ?? 'the agent closed this channel') : 'protocol error');
   }
 }
 

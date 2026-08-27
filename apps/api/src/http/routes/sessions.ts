@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, release } from '../../allocator.ts';
 import { mintSessionToken, DEFAULT_TTL_SECONDS } from '../../tokens.ts';
+import { isTunnelledDataPlane } from '@mfarm/protocol';
 import { mintIce, type IceBlock } from '../../turn.ts';
 import { loadConfig } from '../../config.ts';
 import { requireTenant } from '../server.ts';
@@ -157,6 +158,31 @@ export async function sessionRoutes(app: FastifyInstance) {
         throw badRequest('The allocated device has no data-plane endpoint configured. Its host must register an endpoint before it can take sessions.');
       }
 
+      /**
+       * A TUNNELLED HOST HAS NO DIALABLE ADDRESS, AND THE INGRESS IS THE ONLY WAY IN.
+       *
+       * `endpoint` is `mfarm+tunnel:/dp` for an agent on a laptop — a marker, not a url, exactly as
+       * `automation_endpoint` is since ADR-0011. The browser was already using `browserEndpoint`
+       * for every host, so nothing downstream changes; what changes is that the fallback is gone.
+       * Without DATA_PLANE_PUBLIC_BASE there is no ingress url to hand out, and the old shape would
+       * have returned `mfarm+tunnel:/dp` as `dataPlane.endpoint` and let the client discover it
+       * cannot open a WebSocket to a scheme nothing implements.
+       *
+       * Released rather than queued, and named as configuration rather than as a device fault: the
+       * device is fine, the control plane is missing the one setting that makes its own ingress
+       * reachable.
+       */
+      const browser = browserEndpoint(host.id);
+      if (isTunnelledDataPlane(host.endpoint) && !browser) {
+        await release(orgId, alloc.sessionId, 'no_endpoint');
+        throw badRequest(
+          'The allocated device is on a tunnelled host, which is reachable only through this ' +
+          'control plane\'s own ingress, and DATA_PLANE_PUBLIC_BASE is not set — so there is no ' +
+          'address to give the client. Set DATA_PLANE_PUBLIC_BASE to the wss:// base this console ' +
+          'is served from.',
+        );
+      }
+
       const token = mintSessionToken(
         { sid: alloc.sessionId, did: alloc.deviceId, org: orgId, fence: alloc.fence!, aud: host.id },
         app.signingKey.privateKeyPem,
@@ -173,7 +199,7 @@ export async function sessionRoutes(app: FastifyInstance) {
         },
         dataPlane: {
           endpoint: host.endpoint,
-          browserEndpoint: browserEndpoint(host.id),
+          browserEndpoint: browser,
           token,
           expiresInSeconds: DEFAULT_TTL_SECONDS,
         },

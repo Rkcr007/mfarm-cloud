@@ -146,7 +146,11 @@ function fakeBackend(localId = 'fake-1'): DeviceBackend & { control: FakeDevice 
 const makeAgent = (
   backends: DeviceBackend[],
   hostname: string,
-  extra: { automationEndpoint?: string; automationEndpoints?: Record<string, string> } = {},
+  extra: {
+    automationEndpoint?: string;
+    automationEndpoints?: Record<string, string>;
+    endpoint?: string;
+  } = {},
 ) =>
   new Agent({
     controlPlaneUrl: baseUrl,
@@ -916,6 +920,43 @@ describe('per-device automation endpoints', () => {
     assert.equal(rows[0].host, null, 'the legacy host column stays empty');
     assert.equal(rows[0].dev, 'https://worker.example:8443/automation/cf-1');
     assert.equal(rows[1].dev, 'https://worker.example:8443/automation/cf-2');
+  });
+
+  test('a changed data-plane endpoint re-registers, instead of resuming onto a stale address', async () => {
+    /**
+     * `hosts.endpoint` is written at registration and nowhere else, so if a change to it does not
+     * move the capability fingerprint, the agent resumes, heartbeats, and the control plane keeps
+     * handing out the address the host gave the FIRST time it ever started.
+     *
+     * Found on hardware: removing PUBLIC_ENDPOINT so the agent would advertise its tunnel changed
+     * what it sent and changed nothing in the database. It is the laptop case exactly — a machine
+     * that registers a direct address on one network and is behind NAT on the next.
+     */
+    const hostname = `dp-endpoint-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'ws://10.0.0.5:8080' });
+    await first.start();
+
+    const second = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'mfarm+tunnel:/dp' });
+    await second.start();
+
+    const row = await withSystem(async (c) => {
+      const { rows } = await c.query(`SELECT endpoint FROM hosts WHERE id = $1`, [second.hostId]);
+      return rows[0] as { endpoint: string };
+    });
+    assert.equal(row.endpoint, 'mfarm+tunnel:/dp',
+      'the host resumed on its old address instead of re-registering the new one');
+  });
+
+  test('an unchanged endpoint still resumes rather than re-registering every restart', async () => {
+    // The other half: adding a field to the fingerprint must not make every restart a registration.
+    const hostname = `dp-stable-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'ws://10.0.0.5:8080' });
+    const firstState = await first.start();
+    const second = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'ws://10.0.0.5:8080' });
+    const secondState = await second.start();
+    assert.equal(secondState.hostId, firstState.hostId);
+    assert.equal(secondState.workerToken, firstState.workerToken,
+      're-registration would have minted a new worker token');
   });
 
   test('re-registering without a server WITHDRAWS the stored endpoint', async () => {

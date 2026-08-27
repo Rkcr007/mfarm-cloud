@@ -12,6 +12,9 @@ import { findOrCreateRun, stampSessionRun, type Run } from '../../runs.ts';
 import {
   WebDriverError, invalidSessionId, sessionNotCreated, toW3cBody, fromApiError,
 } from '../webdriver/errors.ts';
+import { parseTunnelAutomationUrl } from '@mfarm/protocol';
+import { callOverTunnel } from '../automation-tunnel.ts';
+import type { TunnelRegistry } from '../tunnel.ts';
 
 /**
  * The W3C WebDriver hub — v2 decision 10, and the actual adoption path.
@@ -80,11 +83,51 @@ interface UpstreamReply {
   text: string;
 }
 
+/**
+ * Where a device's automation gateway is, and how to get to it.
+ *
+ * `hostId` is not optional and is not looked up here: every caller has already joined `devices` to
+ * `hosts` to mint the grant's `aud`, so asking again would be a second round trip to learn
+ * something the caller is holding.
+ */
+interface UpstreamRoute {
+  tunnels: TunnelRegistry;
+  hostId: string;
+}
+
+/**
+ * One request to a device's automation gateway, by whichever transport that gateway advertised.
+ *
+ * TWO TRANSPORTS, ONE CALLER (ADR-0011). A `mfarm+tunnel:` endpoint means the host is not dialable
+ * — a laptop behind NAT, which is how physical devices actually arrive — so the request rides the
+ * socket the agent already holds open. Anything else is fetched directly, unchanged, which is what
+ * keeps the existing farm on the path it was verified on.
+ *
+ * The choice is the ENDPOINT'S, not this function's: the agent writes the scheme at registration
+ * according to how it can actually be reached, and the hub does what the string says. A hub that
+ * guessed — probing, falling back — would sometimes reach a device by a route its operator had
+ * deliberately closed.
+ *
+ * Both branches end in a fully-read body, both throw rather than fabricate a status, and both put a
+ * `TimeoutError` on the deadline, because the proxy path reads `e.name` to tell a timeout from a
+ * dead host. The callers cannot tell them apart and must not need to.
+ */
 async function callUpstream(
   url: string,
-  init: RequestInit,
+  init: { method: string; headers: Record<string, string>; body?: string },
   timeoutMs: number,
+  route: UpstreamRoute,
 ): Promise<UpstreamReply> {
+  const tunnelPath = parseTunnelAutomationUrl(url);
+  if (tunnelPath) {
+    const reply = await callOverTunnel(route.tunnels, route.hostId, tunnelPath, init, timeoutMs);
+    return {
+      status: reply.status,
+      contentType: reply.headers['content-type'] ?? 'application/json; charset=utf-8',
+      text: reply.text,
+    };
+  }
+
   const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   return {
     status: res.status,
@@ -412,6 +455,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
           body: JSON.stringify({ capabilities: { alwaysMatch: upstreamCaps, firstMatch: [{}] } }),
         },
         NEW_SESSION_TIMEOUT_MS,
+        { tunnels: app.tunnels, hostId: target.host_id },
       ).catch((e: Error) => {
         throw sessionNotCreated(
           `Could not reach the automation server for the allocated device: ${e.message}`,
@@ -516,6 +560,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
       `${row.upstream_base_url}/session/${encodeURIComponent(row.upstream_session_id)}`,
       { method: 'DELETE', headers: grantFor(orgId, req.params.sessionId, row) },
       30_000,
+      { tunnels: app.tunnels, hostId: row.host_id },
     ).catch((e: Error) => {
       req.log.warn({ err: e, sessionId: req.params.sessionId }, 'upstream session delete failed; releasing anyway');
     });
@@ -572,6 +617,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
           body: hasBody ? JSON.stringify(req.body ?? {}) : undefined,
         },
         COMMAND_TIMEOUT_MS,
+        { tunnels: app.tunnels, hostId: row.host_id },
       ).catch((e: Error) => {
         // A dead host is not a dead session yet — a restart or a blip is survivable, and ending the
         // session here would throw away a device the client may still recover. The TTL collects it

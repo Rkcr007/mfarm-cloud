@@ -350,7 +350,19 @@ export class Agent {
         };
       })
       .sort((a, b) => a.localId.localeCompare(b.localId));
-    return JSON.stringify({ host: [...this.capabilities()].sort(), devices });
+    // THE DATA-PLANE ENDPOINT IS PART OF THIS, and leaving it out was a silent staleness bug.
+    //
+    // `hosts.endpoint` is written at registration and nowhere else, so anything not in this
+    // fingerprint can never be corrected on a host that already exists — it resumes, heartbeats,
+    // and keeps advertising whatever it said the first time. The automation endpoint was already
+    // covered (`automation`, per device); its sibling was not.
+    //
+    // It matters most on exactly the machine this is for. A laptop moves: it registers a direct
+    // address on one network and is behind NAT on the next, and the stale row then fails every
+    // session at the browser, with a device that looks perfectly healthy. Found on 2026-08-26,
+    // when removing PUBLIC_ENDPOINT changed what the agent WOULD send and changed nothing at all
+    // about what the control plane had stored.
+    return JSON.stringify({ host: [...this.capabilities()].sort(), endpoint: this.opts.endpoint, devices });
   }
 
   async start(): Promise<AgentState> {
