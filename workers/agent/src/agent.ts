@@ -16,6 +16,7 @@ import {
 } from '@mfarm/protocol';
 import { derivePort } from './appium.ts';
 import type { DeviceBackend, DeviceHealth } from './device.ts';
+import { InstallBlockedError } from './devices/physical.ts';
 
 /**
  * Bases for the two ports UiAutomator2 otherwise defaults to a single fixed number.
@@ -1102,7 +1103,22 @@ export class Agent {
       // download safe and the id is what makes it reachable; neither has a sane default, so an
       // install missing either is refused by name rather than attempted.
       if (!appId) throw new Error('the control plane offered an install with no app to install');
-      await control.installApp(await this.fetchApk({ ...r, sha256, appId }));
+      try {
+        await control.installApp(await this.fetchApk({ ...r, sha256, appId }));
+      } catch (e) {
+        /**
+         * A REFUSED install is the farm's problem, not the suite's (§18).
+         *
+         * The device declined to install the APK — nothing about the application was exercised, so
+         * letting this land as a test failure would blame somebody's app for a setting on a phone.
+         * The remedy travels with the incident because it is the one install failure that has one,
+         * and because the person who can act on it is looking at the console, not at adb.
+         */
+        if (e instanceof InstallBlockedError) {
+          this.reportIncident(control.info.localId, 'install-blocked', `${e.message} ${e.remedy}`);
+        }
+        throw e;
+      }
       return;
     }
     if (r.kind === 'launch') {

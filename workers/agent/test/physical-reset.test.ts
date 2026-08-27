@@ -21,6 +21,7 @@ let dir: string;
 let statePath: string;
 let ledgerPath: string;
 let PhysicalDevice: typeof import('../src/devices/physical.ts').PhysicalDevice;
+let InstallBlockedError: typeof import('../src/devices/physical.ts').InstallBlockedError;
 
 /** The device's installed third-party packages, as the fake adb sees them. */
 // The trailing newline is load-bearing: `echo >>` in the fake adb would otherwise append onto the
@@ -55,6 +56,10 @@ case "$verb" in
   install)
     apk=""
     for a in "$@"; do case "$a" in -*) ;; *) apk="$a";; esac; done
+    if [ -f "$apk.blocked" ]; then
+      echo "adb: failed to install $apk: Failure [INSTALL_FAILED_VERIFICATION_FAILURE: Install not allowed]" >&2
+      exit 1
+    fi
     pkg=$(cat "$apk.pkg")
     grep -qx "$pkg" "$state" || echo "$pkg" >> "$state"
     echo "Success"
@@ -68,6 +73,9 @@ case "$verb" in
   shell)
     case "$*" in
       *"list packages"*) sed 's/^/package:/' "$state" ;;
+      *"settings get global verifier_verify_adb_installs"*) cat "${statePath}.verify" 2>/dev/null || echo null ;;
+      *"settings put global verifier_verify_adb_installs"*) echo "$5" > "${statePath}.verify" ;;
+      *"settings delete global verifier_verify_adb_installs"*) rm -f "${statePath}.verify" ;;
       *) : ;;
     esac
     ;;
@@ -84,7 +92,7 @@ exit 0
   // Imported AFTER ADB_PATH is set: physical.ts resolves it at module scope, so a static import at
   // the top of this file would bind the real adb and every test here would drive the phone on the
   // desk.
-  ({ PhysicalDevice } = await import('../src/devices/physical.ts'));
+  ({ PhysicalDevice, InstallBlockedError } = await import('../src/devices/physical.ts'));
 });
 
 beforeEach(async () => {
@@ -186,5 +194,82 @@ describe('a full-sweep release (opt-in)', () => {
     // the sweep path ran at all rather than the uninstall one, which would have removed the app.
     assert.ok((await getPackages()).includes('com.acme.tests'),
       'the sweep clears data and leaves the package; uninstalling it means the wrong path ran');
+  });
+
+});
+
+/**
+ * An install the phone REFUSED, which is M1's whole subject.
+ *
+ * Play Protect declining an APK looks like any other non-zero adb exit, so it surfaced as
+ * `upstream_rejected` after a 60-second timeout — several hops from a cause with a one-line fix.
+ * It refuses Appium's own debug-signed helpers too, so a stock handset cannot run a session at all.
+ */
+describe('an install the device refuses', () => {
+  test('is a refusal, not a generic adb failure', async () => {
+    const d = device();
+    const apk = await makeApk('com.acme.tests');
+    await writeFile(`${apk}.blocked`, '');
+    await assert.rejects(() => d.installApp(apk), (e: Error) => {
+      assert.ok(e instanceof InstallBlockedError, 'the caller classifies on the type, not on adb\'s wording');
+      assert.match(e.message, /package verifier blocked it/);
+      return true;
+    });
+  });
+
+  test('carries a remedy a person can act on, naming the device', async () => {
+    const d = device();
+    const apk = await makeApk('com.acme.tests');
+    await writeFile(`${apk}.blocked`, '');
+    // `installApp` resolves to void, so the catch value is a union until it is narrowed — and the
+    // narrowing is the assertion worth making anyway: the caller classifies on the type.
+    const err = await d.installApp(apk).then(() => undefined, (e: unknown) => e);
+    assert.ok(err instanceof InstallBlockedError, 'a refusal must arrive as InstallBlockedError');
+    assert.match(err.remedy, /Harmful app blocked/);
+    assert.match(err.remedy, /FAKESERIAL/, 'a remedy you cannot copy-paste is half a remedy');
+    assert.match(err.remedy, /PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF/);
+  });
+
+  test('a refused install ledgers nothing', async () => {
+    // Otherwise a release would try to uninstall something that was never installed, which fails,
+    // which takes a healthy device out of the pool.
+    const d = device();
+    const apk = await makeApk('com.acme.tests');
+    await writeFile(`${apk}.blocked`, '');
+    await d.installApp(apk).catch(() => {});
+    await d.resetToSnapshot();
+    assert.deepEqual((await getPackages()).sort(), ['com.owner.bank', 'com.owner.chat']);
+  });
+});
+
+describe('the install-verification setting', () => {
+  test('unset reads as ON, which is Android\'s default', async () => {
+    await rm(`${statePath}.verify`, { force: true });
+    assert.equal(await device().installVerificationOn(), true);
+  });
+
+  test('turning it off and restoring puts back exactly what was there', async () => {
+    // Restoring must not silently ENABLE a setting the owner had turned off themselves, so the
+    // prior value is captured rather than assumed.
+    await writeFile(`${statePath}.verify`, '1\n');
+    const d = device();
+    await d.disableInstallVerification();
+    assert.equal(await d.installVerificationOn(), false);
+    await d.restoreInstallVerification();
+    assert.equal((await readFile(`${statePath}.verify`, 'utf8')).trim(), '1');
+  });
+
+  test('restoring an unset setting deletes it rather than writing "null"', async () => {
+    await rm(`${statePath}.verify`, { force: true });
+    const d = device();
+    await d.disableInstallVerification();
+    await d.restoreInstallVerification();
+    await assert.rejects(() => readFile(`${statePath}.verify`, 'utf8'), 'the row should be gone, not the string "null"');
+  });
+
+  test('restoring when nothing was changed is a no-op', async () => {
+    await writeFile(`${statePath}.verify`, '1\n');
+    await device().restoreInstallVerification();
+    assert.equal((await readFile(`${statePath}.verify`, 'utf8')).trim(), '1');
   });
 });
