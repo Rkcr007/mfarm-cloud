@@ -669,6 +669,14 @@ export const FAILURE_REASONS = {
   infrastructure: [
     'adb-failure', 'appium-failure', 'device-disconnected', 'usb-failure',
     'agent-failure', 'network-failure',
+    // The device REFUSED the install rather than failing at it — Play Protect's package verifier
+    // rejecting an APK pushed over adb. It is infrastructure and not a test failure because the
+    // suite never ran: nothing about the app was exercised, and reporting it as a test result
+    // would blame the product for a setting on the phone. It has its own name rather than sharing
+    // `adb-failure` because it is the one install failure with a specific, actionable remedy, and
+    // it is common enough that "how many devices in this fleet cannot install anything" is a
+    // question somebody will need answered.
+    'install-blocked',
   ],
   'device-health': ['low-storage', 'low-battery', 'device-locked', 'device-unresponsive'],
 } as const satisfies Record<FailureClass, readonly string[]>;

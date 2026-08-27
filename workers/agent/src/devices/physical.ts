@@ -47,6 +47,35 @@ const KEYCODES: Record<KeyName, string> = {
  * phone that enrolls, schedules, and fails every session with an error pointing at the test.
  */
 /**
+ * An install the DEVICE refused, as opposed to one that failed.
+ *
+ * Its own class because the caller has to tell these apart to classify the incident, and matching
+ * adb's wording in two places is how the two copies drift. `remedy` is a sentence for a person, not
+ * a log line: this is the single most likely thing to stop somebody's first session, and the fix is
+ * a setting on their phone that they, not we, have to agree to.
+ */
+export class InstallBlockedError extends Error {
+  readonly remedy: string;
+  constructor(message: string, remedy: string) {
+    super(message);
+    this.name = 'InstallBlockedError';
+    this.remedy = remedy;
+  }
+}
+
+/**
+ * What adb says when the package verifier refuses an APK.
+ *
+ * Two spellings because OEMs differ: AOSP reports VERIFICATION_FAILURE, and some builds report the
+ * user-restriction form when the same block is applied by policy. Both mean "the phone declined",
+ * and both have the same remedy.
+ */
+const INSTALL_BLOCKED = /INSTALL_FAILED_VERIFICATION_FAILURE|INSTALL_FAILED_USER_RESTRICTED|verification (failed|timed out)/i;
+
+/** The global setting that decides whether Play Protect vets APKs pushed over adb. */
+export const ADB_VERIFY_SETTING = 'verifier_verify_adb_installs';
+
+/**
  * How a release cleans this device — ADR-0012.
  *
  * `install-scoped` IS THE DEFAULT, and the default is the whole decision. The alternative sweeps
@@ -135,6 +164,8 @@ export class PhysicalDevice implements DeviceControl {
    * install and closes that hole.
    */
   private installed: string[] = [];
+  /** What `verifier_verify_adb_installs` was before we touched it, so it can be put back exactly. */
+  private priorVerifySetting?: string;
   /** Held open for the life of the device. Reopening per event costs 57-77ms of pure overhead. */
   private shell?: ReturnType<typeof spawn>;
   private shellSeq = 0;
@@ -494,11 +525,83 @@ export class PhysicalDevice implements DeviceControl {
     await this.saveLedger([...this.installed, ...fresh.filter((p) => !this.installed.includes(p))]);
   }
 
-  /** The install itself, with adb's habit of reporting failure on stdout accounted for. */
+  /**
+   * The install itself, with adb's habit of reporting failure on stdout accounted for.
+   *
+   * A REFUSAL IS NOT A FAILURE, and separating them is the whole of M1. Play Protect declining an
+   * APK looks like any other non-zero adb exit, so it used to surface as `upstream_rejected` after
+   * a 60-second timeout — several hops from a cause that has a one-line fix. It blocks Appium's own
+   * helper APKs too, which are debug-signed, so a stock phone cannot run a session at all until
+   * somebody deals with it.
+   */
   private async rawInstall(apkPath: string): Promise<void> {
-    const out = await this.adb(['install', '-r', apkPath], INSTALL_TIMEOUT_MS);
+    let out: string;
+    try {
+      out = await this.adb(['install', '-r', apkPath], INSTALL_TIMEOUT_MS);
+    } catch (e) {
+      // adb exits non-zero AND prints the reason to stderr, which `run` folds into the message.
+      const msg = (e as Error).message;
+      if (INSTALL_BLOCKED.test(msg)) throw this.installBlocked(msg);
+      throw e;
+    }
+    if (INSTALL_BLOCKED.test(out)) throw this.installBlocked(out.trim().split('\n').slice(-2).join(' '));
     if (/^\s*(Failure|Error)/im.test(out)) {
       throw new Error(`adb install failed on ${this.info.localId}: ${out.trim().split('\n').slice(-3).join(' ')}`);
+    }
+  }
+
+  private installBlocked(detail: string): InstallBlockedError {
+    return new InstallBlockedError(
+      `${this.info.localId} refused the install: the phone's package verifier blocked it. ${detail}`,
+      `On the phone this shows as "Harmful app blocked". It is Play Protect vetting an APK pushed `
+      + `over adb, and it refuses debug-signed builds — including the automation helpers, so no `
+      + `session can run until it is dealt with. Either tap through the prompt on the device, or `
+      + `turn off adb-install verification for this phone: `
+      + `adb -s ${this.serial} shell settings put global ${ADB_VERIFY_SETTING} 0. `
+      + `That is the device owner's decision, so the agent will not do it unless asked `
+      + `(PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF=1).`,
+    );
+  }
+
+  /**
+   * Will installs be refused on this device? Read at start-up, so the answer arrives before a
+   * session needs it rather than 60 seconds into somebody's first test.
+   *
+   * `null` means the setting is unset, which is the DEFAULT and means verification is ON. Reading
+   * it is not changing it — this method never writes.
+   */
+  async installVerificationOn(): Promise<boolean> {
+    const raw = (await this.adb(['shell', 'settings', 'get', 'global', ADB_VERIFY_SETTING], 15_000)).trim();
+    return raw !== '0';
+  }
+
+  /**
+   * Turn adb-install verification off, and remember what it was.
+   *
+   * ONLY EVER CALLED BEHIND AN EXPLICIT OPT-IN. This is a security setting on somebody's personal
+   * phone: the agent proposes, the owner disposes. `restoreInstallVerification` puts it back, and
+   * the previous value is captured rather than assumed so restoring cannot silently ENABLE a
+   * setting the owner had deliberately turned off before we arrived.
+   */
+  async disableInstallVerification(): Promise<void> {
+    if (this.priorVerifySetting === undefined) {
+      this.priorVerifySetting = (await this.adb(
+        ['shell', 'settings', 'get', 'global', ADB_VERIFY_SETTING], 15_000)).trim();
+    }
+    await this.adb(['shell', 'settings', 'put', 'global', ADB_VERIFY_SETTING, '0'], 15_000);
+  }
+
+  /** Put the setting back exactly as it was found. A no-op if we never changed it. */
+  async restoreInstallVerification(): Promise<void> {
+    const prior = this.priorVerifySetting;
+    if (prior === undefined) return;
+    this.priorVerifySetting = undefined;
+    // `null` is how `settings get` spells "unset", and the way to restore that is to delete the
+    // row rather than to write the string "null" into it.
+    if (prior === 'null' || prior === '') {
+      await this.adb(['shell', 'settings', 'delete', 'global', ADB_VERIFY_SETTING], 15_000);
+    } else {
+      await this.adb(['shell', 'settings', 'put', 'global', ADB_VERIFY_SETTING, prior], 15_000);
     }
   }
 

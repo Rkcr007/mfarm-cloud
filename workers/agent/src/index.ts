@@ -12,7 +12,7 @@ import { DataPlane } from './dataplane.ts';
 import { AgentTunnel } from './tunnel.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
 import { createAvdBackend } from './devices/avd.ts';
-import { createPhysicalBackend } from './devices/physical.ts';
+import { createPhysicalBackend, PhysicalDevice } from './devices/physical.ts';
 import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DeviceBackend } from './device.ts';
 
@@ -120,7 +120,7 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
     );
   }
 
-  return usable.map((d) => {
+  const backends = usable.map((d) => {
     const localId = localIdForSerial(d.serial);
     console.log(
       `[agent] enrolling ${localId}: ${d.props?.manufacturer ?? '?'} ${d.props?.model ?? d.serial}`
@@ -139,6 +139,44 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
       aapt2Path,
     });
   });
+
+  /**
+   * WILL INSTALLS EVEN WORK ON THESE PHONES? Asked here, once, because the answer costs one adb
+   * read and the alternative is finding out 60 seconds into somebody's first session.
+   *
+   * Play Protect refuses debug-signed APKs pushed over adb — which includes Appium's own helpers,
+   * so a phone in this state cannot run a session at all, and the symptom is `upstream_rejected`
+   * several hops from the cause.
+   *
+   * ON THE REAL BACKENDS, not a throwaway probe: `disableInstallVerification` remembers what the
+   * setting was so `restoreInstallVerification` can put it back, and a prior value recorded on an
+   * object nobody keeps is a promise to restore that could never be kept.
+   */
+  const mayDisable = flag('PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF');
+  for (const b of backends) {
+    const dev = b.control as PhysicalDevice;
+    try {
+      if (!(await dev.installVerificationOn())) continue;
+      if (mayDisable) {
+        await dev.disableInstallVerification();
+        console.log(
+          `[agent] ${dev.info.localId}: adb-install verification turned OFF, as `
+          + `PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF permits. Restored when this agent stops.`);
+        continue;
+      }
+      console.warn(
+        `[agent] ${dev.info.localId}: Play Protect will REFUSE apps installed over adb, including `
+        + `the automation helpers — so sessions on this device fail before your app ever runs. `
+        + `Either tap through "Harmful app blocked" on the phone, or start the agent with `
+        + `PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF=1. It is a security setting on somebody's phone, `
+        + `so it is the owner's call and the agent will not make it silently.`);
+    } catch (e) {
+      // Advice, not a gate: a phone that cannot answer this still enrolls and still works.
+      console.warn(`[agent] ${dev.info.localId}: could not read the install-verification setting — ${(e as Error).message}`);
+    }
+  }
+
+  return backends;
 }
 
 async function chooseBackends(): Promise<DeviceBackend[]> {
@@ -539,6 +577,18 @@ async function main(): Promise<void> {
       // pulling the device out from under a live driver leaves adb wedged and the helper installed —
       // which the next boot then inherits.
       for (const s of supervisors) await s.stop();
+      // Put back anything we changed ON somebody's phone before we let go of it. Before `stop()`,
+      // because that is what closes the held adb shell this needs. A failure here is logged rather
+      // than thrown: it must never be the reason a drain gives up and leaves devices allocated.
+      for (const b of backends) {
+        const dev = b.control as Partial<PhysicalDevice>;
+        if (typeof dev.restoreInstallVerification !== 'function') continue;
+        try {
+          await dev.restoreInstallVerification();
+        } catch (e) {
+          console.warn(`[agent] could not restore the install-verification setting on ${b.control.info.localId}: ${(e as Error).message}`);
+        }
+      }
       for (const b of backends) await b.control.stop();
     } catch (e) {
       console.error('[agent] drain failed:', (e as Error).message);
