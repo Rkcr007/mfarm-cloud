@@ -162,10 +162,12 @@ back exactly as it found it:
 The first of those is the one that matters: it is the run that, before this ADR, would have logged
 the owner out of everything on their phone.
 
-**Status on 2026-08-26: case 2 passes on hardware** — a release after a session that installed
-nothing left all 137 packages untouched. **Cases 1 and 3 are unrun**, because installing any APK
-over adb on the test handset is blocked by Play Protect
-(`INSTALL_FAILED_VERIFICATION_FAILURE`) — its own product problem, and not this one. They are
-covered by unit tests driving a fake `adb`, which exercise the real argument lists and output
-parsing and say nothing about how a real `pm` behaves. **That is the remaining hardware gap in this
-ADR, and it should close before a borrowed phone is shared with anybody.**
+**Status on 2026-08-28: all three cases pass on hardware.** A release after a session that installed
+nothing left all 138 packages untouched; an APK installed through a real session on the deployed
+farm was ledgered, removed on release, and left the owner's 138 apps intact; and installing over a
+package the device already had was refused by name. The device was left exactly as it was found.
+
+They were unrunnable for two days because Play Protect refuses every APK pushed over adb on this
+handset — its own product problem, and the one that became M1 of the build plan. The consented,
+reversible opt-in M1 added is what let this gate close, which is the argument for that milestone
+sitting first: it was not merely blocking a test, it was blocking the product's core loop.
