@@ -203,7 +203,11 @@ const KIND_LABEL = { install: 'Install', launch: 'Launch', uninstall: 'Uninstall
  * POST /sessions/:id/app-actions before it will queue anything, so a device without it needs to say
  * so in the UI or the disabled Install button has no explanation.
  */
-const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'session-reset', 'screen-stream', 'logcat', 'screenshot'];
+// The three resets are mutually exclusive and all three are listed, so a device shows which one it
+// has and which it does not. Leaving `install-reset` out did not hide it — unknown capabilities
+// still render below — but it greyed out `session-reset` beside it, which reads as "this phone has
+// no reset" when it has a different one, on purpose (ADR-0012).
+const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'session-reset', 'install-reset', 'screen-stream', 'logcat', 'screenshot'];
 
 /**
  * Failure classification (spec §18).
@@ -1955,7 +1959,18 @@ function paintToolbar(sess, live, caps) {
   if (!st) return;
   const streaming = state.liveState === 'streaming';
   const attached = ATTACHED.has(state.liveState);
-  const ctrl = streaming && state.live?.control?.readyState === 'open';
+  /**
+   * Power/Back/Home/Overview need a device to send to, NOT a picture of it.
+   *
+   * This used to be `streaming && control.readyState === 'open'`, which tied four buttons to the
+   * WebRTC datachannel — and a physical handset never negotiates one. The result was a phone whose
+   * Volume and Rotate worked, beside a Home button that did nothing, because those two groups were
+   * written against different transports and only one of them was gated on video.
+   *
+   * `pressButton` now falls back to the data-plane socket, so the honest gate is the same one
+   * Volume and Rotate use: is this session attached to a device.
+   */
+  const ctrl = attached;
 
   const press = (cmd) => () => {
     if (!state.live?.pressButton(cmd)) toast('Not connected', 'The device control channel is not open yet.', 'warn');

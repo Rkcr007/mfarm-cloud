@@ -290,7 +290,9 @@ describe('real and virtual devices are told apart', () => {
       {
         id: 'dev-2', region: 'lab', platform: 'android', tier: 'physical',
         model: 'Pixel 9', osVersion: '16', state: 'READY', dedicated: true,
-        capabilities: ['input-datachannel', 'session-reset', 'app-install', 'logcat',
+        // `install-reset`, which is what a handset declares since ADR-0012 — a release undoes what
+        // the session installed rather than sweeping the owner's apps.
+        capabilities: ['input-datachannel', 'install-reset', 'app-install', 'logcat',
           'screenshot', 'ui-hierarchy', 'webdriver'],
         screen: { width: 1080, height: 2400, density: 420 },
       },
@@ -342,12 +344,12 @@ describe('real and virtual devices are told apart', () => {
     mod.state.deviceKind = 'all';
   });
 
-  test('the device detail names session-reset rather than showing it as missing', () => {
+  test('the device detail names the reset it has rather than showing it as missing', () => {
     withPhone();
     mod.state.route = { name: 'device', id: 'dev-2' };
     // KNOWN_CAPS drives the chip row; a capability absent from it renders as an unknown extra and
     // a phone's only reset would read as "this device cannot reset at all".
-    assert.match(textOf(mod.SCREENS.device()), /session-reset/);
+    assert.match(textOf(mod.SCREENS.device()), /install-reset/);
   });
 });
 
