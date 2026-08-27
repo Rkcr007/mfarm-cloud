@@ -165,9 +165,54 @@ it is now an informed one.
 ## Status of the work
 
 Milestone 0 is built and green: enrollment, org-pinning, the tunnel, the quarantine fix, off-box
-backups, the rollback guard. **None of it has run on hardware.** The tunnel is proven over real
-sockets on a laptop, which is not the same as over the internet from behind an office NAT.
+backups, the rollback guard.
 
-The gate before anything is built on top: `deploy/verify-live.sh` and `deploy/verify-webdriver.mjs`
-green against the EXISTING Cuttlefish host, through the tunnel. Nothing about physical devices
-justifies regressing the virtual farm (§36.1).
+**THE HARDWARE GATE IS CLOSED (2026-08-24.)** It was: `deploy/verify-live.sh` and
+`deploy/verify-webdriver.mjs` green against the EXISTING Cuttlefish host, through the tunnel —
+because nothing about physical devices justifies regressing the virtual farm (§36.1). All three
+verifiers now pass on the real farm with `WORKER_DATA_PLANE` unset, which is the tunnel path:
+
+- `verify-live.sh` — 1 agent tunnel connected, 2 devices READY, coturn answering.
+- `verify-dataplane.mjs` — 10/10, all eight hostile hellos refused, through the tunnel.
+- `verify-webdriver.mjs` — a full M3 session in 9.0s.
+
+So the inversion is proven over the internet, not only over laptop sockets.
+
+### Phase 1 — automation-only physical devices (built, unproven on a handset)
+
+The MVP is deliberately split: everything a real phone needs to run TESTS, with the live view left
+to a second phase because it is the only piece resting on unmeasured technology (scrcpy→RTP
+throughput in Node). Built:
+
+- `session-reset` capability, and `REQUIRED_FOR_TENANT_USE` becomes a list of alternative GROUPS —
+  a device satisfies a group by declaring any one of it. This is decision 3 above, finally in code:
+  the gate meant "the next tenant inherits nothing", and demanded `snapshot-reset`, a mechanism.
+- `workers/agent/src/devices/physical.ts` — the third backend. §17 package-level cleanup, battery
+  and storage health, screenshot, UI hierarchy, logcat. No `screen-stream`, deliberately.
+- `workers/agent/src/devices/discovery.ts` — `adb devices -l`, with every unusable state (
+  `unauthorized`, `offline`, `no permissions`) reported alongside the instruction that fixes it.
+- `PHYSICAL_ENABLED`, opt-in: discovery is a read, but enrolling what it finds is not.
+- The console tells REAL from VIRTUAL, and filters by kind (§25).
+- `docs/PHYSICAL_DEVICES.md` — prerequisites (§8), enrollment, what a reset does and does not do.
+
+**Two defects found doing it**, both invisible until a non-Cuttlefish host existed:
+
+- **The agent could present the wrong credential at re-registration.** `resolveCredential` has
+  accepted `mwk_` since 023 — the branch this ADR describes as "what lets a laptop plug in a second
+  phone" — but the agent only ever sent its CONFIGURED token. On an operator-owned box that is the
+  fleet secret and nothing was wrong. On an enrolled laptop it is an `mae_` token spent by the end
+  of the first registration, and the agent re-registers whenever its capability fingerprint changes
+   — which is exactly what plugging in a second phone does. Every enrolled host could therefore be
+  started once. The `mwk_` branch was unreachable in practice, so nothing had ever exercised it.
+  Re-registration now presents the host's own token, falling back to the configured credential on a
+  401/403 so a genuinely dead token cannot strand a host either.
+- **Host-level capabilities were three hardcoded literals.** `agent.ts` claimed `screen-stream`,
+  `input-datachannel` and `snapshot-reset` for every host unconditionally — true by construction
+  while every device everywhere was a Cuttlefish. A phone-only laptop would have registered
+  claiming both of the two it cannot do. Nothing schedules on host capabilities, so the damage was
+  confined to `hosts.capabilities` and `degradedCapabilities` telling an operator the opposite of
+  the truth about their own fleet. Now derived per-device, the same way `app-install` already was.
+
+Still open, and none of it blocks a pilot: the live view and interactive control (§20/§21), USB
+hot-plug (discovery runs at startup; a restart picks up a new phone), failure classification (§18 —
+an ADB drop still reports as a test failure), and a Windows agent (§5).

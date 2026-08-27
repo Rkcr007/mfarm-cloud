@@ -135,4 +135,10 @@ if (failed || exitCode) {
   console.error(`\nFAILED after ${since()}. Capture the exchange above verbatim — it is a repo bug, not something to work around here.`);
   process.exit(1);
 }
-console.log(`\nM3: a real WebDriver session drove a real Cuttlefish device end to end, in ${since()}.`);
+// NOT hardcoded to Cuttlefish any more. This script predates physical devices, and on 2026-08-26 it
+// passed against a Samsung handset while claiming in its own success line to have driven a
+// Cuttlefish — the one sentence somebody would quote as evidence of what was proven.
+const drove = caps['appium:deviceUDID'] ?? caps['appium:udid'] ?? caps.udid
+  ? `${caps.platformName ?? 'a'} device ${caps['appium:udid'] ?? caps.udid}`
+  : 'a real device';
+console.log(`\nM3: a real WebDriver session drove ${drove} end to end, in ${since()}.`);

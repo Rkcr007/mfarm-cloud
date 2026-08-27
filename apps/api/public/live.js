@@ -37,6 +37,15 @@ export const STATES = [
 export const ATTACHED = new Set(['authenticated', 'negotiating', 'streaming', 'nostream', 'nodisplay']);
 
 /**
+ * A control-channel button command, as the data plane's `KeyName` spells it.
+ *
+ * Only the names differ: `menu` is Cuttlefish's word for the overview button and `recents` is the
+ * agent's. Anything absent from this map has no data-plane equivalent and is refused rather than
+ * silently dropped.
+ */
+export const BUTTON_KEY = { power: 'power', back: 'back', home: 'home', menu: 'recents' };
+
+/**
  * How long a CONNECTED peer connection may go without offering a display before we say so.
  *
  * This is not a guess at network latency — by the time it starts, ICE has completed and media is
@@ -546,18 +555,32 @@ export class LiveSession {
     return this.seq;
   }
 
-  /** A hardware button: home, back, menu, power. Sent as a press and a release, like a real one. */
+  /**
+   * A hardware button: home, back, menu, power. Sent as a press and a release, like a real one.
+   *
+   * TWO TRANSPORTS, because there are two kinds of device and only one of them has a peer
+   * connection. `this.control` is the `device-control` WebRTC datachannel, which exists only where
+   * something negotiated video — so on a physical handset it is never open, and these four buttons
+   * were dead while Volume and Rotate beside them worked. Those go over the data-plane socket
+   * (`sendControl`), which every attached device has and which already carries `{t:'key'}`.
+   *
+   * The datachannel stays preferred where it exists: it is the shorter path, and it carries a real
+   * down/up pair rather than the data plane's single key event.
+   */
   pressButton(command) {
-    if (this.control?.readyState !== 'open') return false;
-    this.control.send(JSON.stringify({ command, button_state: 'down' }));
-    // The gap matters: Android distinguishes a tap from a long press by duration, and a down/up in
-    // the same tick is not reliably seen as either.
-    setTimeout(() => {
-      if (this.control?.readyState === 'open') {
-        this.control.send(JSON.stringify({ command, button_state: 'up' }));
-      }
-    }, 60);
-    return true;
+    if (this.control?.readyState === 'open') {
+      this.control.send(JSON.stringify({ command, button_state: 'down' }));
+      // The gap matters: Android distinguishes a tap from a long press by duration, and a down/up in
+      // the same tick is not reliably seen as either.
+      setTimeout(() => {
+        if (this.control?.readyState === 'open') {
+          this.control.send(JSON.stringify({ command, button_state: 'up' }));
+        }
+      }, 60);
+      return true;
+    }
+    const name = BUTTON_KEY[command];
+    return name ? this.sendControl({ t: 'key', name }) : false;
   }
 
   /* ------------------------------------------------------------------ out-of-band */

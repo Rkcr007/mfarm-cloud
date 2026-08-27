@@ -273,3 +273,158 @@ describe('outcome reporting in the console', () => {
     assert.match(textOf(mod.SCREENS.run()), /Only 2 of 5 sessions reported/);
   });
 });
+
+/**
+ * Real devices in the fleet screen (ADR-0008, spec §25).
+ *
+ * The thing worth testing is not that a badge exists — it is that the two kinds are DISTINGUISHED.
+ * A physical handset and a Cuttlefish differ in what a result from them means, and a console that
+ * renders them identically quietly invites someone to trust an emulator run as if it were a phone.
+ */
+describe('real and virtual devices are told apart', () => {
+  /** A handset as the agent registers one: physical tier, session-reset, and no stream. */
+  function withPhone() {
+    seed({ name: 'devices' });
+    mod.state.devices = [
+      ...mod.state.devices,
+      {
+        id: 'dev-2', region: 'lab', platform: 'android', tier: 'physical',
+        model: 'Pixel 9', osVersion: '16', state: 'READY', dedicated: true,
+        // `install-reset`, which is what a handset declares since ADR-0012 — a release undoes what
+        // the session installed rather than sweeping the owner's apps.
+        capabilities: ['input-datachannel', 'install-reset', 'app-install', 'logcat',
+          'screenshot', 'ui-hierarchy', 'webdriver'],
+        screen: { width: 1080, height: 2400, density: 420 },
+      },
+    ];
+    mod.state.available = 2;
+  }
+
+  test('a handset is labelled REAL and a cuttlefish VIRTUAL', () => {
+    withPhone();
+    const text = textOf(mod.SCREENS.devices());
+    assert.match(text, /REAL DEVICE/);
+    assert.match(text, /VIRTUAL DEVICE/);
+    assert.match(text, /Pixel 9/);
+  });
+
+  test('the kind filter narrows to one kind', () => {
+    withPhone();
+    mod.state.deviceKind = 'real';
+    const real = textOf(mod.SCREENS.devices());
+    assert.match(real, /Pixel 9/);
+    assert.doesNotMatch(real, /cf_x86_64/, 'a virtual device must not survive the real filter');
+
+    mod.state.deviceKind = 'virtual';
+    const virtual = textOf(mod.SCREENS.devices());
+    assert.match(virtual, /cf_x86_64/);
+    assert.doesNotMatch(virtual, /Pixel 9/);
+
+    mod.state.deviceKind = 'all';
+  });
+
+  /**
+   * A filter that can only produce an empty screen is a control that should not be there. This is
+   * the state every existing Cuttlefish-only farm is in, and offering "Real (0)" on it would be an
+   * invitation to click into a blank page and wonder what broke.
+   */
+  test('the filter is not offered on a fleet of one kind', () => {
+    seed({ name: 'devices' });
+    assert.doesNotMatch(textOf(mod.SCREENS.devices()), /Virtual|Real/,
+      'one kind in the fleet means nothing to choose between');
+  });
+
+  test('filtering to a kind the farm does not have explains itself', () => {
+    seed({ name: 'devices' });
+    mod.state.deviceKind = 'real';
+    const text = textOf(mod.SCREENS.devices());
+    // Never the "no devices are registered" copy — there ARE devices, just not of this kind.
+    assert.doesNotMatch(text, /No devices are registered/);
+    assert.match(text, /Clear the filter/);
+    mod.state.deviceKind = 'all';
+  });
+
+  test('the device detail names the reset it has rather than showing it as missing', () => {
+    withPhone();
+    mod.state.route = { name: 'device', id: 'dev-2' };
+    // KNOWN_CAPS drives the chip row; a capability absent from it renders as an unknown extra and
+    // a phone's only reset would read as "this device cannot reset at all".
+    assert.match(textOf(mod.SCREENS.device()), /install-reset/);
+  });
+});
+
+/**
+ * §18 in the console: a farm fault must be visibly NOT a test failure.
+ *
+ * The taxonomy is worth nothing if the screen renders both identically — the whole point is that a
+ * person reading a red run can tell "your app is broken" from "our cable fell out".
+ */
+describe('failure classification on the run detail', () => {
+  function withIncidents() {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.failures = [
+      {
+        id: 'tr-1', sessionId: 'sess-1', name: 'checkout applies a promo',
+        failure: 'AssertionError: expected 8 got 10', durationMs: 1200,
+        failureClass: 'test', failureReason: 'assertion-failure',
+        reportedAt: new Date().toISOString(),
+      },
+      {
+        id: 'tr-2', sessionId: 'sess-1', name: 'cart survives a reload',
+        failure: 'no such session', durationMs: 900,
+        failureClass: null, failureReason: null,
+        reportedAt: new Date().toISOString(),
+      },
+    ];
+    mod.state.runDetail.incidents = [{
+      id: 'si-1', sessionId: 'sess-1', class: 'infrastructure',
+      reason: 'device-disconnected', detail: 'adb: device offline',
+      device: 'phone-ABC123', occurredAt: new Date().toISOString(),
+    }];
+  }
+
+  test('what the farm saw is its own card, not mixed into the failures', () => {
+    withIncidents();
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /What the farm saw/);
+    assert.match(text, /adb: device offline/);
+    assert.match(text, /phone-ABC123/);
+    // The failures card still reports only what the SUITE said.
+    assert.match(text, /Failures \(2\)/);
+  });
+
+  test('an infrastructure incident is labelled as such, never as a test failure', () => {
+    withIncidents();
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /Infrastructure/);
+  });
+
+  test('a classified test failure carries its class', () => {
+    withIncidents();
+    assert.match(textOf(mod.SCREENS.run()), /Test/);
+  });
+
+  /** The run still renders when the farm saw nothing — the common, healthy case. */
+  test('no incidents means no card, not an empty one', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.incidents = [];
+    assert.doesNotMatch(textOf(mod.SCREENS.run()), /What the farm saw/);
+  });
+
+  /**
+   * The state this card exists for: nothing failed, but the farm had a problem. A run like this
+   * looks perfectly green and should not be trusted without a second look.
+   */
+  test('incidents show even when every test passed', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.failures = [];
+    mod.state.runDetail.incidents = [{
+      id: 'si-1', sessionId: 'sess-1', class: 'device-health',
+      reason: 'low-battery', detail: 'battery at 9%',
+      device: 'phone-ABC123', occurredAt: new Date().toISOString(),
+    }];
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /What the farm saw/);
+    assert.match(text, /Device health/);
+  });
+});

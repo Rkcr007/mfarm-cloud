@@ -3,7 +3,7 @@ import { timingSafeEqual, createHash } from 'node:crypto';
 import { withSystem } from '../../db.ts';
 import { generateWorkerToken, sha256, safeEqualHex } from '../../auth.ts';
 import { redeemEnrollment, markRedeemed } from '../../enrollment.ts';
-import { negotiate, deviceAutomationEndpoint, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
+import { negotiate, deviceAutomationEndpoint, classifyReason, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete, sessionAttach } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
 import { appActions, hostsRecovered, meteringEvents, workerResets } from '../../metrics.ts';
@@ -228,8 +228,8 @@ export async function workerRoutes(app: FastifyInstance) {
            RETURNING id`,
           [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,
            JSON.stringify(d.capabilities), d.localId,
-           // A device missing snapshot-reset or persistent input registers so it stays visible and
-           // monitorable, but starts OFFLINE — it is never handed to a tenant.
+           // A device that can reset by neither mechanism, or lacks persistent input, registers so
+           // it stays visible and monitorable, but starts OFFLINE — it is never handed to a tenant.
            schedulable.has(d.localId) ? 'READY' : 'OFFLINE',
            // v1 workers name one server for the whole host; v2 names one per device. Resolved in
            // `packages/protocol` so the hub's COALESCE and this write cannot drift apart.
@@ -410,10 +410,19 @@ export async function workerRoutes(app: FastifyInstance) {
       // A data-plane client attached to this session. The worker is the only party that observes
       // it — the grant is verified offline, so nothing else on the network knows a viewer arrived.
       attaches?: Array<{ sessionId: string; fence: number }>;
+      /**
+       * Infrastructure and device-health failures the AGENT saw (spec §18, migration 024).
+       *
+       * Here rather than on a route of its own because this batch is already buffered and re-sent
+       * on reconnect — and an incident is most worth having in exactly the window where the
+       * connection was bad, which is when a fire-and-forget POST would be lost.
+       */
+      incidents?: Array<{ eventId: string; deviceId: string; sessionId?: string | null;
+                          reason: string; detail?: string; occurredAt: string }>;
     };
   }>('/workers/events', async (req) => {
     const { hostId } = requireWorker(req);
-    const { metering = [], resets = [], actions = [], attaches = [] } = req.body ?? {};
+    const { metering = [], resets = [], actions = [], attaches = [], incidents = [] } = req.body ?? {};
 
     const meter = await ingest(
       hostId,
@@ -474,6 +483,51 @@ export async function workerRoutes(app: FastifyInstance) {
       attachResults.push({ sessionId: a.sessionId, accepted: await sessionAttach(hostId, a.sessionId, a.fence) });
     }
 
+    /**
+     * Incidents (spec §18).
+     *
+     * `FROM devices d WHERE d.host_id = $1` is the whole security of this insert, exactly as it is
+     * for resets and actions above: a worker names a device id, and without the join it could file
+     * incidents against any device in the fleet — quietly poisoning another tenant's failure
+     * reports, which is a worse outcome than most things a worker could forge, because it is
+     * invisible. The org is taken from the device's row, never from the body (architecture rule 4).
+     *
+     * `ON CONFLICT (event_id) DO NOTHING` is what makes the re-send safe. The agent buffers these
+     * and flushes on reconnect by design, so one pulled cable arriving thirty times is the expected
+     * case, not the exceptional one.
+     */
+    const incidentResults = [];
+    for (const i of incidents) {
+      const cls = classifyReason(i.reason);
+      // Refused here rather than left to the CHECK: the agent is a program we ship, so an unknown
+      // reason means a newer worker against an older control plane. Ignore it the way an unknown
+      // capability is ignored — one line, not a failed batch that would also drop the good rows.
+      if (cls !== 'infrastructure' && cls !== 'device-health') {
+        req.log.warn({ hostId, reason: i.reason }, 'incident with an unknown reason ignored');
+        incidentResults.push({ eventId: i.eventId, accepted: false });
+        continue;
+      }
+      const accepted = await withSystem(async (c) => {
+        const res = await c.query(
+          `INSERT INTO session_incidents
+             (org_id, session_id, device_id, class, reason, detail, occurred_at, event_id)
+           SELECT COALESCE(s.org_id, d.org_id), s.id, d.id, $4, $5, $6, $7, $8
+             FROM devices d
+             -- LEFT, and host-scoped on the session too: an incident with no session is the normal
+             -- idle case, and a worker naming ANOTHER host's session must not attach to it. A plain
+             -- join would silently drop every incident that happened outside a session.
+             LEFT JOIN sessions s ON s.id = $3 AND s.device_id = d.id
+            WHERE d.id = $2 AND d.host_id = $1
+           ON CONFLICT (event_id) DO NOTHING
+           RETURNING id`,
+          [hostId, i.deviceId, i.sessionId ?? null, cls, i.reason,
+           i.detail?.slice(0, 4000) ?? null, new Date(i.occurredAt), i.eventId],
+        );
+        return res.rowCount === 1;
+      });
+      incidentResults.push({ eventId: i.eventId, accepted });
+    }
+
     const actionResults = [];
     for (const r of actions) {
       const accepted = await withSystem(async (c) => {
@@ -502,6 +556,9 @@ export async function workerRoutes(app: FastifyInstance) {
       resets: resetResults,
       actions: actionResults,
       attaches: attachResults,
+      // Reported back so the agent can drop them from its buffer. `accepted: false` on a re-send is
+      // the normal, correct answer — it means "already recorded", not "lost".
+      incidents: incidentResults,
     };
   });
 }

@@ -494,6 +494,200 @@ describe('outcome reporting', () => {
     method: 'POST', url: `/v1/sessions/${sessionId}/result`, headers: auth(key), payload: body,
   });
 
+  /**
+   * Spec §18. A failure that is the FARM's fault must not be counted as the product's.
+   *
+   * These tests are as much about what is NOT claimed as about what is: the taxonomy's whole value
+   * is that a number meaning "your app is broken" stops silently including cable pulls, and that
+   * only holds if nothing in the path invents a classification nobody sent.
+   */
+  describe('failure classification', () => {
+    test('a suite can say the app crashed rather than an assertion failing', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'classified' });
+      const r = await report(s, {
+        status: 'failed', name: 'checkout', failure: 'app died',
+        failureReason: 'application-crash',
+      });
+      assert.equal(r.statusCode, 201);
+      assert.equal(r.json().result.failureReason, 'application-crash');
+      assert.equal(r.json().result.failureClass, 'test', 'the class is derived, not sent');
+    });
+
+    test('an infrastructure reason classifies as infrastructure, not as the product', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'infra' });
+      const r = await report(s, {
+        status: 'failed', name: 'checkout', failureReason: 'device-disconnected',
+      });
+      assert.equal(r.json().result.failureClass, 'infrastructure');
+    });
+
+    /**
+     * The whole point of the column. An unclassified failure is UNKNOWN, and defaulting it to
+     * `test` would make every suite written before §18 retroactively assert something it never said
+     *  — the same mistake migration 021 refuses to make about pass/fail.
+     */
+    test('an unclassified failure stays unclassified, never "the product\'s fault"', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'unclassified' });
+      const r = await report(s, { status: 'failed', name: 'checkout', failure: 'boom' });
+      assert.equal(r.statusCode, 201);
+      assert.equal(r.json().result.failureClass, null);
+      assert.equal(r.json().result.failureReason, null);
+    });
+
+    test('a passing test cannot carry a failure reason', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'contradiction' });
+      const r = await report(s, {
+        status: 'passed', name: 'checkout', failureReason: 'assertion-failure',
+      });
+      assert.equal(r.statusCode, 400, 'a contradiction is a caller bug, not something to silently drop');
+    });
+
+    test('an unknown reason is refused by name, not by a 500 from the CHECK', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'bogus' });
+      const r = await report(s, {
+        status: 'failed', name: 'checkout', failureReason: 'the-intern-did-it',
+      });
+      assert.equal(r.statusCode, 400);
+    });
+  });
+
+  /**
+   * Incidents — what the FARM saw, which the suite cannot know (spec §18, migration 024).
+   *
+   * The security property here matters more than the feature. A worker names a device id, and
+   * without the host-scoping join it could file incidents against any device in the fleet: quietly
+   * poisoning another tenant's failure reports, which is worse than most things a worker could
+   * forge precisely because nobody would ever look for it.
+   */
+  describe('incidents', () => {
+    const sendIncidents = async (incidents: unknown[]) => {
+      const wt = generateWorkerToken();
+      await withSystem((c) => c.query(
+        'UPDATE hosts SET token_prefix = $1, token_hash = $2 WHERE id = $3',
+        [wt.prefix, wt.hash, hostId]));
+      return app.inject({
+        method: 'POST', url: '/v1/workers/events', headers: auth(wt.plaintext),
+        payload: { incidents },
+      });
+    };
+
+    test('the farm records what it saw, against the device and the session', async () => {
+      await clearFleet();
+      const [deviceId] = await seedDevices(1);
+      const sessionId = await openSession(keyA, { 'mfarm:runId': 'incident' });
+
+      const r = await sendIncidents([{
+        eventId: randomUUID(), deviceId, sessionId,
+        reason: 'device-disconnected', detail: 'adb: device offline',
+        occurredAt: new Date().toISOString(),
+      }]);
+      assert.equal(r.statusCode, 200);
+      assert.deepEqual(r.json().incidents.map((i: { accepted: boolean }) => i.accepted), [true]);
+
+      const rows = await withSystem(async (c) => (await c.query(
+        'SELECT class, reason, org_id, session_id FROM session_incidents WHERE device_id = $1',
+        [deviceId])).rows);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].class, 'infrastructure', 'the class is derived from the reason');
+      assert.equal(rows[0].org_id, orgA, 'the org comes from the device, never from the worker');
+      assert.equal(rows[0].session_id, sessionId);
+    });
+
+    /**
+     * The agent buffers incidents and flushes on reconnect BY DESIGN, so the same one arriving many
+     * times is the expected case. Without idempotency one pulled cable reads as thirty faults.
+     */
+    test('a re-sent incident is recorded once', async () => {
+      await clearFleet();
+      const [deviceId] = await seedDevices(1);
+      const eventId = randomUUID();
+      const one = {
+        eventId, deviceId, reason: 'appium-failure', occurredAt: new Date().toISOString(),
+      };
+      await sendIncidents([one]);
+      const second = await sendIncidents([one]);
+      assert.deepEqual(second.json().incidents.map((i: { accepted: boolean }) => i.accepted), [false],
+        '"already recorded" is the truthful answer, not a failure');
+
+      const count = await withSystem(async (c) => (await c.query(
+        'SELECT count(*)::int AS n FROM session_incidents WHERE device_id = $1', [deviceId])).rows[0].n);
+      assert.equal(count, 1);
+    });
+
+    test('a worker cannot file an incident against a device that is not its own', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      // A device on a host this worker does not hold the credential for.
+      const otherDevice = await withSystem(async (c) => {
+        const wt2 = generateWorkerToken();
+        const other = (await c.query(
+          `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint,
+                              token_prefix,token_hash,last_heartbeat_at)
+           VALUES ($1,'run-test-otherhost','UP',1,8,1024,'wss://other.example:8443',$2,$3, now())
+           RETURNING id`, [REGION, wt2.prefix, wt2.hash])).rows[0].id;
+        return (await c.query(
+          `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state,
+                                capabilities, local_id)
+           VALUES ($1,$2,'android','cuttlefish','cf','15','READY','[]'::jsonb,$3)
+           RETURNING id`, [other, REGION, `other-${randomUUID()}`])).rows[0].id;
+      });
+
+      try {
+        const r = await sendIncidents([{
+          eventId: randomUUID(), deviceId: otherDevice,
+          reason: 'usb-failure', occurredAt: new Date().toISOString(),
+        }]);
+        assert.deepEqual(r.json().incidents.map((i: { accepted: boolean }) => i.accepted), [false]);
+
+        const count = await withSystem(async (c) => (await c.query(
+          'SELECT count(*)::int AS n FROM session_incidents WHERE device_id = $1', [otherDevice])).rows[0].n);
+        assert.equal(count, 0, 'poisoning another host\'s failure reports must not be possible');
+      } finally {
+        // This host is the ONLY row in the file that `after()` does not know about, and leaving it
+        // does not merely leak — `after()` ends with DELETE FROM regions, which this host still
+        // references, so the teardown dies on a foreign key and the whole file hangs without ever
+        // saying why. In a `finally` so a failed assertion above cannot cause that.
+        await withSystem((c) => c.query('DELETE FROM hosts WHERE hostname = $1', ['run-test-otherhost']));
+      }
+    });
+
+    /** A newer agent against an older control plane: ignore the row, keep the batch. */
+    test('an unknown reason is ignored without failing the whole batch', async () => {
+      await clearFleet();
+      const [deviceId] = await seedDevices(1);
+      const r = await sendIncidents([
+        { eventId: randomUUID(), deviceId, reason: 'quantum-decoherence', occurredAt: new Date().toISOString() },
+        { eventId: randomUUID(), deviceId, reason: 'low-battery', occurredAt: new Date().toISOString() },
+      ]);
+      assert.equal(r.statusCode, 200);
+      assert.deepEqual(r.json().incidents.map((i: { accepted: boolean }) => i.accepted), [false, true]);
+    });
+
+    /** A device can go unhealthy while idle, and a reset can fail after its session ended. */
+    test('an incident with no session is stored, not dropped', async () => {
+      await clearFleet();
+      const [deviceId] = await seedDevices(1);
+      await sendIncidents([{
+        eventId: randomUUID(), deviceId, reason: 'low-storage', occurredAt: new Date().toISOString(),
+      }]);
+      const rows = await withSystem(async (c) => (await c.query(
+        'SELECT class, session_id FROM session_incidents WHERE device_id = $1', [deviceId])).rows);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].class, 'device-health');
+      assert.equal(rows[0].session_id, null);
+    });
+  });
+
   test('a run with no reports is UNMEASURED, not passing', async () => {
     await clearFleet();
     await seedDevices(1);

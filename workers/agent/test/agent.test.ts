@@ -146,7 +146,11 @@ function fakeBackend(localId = 'fake-1'): DeviceBackend & { control: FakeDevice 
 const makeAgent = (
   backends: DeviceBackend[],
   hostname: string,
-  extra: { automationEndpoint?: string; automationEndpoints?: Record<string, string> } = {},
+  extra: {
+    automationEndpoint?: string;
+    automationEndpoints?: Record<string, string>;
+    endpoint?: string;
+  } = {},
 ) =>
   new Agent({
     controlPlaneUrl: baseUrl,
@@ -918,6 +922,43 @@ describe('per-device automation endpoints', () => {
     assert.equal(rows[1].dev, 'https://worker.example:8443/automation/cf-2');
   });
 
+  test('a changed data-plane endpoint re-registers, instead of resuming onto a stale address', async () => {
+    /**
+     * `hosts.endpoint` is written at registration and nowhere else, so if a change to it does not
+     * move the capability fingerprint, the agent resumes, heartbeats, and the control plane keeps
+     * handing out the address the host gave the FIRST time it ever started.
+     *
+     * Found on hardware: removing PUBLIC_ENDPOINT so the agent would advertise its tunnel changed
+     * what it sent and changed nothing in the database. It is the laptop case exactly — a machine
+     * that registers a direct address on one network and is behind NAT on the next.
+     */
+    const hostname = `dp-endpoint-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'ws://10.0.0.5:8080' });
+    await first.start();
+
+    const second = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'mfarm+tunnel:/dp' });
+    await second.start();
+
+    const row = await withSystem(async (c) => {
+      const { rows } = await c.query(`SELECT endpoint FROM hosts WHERE id = $1`, [second.hostId]);
+      return rows[0] as { endpoint: string };
+    });
+    assert.equal(row.endpoint, 'mfarm+tunnel:/dp',
+      'the host resumed on its old address instead of re-registering the new one');
+  });
+
+  test('an unchanged endpoint still resumes rather than re-registering every restart', async () => {
+    // The other half: adding a field to the fingerprint must not make every restart a registration.
+    const hostname = `dp-stable-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'ws://10.0.0.5:8080' });
+    const firstState = await first.start();
+    const second = makeAgent([fakeBackend('cf-1')], hostname, { endpoint: 'ws://10.0.0.5:8080' });
+    const secondState = await second.start();
+    assert.equal(secondState.hostId, firstState.hostId);
+    assert.equal(secondState.workerToken, firstState.workerToken,
+      're-registration would have minted a new worker token');
+  });
+
   test('re-registering without a server WITHDRAWS the stored endpoint', async () => {
     // A stale url left behind would keep the hub dialling a server that is gone (ADR-0003 d3).
     const hostname = `b2-withdraw-${randomUUID().slice(0, 8)}`;
@@ -1369,5 +1410,94 @@ describe('the data-plane tunnel', () => {
     // And it comes back on its own, which is the whole reason a laptop closing its lid is survivable.
     tunnel.start();
     await waitFor(() => tunnel.connected, 'the tunnel to reconnect');
+  });
+});
+
+/**
+ * Re-registering a host that enrolled with a SINGLE-USE token (ADR-0008).
+ *
+ * `POST /workers/register` has accepted three credential kinds since migration 023, and the `mwk_`
+ * branch — the host's own worker token — was unreachable in practice, because the agent only ever
+ * presented the value it was configured with. On an operator-owned Cuttlefish box that value is the
+ * fleet secret and nothing was wrong. On the laptop enrollment was built for, it is an `mae_` token
+ * that is spent the moment the first registration succeeds.
+ *
+ * The agent re-registers whenever its capability fingerprint changes — which is precisely what
+ * plugging in a second phone does. So without this, every enrolled host could be started exactly
+ * once, and adding a phone or restarting the agent would need a freshly minted enrollment token.
+ */
+describe('re-registration presents the host\'s own credential', () => {
+  /** Mint a real single-use enrollment token for the test org. */
+  async function enrollmentToken(): Promise<string> {
+    const { createEnrollment } = await import('@mfarm/api/enrollment');
+    const { plaintext } = await createEnrollment(orgId, null, 'agent-test laptop', 24);
+    return plaintext;
+  }
+
+  test('a spent enrollment token does not strand the host it enrolled', async () => {
+    const host = `enrolled-${randomUUID().slice(0, 8)}`;
+    const token = await enrollmentToken();
+    const statePath = join(stateDir, `${host}.json`);
+
+    const first = new Agent({
+      controlPlaneUrl: baseUrl,
+      registrationToken: token,
+      hostname: host, region: REGION,
+      endpoint: 'wss://agent-test.example:8080',
+      devices: [fakeBackend()],
+      statePath, cores: 8, memoryMb: 16384,
+    });
+    const s1 = await first.start();
+    assert.ok(s1.workerToken.startsWith('mwk_'), 'enrolling yields a worker token of its own');
+    await first.shutdown();
+
+    // The fingerprint changes — a second phone, in the shape this test can express. The agent must
+    // re-register, and the enrollment token in its environment is now spent.
+    const b2 = fakeBackend('second-device');
+    const second = new Agent({
+      controlPlaneUrl: baseUrl,
+      registrationToken: token, // the SAME spent token, exactly as it would still be in the env
+      hostname: host, region: REGION,
+      endpoint: 'wss://agent-test.example:8080',
+      devices: [fakeBackend(), b2],
+      statePath, cores: 8, memoryMb: 16384,
+    });
+
+    const s2 = await second.start();
+    assert.equal(s2.hostId, s1.hostId, 'the same host, not a second one');
+    assert.ok(s2.workerToken.startsWith('mwk_'));
+    await second.shutdown();
+
+    // And the device it could only have registered by re-registering successfully is really there.
+    const found = await withSystem(async (c) =>
+      (await c.query('SELECT local_id FROM devices WHERE host_id = $1 ORDER BY local_id', [s1.hostId])).rows);
+    assert.deepEqual(found.map((r) => r.local_id), ['fake-1', 'second-device']);
+  });
+
+  /**
+   * The fallback. A stored worker token can be genuinely dead — host row deleted, database restored
+   * from before this host existed — and `start()` reaches re-registration exactly when a heartbeat
+   * has just failed, which is one of the ways that happens. Refusing the stored credential must not
+   * end the attempt.
+   */
+  test('a dead worker token falls back to the configured credential', async () => {
+    const host = `stale-${randomUUID().slice(0, 8)}`;
+    const statePath = join(stateDir, `${host}.json`);
+
+    const first = makeAgent([fakeBackend()], host);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (first as any).opts.statePath = statePath;
+    const s1 = await first.start();
+    await first.shutdown();
+
+    // The host disappears from under the agent, taking its token's validity with it.
+    await withSystem((c) => c.query('DELETE FROM hosts WHERE id = $1', [s1.hostId]));
+
+    const revived = makeAgent([fakeBackend()], host);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (revived as any).opts.statePath = statePath;
+    const s2 = await revived.start();
+    assert.notEqual(s2.hostId, s1.hostId, 'a new host row, reached via the fleet secret');
+    await revived.shutdown();
   });
 });

@@ -584,6 +584,13 @@ Advertised endpoints (`AUTOMATION_ADVERTISE_BASE`, `APPIUM_ADVERTISE_HOST`) must
 tailnet address or MagicDNS name — an endpoint the control plane registers but cannot reach is a
 device that absorbs sessions and fails them.
 
+**Or set neither, and let automation ride the tunnel** (ADR-0011). With no advertised name and the
+tunnel on — which is the default — the agent advertises `mfarm+tunnel:/automation/<localId>`, binds
+its gateway to `127.0.0.1`, and the hub reaches it over the socket the agent already dials out. That
+is the answer for a laptop behind NAT, where there is no address to advertise and no port to open;
+it is also a legitimate answer for a VM, one loopback hop slower than the direct path. A host that
+names a public address keeps using it, so an existing farm does not move by upgrading.
+
 ### TLS internally
 
 Tailscale traffic is already WireGuard-encrypted end to end, so nothing on the tailnet is in the

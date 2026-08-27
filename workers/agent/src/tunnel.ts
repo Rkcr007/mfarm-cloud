@@ -2,6 +2,7 @@ import { WebSocket } from 'ws';
 import { TUNNEL_PATH, TUNNEL_MAX_FRAME_BYTES, isTunnelFrame, type TunnelFrame } from '@mfarm/protocol';
 import type { Agent } from './agent.ts';
 import type { DataPlane, DataPlaneSocket } from './dataplane.ts';
+import { AutomationChannel } from './automation-tunnel.ts';
 
 /**
  * The agent's end of the data-plane tunnel.
@@ -25,6 +26,14 @@ export interface TunnelOptions {
   /** Backoff bounds. Defaults are 1s doubling to 30s, the same shape the Appium supervisor uses. */
   minBackoffMs?: number;
   maxBackoffMs?: number;
+  /**
+   * Where this agent's own automation gateway listens, for `automation` channels (ADR-0011).
+   *
+   * Absent means this host does not serve WebDriver over the tunnel, and an `automation` channel is
+   * refused rather than opened. That is the honest answer for an agent with no Appium: the
+   * alternative is a channel that accepts a request and then cannot answer it.
+   */
+  automationTarget?: { host: string; port: number };
 }
 
 /**
@@ -85,6 +94,15 @@ class TunnelChannel implements DataPlaneSocket {
 export class AgentTunnel {
   private ws?: WebSocket;
   private readonly channels = new Map<number, TunnelChannel>();
+  /**
+   * Automation channels, kept in their own map (ADR-0011).
+   *
+   * Separate rather than a union in one map because they have different lifetimes and different
+   * teardown: a data-plane channel is a viewer that lasts as long as somebody is looking, and an
+   * automation channel is ONE WebDriver command. Keeping `channelCount` — which the heartbeat
+   * reports as live viewers — counting only the first is the reason this is not one map.
+   */
+  private readonly automation = new Map<number, AutomationChannel>();
   private stopped = false;
   private backoff: number;
   private timer?: NodeJS.Timeout;
@@ -173,6 +191,10 @@ export class AgentTunnel {
   private dropAllChannels(reason: string): void {
     for (const ch of this.channels.values()) ch.remoteClose();
     this.channels.clear();
+    // An in-flight WebDriver command whose tunnel just died has nowhere to send its answer, and the
+    // request it is holding open keeps that device's Appium busy. Aborting is what frees it.
+    for (const ch of this.automation.values()) ch.abort();
+    this.automation.clear();
     if (reason) this.log('data-plane channels dropped', { reason });
   }
 
@@ -189,14 +211,24 @@ export class AgentTunnel {
     if (frame.t === 'open') {
       // A repeated open for a live channel would orphan the first one's logcat child and its
       // signalling socket. The control plane allocates ids and does not reuse them, so this is a
-      // bug or a forgery either way; refusing is the safe reading of both.
-      if (this.channels.has(frame.ch)) {
+      // bug or a forgery either way; refusing is the safe reading of both. Checked across BOTH
+      // maps: the id space is shared, so a collision is a collision whatever the channel carries.
+      if (this.channels.has(frame.ch) || this.automation.has(frame.ch)) {
         this.sendFrame({ ch: frame.ch, t: 'close', reason: 'channel already open' });
         return;
       }
+      if (frame.kind === 'automation') return this.openAutomation(frame.ch);
       const channel = new TunnelChannel(frame.ch, (f) => this.sendFrame(f));
       this.channels.set(frame.ch, channel);
       this.opts.dataPlane.accept(channel);
+      return;
+    }
+
+    const automation = this.automation.get(frame.ch);
+    if (automation) {
+      if (frame.t === 'data') return automation.deliver(frame.d);
+      this.automation.delete(frame.ch);
+      automation.abort();
       return;
     }
 
@@ -207,5 +239,33 @@ export class AgentTunnel {
 
     this.channels.delete(frame.ch);
     channel.remoteClose();
+  }
+
+  /**
+   * Accept one tunnelled WebDriver command (ADR-0011).
+   *
+   * Refused outright on a host with no automation gateway. The control plane only sends this when
+   * the device advertised a `mfarm+tunnel:` endpoint, so reaching here without a target means the
+   * agent's view of itself and the control plane's have diverged — which is worth saying as a
+   * closed channel with a reason, not worth papering over.
+   */
+  private openAutomation(ch: number): void {
+    const target = this.opts.automationTarget;
+    if (!target) {
+      this.sendFrame({ ch, t: 'close', reason: 'this host serves no automation' });
+      return;
+    }
+    const channel = new AutomationChannel({
+      target,
+      send: (f) => this.sendFrame({ ch, t: 'data', d: JSON.stringify(f) }),
+      close: () => {
+        // Deleted BEFORE the close frame so the terminal `end`/`err` this follows cannot be raced
+        // by a late data frame arriving on an id we have already finished with.
+        this.automation.delete(ch);
+        this.sendFrame({ ch, t: 'close' });
+      },
+      log: (msg, meta) => this.log(msg, { ch, ...meta }),
+    });
+    this.automation.set(ch, channel);
   }
 }

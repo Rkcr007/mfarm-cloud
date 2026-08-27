@@ -44,6 +44,15 @@ export function nodeAt(nodes: UiNode[], x: number, y: number): UiNode | null;
 export function selectorsFor(node: UiNode, nodes: UiNode[]): Selector[];
 
 export const ATTACHED: Set<string>;
+
+/**
+ * Control-channel button command -> the data plane's `KeyName`.
+ *
+ * Declared because a test asserts every value is a name the agent will accept: a typo here is a
+ * console button that renders enabled and does nothing, which is the failure this map was added to
+ * fix in the first place.
+ */
+export const BUTTON_KEY: Record<string, string>;
 export const STATES: string[];
 export function parseLogLine(line: string): {
   time: string; pid?: string; tid?: string; level: string; tag: string; message: string; raw: string;

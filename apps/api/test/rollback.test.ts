@@ -41,7 +41,27 @@ const BASELINE = '022_screenshot_action.sql';
  * writes the previous release makes happily, so adding one is a decision to record here with the
  * reason it is safe — not something to discover during a rollback.
  */
-const ACCEPTED_NEW_CHECKS: string[] = [];
+const ACCEPTED_NEW_CHECKS: string[] = [
+  /**
+   * Migration 024, failure classification (spec §18). All four constrain ONLY columns that did not
+   * exist at the baseline — `failure_class` and `failure_reason`, both nullable and both added by
+   * the same migration.
+   *
+   * That is what makes them safe in the direction this guard actually cares about. Roll the CODE
+   * back to the previous release against a 024 schema and it writes `test_results` exactly as it
+   * always did, naming neither column; both default to NULL; and every one of these CHECKs is
+   * satisfied by its own `IS NULL` branch. There is no write the old release makes that the new
+   * constraints reject, which is the precise question the test is asking.
+   *
+   * The general rule stays right and this is not a precedent for relaxing it: a CHECK that touched
+   * `status` or `failure` — columns the old release DOES write — would fail a rollback exactly as
+   * the guard predicts, and belongs in a new migration rather than in this list.
+   */
+  'test_results.test_results_failure_class_ck',
+  'test_results.test_results_failure_reason_ck',
+  'test_results.test_results_failure_pair_ck',
+  'test_results.test_results_failure_only_on_failed_ck',
+];
 
 const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const SYSTEM_URL = process.env.DATABASE_URL ?? 'postgres://mfarm:mfarm@localhost:5433/mfarm';

@@ -1,6 +1,10 @@
+import { access, readdir } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { cpus, hostname as osHostname, totalmem } from 'node:os';
 import { join } from 'node:path';
-import { automationPath } from '@mfarm/protocol';
+
+const { X_OK } = fsConstants;
+import { automationIsTunnelled, dataPlaneEndpoint, gatewayBase, tunnelEnabled } from './automation-endpoint.ts';
 import { Agent } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
 import { AutomationGateway } from './gateway.ts';
@@ -8,6 +12,8 @@ import { DataPlane } from './dataplane.ts';
 import { AgentTunnel } from './tunnel.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
 import { createAvdBackend } from './devices/avd.ts';
+import { createPhysicalBackend } from './devices/physical.ts';
+import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DeviceBackend } from './device.ts';
 
 /**
@@ -32,7 +38,113 @@ function env(key: string, fallback?: string): string {
 
 const flag = (key: string): boolean => /^(1|true|yes|on)$/i.test(process.env[key] ?? '');
 
+/**
+ * The phones on this machine's USB, as backends (ADR-0008, spec §6).
+ *
+ * OPT-IN VIA `PHYSICAL_ENABLED`, deliberately. Discovery is a read — `adb devices` — but enrolling
+ * what it finds is not: it puts a handset into a farm where a stranger's session can drive it. A
+ * developer with a phone plugged in for unrelated reasons must not have it silently join a fleet
+ * because they started an agent.
+ *
+ * WHAT IT DOES WITH A PHONE IT CANNOT USE. Says so, with the fix. An unauthorized or badly-cabled
+ * device is the single most common physical-farm support ticket, and the version of this that
+ * filters them out silently turns "tap Allow on the screen" into an afternoon.
+ */
+/**
+ * `aapt2` from the Android SDK's build-tools, if this machine has any.
+ *
+ * Searched rather than configured: `ANDROID_HOME` is already required for Appium, build-tools sit
+ * at a versioned path underneath it, and asking an operator for a fifth variable naming a binary
+ * inside a directory they already told us about is how setup becomes a support ticket. Newest
+ * version wins — `readdir` sorted descending is good enough for the `NN.N.N` names these use, and
+ * any of them can read a package name.
+ */
+async function findAapt2(): Promise<string | undefined> {
+  if (process.env.AAPT2_PATH) return process.env.AAPT2_PATH;
+  const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
+  if (!sdk) return undefined;
+  try {
+    const versions = (await readdir(join(sdk, 'build-tools'))).sort().reverse();
+    for (const v of versions) {
+      const candidate = join(sdk, 'build-tools', v, 'aapt2');
+      try {
+        await access(candidate, X_OK);
+        return candidate;
+      } catch { /* try the next version */ }
+    }
+  } catch { /* no build-tools directory at all */ }
+  return undefined;
+}
+
+async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
+  const found = await discover();
+  if (found.length === 0) {
+    console.warn('[agent] PHYSICAL_ENABLED is set but adb sees no devices at all — check the cable and that adb is installed');
+    return [];
+  }
+
+  const usable = found.filter((d) => d.state === 'device');
+  for (const d of found) {
+    if (d.state === 'device') continue;
+    // One line per unusable device, naming the device, the state and what to do about it.
+    console.warn(`[agent] ${d.serial} is ${d.state} and will NOT be enrolled — ${d.remedy}`);
+  }
+
+  /**
+   * How a release cleans these phones — ADR-0012, and `install-scoped` unless somebody says
+   * otherwise IN THIS PROCESS's environment.
+   *
+   * There is no console setting for this yet; when there is, it belongs beside the per-device
+   * sharing toggle, because it is the same trust decision made by the same person. Until then an
+   * operator provisioning a dedicated farm phone opts in here, and a borrowed handset gets the safe
+   * mode by doing nothing at all — which is the entire point of the ADR.
+   */
+  const resetMode = process.env.PHYSICAL_RESET_MODE === 'full-sweep' ? 'full-sweep' as const : 'install-scoped' as const;
+  if (resetMode === 'full-sweep') {
+    console.warn(
+      '[agent] PHYSICAL_RESET_MODE=full-sweep — a release will `pm clear` EVERY third-party package '
+      + 'on these devices except the keep list. Correct for a dedicated farm phone; on somebody\'s '
+      + 'own handset it wipes their apps\' data. `node deploy/verify-physical.mjs` lists exactly what.',
+    );
+  }
+
+  // `aapt2` lets the agent read an APK's package name BEFORE installing it, which is what turns
+  // "we overwrote the owner's app" from a report into a refusal. Absent is survivable, and
+  // installApp says so at the moment it matters rather than here.
+  const aapt2Path = await findAapt2();
+  if (!aapt2Path && resetMode === 'install-scoped') {
+    console.warn(
+      '[agent] no aapt2 in the Android SDK build-tools — the agent cannot read an APK\'s package '
+      + 'name in advance, so installing over an app the device already has will be reported after '
+      + 'the fact instead of refused. Fix: ./deploy/install-build-tools.sh',
+    );
+  }
+
+  return usable.map((d) => {
+    const localId = localIdForSerial(d.serial);
+    console.log(
+      `[agent] enrolling ${localId}: ${d.props?.manufacturer ?? '?'} ${d.props?.model ?? d.serial}`
+      + `, Android ${d.props?.osVersion ?? '?'} (sdk ${d.props?.sdkVersion ?? '?'})`,
+    );
+    return createPhysicalBackend({
+      serial: d.serial,
+      localId,
+      model: d.props?.model,
+      osVersion: d.props?.osVersion,
+      manufacturer: d.props?.manufacturer,
+      sdkVersion: d.props?.sdkVersion,
+      screen: d.props?.screen,
+      keepPackages: (process.env.PHYSICAL_KEEP_PACKAGES ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+      resetMode,
+      aapt2Path,
+    });
+  });
+}
+
 async function chooseBackends(): Promise<DeviceBackend[]> {
+  // Additive rather than exclusive: a host may legitimately have both, and the tiers do not
+  // interact — they are separate devices with separate lifecycles behind one abstraction (§32).
+  const physical = flag('PHYSICAL_ENABLED') ? await choosePhysicalBackends() : [];
   const avail = await CuttlefishDevice.available();
 
   if (avail.ok) {
@@ -49,7 +161,7 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
     // `bin/launch_cvd` and `super.img`, and a 4 GB snapshot under imageDir would confuse that.
     const snapshotRoot = process.env.CF_SNAPSHOT_DIR ?? join(imageDir, '..', 'snapshots');
     console.log(`[agent] Cuttlefish available — starting ${count} instance(s), snapshots under ${snapshotRoot}`);
-    return Array.from({ length: count }, (_, i) =>
+    return [...physical, ...Array.from({ length: count }, (_, i) =>
       createCuttlefishBackend({
         localId: `cf-${i + 1}`,
         instanceNum: i + 1,
@@ -66,10 +178,24 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
         resetMode: process.env.CF_RESET_MODE === 'powerwash' ? 'powerwash' : 'snapshot',
         gpuMode: process.env.GPU_MODE === 'none' ? 'none' : 'guest_swiftshader',
       }),
-    );
+    )];
   }
 
   console.warn(`[agent] Cuttlefish unavailable: ${avail.reason}`);
+
+  /**
+   * A laptop with phones on it is a COMPLETE host, not a degraded one.
+   *
+   * This return exists so the AVD fallback below is not reached in that case. Falling through would
+   * demand `AVD_NAME` — `env()` throws without it — so an agent doing exactly what ADR-0008 designed
+   * it for would exit at startup asking for an emulator nobody wants, with the phones it had already
+   * found going unmentioned.
+   */
+  if (physical.length > 0) {
+    console.log(`[agent] serving ${physical.length} physical device(s); no virtual tier on this host`);
+    return physical;
+  }
+
   console.warn('[agent] falling back to the AVD tier — it cannot meet the 100ms target and has no WebRTC path');
   return [createAvdBackend({ avdName: env('AVD_NAME'), localId: 'avd-1' })];
 }
@@ -149,29 +275,6 @@ const UNHEALTHY_GRACE_MS = Number(process.env.APPIUM_UNHEALTHY_GRACE_MS ?? 60_00
 /** A drain that hangs is a host that never releases its devices, so it gets a hard deadline. */
 const DRAIN_TIMEOUT_MS = Number(process.env.AGENT_DRAIN_TIMEOUT_MS ?? 30_000);
 
-/**
- * The externally-reachable base url of this host's automation gateway.
- *
- * `AUTOMATION_ADVERTISE_BASE` wins outright and is what a TLS deployment sets
- * (`https://worker-1.example:8443`) — the worker already terminates TLS for the data plane, and
- * ADR-0004 point 3 puts automation on that same public listener rather than inventing a second
- * exposure class. Otherwise it is composed from `APPIUM_ADVERTISE_HOST`, which keeps exactly the
- * meaning ADR-0004 gives it: the externally-reachable name for the worker.
- */
-function gatewayBase(port: number): string {
-  const explicit = process.env.AUTOMATION_ADVERTISE_BASE;
-  if (explicit) return explicit.replace(/\/+$/, '');
-  const host = process.env.APPIUM_ADVERTISE_HOST ?? process.env.PUBLIC_HOST;
-  if (!host) {
-    throw new Error(
-      'APPIUM_ENABLED needs somewhere to advertise the automation gateway. Set ' +
-      'AUTOMATION_ADVERTISE_BASE to its full public base url, or APPIUM_ADVERTISE_HOST/PUBLIC_HOST ' +
-      'to this host\'s externally-reachable name. Advertising 127.0.0.1 would register an endpoint ' +
-      'only this machine can reach.',
-    );
-  }
-  return `http://${host}:${port}`;
-}
 
 /**
  * Per-device automation endpoints to register, keyed by local id.
@@ -186,7 +289,7 @@ function gatewayBase(port: number): string {
  */
 async function resolveAutomationEndpoints(
   supervisors: AppiumSupervisor[],
-  base: string,
+  endpointFor: (localId: string) => string,
 ): Promise<Record<string, string>> {
   const manual = process.env.AUTOMATION_ENDPOINT;
   // Escape hatch, unchanged: an externally-managed Appium (a systemd unit, a sidecar, one server
@@ -207,7 +310,7 @@ async function resolveAutomationEndpoints(
   const endpoints: Record<string, string> = {};
   for (const { sup, ready } of started) {
     if (ready) {
-      endpoints[sup.localId] = `${base}${automationPath(sup.localId)}`;
+      endpoints[sup.localId] = endpointFor(sup.localId);
       console.log(`[agent] Appium ready for ${sup.localId} on :${sup.port}, advertised at ${endpoints[sup.localId]}`);
     } else {
       console.error(
@@ -252,8 +355,10 @@ async function main(): Promise<void> {
   );
 
   const gatewayPort = Number(process.env.AUTOMATION_GATEWAY_PORT ?? 8090);
+  // Composed per device, and composed EAGERLY for the first one so an unadvertisable gateway is a
+  // startup failure rather than a device that quietly registers without the `webdriver` capability.
   const automationEndpoints = supervisors.length > 0
-    ? await resolveAutomationEndpoints(supervisors, gatewayBase(gatewayPort))
+    ? await resolveAutomationEndpoints(supervisors, (localId) => gatewayBase(gatewayPort, localId))
     : {};
 
   const agent = new Agent({
@@ -261,7 +366,9 @@ async function main(): Promise<void> {
     registrationToken: env('WORKER_REGISTRATION_TOKEN'),
     hostname: env('WORKER_HOSTNAME', osHostname()),
     region: env('REGION'),
-    endpoint: env('PUBLIC_ENDPOINT'),
+    // NOT `env('PUBLIC_ENDPOINT')` any more. It had no default, so an agent on a laptop refused to
+    // start over an address that a tunnelled host has never used — see `dataPlaneEndpoint`.
+    endpoint: dataPlaneEndpoint(),
     // The gateway's public path per device (ADR-0004), or — when Appium is managed outside this
     // agent — whatever AUTOMATION_ENDPOINT names, which stays host-level and must not be publicly
     // routable, because an open Appium port is unauthenticated device control.
@@ -283,6 +390,10 @@ async function main(): Promise<void> {
    * number and handed to the agent above. A failure to bind is therefore fatal rather than something
    * to work around — the alternative is registering an endpoint that resolves to nothing.
    */
+  const gatewayBindHost = process.env.AUTOMATION_BIND_HOST?.trim()
+    || process.env.BIND_HOST?.trim()
+    || (automationIsTunnelled() ? '127.0.0.1' : undefined);
+
   const gateway = supervisors.length > 0
     ? new AutomationGateway({
         agent,
@@ -297,9 +408,14 @@ async function main(): Promise<void> {
     // belongs on the docker bridge or on loopback. The data plane has to be reachable by a browser
     // and cannot live there. Sharing one variable meant satisfying the hub broke the viewer, which
     // is exactly what happened (HANDOFF known issue 15).
-    const bindHost = process.env.AUTOMATION_BIND_HOST?.trim() || process.env.BIND_HOST?.trim() || undefined;
-    await gateway.listen(gatewayPort, bindHost);
-    console.log(`[agent] automation gateway listening on ${bindHost ?? '0.0.0.0'}:${gatewayPort}`);
+    //
+    // ON THE TUNNEL PATH IT IS LOOPBACK, and not as a default an operator can drift off: the only
+    // client is this same process, replaying what arrived on the tunnel. That is what makes
+    // ADR-0009 §3's "nothing listens on the network" true of a laptop rather than aspirational —
+    // an explicit bind variable is still honoured, because an operator who set one is describing
+    // a deployment we cannot see, but nothing else can widen it by accident.
+    await gateway.listen(gatewayPort, gatewayBindHost);
+    console.log(`[agent] automation gateway listening on ${gatewayBindHost ?? '0.0.0.0'}:${gatewayPort}`);
   }
 
   const state = await agent.start();
@@ -366,21 +482,39 @@ async function main(): Promise<void> {
    * Set MFARM_TUNNEL=0 to leave it off — for a host where the inbound path is known-good and an
    * extra long-lived connection is not wanted.
    */
-  const tunnel = process.env.MFARM_TUNNEL === '0' ? undefined : new AgentTunnel({
+  const tunnel = !tunnelEnabled() ? undefined : new AgentTunnel({
     controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
     agent,
     dataPlane: dp,
+    // Only when automation is actually advertised over the tunnel (ADR-0011). A host that published
+    // a directly-dialable gateway must refuse a tunnelled automation channel rather than serve one:
+    // accepting both would mean a route its operator did not advertise still works.
+    // The BOUND address, not a hardcoded loopback: an operator who pointed AUTOMATION_BIND_HOST
+    // somewhere else has moved the only listener this is allowed to reach, and connecting to
+    // 127.0.0.1 anyway would fail every command with a message about a gateway that is running.
+    automationTarget: gateway && automationIsTunnelled()
+      ? { host: gatewayBindHost ?? '127.0.0.1', port: gatewayPort }
+      : undefined,
     log: (msg, meta) => console.log(`[agent] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
   });
   tunnel?.start();
 
   agent.startHeartbeat();
   agent.startMetering();
+  // Nothing polled device health before this (spec §18): every backend implemented `health()` and
+  // no caller ever asked. A phone that falls off the USB mid-suite is now an incident with a reason,
+  // instead of a WebDriver error the suite records as its own test failing.
+  agent.startHealthMonitor();
 
   let shuttingDown = false;
+  /** The USB watch, when this host has phones. Stopped first on drain. */
+  let discoveryWatch: { stop: () => void } | undefined;
   const shutdown = async (signal: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    // First, so a discovery tick landing mid-drain cannot call shutdown again or log an arrival
+    // nobody can act on.
+    discoveryWatch?.stop();
     console.log(`[agent] ${signal} — draining`);
     // A drain reached from uncaughtException runs on a process whose invariants are already broken,
     // so any step here may hang or throw. Without this deadline the `shuttingDown` guard turns a
@@ -452,7 +586,7 @@ async function main(): Promise<void> {
     // the control plane was told about, and it keeps listening either way.
     agent.setAutomationEndpoint(
       localId,
-      healthy ? `${gatewayBase(gatewayPort)}${automationPath(localId)}` : undefined,
+      healthy ? gatewayBase(gatewayPort, localId) : undefined,
     );
 
     // This device registered without `webdriver` because its Appium was not ready in time. There is
@@ -485,6 +619,14 @@ async function main(): Promise<void> {
       'advertises `webdriver`. WebDriver sessions allocated to it will fail at the proxy hop. ' +
       `Withdrawing by draining in ${UNHEALTHY_GRACE_MS}ms unless it recovers first.`,
     );
+    /**
+     * §18. This is the moment a test is about to fail for a reason that is not the test's fault.
+     *
+     * Reported HERE rather than when the WebDriver call fails, because by then the only thing left
+     * is a proxy error the suite will faithfully record as its own failure. The agent is the only
+     * party that knows Appium went away, and this is the only place it knows it.
+     */
+    agent.reportIncident(localId, 'appium-failure', `Appium became unready (state: ${sup.state})`);
     // Still a whole-agent drain, for the reason in the block comment above: capabilities are written
     // at registration only, so one device's `webdriver` cannot be withdrawn without re-registering
     // the host. Per-device endpoints make the RE-registration honest — the agent returns advertising
@@ -505,6 +647,10 @@ async function main(): Promise<void> {
 
   onGiveUp = (localId: string, reason: string): void => {
     console.error(`[agent] Appium for ${localId} is permanently unhealthy: ${reason}`);
+    agent.reportIncident(localId, 'appium-failure', `permanently unhealthy: ${reason}`);
+    // Flushed before the drain below can exit the process, or the incident explaining WHY this host
+    // went away dies with it — which is precisely the case somebody will be trying to reconstruct.
+    void agent.flush();
     if (!advertisedWebdriver.has(localId)) return; // never advertised it; already honest
     console.error(`[agent] ${localId} registered \`webdriver\` and can no longer serve it — draining`);
     void shutdown('appium-permanent-failure', 1);
@@ -512,6 +658,52 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+  /**
+   * USB hot-plug (spec §6) — plug a phone in and it joins the farm without anyone typing anything.
+   *
+   * ARRIVAL AND DEPARTURE ARE NOT SYMMETRIC, and that asymmetry is the design rather than a gap:
+   *
+   *   A DEVICE THAT LEAVES needs nothing from here. The health monitor above already probes it,
+   *   sees the adb calls fail, files a `device-disconnected` incident and reports it offline — and
+   *   the control plane stops scheduling it. Restarting the agent because a phone was unplugged
+   *   would take down every OTHER device on the host to react to one that is already handled.
+   *
+   *   A DEVICE THAT ARRIVES cannot be added in place. `hosts.capabilities` and the device list are
+   *   written by `POST /workers/register` and by nothing else — the heartbeat has no field for
+   *   them — so a new phone becomes visible only by registering again. That is precisely what
+   *   draining and exiting does: the unit's `Restart=always` brings the agent straight back, it
+   *   discovers both phones, and registration tells the truth about both. It is the same mechanism
+   *   ADR-0003 already uses to withdraw `webdriver`, for the same reason.
+   *
+   * THE DRAIN IS WHAT MAKES THIS SAFE. `shutdown` waits for live sessions to end before exiting, so
+   * plugging in a second phone does not interrupt a suite running on the first.
+   *
+   * A phone sitting at `unauthorized` counts as an arrival the moment somebody taps Allow — which
+   * is the most common way a device becomes usable, and would be missed by watching plug events.
+   */
+  if (flag('PHYSICAL_ENABLED')) {
+    const knownSerials = backends
+      .map((b) => b.control.info.adbSerial)
+      .filter((x): x is string => typeof x === 'string');
+
+    discoveryWatch = watchForChanges(knownSerials, (added, removed) => {
+      // Logged, never acted on — see the block comment. The health monitor owns departures.
+      if (removed.length > 0) {
+        console.warn(
+          `[agent] no longer on USB: ${removed.join(', ')}. Health checks will report them offline; `
+          + 'the agent stays up for the devices it still has.',
+        );
+      }
+      if (added.length === 0) return;
+      console.log(
+        `[agent] new device(s) on USB: ${added.join(', ')}. Draining to re-register — live sessions `
+        + 'finish first, then the agent restarts with them.',
+      );
+      void shutdown('usb-device-added', 0);
+    });
+  }
+
 
   // Without these the agent died on any unexpected throw WITHOUT draining, and Appium — a detached
   // process group — outlived it holding the device's adb connection and the port. Because

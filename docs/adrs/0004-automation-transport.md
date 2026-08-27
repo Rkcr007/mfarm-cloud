@@ -183,8 +183,22 @@ rather than a hang.
 The fifth refusal is the one this ADR exists for. Nothing is wrong with that grant's signature — the
 authorization is wrong, and it is the check no network transport could have made.
 
+## Superseded in part by ADR-0011
+
+Point 3 said `automation_endpoint` advertises the gateway on the worker's own **public** listener,
+and `gatewayBase()` enforced that by refusing to start without an externally-reachable name. That is
+still correct for a rented box with a public interface, and it is still the first thing tried — but
+it is no longer the only answer. A physical device arrives on a laptop behind NAT, which has no such
+name, so ADR-0011 adds `mfarm+tunnel:` as a third option: automation rides the socket the agent
+already dials out, and the agent replays each request against **this same gateway** on loopback.
+
+Nothing in points 1, 2, 4 or 5 changes. The gateway is still the only thing that can reach Appium,
+it still verifies every grant offline, and it still refuses a grant for the wrong device. That was
+the condition for tunnelling anything at all.
+
 ## Related
 
+- `ADR-0011` — the tunnelled transport for a worker nobody can dial
 - `ADR-0003` — B1, the blocker this resolves, and decision 4, which it preserves
 - `apps/api/src/tokens.ts`, `packages/protocol/src/tokens.ts` — the minting and verifying halves
 - `workers/agent/src/appium.ts` — `advertiseHost`, the seam this names

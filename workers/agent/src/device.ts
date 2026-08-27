@@ -1,4 +1,4 @@
-import type { Capability } from '@mfarm/protocol';
+import type { Capability, FailureReason } from '@mfarm/protocol';
 
 /**
  * The device abstraction — v2 decision 4, and deliberately NOT the v1 `DeviceAdapter`.
@@ -55,10 +55,22 @@ export type KeyName =
   | 'home' | 'back' | 'recents' | 'power' | 'enter' | 'backspace'
   | 'volume_up' | 'volume_down';
 
+/**
+ * `reason` is for a human; `reasonCode` is for aggregation (spec §18).
+ *
+ * Both, rather than one derived from the other. Sniffing the prose for the word "battery" is a
+ * classifier that breaks the first time somebody rewords a message, and it puts the taxonomy in the
+ * hands of the code FURTHEST from the evidence. The backend saw the `dumpsys` output; it is the
+ * thing that knows whether this was a battery or a disk, so it says so.
+ *
+ * `reasonCode` is optional because the older tiers do not set it and a health report without a code
+ * is still worth having — it just aggregates as an unclassified device-health event rather than as
+ * a low battery.
+ */
 export type DeviceHealth =
   | { status: 'healthy'; inputLatencyMs: number }
-  | { status: 'degraded'; reason: string; inputLatencyMs?: number }
-  | { status: 'offline'; reason: string };
+  | { status: 'degraded'; reason: string; reasonCode?: FailureReason; inputLatencyMs?: number }
+  | { status: 'offline'; reason: string; reasonCode?: FailureReason };
 
 export interface DeviceControl {
   readonly info: DeviceInfo;

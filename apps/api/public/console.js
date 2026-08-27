@@ -109,6 +109,13 @@ export const state = {
   liveStats: { fps: 0, kbps: 0, rtt: null, ice: null },
   /** Ring buffer of parsed logcat lines, plus what the dock is filtering to. */
   log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 },
+  /**
+   * Which kind of device the fleet screen is showing (spec §25).
+   *
+   * View state, not a query: the fleet is already in memory and small, so filtering here costs
+   * nothing and — unlike a server-side filter — cannot disagree with the counts in the page head.
+   */
+  deviceKind: 'all',
   /** Screenshots taken this session. Data urls, in memory only — nothing persists them yet. */
   shots: [],
   /**
@@ -196,7 +203,76 @@ const KIND_LABEL = { install: 'Install', launch: 'Launch', uninstall: 'Uninstall
  * POST /sessions/:id/app-actions before it will queue anything, so a device without it needs to say
  * so in the UI or the disabled Install button has no explanation.
  */
-const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'screen-stream', 'logcat', 'screenshot'];
+// The three resets are mutually exclusive and all three are listed, so a device shows which one it
+// has and which it does not. Leaving `install-reset` out did not hide it — unknown capabilities
+// still render below — but it greyed out `session-reset` beside it, which reads as "this phone has
+// no reset" when it has a different one, on purpose (ADR-0012).
+const KNOWN_CAPS = ['app-install', 'webdriver', 'snapshot-reset', 'session-reset', 'install-reset', 'screen-stream', 'logcat', 'screenshot'];
+
+/**
+ * Failure classification (spec §18).
+ *
+ * The point of showing this at all is that "failed" has meant two unrelated things — your app is
+ * broken, and our farm is broken — and a report that cannot tell them apart teaches people to
+ * ignore red. So the class is what gets the colour: `test` is the only one that is the product's
+ * fault, and the other two are visually the farm admitting something.
+ */
+const FAILURE_CLASS_LABEL = {
+  'test': 'Test',
+  'infrastructure': 'Infrastructure',
+  'device-health': 'Device health',
+};
+
+const FAILURE_REASON_LABEL = {
+  'assertion-failure': 'an assertion failed',
+  'application-crash': 'the app under test crashed',
+  'adb-failure': 'adb stopped responding',
+  'appium-failure': 'the automation server failed',
+  'device-disconnected': 'the device disconnected',
+  'usb-failure': 'the USB connection failed',
+  'agent-failure': 'the MFARM agent failed',
+  'network-failure': 'the network failed',
+  'low-storage': 'the device ran out of storage',
+  'low-battery': 'the device battery was too low',
+  'device-locked': 'the device was locked',
+  'device-unresponsive': 'the device stopped responding',
+};
+
+/**
+ * One tag naming a failure's class, with the specific reason as its tooltip.
+ *
+ * Class in the label and reason in the title rather than both inline: a list of twelve failures is
+ * scanned for the SHAPE of the problem, and twelve different reason strings defeat that. The reason
+ * is one hover away for the row that turns out to matter.
+ */
+function failureTag(cls, reason) {
+  const label = FAILURE_CLASS_LABEL[cls] || cls;
+  return h('span', {
+    // `test` is the product's problem and stays neutral — it is the ordinary case a red pill
+    // already covers. The farm's own faults are marked, because those are the ones a person is
+    // being asked to discount.
+    class: `failtag ${cls === 'test' ? '' : 'farm'}`.trim(),
+    title: reason ? `${label}: ${FAILURE_REASON_LABEL[reason] || reason}` : label,
+    text: label,
+  });
+}
+
+/**
+ * Real device or virtual one (spec §25).
+ *
+ * Derived from `tier` rather than stored, because the tier is already the truth and a second field
+ * saying the same thing is a second field that can disagree with it. Everything that is not a
+ * handset is virtual — a new virtual tier should appear as VIRTUAL without anyone remembering to
+ * add it here, while a new PHYSICAL tier is a decision someone must make deliberately.
+ */
+const isRealDevice = (d) => d.tier === 'physical';
+const deviceKindOf = (d) => (isRealDevice(d) ? 'real' : 'virtual');
+
+const DEVICE_KINDS = [
+  ['all', 'All'],
+  ['virtual', 'Virtual'],
+  ['real', 'Real'],
+];
 
 /* ---------------------------------------------------------------------------- transport */
 
@@ -878,6 +954,24 @@ function deviceCard(d) {
       pill(st.label, st.tone, { live: d.state === 'READY' }),
     ),
 
+    /**
+     * REAL or VIRTUAL, said outright rather than left to be inferred from the tier (spec §25).
+     *
+     * `cuttlefish` means nothing to someone who did not build this, and the difference is the one
+     * thing about a device a tester most needs to know before trusting a result — a render bug that
+     * reproduces on a handset and not on an emulator is the whole reason the real one is there.
+     * The tier stays visible below; this is the word for it, not a replacement.
+     */
+    h('div', { class: 'row tight' },
+      h('span', {
+        class: `kindtag ${deviceKindOf(d)}`,
+        title: isRealDevice(d)
+          ? 'A physical handset on an agent host. Pinned to your organisation — it is never shared.'
+          : 'A virtual device. Reset to a clean snapshot between tenants.',
+        text: isRealDevice(d) ? 'REAL DEVICE' : 'VIRTUAL DEVICE',
+      }),
+    ),
+
     // Dot + word + context. Never the dot alone.
     h('p', { class: 'help row tight' }, h('span', { class: `dot ${st.tone}` }), st.note),
 
@@ -960,13 +1054,30 @@ function activityCard(filter) {
 
 function screenDevices() {
   const n = state.devices.length;
+  const kind = state.deviceKind;
+  const shown = kind === 'all' ? state.devices : state.devices.filter((d) => deviceKindOf(d) === kind);
+  // Only offered once there is something to choose between. A filter on a fleet with one kind in it
+  // is a control that can only ever produce an empty screen.
+  const mixed = new Set(state.devices.map(deviceKindOf)).size > 1;
+
   return [
     pageHead([{ label: 'Farm' }], 'Devices',
       `${n} device${n === 1 ? '' : 's'} · ${state.available} ready to allocate`),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
+        mixed
+          ? h('div', { class: 'row tight mb-gap' }, DEVICE_KINDS.map(([k, label]) => h('button', {
+              class: `levelchip${kind === k ? ' on' : ''}`,
+              onclick: () => { state.deviceKind = k; render(); },
+            }, k === 'all' ? label : `${label} (${state.devices.filter((d) => deviceKindOf(d) === k).length})`)))
+          : null,
         n
-          ? h('div', { class: 'autogrid' }, state.devices.map(deviceCard))
+          ? (shown.length
+              ? h('div', { class: 'autogrid' }, shown.map(deviceCard))
+              // Reachable only by filtering, so it says which filter and offers the way back —
+              // rather than the "no devices are registered" copy below, which would be a lie.
+              : card(null, {}, empty(`No ${kind} devices in this region.`,
+                  'Every device here is of the other kind. Clear the filter to see them.')))
           : card(null, {}, empty('No devices are registered in this region yet.',
               'Start a worker and it appears here within a heartbeat.')),
       ),
@@ -1848,7 +1959,18 @@ function paintToolbar(sess, live, caps) {
   if (!st) return;
   const streaming = state.liveState === 'streaming';
   const attached = ATTACHED.has(state.liveState);
-  const ctrl = streaming && state.live?.control?.readyState === 'open';
+  /**
+   * Power/Back/Home/Overview need a device to send to, NOT a picture of it.
+   *
+   * This used to be `streaming && control.readyState === 'open'`, which tied four buttons to the
+   * WebRTC datachannel — and a physical handset never negotiates one. The result was a phone whose
+   * Volume and Rotate worked, beside a Home button that did nothing, because those two groups were
+   * written against different transports and only one of them was gated on video.
+   *
+   * `pressButton` now falls back to the data-plane socket, so the honest gate is the same one
+   * Volume and Rotate use: is this session attached to a device.
+   */
+  const ctrl = attached;
 
   const press = (cmd) => () => {
     if (!state.live?.pressButton(cmd)) toast('Not connected', 'The device control channel is not open yet.', 'warn');
@@ -2846,6 +2968,9 @@ function screenRun(id) {
             h('p', { class: 'row tight' },
               pill('failed', 'bad'),
               h('strong', { text: f.name }),
+              // What KIND of failure, when the suite said (spec §18). Absent when it did not, and
+              // absent is NOT the same as "the product's fault" — see `failureLabel`.
+              f.failureClass ? failureTag(f.failureClass, f.failureReason) : null,
             ),
             f.failure
               ? h('pre', { class: 'failtext', text: f.failure })
@@ -2854,6 +2979,33 @@ function screenRun(id) {
               h('span', { class: 'caption', text: 'Evidence:' }),
               btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
             ),
+          ))))
+      : null,
+
+    /**
+     * What the FARM saw, as its own card (spec §18).
+     *
+     * SEPARATE FROM THE FAILURES ABOVE, deliberately. Merging them would mean attaching each
+     * incident to whichever test happened to be running and calling that test infrastructure —
+     * a claim the farm cannot support, and wrong often enough to matter: a test can genuinely fail
+     * an assertion during a session that also had a cable glitch. Side by side, a person reads
+     * "eleven failures, and the phone dropped off USB twice" and draws their own conclusion.
+     *
+     * It renders even when there are no failures at all, because "nothing failed but the farm had
+     * three incidents" is a real and important state — it is a run that should be re-read with
+     * suspicion rather than trusted.
+     */
+    d.incidents?.length
+      ? card(`What the farm saw (${d.incidents.length})`, { class: 'mb-gap' },
+          h('p', { class: 'help' },
+            'Problems MFARM detected with the device or the harness during this run. These are not '
+            + 'test failures, and they are not counted as any. A failure above that overlaps one of '
+            + 'these is worth re-running before it is believed.'),
+          h('div', { class: 'stack mt-md' }, d.incidents.map((i) => h('div', { class: 'row tight' },
+            failureTag(i.class, i.reason),
+            h('span', { class: 'caption mono', text: i.device || '—' }),
+            h('span', { class: 'caption', text: i.detail || FAILURE_REASON_LABEL[i.reason] || i.reason }),
+            h('span', { class: 'caption', text: ago(i.occurredAt) }),
           ))))
       : null,
 

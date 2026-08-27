@@ -12,6 +12,47 @@ Neither can be run on a macOS laptop — see "Where these must run" below.
 | 1 — Glass-to-glass latency | < 120 ms untuned, camera-measured | **BLOCKED** — needs Linux + KVM host, and a camera |
 | 2a — Android density | ≥ 12 instances on a 128 GB box | **BLOCKED** — needs Linux + KVM host |
 | 2b — iOS density | ≥ 6 simulators on a 24 GB Mac | **BLOCKED** — needs full Xcode |
+| 3 — scrcpy → RTP in Node | p99 packetize < 2 ms at 1080p60 | **PASS** (2026-08-25, M1 laptop) |
+
+### Spike 3 — can Node be the live view for a physical device?
+
+`node spikes/scrcpy_rtp_throughput.mjs`
+
+ADR-0008 named one unmeasured risk in the physical-device design: the agent becomes a WebRTC peer
+for the first time, and *"packetizing scrcpy's already-hardware-encoded H.264 into RTP … throughput
+in Node is UNMEASURED and is the largest open risk."* This answers it.
+
+Measured on the dev laptop (Apple M1, macOS), 1080p60, 8 Mbps, MTU 1200, 15 s, paced to real time:
+
+| | Result |
+|---|---:|
+| per-frame packetize, p50 / p95 / p99 | **0.13 / 0.24 / 0.36 ms** |
+| worst single frame (a keyframe) | **2.4 – 8.0 ms** across runs, budget is 16.67 ms |
+| one core spent in the packetizer | **0.8 %** |
+| event-loop delay attributable to packetizing | **0.00 ms** (measured against a control run) |
+| frames that fell a frame behind | **0** |
+
+Still PASS at 16 Mbps: p99 0.745 ms, worst frame 5.1 ms.
+
+**Conclusion: Node is not the reason this cannot work.** At ~1 % of one core per device, a four-phone
+host spends single-digit percent on packetization.
+
+**What this does NOT establish**, and the spike says so in its own header rather than only here:
+
+- **SRTP encryption and the actual send are not included.** Those live inside whichever WebRTC
+  library is chosen and are mostly native. This is why the 2 ms threshold leaves 88 % of the frame
+  budget unspent rather than merely fitting.
+- **No handset was involved.** Frame sizes are modelled from a real bitrate, which is fair for CPU
+  cost — the work scales with bytes and NAL count — but a device that stalls or bursts is not
+  represented. Running this harness against a real phone is the next step.
+
+**A note on how the threshold was reached, because the first version of this spike was wrong.** It
+failed on an absolute event-loop-delay limit. The harness paces itself with `setTimeout`, whose
+granularity plus a GC pause produces ~19 ms spikes *with no packetizer running at all* — so the
+spike was measuring itself and reporting a FAIL on work that costs 0.8 % of a core. It now runs a
+control pass that packetizes nothing and judges the measured run against it. On the run that
+produced the table above, the control's loop delay (7.55 ms) was *worse* than the measured run's
+(3.83 ms), which is the clearest possible statement that the packetizer is not the variable.
 
 ### What *was* measured on 2026-08-15
 

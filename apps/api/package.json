@@ -26,6 +26,7 @@
     "./server": "./src/http/server.ts",
     "./db": "./src/db.ts",
     "./auth": "./src/auth.ts",
+    "./enrollment": "./src/enrollment.ts",
     "./tokens": "./src/tokens.ts"
   }
 }
