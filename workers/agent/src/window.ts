@@ -51,8 +51,17 @@ export interface WindowDevice {
    * instance is not "on USB", and printing a state for it would invent one.
    */
   adbState?: AdbState;
-  /** Registered with the control plane, and therefore reachable by the org. */
+  /**
+   * Whether the OWNER has said this device may be used by the org — ADR-0009 §2.
+   *
+   * The person's decision, not the registration state. Those differ for a few seconds either side
+   * of a restart, and conflating them would make the toggle appear to snap back: a phone just
+   * shared is `shared: true` and not yet registered, which is `status: 'starting'` and reads
+   * correctly.
+   */
   shared: boolean;
+  /** Whether this device CAN be shared from here. False for a tier with no serial to name. */
+  shareable?: boolean;
   status: 'ready' | 'busy' | 'starting' | 'unhealthy' | 'blocked';
   /** What a person should DO. Present exactly when there is something to do. */
   remedy?: string;
@@ -120,6 +129,14 @@ export interface WindowState {
 export interface WindowActions {
   /** Flip `verifier_verify_adb_installs`, with the button press as the consent. */
   setInstallVerification?(localId: string, enabled: boolean): Promise<void>;
+  /**
+   * Share this device with the org, or stop — ADR-0009 §2, by adb serial.
+   *
+   * BY SERIAL, not by local id, because the whole point is that this can be answered for a phone
+   * the agent has NOT adopted: an unshared device has no local id, and requiring one would mean the
+   * only devices you could share are the ones already shared.
+   */
+  setShared?(serial: string, shared: boolean): Promise<void>;
 }
 
 export interface WindowOptions {
@@ -378,6 +395,11 @@ export class AgentWindow {
       return this.setVerification(decodeURIComponent(verification[1]), req, res);
     }
 
+    const sharing = /^\/api\/devices\/([^/]+)\/shared$/.exec(url.pathname);
+    if (sharing && req.method === 'POST') {
+      return this.setShared(decodeURIComponent(sharing[1]), req, res);
+    }
+
     return deny(res, { status: 404, error: 'not_found', message: `No route for ${url.pathname}.` });
   }
 
@@ -439,17 +461,10 @@ export class AgentWindow {
         message: 'This agent has no device that can change that setting.',
       });
     }
-    let body: { enabled?: unknown };
+    const enabled = await readBoolean(req, res, 'enabled');
+    if (enabled === undefined) return;
     try {
-      body = JSON.parse(await readBody(req)) as { enabled?: unknown };
-    } catch (e) {
-      return deny(res, { status: 400, error: 'bad_body', message: (e as Error).message });
-    }
-    if (typeof body.enabled !== 'boolean') {
-      return deny(res, { status: 400, error: 'bad_body', message: '`enabled` must be true or false.' });
-    }
-    try {
-      await act(localId, body.enabled);
+      await act(localId, enabled);
     } catch (e) {
       // The phone refused, or is gone. A message, not a stack: this renders next to the button.
       return deny(res, { status: 502, error: 'device_refused', message: (e as Error).message });
@@ -464,6 +479,63 @@ export class AgentWindow {
     // The device's state just changed, so say so rather than waiting for the next discovery pass.
     this.push();
   }
+
+  /**
+   * Share a device with the org, or stop — ADR-0009 §2.
+   *
+   * THE AGENT RESTARTS AFTER THIS, and that is not hidden from the caller. `hosts.capabilities` and
+   * the device list are written at registration and nowhere else, so a device set changed in place
+   * would be a claim the control plane never hears. The response says the choice was recorded; the
+   * restart is what makes it true.
+   */
+  private async setShared(serial: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const act = this.opts.actions?.setShared;
+    if (!act) {
+      return deny(res, {
+        status: 501, error: 'unsupported',
+        message: 'This agent cannot change what is shared.',
+      });
+    }
+    const shared = await readBoolean(req, res, 'shared');
+    if (shared === undefined) return;
+    try {
+      await act(serial, shared);
+    } catch (e) {
+      return deny(res, { status: 500, error: 'not_recorded', message: (e as Error).message });
+    }
+    const out = JSON.stringify({ ok: true, shared });
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(out),
+      'cache-control': 'no-store',
+    });
+    res.end(out);
+    this.push();
+  }
+}
+
+/**
+ * A POST body that is a single boolean field, read and validated the same way twice.
+ *
+ * Factored out because the two device actions are the entire write surface of this server, and the
+ * checks they share — a bounded body, valid JSON, a field that really is a boolean — are exactly
+ * the ones that must not drift apart between them.
+ */
+async function readBoolean(
+  req: IncomingMessage, res: ServerResponse, field: string,
+): Promise<boolean | undefined> {
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+  } catch (e) {
+    deny(res, { status: 400, error: 'bad_body', message: (e as Error).message });
+    return undefined;
+  }
+  if (typeof body[field] !== 'boolean') {
+    deny(res, { status: 400, error: 'bad_body', message: `\`${field}\` must be true or false.` });
+    return undefined;
+  }
+  return body[field] as boolean;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

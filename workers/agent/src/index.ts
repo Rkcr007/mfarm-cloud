@@ -18,6 +18,7 @@ import { discover, localIdForSerial, watchForChanges } from './devices/discovery
 import type { DiscoveredDevice } from './devices/discovery.ts';
 import { AgentWindow, openInBrowser, type WindowDevice, type WindowNotice, type WindowPairing, type WindowState } from './window.ts';
 import { agentVersion, pairForToken, PairingError } from './pairing.ts';
+import { loadSharing, setShared, sharedByDefault, type SharingPolicy } from './sharing.ts';
 import type { DeviceBackend } from './device.ts';
 
 /**
@@ -130,7 +131,28 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
     return [];
   }
 
-  const usable = found.filter((d) => d.state === 'device');
+  /**
+   * DISCOVERED IS NOT SHARED — ADR-0009 §2.
+   *
+   * Every usable phone used to be enrolled here, which is right for a box in a rack and wrong for
+   * the machine this product is aimed at. Somebody plugging their own handset into a work laptop
+   * was silently offering it, with everything on it, to their colleagues.
+   *
+   * A withheld phone is NOT hidden: it stays in `lastDiscovery`, so the window lists it with a
+   * toggle. It simply never becomes a backend, and therefore never reaches registration — the org
+   * cannot ask for a device the control plane was never told about.
+   */
+  const sharing = await loadSharing();
+  const usable = found
+    .filter((d) => d.state === 'device')
+    .filter((d) => {
+      if (sharing.allows(d.serial, 'physical')) return true;
+      console.log(
+        `[agent] ${d.props?.model ?? d.serial} is plugged in and NOT shared — tick it in the window `
+        + 'to let this org use it. Nothing about it is sent anywhere until you do.',
+      );
+      return false;
+    });
   for (const d of found) {
     if (d.state === 'device') continue;
     // One line per unusable device, naming the device, the state and what to do about it.
@@ -508,6 +530,24 @@ async function main(): Promise<void> {
    * of its own arrival/departure callback.
    */
   let lastDiscovery: DiscoveredDevice[] = [];
+  /** The owner's sharing decisions, re-read whenever one changes. See `sharing.ts`. */
+  let sharing: SharingPolicy = await loadSharing();
+
+  /**
+   * Ask the agent to re-register, from code that may run BEFORE there is anything to drain.
+   *
+   * The window is live during pairing, which can last minutes, so somebody can tick a phone before
+   * `shutdown` exists — and a closure calling it then would throw a ReferenceError on a `const` in
+   * its own temporal dead zone. It would fire exactly once, on somebody's first run, on the button
+   * this whole milestone is about.
+   *
+   * Before the drain exists the request is REMEMBERED rather than dropped, and honoured the moment
+   * start-up finishes. That matters beyond the crash: `chooseBackends` already ran, so a phone
+   * shared during pairing is not in this process's device set and registration would not mention
+   * it. Restarting is what makes the choice true, whenever it was made.
+   */
+  let pendingRestart: string | undefined;
+  let drainAndRestart = (reason: string): void => { pendingRestart = reason; };
 
   const windowState = (): WindowState => {
     const devices: WindowDevice[] = [];
@@ -542,7 +582,10 @@ async function main(): Promise<void> {
         manufacturer: seen?.props?.manufacturer,
         osVersion: info.osVersion,
         adbState: info.tier === 'physical' ? (seen?.state ?? (vanished ? 'offline' : undefined)) : undefined,
-        shared: Boolean(deviceId),
+        // The DECISION, not the registration state. A phone just shared is `shared` and not yet
+        // registered, which reads as 'starting' rather than as a toggle that snapped back.
+        shared: sharing.allows(serial, info.tier),
+        shareable: Boolean(serial),
         status,
         remedy: vanished
           ? 'This phone is no longer on USB. Replug it — the agent picks it up again on its own.'
@@ -566,11 +609,14 @@ async function main(): Promise<void> {
         manufacturer: d.props?.manufacturer,
         osVersion: d.props?.osVersion,
         adbState: d.state,
-        shared: false,
-        status: d.state === 'device' ? 'starting' : 'blocked',
-        remedy: d.state === 'device'
-          ? 'Usable, and not in the farm yet. The agent restarts to register it — any live session on the other devices finishes first.'
-          : d.remedy,
+        shared: sharing.allows(d.serial, 'physical'),
+        shareable: true,
+        status: d.state !== 'device' ? 'blocked'
+          : sharing.allows(d.serial, 'physical') ? 'starting' : 'ready',
+        remedy: d.state !== 'device' ? d.remedy
+          : sharing.allows(d.serial, 'physical')
+            ? 'Usable, and not in the farm yet. The agent restarts to register it — any live session on the other devices finishes first.'
+            : undefined,
         sessions: 0,
       });
     }
@@ -632,6 +678,25 @@ async function main(): Promise<void> {
            * before they have seen the phone. Here the offer appears beside the device, in the
            * moment it matters, and it is reversible from the same place.
            */
+          /**
+           * DISCOVERED IS NOT SHARED — ADR-0009 §2, and the one behavioural change that ADR makes
+           * to existing code.
+           *
+           * The restart is the mechanism, not a side effect: capabilities and the device list
+           * travel only at registration, so a device set changed in place would be a claim the
+           * control plane never hears. Same drain as a hot-plug, so a live session finishes first —
+           * un-sharing a phone must never yank it out from under somebody's suite.
+           */
+          setShared: async (serial: string, share: boolean): Promise<void> => {
+            await setShared(serial, share);
+            sharing = await loadSharing();
+            win?.push();
+            console.log(
+              `[agent] ${serial} is now ${share ? 'SHARED with this org' : 'NOT shared'} — `
+              + 'draining to re-register, live sessions finish first',
+            );
+            drainAndRestart('sharing-changed');
+          },
           setInstallVerification: async (localId: string, enabled: boolean): Promise<void> => {
             const found = backends.find((b) => b.control.info.localId === localId);
             const dev = found?.control as Partial<PhysicalDevice> | undefined;
@@ -1054,6 +1119,14 @@ async function main(): Promise<void> {
     console.error(`[agent] ${localId} registered \`webdriver\` and can no longer serve it — draining`);
     void shutdown('appium-permanent-failure', 1);
   };
+
+  drainAndRestart = (reason: string): void => { void shutdown(reason, 0, true); };
+  // Somebody ticked a phone while this was still starting up. Their choice is not in this process's
+  // device set, so honour it now rather than leaving a toggle that appears to have done nothing.
+  if (pendingRestart) {
+    console.log(`[agent] a sharing change was made during start-up — re-registering to apply it`);
+    drainAndRestart(pendingRestart);
+  }
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

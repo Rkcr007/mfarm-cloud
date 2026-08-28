@@ -282,14 +282,24 @@ are right to hesitate over installing.
 The `curl` path and `WORKER_REGISTRATION_TOKEN` both survive — a scripted fleet rollout should not
 have to drive a GUI.
 
-### 3b. Discovered is not shared
+### 3b. Discovered is not shared — **built**
 
 A per-device toggle, **off by default**, reversible instantly (ADR-0009 §2). Plugging a personal
 phone into a work laptop must not silently offer somebody's banking and 2FA apps to their
-colleagues. This is the guardrail every other promise in this product rests on.
+colleagues. This is the guardrail every other promise in this product rests on, and it is the one
+behavioural change ADR-0009 makes to code that already worked.
+
+| | |
+|---|---|
+| Where the choice lives | `~/.mfarm/shared.json`, `0600`, an **allow list** — a lost or corrupt file means *nothing is shared*, never *everything* |
+| Default | off for `tier: 'physical'`, on for everything else. Nobody accidentally has a Cuttlefish instance on their desk, and defaulting the whole fleet off would take the existing farm out of service to fix a problem it does not have |
+| Keyed by | adb serial, **not** local id — an unshared phone has no local id, and requiring one would mean the only devices you could share are the ones already shared |
+| A withheld phone | still appears in the window, with a toggle. It simply never becomes a backend, so registration never mentions it |
+| Applying a change | drains and re-registers, exactly like a hot-plug — capabilities travel only at registration. A live session finishes first, so un-sharing never yanks a device out from under somebody's suite |
 
 **The reset mode is chosen on the same screen** (ADR-0012 §4) — same trust decision, same person,
-with the blast radius shown before anyone picks the sweep.
+with the blast radius shown before anyone picks the sweep. **Not built yet**; it is still
+`PHYSICAL_RESET_MODE` in the environment.
 
 ### 3c. The agent gets a second sense — the part that makes step 3 possible
 

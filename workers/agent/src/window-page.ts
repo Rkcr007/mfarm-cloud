@@ -279,7 +279,7 @@ footer { margin-top: 26px; color: var(--t-caption); font-size: 11px; line-height
     head.appendChild(h('span', 'name', d.model || d.serial));
     var tag = STATUS_TAG[d.status] || ['', d.status];
     head.appendChild(h('span', 'tag ' + tag[0], tag[1]));
-    if (d.shared) head.appendChild(h('span', 'tag', 'shared'));
+    head.appendChild(h('span', 'tag ' + (d.shared ? 'ok' : ''), d.shared ? 'shared' : 'private'));
     var sp = h('span', 'spacer'); sp.style.flex = '1'; head.appendChild(sp);
     head.appendChild(h('span', 'serial', d.serial));
     card.appendChild(head);
@@ -302,8 +302,57 @@ footer { margin-top: 26px; color: var(--t-caption); font-size: 11px; line-height
     if (d.installVerification === 'on' && d.localId) {
       card.appendChild(verificationEl(d));
     }
+    if (d.shareable) card.appendChild(shareEl(d));
 
     return card;
+  }
+
+  /**
+   * The share decision — ADR-0009 §2.
+   *
+   * OFF IS THE DEFAULT AND OFF IS SAFE, so the copy leads with what is true right now rather than
+   * with what the button does. Somebody who plugged in their own phone should be able to read one
+   * line and stop worrying; somebody who meant to share a test device should see one control.
+   */
+  function shareEl(d) {
+    var n = h('div', 'note');
+    n.appendChild(h('div', 'title', d.shared ? 'Shared with your team' : 'Not shared'));
+    n.appendChild(h('div', 'body', d.shared
+      ? 'Anyone in your organisation can run tests on this device from the console. Their apps '
+        + 'install here, and what a session installs is removed when it ends.'
+      : 'Nothing about this phone is sent anywhere, and nobody can reach it. Plugging it in was '
+        + 'not a decision to share it.'));
+    var row = h('div', 'actions');
+    var btn = h('button', 'btn' + (d.shared ? '' : ' primary'),
+      d.shared ? 'Stop sharing' : 'Share this device');
+    var note = h('span', 'btn-note', '');
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      note.textContent = 'saving\u2026';
+      fetch(q('/api/devices/' + encodeURIComponent(d.serial) + '/shared'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ shared: !d.shared })
+      }).then(function (res) {
+        return res.json().then(function (body) { return { ok: res.ok, body: body }; });
+      }).then(function (r) {
+        if (r.ok) {
+          // The agent restarts to re-register. The stream drops and EventSource reconnects on its
+          // own, so say what is happening rather than letting the page look broken for a second.
+          note.textContent = 'saved \u2014 reconnecting\u2026';
+          return;
+        }
+        btn.disabled = false;
+        note.textContent = (r.body && r.body.message) || 'could not save that';
+      }).catch(function (e) {
+        btn.disabled = false;
+        note.textContent = String(e && e.message || e);
+      });
+    });
+    row.appendChild(btn);
+    row.appendChild(note);
+    n.appendChild(row);
+    return n;
   }
 
   /**

@@ -51,6 +51,7 @@ describe('the agent window', () => {
   let win: AgentWindow;
   let base: string;
   let calls: Array<{ localId: string; enabled: boolean }>;
+  let sharedCalls: Array<{ serial: string; shared: boolean }>;
   let refuse: Error | undefined;
 
   before(async () => {
@@ -63,6 +64,7 @@ describe('the agent window', () => {
           if (refuse) throw refuse;
           calls.push({ localId, enabled });
         },
+        setShared: async (serial, shared) => { sharedCalls.push({ serial, shared }); },
       },
     });
     // Port 0: the tests must not fight whatever is on 7317 on the machine running them, and the
@@ -73,7 +75,7 @@ describe('the agent window', () => {
 
   after(async () => { await win.close(); });
 
-  beforeEach(() => { state = fresh(); calls = []; refuse = undefined; });
+  beforeEach(() => { state = fresh(); calls = []; sharedCalls = []; refuse = undefined; });
 
   /** A request shaped the way the page's own `fetch` shapes it. */
   const get = (path: string, init: RequestInit = {}) =>
@@ -280,6 +282,61 @@ describe('the agent window', () => {
       assert.equal(res.status, 400, body);
     }
     assert.deepEqual(calls, []);
+  });
+
+  // ---------------------------------------------------------------- discovered is not shared
+
+  test('a device can be shared and unshared from the window', async () => {
+    for (const shared of [true, false]) {
+      const res = await get(withToken(`/api/devices/${HOST}/shared`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${win.port}` },
+        body: JSON.stringify({ shared }),
+      });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { ok: true, shared });
+    }
+    assert.deepEqual(sharedCalls, [{ serial: HOST, shared: true }, { serial: HOST, shared: false }]);
+  });
+
+  test('sharing is keyed by serial, so a device the agent has NOT adopted can be shared', async () => {
+    // The point of the whole feature: an unshared phone has no local id, and requiring one would
+    // mean the only devices you could share are the ones already shared.
+    const res = await get(withToken('/api/devices/NEVER-ADOPTED/shared'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${win.port}` },
+      body: JSON.stringify({ shared: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(sharedCalls, [{ serial: 'NEVER-ADOPTED', shared: true }]);
+  });
+
+  test('a share request without an Origin is refused like any other write', async () => {
+    const res = await get(withToken(`/api/devices/${HOST}/shared`), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ shared: true }),
+    });
+    assert.equal(res.status, 403);
+    assert.deepEqual(sharedCalls, []);
+  });
+
+  test('a share body without a boolean is refused rather than guessed at', async () => {
+    for (const body of ['{}', '{"shared":"yes"}', '{"shared":1}', 'nope']) {
+      const res = await get(withToken(`/api/devices/${HOST}/shared`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${win.port}` },
+        body,
+      });
+      assert.equal(res.status, 400, body);
+    }
+    assert.deepEqual(sharedCalls, []);
+  });
+
+  test('GET on the share path is a 404, so a link cannot change what is shared', async () => {
+    const res = await get(withToken(`/api/devices/${HOST}/shared`));
+    assert.equal(res.status, 404);
+    assert.deepEqual(sharedCalls, []);
   });
 
   test('GET on the action path is a 404, so a link cannot trigger it', async () => {

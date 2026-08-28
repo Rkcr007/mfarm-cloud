@@ -125,6 +125,27 @@ npm start -w @mfarm/agent
 puts a handset somewhere other people's sessions can drive it — that should never happen because
 somebody started an agent with a phone plugged in for unrelated reasons.
 
+## 3c. Plugging a phone in does not share it (ADR-0009 §2)
+
+**Discovery is a read. Sharing is a decision.** A phone this machine can see is listed in the window
+and reachable by nobody until somebody ticks **Share this device**. Until then nothing about it is
+sent anywhere — it is not registered, so the control plane has never heard of it and the org cannot
+ask for it.
+
+That is the default and it is deliberate: the machine this product is aimed at is somebody's work
+laptop, and the phone on the end of the cable may well be their own.
+
+- The choice is stored in `~/.mfarm/shared.json` (`0600`) as an **allow list**, so a lost or corrupt
+  file means *nothing is shared* rather than *everything*.
+- It is keyed by **adb serial**, so it survives a replug and an agent restart.
+- **Virtual devices are shared by default.** A Cuttlefish instance is infrastructure somebody
+  provisioned on purpose; nobody has one by accident. Only `tier: physical` defaults to off.
+- Sharing or un-sharing **restarts the agent** to re-register — the device list travels only at
+  registration. A live session finishes first, so taking a device back never interrupts a suite
+  mid-run.
+
+Two phones on one laptop are independent: share the test device, leave your own alone.
+
 ## 4. What the agent says about a phone it cannot use
 
 Every unusable state is reported with the fix, because a plugged-in phone missing from the console
