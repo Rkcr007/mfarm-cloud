@@ -841,7 +841,14 @@ async function main(): Promise<void> {
   }
 
   const state = await agent.start();
-  console.log(`[agent] registered as host ${state.hostId}`);
+  // WHICH OF THE TWO THINGS HAPPENED. `start()` re-registers only when this host's capability
+  // fingerprint has changed; otherwise it proves the existing registration with a heartbeat. Saying
+  // "registered" for both hid the difference at the exact moment it matters — registration is the
+  // only thing that writes the device list, so a stale device and a skipped registration look the
+  // same from here.
+  console.log(agent.registeredThisStart
+    ? `[agent] registered as host ${state.hostId}`
+    : `[agent] resumed as host ${state.hostId} — capabilities unchanged, so nothing was re-registered`);
 
 
   /**

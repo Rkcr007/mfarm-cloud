@@ -143,6 +143,9 @@ laptop, and the phone on the end of the cable may well be their own.
 - Sharing or un-sharing **restarts the agent** to re-register — the device list travels only at
   registration. A live session finishes first, so taking a device back never interrupts a suite
   mid-run.
+- **The agent only re-registers when its capability fingerprint changes** — which a phone
+  appearing or disappearing does. A restart that changes nothing resumes with a heartbeat and
+  writes no device list, and the log says which happened (`registered as` vs `resumed as`).
 - A device absent from a registration **leaves the pool** (`OFFLINE`). That is what makes
   un-sharing real rather than local: until 2026-08-28 the control plane kept a device it had
   stopped hearing about, so a phone could be unplugged — or unshared — and still be advertised as

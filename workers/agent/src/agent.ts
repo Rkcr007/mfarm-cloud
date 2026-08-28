@@ -411,9 +411,22 @@ export class Agent {
     return JSON.stringify({ host: [...this.capabilities()].sort(), endpoint: this.opts.endpoint, devices });
   }
 
+  /**
+   * Whether the last `start()` actually re-registered, or only proved an existing registration.
+   *
+   * Read by the caller for its log line, and that line used to lie: `index.ts` printed "registered
+   * as host X" on both paths, so a run that only heartbeated looked identical to one that had just
+   * told the control plane what devices it has. That cost real time diagnosing a fix that was
+   * working and simply had not been reached — registration is the only thing that writes the device
+   * list, so "did it register?" is exactly the question being asked when a device looks stale.
+   */
+  private _registeredThisStart = false;
+  get registeredThisStart(): boolean { return this._registeredThisStart; }
+
   async start(): Promise<AgentState> {
     const restored = await this.loadState();
     const fingerprint = this.capabilityFingerprint();
+    this._registeredThisStart = false;
 
     // The state is adopted BEFORE the heartbeat that validates it, and put back if that beat fails.
     //
@@ -445,6 +458,7 @@ export class Agent {
       // re-registering laptop would fall back to its configured credential, which for an enrolled
       // host is a single-use token that was spent the first time it started.
       this.state = await this.register(restored?.workerToken);
+      this._registeredThisStart = true;
       await this.saveState(this.state);
     }
     return this.state;
