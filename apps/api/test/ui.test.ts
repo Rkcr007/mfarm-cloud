@@ -83,3 +83,40 @@ describe('content security policy', () => {
     assert.match(String(res.headers['cache-control']), /no-store/);
   });
 });
+
+/**
+ * EVERY MODULE THE CONSOLE IMPORTS MUST BE SERVED.
+ *
+ * `FILES` in ui.ts is an allowlist, and a path missing from it does not 404 — it falls through to
+ * the authenticated API routes and answers 401. The browser then cannot resolve the import, the ES
+ * module graph fails, and `console.js` never runs. The symptom is a BLANK CONSOLE, with the only
+ * evidence a 401 on a `.js` file in the network tab.
+ *
+ * That shipped once: `/profiles.js` was added to `console.js` and not to the table, and the deployed
+ * console was dead until someone curled the asset. Derived from the source rather than hand-listed,
+ * because a hand-listed copy is the same mistake one level up.
+ */
+describe('the console can load every module it imports', () => {
+  test('every browser-absolute import in console.js is a served path', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const { SERVED_PATHS } = await import('../src/http/routes/ui.ts');
+
+    const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
+    const src = await readFile(join(publicDir, 'console.js'), 'utf8');
+    const imports = [...src.matchAll(/from\s+'(\/[^']+)'/g)].map((m) => m[1]);
+
+    assert.ok(imports.length > 0, 'expected console.js to import at least one module');
+    for (const spec of imports) {
+      assert.ok(SERVED_PATHS.includes(spec), `console.js imports ${spec}, which ui.ts does not serve`);
+    }
+  });
+
+  test('an unserved import is what this catches', () => {
+    // The assertion above passes trivially if the regex ever stops matching. This pins the failure
+    // mode itself: a specifier the table does not carry must be rejected.
+    const served = ['/console.js', '/live.js'];
+    assert.equal(served.includes('/profiles.js'), false, 'the shape of the bug that shipped');
+  });
+});
