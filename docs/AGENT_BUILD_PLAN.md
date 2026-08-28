@@ -117,8 +117,8 @@ Ordered by what a user hits first, not by what is architecturally interesting.
 
 | # | Milestone | Why here | Est. |
 |---|---|---|---|
-| **M1** | Installing an app actually works | "Test your app on a real device" fails at step one today. | 2–4 d |
-| **M2** | The window | Turns a terminal command into something a person runs. | 3–5 d |
+| ~~M1~~ | ~~Installing an app actually works~~ | **Done** — shipped as `4cdb6a5`, verified on the handset. | — |
+| ~~M2~~ | ~~The window~~ | **Done** — see below for what it does and does not do. | — |
 | **M3** | Pairing + per-device sharing | The other half of "somebody else can use this". | 3–5 d |
 | **M4** | Operate a device without video | Works on secure apps, where video never will. | 4–6 d |
 | **S1** | Spike: iPhone on this Mac | Days, gates a quarter of the product. Run it alongside. | 1–2 d |
@@ -155,20 +155,51 @@ can be installed; `deploy/verify-reset.mjs` is written and waiting.
 
 ---
 
-## M2 — The window
+## M2 — The window — **built**
 
-The single largest gap between "a farm" and "a product", and it needs no new device support.
+The single largest gap between "a farm" and "a product", and it needed no new device support.
 
-**Build:** an HTTP server on `127.0.0.1` serving a small web app. **Security in the first commit, not
-retrofitted:** loopback bind, a session token minted at start-up and passed in the URL, and `Origin`
-**and** `Host` validated on every request — all three, for the reasons in ADR-0009 §3. The device
-list with the human remedy for every unusable adb state. Live updates.
+`workers/agent/src/window.ts` serves one self-contained page on `127.0.0.1`. All three of ADR-0009
+§3's mitigations are in the first commit rather than retrofitted, and each is tested for the exact
+bypass it exists to stop:
 
-Everything it shows is already computed inside the agent. This is presentation over existing
-machinery, which is why it is small.
+| Mitigation | What it stops | Verified |
+|---|---|---|
+| Loopback bind, no override variable | The window answering another machine | `lsof` on the running agent: `127.0.0.1:7317 (LISTEN)` |
+| 32-byte token in the URL, compared in constant time, never persisted | A website that can reach loopback but cannot guess it | `401` with no token, with a wrong token of the same length, and with a prefix |
+| `Origin` **and** `Host` on every request | A page on another site; a DNS name rebound to 127.0.0.1 | `403` and `421` against the live agent |
+
+`Origin` is required on a write and optional on a read, because browsers omit it on the same-origin
+GET that loads the page — and a `Host` check without an `Origin` check would leave rebinding open,
+which is why both are there.
+
+Three things beyond the plan turned out to be part of the milestone:
+
+- **The agent now stays up with no devices.** `PHYSICAL_ENABLED=1` with nothing plugged in used to
+  fall through to the AVD tier and exit on `AVD_NAME is required` — so the gate below, which starts
+  with "with the window open", could not be performed at all. It registers with an empty device list
+  and waits.
+- **M1's other half landed here**, where the plan said it should: the Play Protect remedy is a
+  sentence beside the device and the opt-in is a button, not `PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF`.
+  The env var stays for scripted provisioning.
+- **`server.close()` waits for keep-alive sockets.** Four seconds added to every drain, found by a
+  test suite that took 4.2s to run 29 tests that each took a millisecond. `closeAllConnections()`.
 
 **Gate:** plug a phone in with the window open and watch the row appear. Unplug it, watch it go.
 Leave it unauthorised and read the line that tells you to tap Allow.
+
+**Not done, and named rather than left to be discovered:**
+
+- **A registration failure still exits the process.** The window comes up before `agent.start()` on
+  purpose — the moment it is worth most is when the control plane cannot be reached — but a 401 from
+  a spent enrollment token kills the agent anyway, so the "not registered yet" notice is only ever
+  visible while a registration is in flight. Retrying a *transient* failure (connection refused,
+  5xx) while a 4xx stays fatal is the right shape and is not built.
+- **A phone arriving still drains and restarts the agent**, which is invisible under systemd and
+  very visible in a terminal. That is ADR-0003's registration-only capability write, and it closes
+  in M5 with the service, not here.
+- **The window shows; it does not yet share.** Every discovered device is listed, and the per-device
+  sharing toggle that decides which of them the org can reach is M3.
 
 ---
 

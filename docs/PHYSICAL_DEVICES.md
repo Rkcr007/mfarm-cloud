@@ -105,12 +105,53 @@ somebody started an agent with a phone plugged in for unrelated reasons.
 Every unusable state is reported with the fix, because a plugged-in phone missing from the console
 with no explanation is the most common support ticket there is:
 
-| adb state | What it means | What the log tells you to do |
+| adb state | What it means | What you are told to do |
 |---|---|---|
 | `device` | usable | — (it enrolls) |
 | `unauthorized` | nobody tapped Allow | Unlock the phone and tap "Allow USB debugging" |
 | `offline` | adb sees it, cannot talk to it | Replug; try a different cable before anything else |
 | `no permissions` | host udev rules | Install vendor udev rules and re-plug, or join `plugdev` |
+
+It says all of it **on a page**, not only in the log — see below.
+
+## 4a. The window
+
+The agent prints a link when it starts and opens it:
+
+```
+[agent] window at http://127.0.0.1:7317/?t=KD_neIJ-DA4JvNQfrzjfilTg5G8LZnlBnBzPY8hAGmA
+```
+
+That page lists every phone adb can see on this machine — including the ones the agent is **not**
+using — with the sentence that unblocks each one, and it updates on its own as phones come and go.
+It also carries the Play Protect offer (§6a), because a security setting on somebody's own handset
+is a decision to put in front of them rather than in an environment variable.
+
+**The whole URL is the credential.** A server on `127.0.0.1` is not private — every process on the
+machine can reach it, and so can any website you visit — so the page is gated three ways
+(ADR-0009 §3), and all three are required:
+
+- it binds loopback only, with no variable that can widen it;
+- the token in that link is minted at start-up, never written to disk, and checked in constant time
+  on every request;
+- `Origin` and `Host` are validated on every request, so neither a page on another site nor a DNS
+  name rebound to 127.0.0.1 can pose as the window.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `MFARM_WINDOW` | on | `MFARM_WINDOW=0` to serve no window at all |
+| `MFARM_WINDOW_PORT` | `7317` | A busy port is not fatal — the agent takes an ephemeral one and prints it |
+| `MFARM_WINDOW_OPEN` | on | `MFARM_WINDOW_OPEN=0` to print the link without launching a browser. Never launches one when stdout is not a terminal, so a service box is unaffected |
+
+**The agent now stays up with no devices at all** when `PHYSICAL_ENABLED=1`. It registers with an
+empty device list and waits, so you can start it, open the window, and *then* go and find a cable —
+which was impossible before, because the agent exited at startup asking for an emulator nobody
+wanted.
+
+What the window does **not** yet do is survive a registration failure: a bad or spent enrollment
+token still exits the process, so the "not registered yet" line is only visible while a registration
+is in flight. Retrying a *transient* control-plane failure with the window up is the obvious next
+step and is not built.
 
 ## 5. Adding or removing a phone
 
@@ -197,6 +238,31 @@ the whole blast radius.
 
 **A failed reset takes the device out of the pool.** That is the safety property: if cleanup could
 not finish, the next session must not get the device.
+
+## 6a. Play Protect will refuse your APK, and what to do about it
+
+On a stock Android phone **every `adb install` is refused**. Play Protect vets APKs pushed over USB
+and rejects debug-signed builds — which includes Appium's own automation helpers, so the device
+cannot run a session at all, not merely your app. On the phone it reads *"Harmful app blocked"*; in
+the farm it used to surface as `upstream_rejected` after a 60-second adb timeout, several hops from
+the cause.
+
+Three things happen now:
+
+1. **It is read at start-up**, once, per phone — one `adb shell settings get`. You are told before a
+   session needs it rather than 60 seconds into your first test.
+2. **A refusal is a farm fault, not a test failure.** It is classified `install-blocked` (§18) with
+   the remedy attached, so a suite is never blamed for it.
+3. **The window offers the fix, and the button is the consent.** `verifier_verify_adb_installs 0`
+   is the standard device-farm answer and it is a security setting on somebody's own phone, so the
+   agent proposes and the owner disposes. It is captured before it is changed and **put back exactly
+   as it was found when the agent stops** — including deleting the row again if it was never set.
+
+`PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF=1` does the same thing without a person, for a dedicated
+farm phone provisioned from a script. It is the wrong shape for a borrowed handset — it asks
+somebody to decide about a phone before they have seen it — which is why the window exists.
+
+The third option is neither: tap through the prompt on the device itself each time.
 
 ## 7. Running tests against a phone
 
