@@ -214,10 +214,15 @@ const INSTALL_TIMEOUT_MS = 600_000;
  * a share of frame intervals longer than 1.5 refresh periods, and SwiftShader rasterises on the CPU
  * — asking for 120 would report the renderer's ceiling as the app's jank, on every app.
  *
- * NOT VERIFIED AGAINST cvd 1.55.1 YET. `--display0` is the flag `launch_cvd` documented and `cvd
- * create` is expected to pass through; `--displays_textproto` is the alternative spelling. Confirm
- * with `cvd create --help | grep -i -e display -e memory` on the lab VM before trusting a boot, and
- * record the answer in HANDOFF.md the way every other non-obvious cvd flag here is.
+ * VERIFIED against cvd 1.55.1 on the lab VM, 2026-08-29, from `cvd create --help`:
+ *
+ *   --display0=VAL   width (required), height (required), dpi (default 320), refresh_rate_hz
+ *                    (default 60). Documented example: --display=width=1440,height=900,dpi=480
+ *   --cpus=VAL       virtual CPU count
+ *   --memory_mb=VAL  total guest memory, MB
+ *
+ * `--displays_textproto` was the alternative spelling considered; `--display0` is the one that
+ * exists, and cvd accepts `--display0` through `--display3` for multi-display devices.
  */
 export function profileFlags(profile: DeviceProfile | undefined): string[] {
   if (!profile) return [];

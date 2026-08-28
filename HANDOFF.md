@@ -1428,15 +1428,14 @@ device is covered by the same URL. Caught by a test, not by review.
     seconds. **Trust the timestamps over the error text.** That gap is what identified this in one
     step after the logs had suggested a device problem.
 
-32. **DEVICE PROFILES — three things unverified against real hardware, in the order they will bite.**
-    2026-08-29, with ADR-0016. The code is written and tested; none of it has met cvd.
+32. **DEVICE PROFILES — what is and is not verified against real hardware.**
+    2026-08-29, with ADR-0016. (a) is now closed; (b) and (c) are open and (b) is the dangerous one.
 
-    a. **The cvd display flag spelling is a guess.** `coldBoot` emits
-       `--display0=width=…,height=…,dpi=…,refresh_rate_hz=60`, `--memory_mb` and `--cpus`. That is
-       the `launch_cvd`-era spelling, expected to pass through `cvd create`; `--displays_textproto`
-       is the alternative. **Run `cvd create --help | grep -i -e display -e memory` before trusting
-       a boot**, and record the answer here the way issues 11 and 12 recorded theirs. A wrong flag
-       here fails at create time, so it is the cheap one.
+    a. ~~**The cvd display flag spelling is a guess.**~~ **VERIFIED 2026-08-29** against cvd 1.55.1
+       on the lab VM. `cvd create --help` documents `--display0` through `--display3`, taking
+       `width` (required), `height` (required), `dpi` (default 320) and `refresh_rate_hz`
+       (default 60) — exactly the form `coldBoot` emits. `--cpus` and `--memory_mb` are both real
+       and spelled as written. `--displays_textproto` does not exist on this build.
 
     b. **The Samsung build properties may not survive a reset, and this one is silent.**
        `deploy/apply-device-profile.sh` writes them through an `adb remount` overlay whose backing
