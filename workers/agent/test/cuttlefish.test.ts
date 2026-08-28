@@ -699,3 +699,56 @@ describe('device profiles', () => {
     assert.deepEqual(profileFlags(undefined), []);
   });
 });
+
+/**
+ * A profiled device's IDENTITY does not survive a wipe — measured, not assumed.
+ *
+ * `cvd powerwash` wipes the overlayfs the build properties live in, so a device that was a Galaxy
+ * before the reset comes back a Cuttlefish. Geometry is unaffected, because that is a boot flag in
+ * cvd's instance database rather than guest state. This farm resets by powerwash, so without
+ * re-application the very first reset silently un-names every profiled device.
+ */
+describe('a reset re-establishes the device identity', () => {
+  async function poweredWash(overrides: Record<string, unknown> = {}) {
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+    const d = device({ resetMode: 'powerwash', ...overrides });
+    await d.start();
+    await d.resetToSnapshot();
+    return d;
+  }
+
+  test('a profiled device rewrites its build properties after a powerwash', async () => {
+    await answerProp('adb', 'ro.product.model', 'SM-S938B');
+    await poweredWash({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] });
+
+    const all = await calls();
+    // Joined, because the heredoc argument spans lines and the fake logs argv verbatim — so a
+    // single `adb shell` call appears in the log as several lines.
+    const log = all.join('\n');
+    assert.match(log, /cat >> \/system\/build\.prop/, `no system write:\n${log}`);
+    assert.match(log, /cat >> \/vendor\/build\.prop/, 'vendor properties go to the vendor partition');
+    // The partition-scoped keys, not just the bare one — Android has DERIVED ro.product.model from
+    // them since 10, so writing only the bare key looks like it worked and changes nothing.
+    assert.match(log, /ro\.product\.vendor\.model=SM-S938B/, 'vendor-scoped model');
+    assert.match(log, /ro\.product\.system\.model=SM-S938B/, 'system-scoped model');
+    // remount is worthless until the device has rebooted, so the sequence has to include one.
+    assert.match(log, /remount/, 'the overlay has to be enabled');
+    assert.ok(all.filter((c) => /\breboot\b/.test(c)).length >= 2, 'one reboot for the overlay, one for the props');
+  });
+
+  test('an UNPROFILED device pays none of that cost', async () => {
+    // cf-1 and cf-2 reset by powerwash several times a day. None of the above may run for them.
+    await poweredWash();
+    const all = await calls();
+    assert.equal(all.some((c) => c.includes('build.prop')), false, `nothing written:\n${all.join('\n')}`);
+    assert.equal(all.some((c) => c.includes('remount')), false, 'and no remount');
+  });
+
+  test('an identity that will not take is logged, not thrown — the device still works', async () => {
+    // A device that resets but comes back named `cuttlefish` is wrong about its name and completely
+    // serviceable. Failing the reset would pull a working device out of the pool over a property.
+    await answerProp('adb', 'ro.product.model', 'Cuttlefish x86_64 phone 64-bit only');
+    await assert.doesNotReject(poweredWash({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] }));
+  });
+});
