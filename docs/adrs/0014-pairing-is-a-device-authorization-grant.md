@@ -46,11 +46,16 @@ modes are known and its shape is one users have met before.
     |--------------------------------->|  mints XXXX-XXXX, 10 min TTL   |
     |<---------------------------------|                                |
     |  displays XXXX-XXXX              |                                |
-    |                                  |<---- POST /v1/pair/redeem -----|  user types the code
-    |                                  |      (session cookie + CSRF)   |
+    |                                  |<--- POST /v1/pair/inspect -----|  user types the code
+    |                                  |---- which machine is this? --->|  console names it
+    |                                  |<--- POST /v1/pair/approve -----|  user confirms
+    |                                  |     (session cookie + CSRF)    |
     |  POST /v1/pair/poll (unauth)     |                                |
     |--------------------------------->|                                |
     |<--- mae_… once, then never ------|                                |
+
+**Approval is two calls, not one.** `inspect` changes nothing and answers *which machine is this* —
+which is what gives §2's phishing mitigation something to show a person before they confirm.
 ```
 
 ### 1. The code goes agent → console, not console → agent
@@ -76,11 +81,21 @@ who floods this endpoint gets a pile of codes bound to no org, granting nothing.
 
 The exposures that remain are ordinary and are handled as such:
 
-- **Guessing a pending code.** 8 characters from a 32-character alphabet is 2^40. With a 10-minute
-  TTL, per-IP rate limiting on the redeem path, and the code invalidated after five wrong attempts,
-  guessing is not a strategy. The alphabet excludes `0/O` and `1/I/L` — a user reading a code off a
-  screen must not be able to fail at it, and ambiguity would push us toward longer codes for the
-  wrong reason.
+- **Guessing a pending code.** The alphabet excludes `0`/`O`, `1`/`I`/`L` and `U`, leaving 30
+  characters, so eight of them is 30^8 — about 6.6e11, near 2^39. It is deliberately not padded back
+  up to a round 2^40: the only two symbols available to do that are `*` and `+`, and neither belongs
+  in a code somebody has to find on a keyboard. The half-bit is not what makes guessing pointless.
+
+  What makes it pointless is that **approval is reachable only by a signed-in user**, and that path
+  carries a budget of 10 code submissions per minute **per user** — not per IP, so an attacker with
+  an account gains nothing by changing address, and a legitimate admin cannot lose their allowance
+  because a colleague on the same NAT was mistyping. At that rate the search outlasts the ten-minute
+  TTL of every code it might find, by a margin with no useful name.
+
+  *(An earlier draft of this ADR also promised "the code invalidated after five wrong attempts".
+  That was not implementable as written and is not built: a wrong code matches no row, so there is
+  nothing to invalidate. The per-user budget above is what was built instead, and it is the control
+  that actually binds.)*
 - **Resource exhaustion.** Rate limited per IP, and pending pairings expire on a timer rather than
   accumulating.
 - **Somebody redeeming a code they were sent.** This is phishing, and it is the flow's known weak
@@ -90,14 +105,32 @@ The exposures that remain are ordinary and are handled as such:
   with its pairing time, and enrollment is revocable. **The remaining risk is accepted**, as it is by
   every product using this flow, because the alternative — no pairing at all — is what we have now.
 
-### 3. The token is delivered exactly once, to the poller that asked for it
+### 3. The token is minted on collection, and delivered exactly once
 
-The poll is unauthenticated, so the pairing id it carries is the only thing linking a poll to a
-pending pairing — and it is therefore a secret of the same weight as the code. It is a 32-byte
-random value returned only in the response to `POST /v1/pair`, never displayed, never logged.
+**Not at approval.** Minting when the admin clicks would leave a usable `mae_` plaintext resting
+somewhere until the agent came for it — in this table or in some side channel — and there is no good
+place to put a credential that is waiting to be collected by whoever asks first. Minting inside the
+poll means it exists only in the response that carries it.
 
-On success the `mae_` token is returned once and the pending row is destroyed. A second poll gets
-`already_redeemed`, not the token again.
+Single use is enforced by the statement, not by a check before it: `collected_at IS NULL` is in the
+`WHERE` clause, so two polls racing serialise on the row and exactly one mints anything. A read
+followed by a write would let both through.
+
+**Expiry is checked before approval, and only for a pairing nobody approved.** An approved pairing
+that ages out between the admin's click and the agent's next poll is still collectable — the TTL
+bounds how long an *unclaimed* code is guessable, and a human approving it closes that window.
+Expiring it anyway would mean approving at 9:59 and polling at 10:01 fails, which is a race nobody
+could diagnose from either end.
+
+The poll is unauthenticated, so the **device code** it carries is the only thing linking a poll to a
+pending pairing — and it is therefore a secret of the same weight as the `mae_` token it returns. It
+is 32 random bytes, given out only in the response to `POST /v1/pair`, never displayed, never logged,
+and stored only as a hash.
+
+On success the token is returned once and the row is marked collected. A second poll gets
+`pairing_gone` — the same answer an unknown device code gets, so a caller cannot learn which device
+codes exist by asking. The row is kept rather than deleted, so a support question — *did that laptop
+ever actually finish pairing?* — has an answer.
 
 ### 4. Credentials go to the OS keychain
 

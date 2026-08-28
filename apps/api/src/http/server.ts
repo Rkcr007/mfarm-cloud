@@ -8,6 +8,7 @@ import { loadSigningKey, type Keypair } from '../tokens.ts';
 import { ApiError, unauthorized, forbidden } from './errors.ts';
 import { sessionRoutes } from './routes/sessions.ts';
 import { authRoutes } from './routes/auth.ts';
+import { pairingRoutes, type PairingRoutesOptions } from './routes/pairing.ts';
 import { accountRoutes } from './routes/account.ts';
 import { artifactRoutes } from './routes/artifacts.ts';
 import { uiRoutes, UI_PATHS } from './routes/ui.ts';
@@ -55,6 +56,19 @@ const PUBLIC_PATHS = new Set([
   // Signing in cannot require being signed in. This is the one route that takes a password, and it
   // is rate limited like every other unauthenticated path.
   '/v1/auth/login',
+  /**
+   * ADR-0014. An agent asking to be paired HAS NO CREDENTIAL YET — obtaining one is the entire
+   * point — so these two cannot be authenticated, exactly like `/v1/workers/register` above.
+   *
+   * What makes them safe is not a check in this hook. `/v1/pair` hands out a code that grants
+   * NOTHING until a signed-in admin approves it, and what it then grants is decided by that
+   * admin's org rather than by anything the caller said; `/v1/pair/poll` carries its own
+   * credential — the 32-byte device code — in the same sense `/dp/*` does below.
+   *
+   * The two halves that a person drives, `/v1/pair/inspect` and `/v1/pair/approve`, are
+   * deliberately NOT here: they need a session cookie, a CSRF token, and an org admin.
+   */
+  '/v1/pair', '/v1/pair/poll',
   // The console itself: the login page and the shell that renders it. Every byte is identical for an
   // anonymous visitor, and it receives no fleet data until it presents a cookie to /v1/*.
   ...UI_PATHS,
@@ -187,6 +201,13 @@ export interface ServerOptions {
   readyCacheMs?: number;
   /** Per-IP requests per minute for `/ready`. */
   readyRateLimitMax?: number;
+  /**
+   * Rate-limit overrides for the pairing routes (ADR-0014). Tests raise them; a deployment should
+   * leave them alone. Same reason `loginRateLimitMax` exists — a test pairs more often in a few
+   * seconds than a person ever will, and would otherwise spend the budget on itself.
+   */
+  pairing?: PairingRoutesOptions;
+
   /** Per-IP sign-in attempts per minute. Tests raise it; see `routes/auth.ts` for the default. */
   loginRateLimitMax?: number;
   /**
@@ -509,6 +530,9 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(uiRoutes);
   await app.register(authRoutes, { prefix: '/v1', loginRateLimitMax: opts.loginRateLimitMax });
   await app.register(accountRoutes, { prefix: '/v1' });
+  // ADR-0014. Two of its four routes are UNAUTHENTICATED, which is safe for the reason written out
+  // in that file: the code they hand out grants nothing until an authenticated admin approves it.
+  await app.register(pairingRoutes, { prefix: '/v1', ...(opts.pairing ?? {}) });
   await app.register(sessionRoutes, { prefix: '/v1' });
   await app.register(deviceRoutes, { prefix: '/v1' });
   await app.register(workerRoutes, { prefix: '/v1' });
