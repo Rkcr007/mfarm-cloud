@@ -47,6 +47,26 @@ for a in "$@"; do
     *) verb="$a"; break ;;
   esac
 done
+# A getprop is keyed on the PROPERTY as well as the verb, because one device answers several and
+# they are not interchangeable: sys.boot_completed must say 1 while ro.product.cpu.abilist says
+# something else entirely. Without this every getprop shares one answer, and scripting either one
+# breaks the other. (No backticks in this comment -- the whole script is a JS template literal.)
+prop=""
+seen_getprop=0
+for a in "$@"; do
+  if [ "$seen_getprop" = 1 ]; then prop="$a"; break; fi
+  [ "$a" = "getprop" ] && seen_getprop=1
+done
+if [ -n "$prop" ]; then
+  if [ -f "$FAKE_DIR/$name.getprop.$prop.fail" ]; then
+    cat "$FAKE_DIR/$name.getprop.$prop.fail" >&2
+    exit 1
+  fi
+  if [ -f "$FAKE_DIR/$name.getprop.$prop.out" ]; then
+    cat "$FAKE_DIR/$name.getprop.$prop.out"
+    exit 0
+  fi
+fi
 if [ -f "$FAKE_DIR/$name.$verb.fail" ]; then
   cat "$FAKE_DIR/$name.$verb.fail" >&2
   exit 1
@@ -69,6 +89,13 @@ const ok = async () => ({ ok: true as const });
 /** Scripted answer for `<tool> <verb>`. */
 async function answer(tool: string, verb: string, stdout: string): Promise<void> {
   await writeFile(join(dir, `${tool}.${verb}.out`), stdout);
+}
+/** Scripted answer for `<tool> … getprop <prop>`, which beats the generic `shell` answer. */
+async function answerProp(tool: string, prop: string, stdout: string): Promise<void> {
+  await writeFile(join(dir, `${tool}.getprop.${prop}.out`), stdout);
+}
+async function failsProp(tool: string, prop: string, stderr = 'nope'): Promise<void> {
+  await writeFile(join(dir, `${tool}.getprop.${prop}.fail`), stderr);
 }
 async function fails(tool: string, verb: string, stderr = 'nope'): Promise<void> {
   await writeFile(join(dir, `${tool}.${verb}.fail`), stderr);
@@ -641,12 +668,30 @@ describe('device profiles', () => {
     assert.equal(d.info.profile, 'galaxy-s25');
   });
 
-  test('every Cuttlefish device publishes its ABIs, profiled or not', () => {
-    // The install preflight refuses an arm64-only APK on the strength of this. A profiled device
-    // needs it MORE than an unprofiled one, not less: it answers Build.MODEL with a Samsung part
-    // number, so "the phone I ship for" is exactly what a tester will assume it can run.
-    assert.deepEqual(device().info.abis, ['x86_64', 'x86']);
-    assert.deepEqual(device({ profile: DEVICE_PROFILES['galaxy-s25'] }).info.abis, ['x86_64', 'x86']);
+  test('ABIs are READ FROM THE GUEST, never assumed', async () => {
+    // This was hard-coded to ['x86_64','x86'] and both entries were wrong — the real image reports
+    // `x86_64,arm64-v8a`. The install preflight acts on this list, so a guess here refuses builds
+    // the platform would have accepted. Asserted against a scripted getprop for that reason.
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+    await answerProp('adb', 'ro.product.cpu.abilist', 'x86_64,arm64-v8a');
+
+    const d = device();
+    assert.equal(d.info.abis, undefined, 'nothing is claimed before the device has been asked');
+    await d.start();
+    assert.deepEqual(d.info.abis, ['x86_64', 'arm64-v8a']);
+  });
+
+  test('a device that cannot answer getprop claims no ABIs rather than none', async () => {
+    // undefined and [] are read differently downstream: "nobody looked" blocks no install, while
+    // "executes nothing" would block every one of them.
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+    await failsProp('adb', 'ro.product.cpu.abilist', 'device offline');
+
+    const d = device();
+    await d.start().catch(() => {});
+    assert.equal(d.info.abis, undefined);
   });
 
   test('profileFlags is empty without a profile', () => {

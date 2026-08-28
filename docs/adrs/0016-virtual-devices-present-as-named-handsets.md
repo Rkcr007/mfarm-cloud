@@ -69,11 +69,20 @@ an app it is on Android 15 while it runs on 17 changes which API-level-condition
 so the app under test would exercise code that never runs on the device it claims to be. An
 obviously-wrong version string is a smaller lie than a silently-wrong code path.
 
-**6. A device publishes its ABIs and an install that cannot work is refused by name.** Cuttlefish
-here is x86_64; every real Galaxy is arm64-v8a; most real APKs ship arm64-only native libraries.
-Without this, the first customer upload dies inside `adb install` with
-`INSTALL_FAILED_NO_MATCHING_ABIS` **on a device named after the exact phone they build for** — a
-worse outcome than never having claimed the name.
+**6. A device publishes its ABIs, READ FROM THE GUEST, and an install that cannot work is refused by
+name.** The concern is that Cuttlefish is x86_64 while every real Galaxy is arm64-v8a, and most real
+APKs ship arm64-only native libraries — so an upload could die inside `adb install` with
+`INSTALL_FAILED_NO_MATCHING_ABIS` **on a device named after the exact phone they build for**.
+
+**Corrected on hardware, 2026-08-29 — see HANDOFF known issue 34.** This decision originally said
+the list was `['x86_64','x86']` and hard-coded it. The lab image actually reports
+`x86_64,arm64-v8a`: no 32-bit x86 at all, and arm64-v8a advertised. The hard-coded version would
+have refused arm64 builds PackageManager accepts — the very failure this decision exists to prevent,
+inverted. The list is now read from the guest, which is what ADR-0003 required all along.
+
+Whether arm64 code actually *runs* on this image is open: the ABI is advertised, but there is no
+native bridge and no binfmt handler, so an arm64-only APK most likely installs and then fails at
+`System.loadLibrary`. Issue 34 records the evidence and how to settle it.
 
 The check's default is to ALLOW. An APK with no native code and a device that never reported its
 ABIs both fall through to the old behaviour. It exists to turn one known-impossible install into a

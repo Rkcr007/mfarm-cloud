@@ -1472,6 +1472,38 @@ device is covered by the same URL. Caught by a test, not by review.
     object. Left alone deliberately as unrelated scope; it wants a `finally` that unlinks after the
     write stream has actually closed.
 
+34. **THE CUTTLEFISH IMAGE ADVERTISES `arm64-v8a` WITH NO TRANSLATION LAYER BEHIND IT.**
+    Found on hardware 2026-08-29 while verifying ADR-0016, and it corrected a claim made in that
+    ADR, in the PR, and in the code.
+
+    `adb shell getprop ro.product.cpu.abilist` on the lab image (AOSP 17, build 16102939) returns:
+
+        x86_64,arm64-v8a
+
+    Not `x86_64,x86`. Two separate surprises in one line: there is **no 32-bit x86** — it is a
+    64-bit-only image, `ro.zygote=zygote64` — and **arm64-v8a is advertised**, which the code had
+    hard-coded a denial of.
+
+    That hard-coded list was shipped in the first cut of the install preflight and would have
+    **refused arm64 builds the platform's own PackageManager accepts**, which is the precise failure
+    the preflight was written to avoid, pointed the other way. Fixed by reading the list off the
+    guest (`refreshAbis` in `cuttlefish.ts`) — a capability is observed state, ADR-0003, in the one
+    place this file had quietly stopped obeying it.
+
+    **WHETHER arm64 CODE ACTUALLY RUNS IS STILL OPEN, and the evidence points both ways:**
+
+    * for — `ro.product.cpu.abilist` and `abilist64` both list `arm64-v8a`, and that list is exactly
+      what PackageManager matches `lib/<abi>/` against, so an arm64-only APK should INSTALL;
+    * against — `ro.enable.native.bridge.exec` is `0`, `ro.dalvik.vm.native.bridge` is empty,
+      `/proc/sys/fs/binfmt_misc/` is empty, and no `ndk_translation`/houdini libraries are present.
+      Nothing found on the device can execute an ARM ELF.
+
+    The likely truth is that an arm64-only APK installs cleanly and then dies at
+    `System.loadLibrary` — a mystery failure moved later rather than removed. **Settle it with a
+    real arm64-only APK**; the sample on the box (`~/bitbar-sample-app.apk`) is pure bytecode and
+    cannot answer it. If it is confirmed, the honest fix is a runtime-capability check, not an
+    install-time one, and the preflight's message should say "installs but will not run".
+
 ## Working notes for whoever picks this up
 
 **Context is cache; disk is truth.** This file, `docs/adrs/`, and the test suite are the system of
