@@ -327,6 +327,23 @@ export class Agent {
   get bufferedEventCount(): number { return this.buffer.size; }
   deviceIdFor(localId: string): string | undefined { return this.state?.deviceIds[localId]; }
 
+  /**
+   * Two read-only views for the local window (ADR-0009 §1). Nothing decides anything on them.
+   *
+   * They exist because the agent is already the only party that knows either answer, and the
+   * alternative — the window recomputing health by probing the device itself — would be a second
+   * process talking to the same handset at the same time as the health monitor. Kept as narrow
+   * accessors rather than exposing the maps, so the window cannot mutate what the monitor owns.
+   */
+  healthOf(localId: string): DeviceHealth['status'] | undefined { return this.lastHealth.get(localId); }
+
+  /** How many sessions this agent currently believes are live on a device, by its control-plane id. */
+  sessionsOn(deviceId: string): number {
+    let n = 0;
+    for (const s of this.active.values()) if (s.deviceId === deviceId) n += 1;
+    return n;
+  }
+
   // ---------------------------------------------------------------- registration
 
   /**

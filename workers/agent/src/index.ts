@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { access, readdir } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { cpus, hostname as osHostname, totalmem } from 'node:os';
@@ -14,6 +15,8 @@ import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.
 import { createAvdBackend } from './devices/avd.ts';
 import { createPhysicalBackend, PhysicalDevice } from './devices/physical.ts';
 import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
+import type { DiscoveredDevice } from './devices/discovery.ts';
+import { AgentWindow, openInBrowser, type WindowDevice, type WindowNotice, type WindowState } from './window.ts';
 import type { DeviceBackend } from './device.ts';
 
 /**
@@ -37,6 +40,12 @@ function env(key: string, fallback?: string): string {
 }
 
 const flag = (key: string): boolean => /^(1|true|yes|on)$/i.test(process.env[key] ?? '');
+
+/**
+ * A flag that is ON unless somebody turns it off — for behaviour that is the product rather than an
+ * option, and where an operator who wants it gone should have to say so.
+ */
+const flagUnless = (key: string): boolean => !/^(0|false|no|off)$/i.test(process.env[key] ?? '');
 
 /**
  * The phones on this machine's USB, as backends (ADR-0008, spec §6).
@@ -77,9 +86,21 @@ async function findAapt2(): Promise<string | undefined> {
 }
 
 async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
-  const found = await discover();
+  let found: DiscoveredDevice[];
+  try {
+    found = await discover();
+  } catch (e) {
+    // NOT the same thing as an empty USB bus, and the old message said it was — "adb sees no
+    // devices ... check the cable and that adb is installed" covered both, so the one case with an
+    // actual error message printed a guess instead of it. The agent still starts: the window is
+    // worth more here than anywhere, and the poll retries.
+    console.error(
+      `[agent] adb is not answering, so no phone on this machine can be found: ${(e as Error).message}`,
+    );
+    return [];
+  }
   if (found.length === 0) {
-    console.warn('[agent] PHYSICAL_ENABLED is set but adb sees no devices at all — check the cable and that adb is installed');
+    console.warn('[agent] PHYSICAL_ENABLED is set and adb reports nothing plugged in — check the cable');
     return [];
   }
 
@@ -232,6 +253,33 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
   if (physical.length > 0) {
     console.log(`[agent] serving ${physical.length} physical device(s); no virtual tier on this host`);
     return physical;
+  }
+
+  /**
+   * `PHYSICAL_ENABLED` WITH NOTHING PLUGGED IN IS A WAIT, NOT A FAILURE — and until M2 there was
+   * nothing to wait in.
+   *
+   * This host said it is a machine phones get plugged into. Falling through to the AVD tier makes
+   * `env('AVD_NAME')` throw, so the agent exits — which is exactly backwards for the case ADR-0009
+   * is written about: somebody runs this, THEN goes and finds a cable. The window is the thing that
+   * tells them the agent is fine and the phone is not plugged in, and an agent that has already
+   * exited has no window to say it in.
+   *
+   * Registering with an empty device list is honest rather than a lie of omission: the host is up,
+   * it has capacity for nothing, and the scheduler reads the device list rather than the host's
+   * existence. It is also what makes the M2 gate performable at all — "plug a phone in with the
+   * window open" needs the window open first.
+   *
+   * A PHONE THAT ARRIVES STILL RESTARTS THE AGENT, for the reason in the hot-plug block below:
+   * capabilities and the device list travel only on registration. Under a process supervisor that
+   * is invisible. Run from a terminal it is not, and that gap closes in M5, not here.
+   */
+  if (flag('PHYSICAL_ENABLED')) {
+    console.warn(
+      '[agent] no devices yet. Staying up — plug a phone into this machine and it joins on its own; '
+      + 'the window says what each one needs.',
+    );
+    return [];
   }
 
   console.warn('[agent] falling back to the AVD tier — it cannot meet the 100ms target and has no WebRTC path');
@@ -456,6 +504,179 @@ async function main(): Promise<void> {
     console.log(`[agent] automation gateway listening on ${gatewayBindHost ?? '0.0.0.0'}:${gatewayPort}`);
   }
 
+  /**
+   * ------------------------------------------------------------------ the window (ADR-0009 §1, M2)
+   *
+   * BEFORE REGISTRATION, deliberately. The moment the window is worth the most is the one where
+   * the control plane cannot be reached — a person staring at a phone that will not appear in the
+   * console needs to be told that the phone is fine and the network is not. A window that only
+   * opens after `agent.start()` returns is dark for exactly that case.
+   *
+   * It reads; it does not compute. Every field below already exists somewhere in this process, and
+   * the snapshot is a pure function over `backends`, `lastDiscovery` and two read-only accessors on
+   * the agent — no adb, no device handles, nothing that could make the page a second client of the
+   * hardware. That is what keeps a browser tab from being able to disturb a running suite.
+   */
+
+  /**
+   * The last full USB picture, refreshed by the discovery poll below.
+   *
+   * The FULL list, not the usable set: a phone sitting at `unauthorized` is precisely the one whose
+   * row somebody is waiting to see change, and it is the one `watchForChanges` is right to keep out
+   * of its own arrival/departure callback.
+   */
+  let lastDiscovery: DiscoveredDevice[] = [];
+
+  const windowState = (): WindowState => {
+    const devices: WindowDevice[] = [];
+    const adopted = new Set<string>();
+
+    for (const b of backends) {
+      const info = b.control.info;
+      const serial = info.adbSerial;
+      if (serial) adopted.add(serial);
+      const seen = serial ? lastDiscovery.find((d) => d.serial === serial) : undefined;
+      const deviceId = agent.deviceIdFor(info.localId);
+      const sessions = deviceId ? agent.sessionsOn(deviceId) : 0;
+      const health = agent.healthOf(info.localId);
+      const phone = b.control as Partial<PhysicalDevice>;
+
+      // Adopted at start-up and no longer in a discovery pass that found SOMETHING: the cable is
+      // out. Distinguished from `health === 'offline'` because the remedy is different and physical
+      // — replug it — where a degraded device needs looking at. Guarded on a non-empty pass so an
+      // adb hiccup, which returns [], does not report every phone as unplugged.
+      const vanished = info.tier === 'physical' && lastDiscovery.length > 0 && !seen;
+
+      const status: WindowDevice['status'] =
+        vanished || health === 'offline' || health === 'degraded' ? 'unhealthy'
+          : sessions > 0 ? 'busy'
+            : !deviceId ? 'starting'
+              : 'ready';
+
+      devices.push({
+        serial: serial ?? info.localId,
+        localId: info.localId,
+        model: info.model,
+        manufacturer: seen?.props?.manufacturer,
+        osVersion: info.osVersion,
+        adbState: info.tier === 'physical' ? (seen?.state ?? (vanished ? 'offline' : undefined)) : undefined,
+        shared: Boolean(deviceId),
+        status,
+        remedy: vanished
+          ? 'This phone is no longer on USB. Replug it — the agent picks it up again on its own.'
+          : seen?.remedy,
+        // `undefined` for a tier that has no such setting, so the offer never appears on a
+        // Cuttlefish instance, where the button would have nothing to press.
+        installVerification: typeof phone.installVerification === 'string' ? phone.installVerification : undefined,
+        sessions,
+      });
+    }
+
+    // Everything adb can see that this agent is NOT using — the whole reason a person opens this
+    // page. A phone that is plugged in and missing from the console with no explanation is the
+    // single most common physical-farm support ticket, and every one of these rows carries the
+    // instruction that ends it.
+    for (const d of lastDiscovery) {
+      if (adopted.has(d.serial)) continue;
+      devices.push({
+        serial: d.serial,
+        model: d.props?.model ?? d.serial,
+        manufacturer: d.props?.manufacturer,
+        osVersion: d.props?.osVersion,
+        adbState: d.state,
+        shared: false,
+        status: d.state === 'device' ? 'starting' : 'blocked',
+        remedy: d.state === 'device'
+          ? 'Usable, and not in the farm yet. The agent restarts to register it — any live session on the other devices finishes first.'
+          : d.remedy,
+        sessions: 0,
+      });
+    }
+
+    const notices: WindowNotice[] = [];
+    if (!agent.hostId) {
+      notices.push({
+        level: 'warn',
+        title: 'Not registered with the control plane yet',
+        detail: `Trying ${env('CONTROL_PLANE_URL', 'http://localhost:3000')}. Devices on this machine `
+          + 'work locally, and nobody can reach them from the console until this succeeds.',
+      });
+    }
+    if (!flag('PHYSICAL_ENABLED')) {
+      notices.push({
+        level: 'info',
+        title: 'This agent is not looking for phones on USB',
+        detail: 'Start it with PHYSICAL_ENABLED=1 to have handsets discovered and enrolled.',
+      });
+    }
+    // Read from the environment rather than threaded down from `choosePhysicalBackends`, because
+    // this is the same pure env read that produced the mode — and the blast radius is worth saying
+    // twice, in the log at start-up and on the screen somebody is actually looking at.
+    if (process.env.PHYSICAL_RESET_MODE === 'full-sweep') {
+      notices.push({
+        level: 'warn',
+        title: 'Releasing a device here clears every third-party app on it',
+        detail: 'PHYSICAL_RESET_MODE=full-sweep is set. That is correct for a dedicated farm phone '
+          + 'and wrong for anybody\'s own handset — it wipes app data, including banking and 2FA. '
+          + 'Unset it to go back to removing only what a session installed.',
+      });
+    }
+
+    return {
+      host: {
+        hostname: env('WORKER_HOSTNAME', osHostname()),
+        region: env('REGION'),
+        controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
+        hostId: agent.hostId,
+        endpoint: dataPlaneEndpoint(),
+        tunnel: tunnelEnabled(),
+      },
+      devices,
+      notices,
+    };
+  };
+
+  const win = flagUnless('MFARM_WINDOW')
+    ? new AgentWindow({
+        snapshot: windowState,
+        actions: {
+          /**
+           * THE BUTTON IS THE CONSENT (M1, ADR-0012's spirit applied to a security setting).
+           *
+           * `PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF=1` is the headless path and stays; it is the
+           * wrong shape for a person, because it asks somebody to decide about their own phone
+           * before they have seen the phone. Here the offer appears beside the device, in the
+           * moment it matters, and it is reversible from the same place.
+           */
+          setInstallVerification: async (localId: string, enabled: boolean): Promise<void> => {
+            const found = backends.find((b) => b.control.info.localId === localId);
+            const dev = found?.control as Partial<PhysicalDevice> | undefined;
+            if (!dev?.disableInstallVerification || !dev.restoreInstallVerification) {
+              throw new Error(`${localId} is not a device this agent can change that setting on.`);
+            }
+            if (enabled) await dev.restoreInstallVerification();
+            else await dev.disableInstallVerification();
+            console.log(
+              `[agent] ${localId}: adb-install verification turned ${enabled ? 'back ON' : 'OFF'} `
+              + 'from the window. It is put back exactly as found when this agent stops.',
+            );
+          },
+        },
+      })
+    : undefined;
+
+  if (win) {
+    await win.listen(Number(process.env.MFARM_WINDOW_PORT ?? 7317));
+    // THE URL CARRIES THE TOKEN, so this line is a credential. It goes to the agent's own stdout,
+    // which on a laptop is the terminal the person is already looking at and on a service box is a
+    // journal that already holds the enrollment token — no new exposure either way, and there is
+    // nowhere else to put it: ADR-0009 §3 says the token is never persisted.
+    console.log(`[agent] window at ${win.url}`);
+    // Only where a person is present. `isTTY` is false under systemd, where launching a browser
+    // would be a process that fails for no reason anybody asked for.
+    if (flagUnless('MFARM_WINDOW_OPEN') && process.stdout.isTTY) openInBrowser(win.url);
+  }
+
   const state = await agent.start();
   console.log(`[agent] registered as host ${state.hostId}`);
 
@@ -547,13 +768,17 @@ async function main(): Promise<void> {
   let shuttingDown = false;
   /** The USB watch, when this host has phones. Stopped first on drain. */
   let discoveryWatch: { stop: () => void } | undefined;
-  const shutdown = async (signal: string, exitCode = 0) => {
+  const shutdown = async (signal: string, exitCode = 0, relaunch = false) => {
     if (shuttingDown) return;
     shuttingDown = true;
     // First, so a discovery tick landing mid-drain cannot call shutdown again or log an arrival
     // nobody can act on.
     discoveryWatch?.stop();
     console.log(`[agent] ${signal} — draining`);
+    // Early, and not with the other listeners below: an open tab showing "ready" while the agent is
+    // handing devices back is the one lie this page must not tell. Closing the stream is what the
+    // browser renders as "reconnecting", which is true.
+    await win?.close();
     // A drain reached from uncaughtException runs on a process whose invariants are already broken,
     // so any step here may hang or throw. Without this deadline the `shuttingDown` guard turns a
     // failed drain into a process that never exits and never releases its devices.
@@ -595,6 +820,35 @@ async function main(): Promise<void> {
       process.exit(exitCode || 1);
     }
     clearTimeout(hard);
+    /**
+     * COME BACK, when a person is watching and nothing else will bring the agent back.
+     *
+     * A phone arriving drains and exits — see the hot-plug block below for why the device set
+     * cannot be changed in place. Under systemd that is invisible: `Restart=always` has a new agent
+     * up before anybody notices. Run from a terminal there is no supervisor at all, so the observed
+     * behaviour is that PLUGGING IN A PHONE KILLS THE AGENT, which is close to the opposite of the
+     * product. The window makes it worse rather than better: the row appears and then the page goes
+     * dark, which reads as the phone having broken something.
+     *
+     * `isTTY` is the same signal used to decide whether to open a browser, and it means the same
+     * thing here: somebody launched this by hand, so there is nobody else to restart it. Under a
+     * service manager it is false and this never runs — two supervisors racing to own one agent is
+     * a worse failure than the one being fixed.
+     *
+     * ONLY ON A CLEAN DRAIN FOR A KNOWN-GOOD REASON. A crash loop must stay a crash loop and be
+     * seen; this exists for the one case where exiting is a mechanism rather than a fault.
+     */
+    if (relaunch && exitCode === 0 && flagUnless('MFARM_RELAUNCH') && process.stdout.isTTY) {
+      const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+        detached: true, stdio: 'inherit', env: process.env, cwd: process.cwd(),
+      });
+      child.unref();
+      console.log(
+        `[agent] restarted as pid ${child.pid} with the device set that just changed. `
+        + 'It survives Ctrl-C — `kill ' + String(child.pid) + '` to stop it. '
+        + 'MFARM_RELAUNCH=0 to exit instead.',
+      );
+    }
     process.exit(exitCode);
   };
 
@@ -750,8 +1004,21 @@ async function main(): Promise<void> {
         `[agent] new device(s) on USB: ${added.join(', ')}. Draining to re-register — live sessions `
         + 'finish first, then the agent restarts with them.',
       );
-      void shutdown('usb-device-added', 0);
+      // The one drain that is a mechanism rather than a fault, and so the one that comes back.
+      void shutdown('usb-device-added', 0, true);
+    }, undefined, undefined, (found) => {
+      // Every pass, changed or not. This is what makes the window live: a phone moving from
+      // `unauthorized` to `device` because somebody tapped Allow is not an arrival by the
+      // definition above — the usable set only changes on the tick after — but it is exactly the
+      // moment the person watching wants their row to update.
+      lastDiscovery = found;
+      win?.push();
     });
+
+    // The first pass is ten seconds away, and a window that opens empty on a machine with a phone
+    // already plugged into it reads as broken. One extra `adb devices` at start-up buys the row
+    // being there when the browser is.
+    void discover().then((found) => { lastDiscovery = found; win?.push(); }).catch(() => { /* the poll will retry */ });
   }
 
 
