@@ -48,6 +48,31 @@ const flag = (key: string): boolean => /^(1|true|yes|on)$/i.test(process.env[key
 const flagUnless = (key: string): boolean => !/^(0|false|no|off)$/i.test(process.env[key] ?? '');
 
 /**
+ * Should the agent start a replacement for itself when it drains for a reason that is a mechanism
+ * rather than a fault?
+ *
+ * THREE STATES, NOT TWO, and the middle one is the default:
+ *
+ *   `MFARM_RELAUNCH=0`  never. What a systemd unit sets, belt and braces.
+ *   unset               when `process.stdout.isTTY` — somebody launched this by hand, so there is
+ *                       nobody else to restart it. Under a service manager it is false and this
+ *                       never runs; two supervisors racing to own one agent is a worse failure
+ *                       than the one being fixed.
+ *   `MFARM_RELAUNCH=1`  always, whatever stdout is.
+ *
+ * The explicit `1` exists because `isTTY` is an inference, not a fact — it is false for an agent
+ * backgrounded with `&`, piped to `tee`, or run under `nohup`, none of which have a supervisor
+ * either. It is also the only way to exercise this path from a script, and a behaviour with no way
+ * to reach it deliberately is a behaviour nobody checks.
+ */
+function shouldRelaunch(): boolean {
+  const explicit = process.env.MFARM_RELAUNCH?.trim();
+  if (/^(0|false|no|off)$/i.test(explicit ?? '')) return false;
+  if (/^(1|true|yes|on)$/i.test(explicit ?? '')) return true;
+  return Boolean(process.stdout.isTTY);
+}
+
+/**
  * The phones on this machine's USB, as backends (ADR-0008, spec §6).
  *
  * OPT-IN VIA `PHYSICAL_ENABLED`, deliberately. Discovery is a read — `adb devices` — but enrolling
@@ -830,15 +855,12 @@ async function main(): Promise<void> {
      * product. The window makes it worse rather than better: the row appears and then the page goes
      * dark, which reads as the phone having broken something.
      *
-     * `isTTY` is the same signal used to decide whether to open a browser, and it means the same
-     * thing here: somebody launched this by hand, so there is nobody else to restart it. Under a
-     * service manager it is false and this never runs — two supervisors racing to own one agent is
-     * a worse failure than the one being fixed.
+     * The default is inferred from `isTTY` and can be overridden either way — see `shouldRelaunch`.
      *
      * ONLY ON A CLEAN DRAIN FOR A KNOWN-GOOD REASON. A crash loop must stay a crash loop and be
      * seen; this exists for the one case where exiting is a mechanism rather than a fault.
      */
-    if (relaunch && exitCode === 0 && flagUnless('MFARM_RELAUNCH') && process.stdout.isTTY) {
+    if (relaunch && exitCode === 0 && shouldRelaunch()) {
       const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
         detached: true, stdio: 'inherit', env: process.env, cwd: process.cwd(),
       });
