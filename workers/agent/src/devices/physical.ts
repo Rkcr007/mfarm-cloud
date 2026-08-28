@@ -166,6 +166,16 @@ export class PhysicalDevice implements DeviceControl {
   private installed: string[] = [];
   /** What `verifier_verify_adb_installs` was before we touched it, so it can be put back exactly. */
   private priorVerifySetting?: string;
+  /**
+   * The last thing this device SAID about install verification, cached so a reader does not have to
+   * spawn adb.
+   *
+   * The window renders this on every state push, and pushes happen on a ten-second discovery tick.
+   * Re-reading the setting there would put an extra `adb shell settings get` per device per tick on
+   * a USB stack that, on the day this matters, is already the thing going wrong. It is only ever
+   * written where the value is already known for certain.
+   */
+  private verifyState?: 'on' | 'off';
   /** Held open for the life of the device. Reopening per event costs 57-77ms of pure overhead. */
   private shell?: ReturnType<typeof spawn>;
   private shellSeq = 0;
@@ -572,8 +582,13 @@ export class PhysicalDevice implements DeviceControl {
    */
   async installVerificationOn(): Promise<boolean> {
     const raw = (await this.adb(['shell', 'settings', 'get', 'global', ADB_VERIFY_SETTING], 15_000)).trim();
-    return raw !== '0';
+    const on = raw !== '0';
+    this.verifyState = on ? 'on' : 'off';
+    return on;
   }
+
+  /** What the last read or write left the setting at, without asking the phone again. */
+  get installVerification(): 'on' | 'off' | 'unknown' { return this.verifyState ?? 'unknown'; }
 
   /**
    * Turn adb-install verification off, and remember what it was.
@@ -589,6 +604,7 @@ export class PhysicalDevice implements DeviceControl {
         ['shell', 'settings', 'get', 'global', ADB_VERIFY_SETTING], 15_000)).trim();
     }
     await this.adb(['shell', 'settings', 'put', 'global', ADB_VERIFY_SETTING, '0'], 15_000);
+    this.verifyState = 'off';
   }
 
   /** Put the setting back exactly as it was found. A no-op if we never changed it. */
@@ -603,6 +619,9 @@ export class PhysicalDevice implements DeviceControl {
     } else {
       await this.adb(['shell', 'settings', 'put', 'global', ADB_VERIFY_SETTING, prior], 15_000);
     }
+    // Unset is the default and the default is ON, which is why this is not `prior === 'null'`
+    // falling through to 'off'.
+    this.verifyState = prior === '0' ? 'off' : 'on';
   }
 
   /** See the Cuttlefish backend for why `monkey`, and why its output must be read on success. */

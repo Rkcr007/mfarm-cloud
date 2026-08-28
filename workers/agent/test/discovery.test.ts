@@ -8,7 +8,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAdbDevices, localIdForSerial, watchForChanges } from '../src/devices/discovery.ts';
+import { AdbUnavailableError, parseAdbDevices, localIdForSerial, watchForChanges } from '../src/devices/discovery.ts';
 
 describe('parseAdbDevices', () => {
   test('reads a plain usable device', () => {
@@ -187,6 +187,58 @@ describe('watchForChanges', () => {
     await settle();
     w.stop();
     assert.equal(calls, 0);
+  });
+
+  /**
+   * WHAT THE WINDOW SEES, which is not what `onChange` sees.
+   *
+   * `onChange` is deliberately narrow — arrivals and departures only, because it drains the agent.
+   * The window needs every pass, including the ones where nothing moved and the ones holding a
+   * phone at `unauthorized`, because those are the rows somebody is standing there watching.
+   */
+  test('onPass carries every pass, including the ones onChange ignores', async () => {
+    const passes: string[][] = [];
+    let i = 0;
+    const probe = async () => {
+      const state = i++ === 0 ? 'unauthorized' as const : 'device' as const;
+      return [{ serial: 'AAA', state }];
+    };
+    const w = watchForChanges([], () => {}, 10, probe, (found) => {
+      passes.push(found.map((d) => `${d.serial}:${d.state}`));
+    });
+    await settle();
+    w.stop();
+    assert.ok(passes.length > 1, 'every tick, not only the ones that changed the usable set');
+    assert.deepEqual(passes[0], ['AAA:unauthorized'], 'the state onChange is right to ignore');
+    assert.deepEqual(passes[1], ['AAA:device']);
+  });
+
+  /**
+   * THE BUG A REAL PHONE FOUND. Plugging a handset in restarted the user's own adb server, so that
+   * pass failed with `protocol fault (couldn't read status)`. `discover()` used to answer that with
+   * `[]` — the same value it uses for "nothing is plugged in" — so the window said *No devices yet,
+   * plug a phone in* about a phone that was sitting right there.
+   *
+   * A failed pass must now leave BOTH the arrival baseline and the window's picture untouched. The
+   * last good answer is better than a confidently wrong one.
+   */
+  test('a pass that could not reach adb changes nothing', async () => {
+    const passes: unknown[] = [];
+    let calls = 0;
+    let i = 0;
+    const probe = async () => {
+      if (i++ === 1) throw new AdbUnavailableError('protocol fault (couldn\'t read status)');
+      return [{ serial: 'AAA', state: 'device' as const }];
+    };
+    const w = watchForChanges([], () => { calls += 1; }, 10, probe, (f) => passes.push(f));
+    await settle();
+    w.stop();
+    // The first pass found AAA and reported the arrival. The failing pass must not then report it
+    // as removed, and must not tell the window the bus went empty.
+    assert.equal(calls, 1, 'a failed probe must not read as every phone being unplugged');
+    for (const p of passes) {
+      assert.deepEqual(p, [{ serial: 'AAA', state: 'device' }], 'no blank picture from a failed pass');
+    }
   });
 
   /**

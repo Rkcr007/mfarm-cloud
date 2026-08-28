@@ -125,6 +125,17 @@ function seed(route: { name: string; id?: string | null }) {
       }],
     },
     held: null,
+    // ADR-0014. `loaded: true` so the screen renders itself rather than the loading skeleton — the
+    // gate fires a fetch that has no server behind it here, and a skeleton would make every
+    // assertion below pass against an empty page.
+    pair: {
+      code: '', machine: null, busy: false, error: null, loaded: true,
+      enrollments: [{
+        prefix: 'mae_abcdefgh', label: 'paired from the agent window',
+        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        revokedAt: null, usedAt: new Date().toISOString(), hostId: 'host-1',
+      }],
+    },
     route: { name: route.name, id: route.id ?? null },
     error: null,
   });
@@ -146,6 +157,7 @@ describe('every screen renders', () => {
     { name: 'cockpit', id: 'sess-1' },
     { name: 'queue' },
     { name: 'health' },
+    { name: 'agents' },
     { name: 'team' },
     { name: 'settings' },
     { name: 'launching', id: 'sess-1' },
@@ -177,13 +189,58 @@ describe('every screen renders', () => {
 describe('screens survive an empty farm', () => {
   // The state a new install is in, and the one every "no devices yet" message exists for. A screen
   // that only works once data has arrived fails on the first morning somebody tries this.
-  for (const name of ['launch', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'team', 'settings']) {
+  for (const name of ['launch', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'agents', 'team', 'settings']) {
     test(`${name} renders with nothing in it`, () => {
       seed({ name });
       Object.assign(mod.state, { devices: [], available: 0, sessions: [], apps: [], actions: [], runs: [], runDetail: null, detail: null, held: null });
       assert.ok(countElements(mod.SCREENS[name]()) > 0, `${name} produced no elements when empty`);
     });
   }
+});
+
+/**
+ * The pairing screen — ADR-0014's console half.
+ *
+ * The two things worth protecting here are both about what a person is shown BEFORE they admit a
+ * machine to their org: that the confirmation step exists at all, and that it names the machine.
+ * Losing either turns a deliberate stop into a single click on a code somebody was sent.
+ */
+describe('pairing a machine', () => {
+  test('asks for a code, and does not offer to approve anything yet', () => {
+    seed({ name: 'agents' });
+    const text = textOf(mod.SCREENS.agents());
+    assert.match(text, /Pair a machine/);
+    assert.match(text, /Find machine/);
+    assert.ok(!/Yes, pair this machine/.test(text),
+      'nothing may be approvable before a machine has been looked up');
+  });
+
+  test('names the machine before offering to pair it', () => {
+    seed({ name: 'agents' });
+    mod.state.pair.code = 'ABCD-2345';
+    mod.state.pair.machine = {
+      hostname: 'ravi-macbook', platform: 'darwin-arm64', agentVersion: '0.1.0',
+      requestedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      approved: false,
+    };
+    const text = textOf(mod.SCREENS.agents());
+    assert.match(text, /ravi-macbook/);
+    assert.match(text, /darwin-arm64/);
+    assert.match(text, /Yes, pair this machine/);
+    // The warning is the mitigation, so it is asserted rather than assumed to have survived edits.
+    assert.match(text, /do not recognise it, do not approve/);
+  });
+
+  test('a member is told they cannot pair, rather than given a button that fails', () => {
+    seed({ name: 'agents' });
+    mod.state.me.role = 'member';
+    assert.match(textOf(mod.SCREENS.agents()), /Only an owner or admin can pair/);
+  });
+
+  test('lists machines that have already paired', () => {
+    seed({ name: 'agents' });
+    assert.match(textOf(mod.SCREENS.agents()), /paired from the agent window/);
+  });
 });
 
 describe('the cockpit', () => {

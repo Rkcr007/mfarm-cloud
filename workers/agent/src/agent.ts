@@ -153,6 +153,34 @@ class RegistrationRefused extends Error {
   }
 }
 
+/**
+ * Where this host's own credential lives.
+ *
+ * Module-level and exported because start-up has to answer "has this machine registered before?"
+ * BEFORE it can construct an `Agent` — a first-run agent has no registration token at all until
+ * somebody pairs it (ADR-0014), and asking would otherwise mean building the object that needs the
+ * answer.
+ */
+export function agentStatePath(override?: string): string {
+  return override ?? `${process.env.HOME}/.mfarm/agent-state.json`;
+}
+
+/**
+ * The `mwk_` this host was issued the last time it registered, if it ever has.
+ *
+ * Its presence is what makes the configured registration credential OPTIONAL: `register()` presents
+ * this first and only falls back to the configured one if it is refused. So a machine that has
+ * paired once never needs to pair again, and never needs an environment variable either.
+ */
+export async function persistedWorkerToken(override?: string): Promise<string | undefined> {
+  try {
+    const raw = JSON.parse(await readFile(agentStatePath(override), 'utf8')) as Partial<AgentState>;
+    return typeof raw.workerToken === 'string' ? raw.workerToken : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class Agent {
   private state?: AgentState;
   private heartbeatTimer?: NodeJS.Timeout;
@@ -326,6 +354,23 @@ export class Agent {
   get workerToken(): string | undefined { return this.state?.workerToken; }
   get bufferedEventCount(): number { return this.buffer.size; }
   deviceIdFor(localId: string): string | undefined { return this.state?.deviceIds[localId]; }
+
+  /**
+   * Two read-only views for the local window (ADR-0009 §1). Nothing decides anything on them.
+   *
+   * They exist because the agent is already the only party that knows either answer, and the
+   * alternative — the window recomputing health by probing the device itself — would be a second
+   * process talking to the same handset at the same time as the health monitor. Kept as narrow
+   * accessors rather than exposing the maps, so the window cannot mutate what the monitor owns.
+   */
+  healthOf(localId: string): DeviceHealth['status'] | undefined { return this.lastHealth.get(localId); }
+
+  /** How many sessions this agent currently believes are live on a device, by its control-plane id. */
+  sessionsOn(deviceId: string): number {
+    let n = 0;
+    for (const s of this.active.values()) if (s.deviceId === deviceId) n += 1;
+    return n;
+  }
 
   // ---------------------------------------------------------------- registration
 
@@ -1242,7 +1287,7 @@ export class Agent {
   // ---------------------------------------------------------------- state file
 
   private statePath(): string {
-    return this.opts.statePath ?? `${process.env.HOME}/.mfarm/agent-state.json`;
+    return agentStatePath(this.opts.statePath);
   }
 
   private async loadState(): Promise<AgentState | undefined> {

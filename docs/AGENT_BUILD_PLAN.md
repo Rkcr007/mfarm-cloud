@@ -117,8 +117,8 @@ Ordered by what a user hits first, not by what is architecturally interesting.
 
 | # | Milestone | Why here | Est. |
 |---|---|---|---|
-| **M1** | Installing an app actually works | "Test your app on a real device" fails at step one today. | 2–4 d |
-| **M2** | The window | Turns a terminal command into something a person runs. | 3–5 d |
+| ~~M1~~ | ~~Installing an app actually works~~ | **Done** — shipped as `4cdb6a5`, verified on the handset. | — |
+| ~~M2~~ | ~~The window~~ | **Done** — see below for what it does and does not do. | — |
 | **M3** | Pairing + per-device sharing | The other half of "somebody else can use this". | 3–5 d |
 | **M4** | Operate a device without video | Works on secure apps, where video never will. | 4–6 d |
 | **S1** | Spike: iPhone on this Mac | Days, gates a quarter of the product. Run it alongside. | 1–2 d |
@@ -155,35 +155,172 @@ can be installed; `deploy/verify-reset.mjs` is written and waiting.
 
 ---
 
-## M2 — The window
+## M2 — The window — **built**
 
-The single largest gap between "a farm" and "a product", and it needs no new device support.
+The single largest gap between "a farm" and "a product", and it needed no new device support.
 
-**Build:** an HTTP server on `127.0.0.1` serving a small web app. **Security in the first commit, not
-retrofitted:** loopback bind, a session token minted at start-up and passed in the URL, and `Origin`
-**and** `Host` validated on every request — all three, for the reasons in ADR-0009 §3. The device
-list with the human remedy for every unusable adb state. Live updates.
+`workers/agent/src/window.ts` serves one self-contained page on `127.0.0.1`. All three of ADR-0009
+§3's mitigations are in the first commit rather than retrofitted, and each is tested for the exact
+bypass it exists to stop:
 
-Everything it shows is already computed inside the agent. This is presentation over existing
-machinery, which is why it is small.
+| Mitigation | What it stops | Verified |
+|---|---|---|
+| Loopback bind, no override variable | The window answering another machine | `lsof` on the running agent: `127.0.0.1:7317 (LISTEN)` |
+| 32-byte token in the URL, compared in constant time, never persisted | A website that can reach loopback but cannot guess it | `401` with no token, with a wrong token of the same length, and with a prefix |
+| `Origin` **and** `Host` on every request | A page on another site; a DNS name rebound to 127.0.0.1 | `403` and `421` against the live agent |
+
+`Origin` is required on a write and optional on a read, because browsers omit it on the same-origin
+GET that loads the page — and a `Host` check without an `Origin` check would leave rebinding open,
+which is why both are there.
+
+Three things beyond the plan turned out to be part of the milestone:
+
+- **The agent now stays up with no devices.** `PHYSICAL_ENABLED=1` with nothing plugged in used to
+  fall through to the AVD tier and exit on `AVD_NAME is required` — so the gate below, which starts
+  with "with the window open", could not be performed at all. It registers with an empty device list
+  and waits.
+- **M1's other half landed here**, where the plan said it should: the Play Protect remedy is a
+  sentence beside the device and the opt-in is a button, not `PHYSICAL_ALLOW_INSTALL_VERIFICATION_OFF`.
+  The env var stays for scripted provisioning.
+- **`server.close()` waits for keep-alive sockets.** Four seconds added to every drain, found by a
+  test suite that took 4.2s to run 29 tests that each took a millisecond. `closeAllConnections()`.
 
 **Gate:** plug a phone in with the window open and watch the row appear. Unplug it, watch it go.
 Leave it unauthorised and read the line that tells you to tap Allow.
 
+**Not done, and named rather than left to be discovered:**
+
+- **A registration failure still exits the process.** The window comes up before `agent.start()` on
+  purpose — the moment it is worth most is when the control plane cannot be reached — but a 401 from
+  a spent enrollment token kills the agent anyway, so the "not registered yet" notice is only ever
+  visible while a registration is in flight. Retrying a *transient* failure (connection refused,
+  5xx) while a 4xx stays fatal is the right shape and is not built.
+- **A phone arriving still drains and restarts the agent**, which is invisible under systemd and
+  very visible in a terminal. That is ADR-0003's registration-only capability write, and it closes
+  in M5 with the service, not here.
+- **The window shows; it does not yet share.** Every discovered device is listed, and the per-device
+  sharing toggle that decides which of them the org can reach is M3.
+
 ---
 
-## M3 — Pairing, and per-device sharing
+## The shape the rest of the plan is written against
 
-**Build:** a pairing code from the console, exchanged for the `mae_` token the API already mints —
-retiring the two-step `curl` with a session cookie and a CSRF header that is the only way to enroll a
-host today. Credentials into the macOS Keychain. **Discovered is not shared**: a per-device toggle,
-off by default, reversible instantly.
+Agreed 2026-08-28. Everything below serves these three steps and nothing else:
 
-**The reset mode is chosen here too** (ADR-0012 §4) — same screen, same trust decision, with the
-blast radius shown before anyone picks the sweep.
+1. **Download** — one signed file from the console's own domain.
+2. **Run it** — a window opens showing `XXXX-XXXX`; type that into the console; paired.
+3. **Plug the phone in** — the agent sees it on USB *whether or not adb can*, walks the
+   prerequisites with live state and a remedy per step, confirms when it becomes usable, and shows
+   the device. Tick **share** and it is in the console.
 
-**Gate:** on a machine that has never seen MFARM, pair, tick one of two phones, and see exactly that
-one in the console.
+**The prerequisites become guided rather than documented.** That is the whole difference between
+what exists and what is wanted, and it is why step 3 is a milestone rather than a paragraph.
+
+### What a new user faces today — the gap this closes
+
+| # | Step | Status |
+|---|---|---|
+| 1 | Get the code | **no artifact exists** — `@mfarm/agent` is `private: true`, no `bin`, no build; Release publishes only the API image |
+| 2 | Install Node ≥ 22.6 | manual |
+| 3 | `npm install` at the repo root | manual |
+| 4 | Install adb | 26 MB, manual |
+| 5 | Install Appium 2 + UiAutomator2 | **~400 MB**, manual, minutes |
+| 6 | Install scrcpy, aapt2 | manual |
+| 7 | Get an enrollment token | **admin logs in by curl with a cookie jar and a CSRF header** — no console screen |
+| 8 | Set 6–11 environment variables | manual |
+| 9 | `npm start -w @mfarm/agent` | ✅ |
+| 10 | Press the Play Protect button | ✅ M2 |
+| 11 | Phone appears in the console | ✅ works, through NAT |
+
+Steps 9–11 are the product. Steps 1–8 are a developer setup guide. **The hard engineering is already
+behind us** — the outbound tunnel, NAT traversal, a browser reaching a laptop's data plane through
+the console's ingress, automation over that same socket, all verified on a real handset. What
+remains is onboarding.
+
+### The one item with a queue
+
+**Apple Developer ID and notarisation. Start it before anything else.** Unsigned, Gatekeeper blocks
+the binary outright, which for a tool asking for USB access is a fatal first impression. ADR-0009
+warned this becomes the critical path if left to the end. It gates M5 and nothing else, so it should
+be in flight while M3 is built.
+
+---
+
+## M3 — Pairing, sharing, and the guided prerequisites
+
+The milestone that turns the table above into three steps. **No certificate needed**, which is why
+it comes first.
+
+### 3a. Pairing — [ADR-0014](adrs/0014-pairing-is-a-device-authorization-grant.md) — **built**
+
+Verified end to end on a real control plane 2026-08-28: an agent with no credential of any kind
+showed `RSMB-MR9J`, an admin inspected it (seeing hostname, platform and agent version), approved
+it, and the agent registered — then a restart paired nothing, because the host now carries its own
+`mwk_`.
+
+**The console screen is built too** — *Organisation → Agents*. Enter the code, see which machine is
+asking, confirm. Approval is deliberately two presses: the flow's one genuine weakness is somebody
+talked into typing a code that was sent to them, and the only defence is showing them what they are
+about to admit before they admit it.
+
+**Still to build here:** credentials into the Keychain (they are in `~/.mfarm/agent-state.json` at
+`0600` today), and unpair.
+
+The agent shows `XXXX-XXXX`; the user types it into the console they are already signed into; the
+agent polls and receives the `mae_` token the API already mints. This is RFC 8628's device
+authorization grant — the flow that signs a television into a streaming account.
+
+**The code goes agent → console, not the reverse**, and that direction is the security argument: the
+console is the authenticated side, so the code carries exactly one claim — *possession of the agent
+in front of you* — and identity comes from the session. The reverse would put a bearer credential
+back in a text field, which is the thing being removed.
+
+Credentials into the macOS Keychain. **Unpairing ships with it**, not after: *forget this machine*
+clears the keychain entry and revokes the host. A flow with an entrance and no exit is one people
+are right to hesitate over installing.
+
+The `curl` path and `WORKER_REGISTRATION_TOKEN` both survive — a scripted fleet rollout should not
+have to drive a GUI.
+
+### 3b. Discovered is not shared — **built**
+
+A per-device toggle, **off by default**, reversible instantly (ADR-0009 §2). Plugging a personal
+phone into a work laptop must not silently offer somebody's banking and 2FA apps to their
+colleagues. This is the guardrail every other promise in this product rests on, and it is the one
+behavioural change ADR-0009 makes to code that already worked.
+
+| | |
+|---|---|
+| Where the choice lives | `~/.mfarm/shared.json`, `0600`, an **allow list** — a lost or corrupt file means *nothing is shared*, never *everything* |
+| Default | off for `tier: 'physical'`, on for everything else. Nobody accidentally has a Cuttlefish instance on their desk, and defaulting the whole fleet off would take the existing farm out of service to fix a problem it does not have |
+| Keyed by | adb serial, **not** local id — an unshared phone has no local id, and requiring one would mean the only devices you could share are the ones already shared |
+| A withheld phone | still appears in the window, with a toggle. It simply never becomes a backend, so registration never mentions it |
+| Applying a change | drains and re-registers, exactly like a hot-plug — capabilities travel only at registration. A live session finishes first, so un-sharing never yanks a device out from under somebody's suite |
+
+**The reset mode is chosen on the same screen** (ADR-0012 §4) — same trust decision, same person,
+with the blast radius shown before anyone picks the sweep. **Not built yet**; it is still
+`PHYSICAL_RESET_MODE` in the environment.
+
+### 3c. The agent gets a second sense — the part that makes step 3 possible
+
+**A phone with USB debugging off is invisible to `adb devices`.** It is not `unauthorized`; it is
+absent. So the window cannot show a row, cannot walk a checklist against a real device, and cannot
+confirm anything — the guide is blind exactly when it is needed.
+
+`system_profiler SPUSBDataType` returns in **0.15 s measured** and lists USB devices independently
+of adb. That gives the agent the state adb cannot report — *a Samsung is on this cable and it is not
+offering debugging* — and turns the prerequisites into a live walkthrough:
+
+| What the agent can see | What it says |
+|---|---|
+| USB device, no adb interface | Developer Options and USB debugging are off — here is where to tap |
+| adb `unauthorized` | Unlock the phone and tap *Allow USB debugging* |
+| adb `device`, verification on | Play Protect will refuse test builds (✅ M2) |
+| adb `device`, ready | Confirm, show the device, offer **share** |
+
+**Gate:** on a machine that has never seen MFARM, with a phone that has never had Developer Options
+enabled — download, pair with a code, follow the agent from a dark screen to a shared device, and
+see exactly that one phone in the console.
 
 ---
 
@@ -218,14 +355,39 @@ work or a re-plan.
 
 ---
 
-## M5 — The signed binary
+## M5 — The signed binary, and where it is downloaded from
 
-Node SEA (stable since Node 22 — ADR-0009 §4), signed with Developer ID and notarised. The automation
-runtime is fetched on first use with visible progress, not bundled. `--install-service` behind a flag.
+Node SEA (stable since Node 22 — ADR-0009 §4), signed with Developer ID and notarised.
+`--install-service` behind a flag.
 
-**The scheduling risk here is already retired:** ADR-0009 warned certificates would become the
-critical path if left to the end, and the Apple account is paid and active, so a Developer ID
-certificate is self-service.
+**Three things here are routinely under-estimated:**
+
+- **SEA needs one JavaScript file, and the agent runs from TypeScript** via
+  `--experimental-strip-types`. So this needs a bundler step (esbuild) *before* it needs a
+  certificate. It is not "run a packager".
+- **The automation runtime is ~400 MB** (Appium 168 MB plus 233 MB of drivers, measured) and adb is
+  another 26 MB. Fetched on first use with visible progress, never bundled — and **the device should
+  appear in the console without waiting for it.** Look-only lands in seconds; the `webdriver`
+  capability arrives when the runtime does. `agent.ts` already advertises capabilities per device
+  based on what is actually ready, so this is honest rather than special-cased.
+- **Everything installs under `$HOME`.** ADR-0009's founding constraint is the locked-down corporate
+  laptop: no administrator rights, so no `brew`, no `/usr/local`, no installer. An installer that
+  writes outside the home directory fails for exactly the people this is built for.
+
+**Publishing:** serve it from `farm.mfarm.dev/download` with a published SHA-256. Zero new
+infrastructure — the console already has TLS and a real domain — and the binary is not a secret, so
+it need not sit behind the login. A bucket and a CDN when there are numbers worth measuring. GitHub
+Releases is the obvious alternative and does not fit: the repo is private, so downloads would need
+auth.
+
+**Version skew becomes real the moment strangers hold a binary.** Minimum: the agent reports its
+version, and both the console and the window say when it is out of date. Otherwise every protocol
+change becomes a support queue.
+
+**An interim worth shipping while the certificate is in flight:** a `curl … | sh` installer that
+checks Node, fetches a tarball, installs adb and the runtime under `$HOME` with visible progress,
+and launches the window. It removes six of the eight bad steps, needs no signing, and can go out in
+days rather than weeks.
 
 **Gate — the one that matters:** someone who has never seen MFARM, on a machine we do not control,
 plugs in a phone and sees it in the console **inside two minutes, without typing a command or
@@ -278,6 +440,11 @@ free product, but it is the shortest path to something a stranger can be shown.
   redesigning to add it later.
 - **Video recording of sessions.** Costed and deliberately unbuilt until it can record only failures.
 - **An MDM/platform installer.** A second path for fleet deployment, never the first one.
+- **An MFARM app on the device under test.** Proposed and rejected in
+  [ADR-0015](adrs/0015-the-agent-is-not-an-app-on-the-device.md): the sandbox forbids what the
+  product does, a device cannot host the thing that tests it, iOS has no path at all, and it would
+  remove none of the setup friction — which all lives on the host. A mobile *console client* is a
+  reasonable product later and is not the agent.
 
 ---
 
