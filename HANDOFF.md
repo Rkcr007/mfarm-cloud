@@ -1437,14 +1437,18 @@ device is covered by the same URL. Caught by a test, not by review.
        (default 60) — exactly the form `coldBoot` emits. `--cpus` and `--memory_mb` are both real
        and spelled as written. `--displays_textproto` does not exist on this build.
 
-    b. **The Samsung build properties may not survive a reset, and this one is silent.**
-       `deploy/apply-device-profile.sh` writes them through an `adb remount` overlay whose backing
-       store may live on `/data`. This farm runs `CF_RESET_MODE=powerwash`, which wipes `/data`. If
-       they do not survive, a profiled device reverts to `Cuttlefish x86_64` at the first reset,
-       mid-session, with **nothing in any log saying so** — the device stays up, keeps serving, and
-       simply stops being the phone the console says it is. Verify by resetting cf-3 once and
-       re-reading `getprop ro.product.model`. If it reverts, re-application belongs inside
-       `powerwash()` in `cuttlefish.ts`, not in a one-shot script.
+    b. ~~**The Samsung build properties may not survive a reset.**~~ **CONFIRMED BROKEN AND FIXED
+       2026-08-29.** They did not survive. The overlay's upper directory is on `/mnt/scratch`, and
+       `cvd powerwash` wipes it — directly after a powerwash cf-3 reported
+       `ro.product.model = Cuttlefish x86_64 phone 64-bit only` and `ro.product.manufacturer =
+       Google`, while its geometry was untouched. Re-application now happens inside `powerwash()`
+       exactly as ADR-0016 said it would have to, and is verified on hardware: an agent-driven reset
+       logs `re-applied galaxy-s25-ultra identity (SM-S938B)`.
+
+       **The cost is real and measured: a powerwash reset on a profiled device takes ~100s instead
+       of ~40s**, because `adb remount` needs a reboot before the overlay is writable and `ro.*`
+       properties are read once at init, so the write needs another. Unprofiled devices are
+       unaffected.
 
     c. **QHD+ on SwiftShader is unmeasured.** `docs/RENDER_BASELINE.md` measured 60fps for ordinary
        UI at 720×1280 with no GPU; cf-3 is ~4.9× the pixels through the same software rasteriser.
@@ -1503,6 +1507,35 @@ device is covered by the same URL. Caught by a test, not by review.
     real arm64-only APK**; the sample on the box (`~/bitbar-sample-app.apk`) is pure bytecode and
     cannot answer it. If it is confirmed, the honest fix is a runtime-capability check, not an
     install-time one, and the preflight's message should say "installs but will not run".
+
+35. **A PLAIN `cvd start` DOES NOT REMEMBER THE DISPLAY, AND THE IDENTITY SURVIVES IT — which is the
+    worst possible combination to debug.** Measured on the lab VM 2026-08-29.
+
+    cf-3, booted and running at 1440x3120 @ 600, came back from `cvd start --daemon` at
+    **720x1280 @ 320** — the image default. Meanwhile `getprop ro.product.model` still answered
+    `SM-S938B`, because the properties live in the guest's own overlay rather than in cvd. So the
+    device kept calling itself a Galaxy S25 Ultra while rendering at the size of a 2013 phone, and
+    the console would have shown the Samsung name and chrome over a 720p stream.
+
+    This contradicts the standing comment in `cuttlefish.ts` that the device configuration comes
+    back out of cvd's instance database. That is true for the SNAPSHOT path and false for the plain
+    restart. The restart path is what a host reboot takes, and what a worker restart takes whenever
+    it finds the group stopped — so this would have fired on the farm's own boot self-heal.
+
+    Fixed by passing the profile's flags to `cvd start` as well as `cvd create`; `cvd start --help`
+    accepts the same `--display0`, `--memory_mb` and `--cpus`. Deliberately NOT added to the
+    snapshot branch, where the configuration comes from the snapshot and a disagreeing flag would
+    give a device whose framebuffer and guest differ about its own size.
+
+    **The general lesson, and the reason both this and issue 34 exist:** for a profiled device,
+    every path that brings it up has to carry the profile, and every path that wipes it has to
+    restore the identity. They are different mechanisms with different lifetimes — geometry lives in
+    cvd, identity lives in the guest — and neither survives what the other survives:
+
+    | | `cvd create` | `cvd start` (plain) | `cvd powerwash` |
+    |---|---|---|---|
+    | geometry (cvd instance db) | set | **was lost — now passed** | survives |
+    | identity (guest overlay) | absent | survives | **wiped — now re-applied** |
 
 ## Working notes for whoever picks this up
 

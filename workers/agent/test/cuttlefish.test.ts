@@ -752,3 +752,39 @@ describe('a reset re-establishes the device identity', () => {
     await assert.doesNotReject(poweredWash({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] }));
   });
 });
+
+/**
+ * A RESTART MUST NOT SILENTLY RESIZE A PROFILED DEVICE.
+ *
+ * Measured on hardware: `cvd start --daemon` brought cf-3 back at the image default 720x1280
+ * instead of its profile's 1440x3120, while the guest kept reporting itself as a Galaxy S25 Ultra.
+ * A device that lies about its size is worse than one that never claimed a size, and this is the
+ * path a host reboot takes.
+ */
+describe('a restart preserves the profile geometry', () => {
+  async function restarted(overrides: Record<string, unknown> = {}) {
+    // A group cvd knows about but that is not running: the restart path, not adopt and not create.
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [{ group_name: 'cvd_1', instances: [{ adb_port: 6520, instance_name: '1', status: 'Stopped' }] }],
+    }));
+    const d = device({ resetMode: 'powerwash', ...overrides });
+    await d.start();
+    return d;
+  }
+
+  test('a profiled device restarts WITH its display, memory and cores', async () => {
+    await restarted({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] });
+    const start = (await calls()).find((c) => /^cvd .*\bstart\b/.test(c) && !c.includes('fleet'));
+    assert.ok(start, 'expected a restart');
+    assert.match(start, /--display0=width=1440,height=3120,dpi=600/);
+    assert.match(start, /--memory_mb=8192/);
+    assert.match(start, /--cpus=4/);
+  });
+
+  test('an unprofiled device restarts exactly as it always did', async () => {
+    await restarted();
+    const start = (await calls()).find((c) => /^cvd .*\bstart\b/.test(c) && !c.includes('fleet'));
+    assert.ok(start);
+    assert.doesNotMatch(start, /--display0|--memory_mb|--cpus/, 'cf-1 and cf-2 gain no flags');
+  });
+});

@@ -597,9 +597,28 @@ export class CuttlefishDevice implements DeviceControl {
    */
   private async restartExisting(): Promise<void> {
     const snapshot = await this.snapshotOnDisk();
+    /**
+     * A PLAIN RESTART DOES NOT REMEMBER THE DISPLAY. Measured on the lab VM 2026-08-29: cf-3, booted
+     * and running at 1440x3120 @ 600, came back from `cvd start --daemon` at 720x1280 @ 320 — the
+     * image default. So the standing comment that "the device configuration comes back out of cvd's
+     * instance database" holds for the SNAPSHOT path and not for this one, and a profiled device
+     * silently loses its panel on any restart: a host reboot, or a worker restart that finds the
+     * group stopped.
+     *
+     * The identity survives, because that lives in the guest's own overlay rather than in cvd. The
+     * combination is the worst possible one to debug — a device still calling itself a Galaxy S25
+     * Ultra while rendering at 720x1280.
+     *
+     * `cvd start` accepts the same display flags as `cvd create` (verified in `cvd start --help`),
+     * so the fix is to stop omitting them.
+     *
+     * NOT added to the snapshot branch: a restore takes its configuration from the snapshot, and
+     * passing flags that disagree with what was captured is how you get a device whose framebuffer
+     * and guest disagree about its own size.
+     */
     const args = snapshot
       ? this.sel('start', `--snapshot_path=${snapshot}`, '--daemon')
-      : this.sel('start', '--daemon');
+      : this.sel('start', ...profileFlags(this.opts.profile), '--daemon');
     console.log(`[cuttlefish] ${this.info.localId}: restarting ${this.groupName}${snapshot ? ' from snapshot' : ' (no snapshot yet)'}`);
     await run('cvd', args, this.opts.imageDir, 120_000);
   }
