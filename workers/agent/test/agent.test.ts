@@ -959,6 +959,30 @@ describe('per-device automation endpoints', () => {
       're-registration would have minted a new worker token');
   });
 
+  test('the agent says which of the two things it did', async () => {
+    /**
+     * `registeredThisStart` exists because the log line lied. `index.ts` printed "registered as
+     * host X" on both paths, so a run that only heartbeated was indistinguishable from one that had
+     * just told the control plane its device list — and registration is the ONLY thing that writes
+     * that list. It cost real time on a deployed farm diagnosing a fix that worked and had simply
+     * never been reached.
+     */
+    const hostname = `said-what-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('cf-1')], hostname);
+    await first.start();
+    assert.equal(first.registeredThisStart, true, 'a first start registers');
+
+    const resumed = makeAgent([fakeBackend('cf-1')], hostname);
+    await resumed.start();
+    assert.equal(resumed.registeredThisStart, false,
+      'an unchanged fingerprint resumes; nothing was written to the device list');
+
+    // A device set that changed is exactly what plugging or unplugging a phone does.
+    const changed = makeAgent([fakeBackend('cf-1'), fakeBackend('cf-2')], hostname);
+    await changed.start();
+    assert.equal(changed.registeredThisStart, true, 'a changed device set re-registers');
+  });
+
   test('re-registering without a server WITHDRAWS the stored endpoint', async () => {
     // A stale url left behind would keep the hub dialling a server that is gone (ADR-0003 d3).
     const hostname = `b2-withdraw-${randomUUID().slice(0, 8)}`;
