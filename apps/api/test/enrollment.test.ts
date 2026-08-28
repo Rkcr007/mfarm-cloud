@@ -285,3 +285,97 @@ describe('the enrollment list', () => {
     );
   });
 });
+
+
+/**
+ * A device the host no longer has — found by verifying a deploy, 2026-08-28.
+ *
+ * Every other field is re-asserted on each registration so a worker cannot leave a stale claim
+ * behind. The device SET was not, so a laptop that re-registered with its phone unplugged left that
+ * phone `READY` and counted as available forever.
+ *
+ * It matters twice. A tenant allocating a device the agent has no backend for gets a session that
+ * fails at the data plane. And it silently weakened ADR-0009 §2: un-sharing a phone works by
+ * re-registering WITHOUT it, so "stop sharing" would have removed the device from the agent and
+ * left the control plane advertising it.
+ */
+describe('devices that stop being registered', () => {
+  /**
+   * Register once with an enrollment token, then again with the host's OWN worker token — which is
+   * what really happens, because the enrollment token is single-use and is spent by the time an
+   * agent re-registers. Getting this wrong is a 401 on the second call, not on the interesting one.
+   */
+  async function firstThenAgain(hostname: string, first: unknown, second: unknown) {
+    const { plaintext } = await createEnrollment(orgA, null, hostname, 24);
+    const one = await register(plaintext, first);
+    assert.equal(one.statusCode, 201, 'first registration');
+    const workerToken = one.json().workerToken as string;
+    const two = await register(workerToken, second);
+    assert.equal(two.statusCode, 201, 'second registration');
+  }
+
+  const withDevices = (hostname: string, localIds: string[]) => ({
+    ...laptop(hostname, localIds[0] ?? 'unused'),
+    devices: localIds.map((localId) => ({
+      localId, platform: 'android' as const, tier: 'physical' as const,
+      model: 'Pixel 9', osVersion: '16', capabilities: ALL_CAPS, adbSerial: `SER${localId}`,
+    })),
+  });
+
+  test('a device missing from a re-registration leaves the pool', async () => {
+    const host = `withdraw-${randomUUID()}`;
+    await firstThenAgain(host, withDevices(host, ['phone-A', 'phone-B']), withDevices(host, ['phone-A']));
+    assert.equal((await deviceRow('phone-A')).state, 'READY', 'the one still there is untouched');
+    assert.equal((await deviceRow('phone-B')).state, 'OFFLINE', 'the one that vanished left the pool');
+  });
+
+  test('a registration with no devices at all empties the host', async () => {
+    // What an unshared phone looks like, and what an adb failure looks like. Both mean "this host
+    // cannot drive anything right now", which is the honest thing for the fleet to say.
+    const host = `empty-${randomUUID()}`;
+    await firstThenAgain(host, withDevices(host, ['phone-C']), withDevices(host, []));
+    assert.equal((await deviceRow('phone-C')).state, 'OFFLINE');
+  });
+
+  test('a device in a live session is never yanked', async () => {
+    // A re-registration mid-suite is ordinary. Taking the device out from under a tenant to tidy
+    // the fleet would be the cure being worse than the disease.
+    const host = `busy-${randomUUID()}`;
+    const { plaintext } = await createEnrollment(orgA, null, host, 24);
+    const one = await register(plaintext, withDevices(host, ['phone-D']));
+    const dev = await deviceRow('phone-D');
+    await withSystem(async (c) =>
+      c.query(`UPDATE devices SET state = 'SESSION_ACTIVE' WHERE id = $1`, [dev.id]));
+
+    assert.equal((await register(one.json().workerToken, withDevices(host, []))).statusCode, 201);
+    assert.equal((await deviceRow('phone-D')).state, 'SESSION_ACTIVE');
+  });
+
+  test('a device mid-reset is not promoted or demoted', async () => {
+    // CLEANING means a session ended and no worker has confirmed the reset. Moving it either way
+    // loses the one fact that state exists to remember.
+    const host = `cleaning-${randomUUID()}`;
+    const { plaintext } = await createEnrollment(orgA, null, host, 24);
+    const one = await register(plaintext, withDevices(host, ['phone-E']));
+    const dev = await deviceRow('phone-E');
+    await withSystem(async (c) =>
+      c.query(`UPDATE devices SET state = 'CLEANING' WHERE id = $1`, [dev.id]));
+
+    assert.equal((await register(one.json().workerToken, withDevices(host, []))).statusCode, 201);
+    assert.equal((await deviceRow('phone-E')).state, 'CLEANING');
+  });
+
+  test("one host withdrawing does not touch another host's devices", async () => {
+    const h1 = `neighbour-a-${randomUUID()}`;
+    const h2 = `neighbour-b-${randomUUID()}`;
+    const t1 = (await createEnrollment(orgA, null, h1, 24)).plaintext;
+    const t2 = (await createEnrollment(orgA, null, h2, 24)).plaintext;
+    const one = await register(t1, withDevices(h1, ['phone-F']));
+    assert.equal(one.statusCode, 201);
+    assert.equal((await register(t2, withDevices(h2, ['phone-G']))).statusCode, 201);
+
+    assert.equal((await register(one.json().workerToken, withDevices(h1, []))).statusCode, 201);
+    assert.equal((await deviceRow('phone-F')).state, 'OFFLINE');
+    assert.equal((await deviceRow('phone-G')).state, 'READY', 'the neighbour is untouched');
+  });
+});

@@ -295,6 +295,7 @@ behavioural change ADR-0009 makes to code that already worked.
 | Default | off for `tier: 'physical'`, on for everything else. Nobody accidentally has a Cuttlefish instance on their desk, and defaulting the whole fleet off would take the existing farm out of service to fix a problem it does not have |
 | Keyed by | adb serial, **not** local id — an unshared phone has no local id, and requiring one would mean the only devices you could share are the ones already shared |
 | A withheld phone | still appears in the window, with a toggle. It simply never becomes a backend, so registration never mentions it |
+| What made that true | registration now takes devices ABSENT from its payload out of the pool. It did not, so "stop sharing" removed the device from the agent and left the control plane advertising it — found by verifying the deploy |
 | Applying a change | drains and re-registers, exactly like a hot-plug — capabilities travel only at registration. A live session finishes first, so un-sharing never yanks a device out from under somebody's suite |
 
 **The reset mode is chosen on the same screen** (ADR-0012 §4) — same trust decision, same person,

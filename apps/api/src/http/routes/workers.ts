@@ -238,6 +238,51 @@ export async function workerRoutes(app: FastifyInstance) {
         );
         if (d.localId && dev[0]?.id) deviceIds[d.localId] = dev[0].id as string;
       }
+
+      /**
+       * DEVICES THIS HOST NO LONGER HAS — the other half of "the last registration is the truth".
+       *
+       * Every field above is re-asserted on each registration precisely so a worker cannot leave a
+       * stale claim behind. The device SET was the one thing that was not: a host that registered
+       * with two phones and came back with one left the second `READY` and counted as available,
+       * forever, because nothing ever looked at what was missing.
+       *
+       * FOUND BY VERIFYING A DEPLOY, 2026-08-28. A laptop re-registered with no devices at all —
+       * the phone was unplugged — and `/v1/devices` went on reporting `SM-S918B READY, available 1`.
+       * A tenant allocating it would have got a session against a device the agent has no backend
+       * for, which fails at the data plane rather than driving somebody's phone; the harm is a
+       * broken scheduling promise and a device listed in a fleet that does not have it.
+       *
+       * It also quietly weakened ADR-0009 §2. Un-sharing a phone drains and re-registers WITHOUT
+       * it, and that is the entire mechanism by which taking a device back is supposed to work —
+       * so without this statement, "stop sharing" removed the device from the agent and left it
+       * advertised by the control plane.
+       *
+       * THE SAME STATE RULES AS THE UPSERT, for the same reasons. Only `READY` and `QUARANTINED`
+       * move: `SESSION_ACTIVE` must never be yanked out from under a live tenant, and `CLEANING`
+       * means a reset nobody has confirmed — promoting or demoting it here would lose the one fact
+       * that state exists to remember. `OFFLINE` is already where this is trying to get to.
+       *
+       * A TRANSIENT DISCOVERY FAILURE takes devices offline for one registration, and that is the
+       * right trade rather than an accident: `chooseBackends` returns an empty list when adb cannot
+       * be reached, so the fleet briefly says "this host has nothing" — which is TRUE, in the sense
+       * that matters, because a device the agent cannot see is a device it cannot drive. The next
+       * good registration brings it back, since the upsert above allows OFFLINE -> READY.
+       */
+      const present = (reg.devices ?? []).map((d) => d.localId).filter((x): x is string => Boolean(x));
+      const { rowCount: withdrawn } = await c.query(
+        `UPDATE devices
+            SET state = 'OFFLINE', updated_at = now()
+          WHERE host_id = $1
+            AND state IN ('READY', 'QUARANTINED')
+            AND NOT (local_id = ANY($2::text[]))`,
+        [hostId, present],
+      );
+      if (withdrawn) {
+        req.log.info({ hostId, withdrawn, present },
+          'devices absent from this registration were taken out of the pool');
+      }
+
       return { hostId, deviceIds };
     });
 
