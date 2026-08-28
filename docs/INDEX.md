@@ -115,6 +115,8 @@ useful half.
 | [0010](adrs/0010-ios-without-xcode.md) | iOS runs on **every host**: WebDriverAgent is built once by us, re-signed, and installed anywhere | Appium's XCUITest driver, which drags the macOS requirement back in. WDA already speaks WebDriver, and the gateway already proxies it. |
 | [0011](adrs/0011-automation-over-the-tunnel.md) | Automation rides the agent's outbound tunnel; the gateway binds **loopback** | Verifying the grant in the tunnel handler. A check that exists twice eventually disagrees with itself, so the agent replays the request against its own gateway. |
 | [0012](adrs/0012-borrowed-devices-reset-by-what-they-installed.md) | A release undoes **what the session installed**; the package sweep is opt-in, chosen by the device's owner | Keeping the sweep behind a mandatory keep list. An unrecoverable default that is safe only when configured — and the probe that checked it was itself wrong. |
+| [0014](adrs/0014-pairing-is-a-device-authorization-grant.md) | The **agent shows a code**, the console redeems it — RFC 8628, retiring the two-step `curl` | Minting from the console instead. It puts a bearer credential back in a text field and asks the unauthenticated side to prove who it belongs to. |
+| [0015](adrs/0015-the-agent-is-not-an-app-on-the-device.md) | An MFARM **app on the phone cannot be the agent** — a device cannot host the thing that tests it | Shizuku-style self-pairing. Real privileges, and still killed by Doze, wiped by a reset, and absent on iOS. |
 
 ---
 
