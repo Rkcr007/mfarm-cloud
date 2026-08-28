@@ -35,7 +35,7 @@ import { buildServer } from '../src/http/server.ts';
 import { withSystem, withTenant, closePools } from '../src/db.ts';
 import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { reap } from '../src/allocator.ts';
-import { ApkParseError, parseManifest, readApkMetadata } from '../src/apk.ts';
+import { abiMismatchReason, ApkParseError, parseManifest, readApkMetadata } from '../src/apk.ts';
 import { AppStore } from '../src/appstore.ts';
 import { buildApk, buildManifest, buildNonApkZip, buildZip } from './fixtures/apk.ts';
 
@@ -161,6 +161,10 @@ describe('APK metadata', () => {
     })));
     assert.deepEqual(meta, {
       packageName: 'dev.mfarm.sample', versionCode: 71, versionName: '2.0.1', minSdk: 29, label: 'Sample',
+      // No `lib/` entries in the fixture, so: pure bytecode. Empty means "runs anywhere" — the
+      // install preflight reads it that way, and reading it as "runs nowhere" would block every
+      // ordinary app in the library (ADR-0016).
+      abis: [],
     });
   });
 
@@ -218,6 +222,59 @@ describe('APK metadata', () => {
     assert.throws(
       () => parseManifest(Buffer.from('<manifest package="com.example"/>')),
       (e: Error) => e instanceof ApkParseError && /binary XML/.test(e.message),
+    );
+  });
+
+  test('native libraries are read out of the lib/<abi>/ layout, directory entries ignored', async () => {
+    const meta = await readApkMetadata(await write(buildApk({ abis: ['arm64-v8a', 'armeabi-v7a'] })));
+    assert.deepEqual(meta.abis, ['arm64-v8a', 'armeabi-v7a']);
+  });
+
+  test('an APK with no native code reports an empty list, which means "runs anywhere"', async () => {
+    assert.deepEqual((await readApkMetadata(await write(buildApk()))).abis, []);
+  });
+});
+
+/**
+ * The install preflight (ADR-0016).
+ *
+ * This is the check that makes it defensible for a virtual x86_64 device to report `Build.MODEL` as
+ * a Samsung Galaxy. Its DEFAULT MUST BE TO ALLOW: it exists to turn one specific known-impossible
+ * install into a clear sentence, not to be an authority on what can run. Every "unknown" case below
+ * therefore asserts that nothing is blocked.
+ */
+describe('ABI preflight', () => {
+  const CF = { abis: ['x86_64', 'x86'], model: 'Samsung Galaxy S25 Ultra' };
+
+  test('an arm64-only build on an x86_64 device is refused, naming both sides', () => {
+    const reason = abiMismatchReason({ abis: ['arm64-v8a'] }, CF);
+    assert.ok(reason, 'this is the exact case the preflight exists for');
+    assert.match(reason, /arm64-v8a/);
+    assert.match(reason, /x86_64/);
+    // The model is in the message because the model is what made the reader expect this to work.
+    assert.match(reason, /Samsung Galaxy S25 Ultra/);
+  });
+
+  test('a build that includes a matching ABI is allowed', () => {
+    assert.equal(abiMismatchReason({ abis: ['arm64-v8a', 'x86_64'] }, CF), null);
+  });
+
+  test('a build with no native code is allowed — empty is not "runs nowhere"', () => {
+    // The common case. Reading [] as a mismatch would block every ordinary app in the library.
+    assert.equal(abiMismatchReason({ abis: [] }, CF), null);
+  });
+
+  test('a device that never reported its ABIs blocks nothing', () => {
+    // An N-1 worker, or a tier not taught to report them. Falls back to the behaviour that existed
+    // before this check: try it and find out.
+    assert.equal(abiMismatchReason({ abis: ['arm64-v8a'] }, { abis: null, model: 'old' }), null);
+    assert.equal(abiMismatchReason({ abis: ['arm64-v8a'] }, { abis: [], model: 'old' }), null);
+  });
+
+  test('a real arm64 handset takes an arm64 build', () => {
+    assert.equal(
+      abiMismatchReason({ abis: ['arm64-v8a'] }, { abis: ['arm64-v8a', 'armeabi-v7a'], model: 'Pixel 8' }),
+      null,
     );
   });
 });

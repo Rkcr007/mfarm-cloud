@@ -29,7 +29,19 @@ export interface ApkMetadata {
   minSdk: number | null;
   /** NULL when the manifest points at a string resource; see the note on RESOURCE references. */
   label: string | null;
+  /**
+   * ABIs this build ships native libraries for, sorted. EMPTY MEANS "no native code", which runs
+   * anywhere — never "runs nowhere". See `nativeAbisOf`.
+   */
+  abis: string[];
 }
+
+/**
+ * What the MANIFEST alone can say. `abis` is absent because it is not in the manifest — it is the
+ * shape of the zip around it — and a parser that had to invent a value for it would be inventing
+ * "no native code", which is the answer that lets everything install.
+ */
+export type ManifestMetadata = Omit<ApkMetadata, 'abis'>;
 
 /** The upload is not an APK, or is one we cannot read. Always a 400, never a 500. */
 export class ApkParseError extends Error {
@@ -76,46 +88,95 @@ async function readAt(fh: FileHandle, offset: number, length: number): Promise<B
  * typically the first entry of a file that may be hundreds of megabytes and there is no reason to
  * touch the other 99% of it.
  */
+/** One central-directory record, reduced to the fields anything here reads. */
+interface ZipEntry {
+  name: string;
+  method: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localOffset: number;
+}
+
+/**
+ * Walk the central directory once and hand back every entry.
+ *
+ * Split out of `extractManifest` when the ABI preflight arrived and needed a second reader of the
+ * same structure. Deliberately shared rather than copied: the EOCD scan below has three separate
+ * bounds checks on attacker-controlled lengths, and a second hand-rolled copy of it is a second
+ * place for one of them to be forgotten.
+ */
+async function readCentralDirectory(fh: FileHandle): Promise<ZipEntry[]> {
+  const { size } = await fh.stat();
+  if (size < 22) throw new ApkParseError('File is too small to be a zip archive.');
+
+  // Scan backwards for the end-of-central-directory record. Backwards because a zip comment may
+  // contain the signature bytes, and the LAST occurrence is the real one.
+  const tailLen = Math.min(size, MAX_EOCD_SEARCH);
+  const tail = await readAt(fh, size - tailLen, tailLen);
+  let eocd = -1;
+  for (let i = tail.length - 22; i >= 0; i--) {
+    if (tail.readUInt32LE(i) === EOCD_SIGNATURE) { eocd = i; break; }
+  }
+  if (eocd === -1) {
+    throw new ApkParseError('Not a zip archive: no end-of-central-directory record. An APK is a zip.');
+  }
+
+  const entryCount = tail.readUInt16LE(eocd + 10);
+  const cdSize = tail.readUInt32LE(eocd + 12);
+  const cdOffset = tail.readUInt32LE(eocd + 16);
+  if (cdOffset + cdSize > size) {
+    throw new ApkParseError('Corrupt archive: the central directory runs past the end of the file.');
+  }
+
+  const cd = await readAt(fh, cdOffset, cdSize);
+  const entries: ZipEntry[] = [];
+  let p = 0;
+  for (let i = 0; i < entryCount && p + 46 <= cd.length; i++) {
+    if (cd.readUInt32LE(p) !== CENTRAL_SIGNATURE) {
+      throw new ApkParseError('Corrupt archive: central directory entry has a bad signature.');
+    }
+    const nameLen = cd.readUInt16LE(p + 28);
+    const extraLen = cd.readUInt16LE(p + 30);
+    const commentLen = cd.readUInt16LE(p + 32);
+    entries.push({
+      name: cd.subarray(p + 46, p + 46 + nameLen).toString('utf8'),
+      method: cd.readUInt16LE(p + 10),
+      compressedSize: cd.readUInt32LE(p + 20),
+      uncompressedSize: cd.readUInt32LE(p + 24),
+      localOffset: cd.readUInt32LE(p + 42),
+    });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+/**
+ * ABIs this build ships native code for, read from the `lib/<abi>/` layout every APK uses.
+ *
+ * An EMPTY RESULT MEANS "pure bytecode, runs anywhere" and is the common case — most apps ship no
+ * native libraries at all. It must never be confused with "runs nowhere", which is why the caller
+ * checks for a non-empty list before refusing anything.
+ *
+ * Split APKs are a known gap and are called out rather than guessed at: an `abi` split ships each
+ * ABI as a SEPARATE file, so a base.apk read on its own reports no native code and this preflight
+ * has nothing to say about it. It catches the universal APK, which is what gets uploaded by hand.
+ */
+export function nativeAbisOf(entries: { name: string }[]): string[] {
+  const abis = new Set<string>();
+  for (const e of entries) {
+    // `lib/arm64-v8a/libfoo.so` — exactly three segments, and the last must be a file. A directory
+    // entry (`lib/arm64-v8a/`) carries no code and is not evidence of anything.
+    const m = /^lib\/([^/]+)\/[^/]+$/.exec(e.name);
+    if (m) abis.add(m[1]);
+  }
+  return [...abis].sort();
+}
+
 export async function extractManifest(apkPath: string): Promise<Buffer> {
   const fh = await open(apkPath, 'r');
   try {
-    const { size } = await fh.stat();
-    if (size < 22) throw new ApkParseError('File is too small to be a zip archive.');
-
-    // Scan backwards for the end-of-central-directory record. Backwards because a zip comment may
-    // contain the signature bytes, and the LAST occurrence is the real one.
-    const tailLen = Math.min(size, MAX_EOCD_SEARCH);
-    const tail = await readAt(fh, size - tailLen, tailLen);
-    let eocd = -1;
-    for (let i = tail.length - 22; i >= 0; i--) {
-      if (tail.readUInt32LE(i) === EOCD_SIGNATURE) { eocd = i; break; }
-    }
-    if (eocd === -1) {
-      throw new ApkParseError('Not a zip archive: no end-of-central-directory record. An APK is a zip.');
-    }
-
-    const entryCount = tail.readUInt16LE(eocd + 10);
-    const cdSize = tail.readUInt32LE(eocd + 12);
-    const cdOffset = tail.readUInt32LE(eocd + 16);
-    if (cdOffset + cdSize > size) {
-      throw new ApkParseError('Corrupt archive: the central directory runs past the end of the file.');
-    }
-
-    const cd = await readAt(fh, cdOffset, cdSize);
-    let p = 0;
-    for (let i = 0; i < entryCount && p + 46 <= cd.length; i++) {
-      if (cd.readUInt32LE(p) !== CENTRAL_SIGNATURE) {
-        throw new ApkParseError('Corrupt archive: central directory entry has a bad signature.');
-      }
-      const method = cd.readUInt16LE(p + 10);
-      const compressedSize = cd.readUInt32LE(p + 20);
-      const uncompressedSize = cd.readUInt32LE(p + 24);
-      const nameLen = cd.readUInt16LE(p + 28);
-      const extraLen = cd.readUInt16LE(p + 30);
-      const commentLen = cd.readUInt16LE(p + 32);
-      const localOffset = cd.readUInt32LE(p + 42);
-      const name = cd.subarray(p + 46, p + 46 + nameLen).toString('utf8');
-
+    for (const entry of await readCentralDirectory(fh)) {
+      const { name, method, compressedSize, uncompressedSize, localOffset } = entry;
       if (name === MANIFEST_NAME) {
         if (uncompressedSize > MAX_MANIFEST_BYTES || compressedSize > MAX_MANIFEST_BYTES) {
           throw new ApkParseError(`AndroidManifest.xml claims ${uncompressedSize} bytes; refusing to inflate it.`);
@@ -137,7 +198,6 @@ export async function extractManifest(apkPath: string): Promise<Buffer> {
           throw new ApkParseError(`AndroidManifest.xml could not be inflated: ${(e as Error).message}`);
         }
       }
-      p += 46 + nameLen + extraLen + commentLen;
     }
     throw new ApkParseError('No AndroidManifest.xml in the archive. This is a zip, but not an APK.');
   } finally {
@@ -241,14 +301,14 @@ interface RawAttribute {
  * caller that already has the bytes (a future `mfarm app inspect`) does not have to go through a
  * file on disk.
  */
-export function parseManifest(buf: Buffer): ApkMetadata {
+export function parseManifest(buf: Buffer): ManifestMetadata {
   if (buf.length < 8 || buf.readUInt16LE(0) !== RES_XML_TYPE) {
     throw new ApkParseError('AndroidManifest.xml is not Android binary XML. A plain-text manifest means this is a source tree, not a built APK.');
   }
 
   let pool: StringPool | undefined;
   let resourceMap: number[] = [];
-  let result: ApkMetadata | undefined;
+  let result: ManifestMetadata | undefined;
 
   // Walk the top-level chunks. The string pool always precedes the elements that index into it, and
   // the resource map precedes them too, so a single forward pass is enough.
@@ -328,7 +388,7 @@ function pick(attrs: RawAttribute[], name: string, resourceId: number): RawAttri
   return attrs.find((a) => a.name === name) ?? attrs.find((a) => a.resourceId === resourceId);
 }
 
-function fromManifestElement(attrs: RawAttribute[], pool: StringPool): ApkMetadata {
+function fromManifestElement(attrs: RawAttribute[], pool: StringPool): ManifestMetadata {
   // `package` is a plain attribute with no android: namespace and no resource id, so there is no
   // id fallback for it — which is fine, because aapt has never emitted it without a name.
   const pkgAttr = attrs.find((a) => a.name === 'package');
@@ -392,5 +452,41 @@ function intOf(a: RawAttribute, pool: StringPool): number | null {
 // ---------------------------------------------------------------- entry point
 
 export async function readApkMetadata(apkPath: string): Promise<ApkMetadata> {
-  return parseManifest(await extractManifest(apkPath));
+  const fh = await open(apkPath, 'r');
+  let entries;
+  try {
+    entries = await readCentralDirectory(fh);
+  } finally {
+    await fh.close();
+  }
+  return { ...parseManifest(await extractManifest(apkPath)), abis: nativeAbisOf(entries) };
+}
+
+/**
+ * Why an APK cannot run on a device, when the reason is its native code — or null when it can.
+ *
+ * THE FAILURE THIS EXISTS TO PREVENT. Two devices in this farm report `Build.MODEL` as a Samsung
+ * Galaxy (ADR-0016). Every real Galaxy is arm64-v8a; these are virtual x86_64 devices, and most
+ * real APKs ship arm64-only native libraries. Without this check the first such upload dies inside
+ * `adb install` with `INSTALL_FAILED_NO_MATCHING_ABIS` — on a device calling itself the exact phone
+ * the customer builds for. That is a worse outcome than never having claimed the name, and the
+ * whole justification for claiming it rests on this function existing.
+ *
+ * BOTH UNKNOWNS MEAN "ALLOW", and for the same reason: this is a preflight that turns one specific
+ * known-impossible install into a clear sentence. It is not an authority on what can run. A device
+ * whose worker never reported its ABIs, and an APK with no native code, both fall through to the
+ * behaviour that existed before this function did — try it and find out.
+ */
+export function abiMismatchReason(
+  apk: Pick<ApkMetadata, 'abis'>,
+  device: { abis?: string[] | null; model?: string | null },
+): string | null {
+  const deviceAbis = device.abis ?? [];
+  if (apk.abis.length === 0 || deviceAbis.length === 0) return null;
+  if (apk.abis.some((a) => deviceAbis.includes(a))) return null;
+  // Names the device's model as well as its ABIs, because on a profiled device the model is exactly
+  // what made the reader expect this to work.
+  return `This build ships native code for ${apk.abis.join(', ')} only. `
+    + `${device.model || 'This device'} executes ${deviceAbis.join(', ')}, so Android will refuse to install it. `
+    + 'Upload a build that includes one of the device ABIs, or run it on a device with a matching architecture.';
 }

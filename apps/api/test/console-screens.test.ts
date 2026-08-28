@@ -24,7 +24,7 @@ import { readFile, writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installDom, countElements, textOf } from './dom-shim.ts';
+import { installDom, countElements, classesOf, textOf } from './dom-shim.ts';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -36,8 +36,8 @@ const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
  * because cleanup runs in `after()` and `after()` does not run if the process dies. Outside the
  * served tree that cannot happen at all.
  *
- * It costs nothing: the only import `console.js` has is `/live.js`, and that is rewritten to an
- * absolute file URL below, so the copy has no relative paths left to resolve.
+ * It costs nothing: `console.js` imports only browser-absolute specifiers, and every one of them is
+ * rewritten to an absolute file URL below, so the copy has no paths left to resolve.
  */
 let SHIMMED = '';
 
@@ -46,15 +46,20 @@ let mod: any;
 
 before(async () => {
   /**
-   * `console.js` imports `/live.js` — an ABSOLUTE URL path, which is correct in a browser (the
-   * origin resolves it) and unresolvable in Node, where `/live.js` means the filesystem root.
+   * `console.js` imports `/live.js` and `/profiles.js` — ABSOLUTE URL paths, which are correct in a
+   * browser (the origin resolves them) and unresolvable in Node, where `/live.js` means the
+   * filesystem root.
    *
-   * Rewritten to a file URL in a copy rather than changed at source: the absolute specifier is what
+   * Rewritten to file URLs in a copy rather than changed at source: the absolute specifier is what
    * makes the console work with no bundler and no import map, and bending the shipped file to suit
    * a test would be the tail wagging the dog.
+   *
+   * Rewritten by PATTERN rather than one call per file, because the previous form silently did
+   * nothing for a specifier it did not name — the next browser module added to the console would
+   * have failed every screen test with a module-not-found that points at a temp directory.
    */
   const src = (await readFile(join(PUBLIC, 'console.js'), 'utf8'))
-    .replace("from '/live.js'", `from ${JSON.stringify(pathToFileURL(join(PUBLIC, 'live.js')).href)}`);
+    .replace(/from '\/([\w.-]+\.js)'/g, (_m, file) => `from ${JSON.stringify(pathToFileURL(join(PUBLIC, file)).href)}`);
   SHIMMED = join(await mkdtemp(join(tmpdir(), 'mfarm-console-')), 'console.undertest.mjs');
   await writeFile(SHIMMED, src);
 
@@ -483,5 +488,87 @@ describe('failure classification on the run detail', () => {
     const text = textOf(mod.SCREENS.run());
     assert.match(text, /What the farm saw/);
     assert.match(text, /Device health/);
+  });
+});
+
+/**
+ * Device profiles in the console — ADR-0016.
+ *
+ * The panel is drawn from two independent sources and the split is the thing worth protecting:
+ * GEOMETRY comes from the device's own reported screen, CHROME comes from its profile. A test that
+ * only checked "the Samsung looks like a Samsung" would pass just as happily if the console had
+ * started drawing the panel from the chrome table — which would show a shape the device is not.
+ */
+describe('device profiles', () => {
+  /** cf-3 as the agent registers it: profiled, Samsung-named, and still a virtual device. */
+  function withProfiled() {
+    seed({ name: 'devices' });
+    mod.state.devices = [
+      ...mod.state.devices,
+      {
+        id: 'dev-3', region: 'lab', platform: 'android', tier: 'cuttlefish',
+        model: 'Samsung Galaxy S25 Ultra', osVersion: '17', state: 'READY', dedicated: false,
+        profile: 'galaxy-s25-ultra',
+        screen: { width: 1440, height: 3120, density: 600 },
+        abis: ['x86_64', 'x86'],
+        capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install',
+          'logcat', 'screenshot', 'ui-hierarchy'],
+      },
+    ];
+    mod.state.available = 2;
+  }
+
+  test('a profiled device is named as the handset AND still tagged VIRTUAL', () => {
+    // Both halves, in one assertion, on purpose. The name is only defensible while the tag is
+    // beside it — if the tag is ever dropped, this is the test that should fail.
+    withProfiled();
+    const text = textOf(mod.SCREENS.devices());
+    assert.match(text, /Samsung Galaxy S25 Ultra/);
+    assert.match(text, /VIRTUAL DEVICE/);
+  });
+
+  test('the card shows the panel it actually boots with', () => {
+    withProfiled();
+    assert.match(textOf(mod.SCREENS.devices()), /1440 × 3120 · 600dpi/);
+  });
+
+  test('a device that reported no screen shows no geometry row rather than an empty one', () => {
+    seed({ name: 'devices' });
+    mod.state.devices = [{
+      id: 'dev-4', region: 'lab', platform: 'android', tier: 'cuttlefish',
+      model: 'cuttlefish', osVersion: '17', state: 'READY', dedicated: false,
+      capabilities: ['app-install'],
+    }];
+    const text = textOf(mod.SCREENS.devices());
+    assert.doesNotMatch(text, /Screen/, 'an N-1 worker sends no screen; a "— × —" row is worse than none');
+  });
+
+  test('the stage draws a body and a punch-hole for a profiled device', () => {
+    withProfiled();
+    mod.state.route = { name: 'cockpit', id: 'sess-1' };
+    mod.state.sessionDetail = { ...mod.state.sessionDetail, deviceId: 'dev-3' };
+    mod.state.stage = null;
+    const classes = classesOf(mod.SCREENS.cockpit());
+    assert.ok(classes.includes('dev-body'), 'the phone body');
+    assert.ok(classes.includes('dev-cutout'), 'the camera, which is IN the display on a real Galaxy');
+  });
+
+  test('an unprofiled device still renders — the plain bezel is the ordinary case', () => {
+    // Two of this farm's four devices are deliberately unprofiled, every physical handset is, and an
+    // N-1 worker profiles nothing. This path is the common one and must never look like an error.
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.stage = null;
+    const tree = mod.SCREENS.cockpit();
+    assert.ok(countElements(tree) > 0);
+    assert.ok(classesOf(tree).includes('dev-frame'), 'the screen is still drawn');
+  });
+
+  test('an unknown profile falls back instead of blanking the panel', () => {
+    // A worker can be a version ahead of the console it is registering with. A profile added after
+    // this file was written must render as a plain phone, not take out the whole live view.
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].profile = 'galaxy-s99-from-the-future';
+    mod.state.stage = null;
+    assert.ok(classesOf(mod.SCREENS.cockpit()).includes('dev-frame'));
   });
 });

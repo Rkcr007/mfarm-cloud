@@ -114,6 +114,22 @@ export function countElements(node: unknown): number {
   return n;
 }
 
+/**
+ * Every class name in a tree.
+ *
+ * The shim deliberately does not match selectors, so this is how a test asks "was this element
+ * drawn". Used for the parts of the device panel that carry no text at all — a punch-hole and a side
+ * button are pure geometry, and `textOf` sees nothing of either.
+ */
+export function classesOf(node: unknown): string[] {
+  if (Array.isArray(node)) return node.flatMap(classesOf);
+  if (!(node instanceof ShimNode)) return [];
+  const own = node instanceof ShimElement && typeof node.className === 'string'
+    ? node.className.split(/\s+/).filter(Boolean)
+    : [];
+  return [...own, ...node.children.flatMap(classesOf)];
+}
+
 /** Every bit of text in a tree, joined — enough to assert a screen said the thing it should. */
 export function textOf(node: unknown): string {
   if (Array.isArray(node)) return node.map(textOf).join(' ');
