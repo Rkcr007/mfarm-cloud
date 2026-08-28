@@ -57,7 +57,18 @@ const FILES: Record<string, { file: string; type: string }> = {
   // not a render function — it holds a socket and a peer connection open (ADR-0007) — and because
   // a page that never opens a cockpit never parses it.
   '/live.js': { file: 'live.js', type: 'text/javascript; charset=utf-8' },
+  // Device chrome (ADR-0016), also imported as a module by console.js.
+  //
+  // ITS ABSENCE HERE TOOK THE WHOLE CONSOLE DOWN IN PRODUCTION. This table is an allowlist, and a
+  // path missing from it falls through to the authenticated API routes and answers 401 — so the
+  // browser could not resolve the import, the module graph failed, and console.js never executed.
+  // Not a degraded console: a blank page. Caught by curl against the deployed host, and by nothing
+  // else, which is why `ui.test.ts` now derives this list from console.js's own imports.
+  '/profiles.js': { file: 'profiles.js', type: 'text/javascript; charset=utf-8' },
 };
+
+/** Exported so a test can assert this table covers every module `console.js` actually imports. */
+export const SERVED_PATHS = Object.keys(FILES);
 
 export async function uiRoutes(app: FastifyInstance): Promise<void> {
   const dp = dataPlaneOrigin();
