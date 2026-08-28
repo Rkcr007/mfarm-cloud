@@ -416,6 +416,12 @@ describe('service lifecycle', () => {
 
     const svc = await start(parseConfig({
       PORT: '0',
+      // AND THE METRICS PORT, which `PORT: '0'` does not cover. `start()` binds two listeners and
+      // only one of them was asked for an ephemeral port, so METRICS_PORT took its 9464 default and
+      // this test could not run on a machine where the API was already running — `EADDRINUSE
+      // 127.0.0.1:9464`, reported as a lifecycle failure with nothing to do with lifecycle. Worse,
+      // the run then HUNG instead of finishing, so the summary that names the port never printed.
+      METRICS_PORT: '0',
       HOST: '127.0.0.1',
       REAPER_INTERVAL_MS: '100',
       RATE_LIMIT_MAX: '10000',
