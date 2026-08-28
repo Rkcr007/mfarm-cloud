@@ -59,6 +59,40 @@ class ShimNode {
   getBoundingClientRect() { return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
 }
 
+/**
+ * A style object that refuses an INDEXED write, the way a real `CSSStyleDeclaration` does.
+ *
+ * WHY THIS IS NOT A PLAIN OBJECT. `h()` writes styles as `Object.assign(n.style, v)`, so passing a
+ * STRING instead of an object spreads its characters across the keys `0`, `1`, `2`… A plain object
+ * accepts that silently and the test passes; a browser throws `Failed to set an indexed property`
+ * and the whole render dies. That exact bug shipped — the cockpit threw on every session in
+ * production while the suite stayed green — so the shim now models the one CSSOM behaviour that
+ * distinguishes the two.
+ *
+ * Deliberately narrow: this is not CSSOM support, it is a single guard against a mistake the shim
+ * was previously blind to. Everything else about `style` is still a bag of properties.
+ */
+function makeStyle(): Record<string, unknown> {
+  const decl: Record<string, unknown> = {
+    setProperty(this: Record<string, unknown>, k: string, v: string) { this[k] = v; },
+    getPropertyValue(this: Record<string, unknown>, k: string) { return (this[k] as string) ?? ''; },
+    removeProperty(this: Record<string, unknown>, k: string) { delete this[k]; },
+  };
+  return new Proxy(decl, {
+    set(target, key, value) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) {
+        throw new TypeError(
+          `Failed to set an indexed property [${key}] on 'CSSStyleDeclaration': `
+          + 'Indexed property setter is not supported. '
+          + 'A style was written as a string; h() requires an object.',
+        );
+      }
+      target[key as string] = value;
+      return true;
+    },
+  });
+}
+
 class ShimText extends ShimNode {
   constructor(text: string) { super(); this.textContent = text; }
 }
@@ -77,11 +111,7 @@ class ShimElement extends ShimNode {
    * device frame is sized with — a dashed name is not a valid JS identifier, so there is no other
    * way to set one.
    */
-  readonly style: Record<string, unknown> = {
-    setProperty(this: Record<string, unknown>, k: string, v: string) { this[k] = v; },
-    getPropertyValue(this: Record<string, unknown>, k: string) { return (this[k] as string) ?? ''; },
-    removeProperty(this: Record<string, unknown>, k: string) { delete this[k]; },
-  };
+  readonly style: Record<string, unknown> = makeStyle();
   readonly dataset: Record<string, string> = {};
   readonly attrs = new Map<string, string>();
   readonly classList = {
