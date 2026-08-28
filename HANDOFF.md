@@ -1537,6 +1537,27 @@ device is covered by the same URL. Caught by a test, not by review.
     | geometry (cvd instance db) | set | **was lost — now passed** | survives |
     | identity (guest overlay) | absent | survives | **wiped — now re-applied** |
 
+36. **A DEVICE'S SHAPE WAS OUTSIDE THE REGISTRATION FINGERPRINT, so it could never be corrected.**
+    2026-08-29. The third instance of the same class of bug, and `capabilityFingerprint()` already
+    carried a comment warning about it: *"anything not in this fingerprint can never be corrected on
+    a host that already exists — it resumes, heartbeats, and keeps advertising whatever it said the
+    first time."*
+
+    `devices.model`, `screen`, `profile` and `abis` are written by the registration upsert and by
+    nothing else. Until device profiles they could not change on a running host — `model` was the
+    constant `cuttlefish` and the other three did not exist — so nothing noticed. ADR-0016 made all
+    four mutable and left them out of the fingerprint.
+
+    The symptom: cf-3 was rebuilt at 1080x2340 @450, the guest agreed, the agent had the right value
+    in memory, the worker was restarted, and the console kept showing **1440x3120 @600** for as long
+    as the capabilities stayed equal. A device whose reported panel disagrees with the one it draws
+    is worse than one that reports nothing — the console divides by it to place a tap, so every
+    click would have landed in the wrong place.
+
+    **The general rule, now stated three times in three places:** anything the registration upsert
+    writes must be in the fingerprint, or it is write-once for the life of the host row. Worth
+    checking against the upsert's column list whenever a field is added to it.
+
 ## Working notes for whoever picks this up
 
 **Context is cache; disk is truth.** This file, `docs/adrs/`, and the test suite are the system of
