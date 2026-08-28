@@ -193,16 +193,38 @@ async function readScreen(serial: string): Promise<Screen | undefined> {
   return { width: Number(chosen[1]), height: Number(chosen[2]), density: d };
 }
 
-/** One discovery pass: what is plugged in, and what each one is. */
+/**
+ * adb itself could not be asked — not installed, or its server refused to start, or the user's own
+ * adb server was restarting underneath us.
+ *
+ * ITS OWN TYPE BECAUSE `[]` WAS AMBIGUOUS, and the ambiguity was a lie the window told. Returning an
+ * empty list for this case makes "adb is broken" indistinguishable from "nothing is plugged in", so
+ * a phone on the desk and a page saying *No devices yet — plug a phone in* could both be true at
+ * once. That is precisely the support ticket this whole file exists to end.
+ *
+ * It happens for an ordinary reason, too: plugging in a phone can make the user's own adb server
+ * restart, and one pass fails with `protocol fault (couldn't read status)` while it does. Observed
+ * on hardware the first time somebody plugged a phone into a running agent.
+ */
+export class AdbUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdbUnavailableError';
+  }
+}
+
+/**
+ * One discovery pass: what is plugged in, and what each one is.
+ *
+ * THROWS when adb could not be reached at all, and returns `[]` only when adb answered and there
+ * was genuinely nothing there. Callers must tell those apart — see `AdbUnavailableError`.
+ */
 export async function discover(): Promise<DiscoveredDevice[]> {
   let stdout: string;
   try {
     stdout = await run(adbPath(), ['devices', '-l'], 20_000);
   } catch (e) {
-    // adb not installed, or its server refused to start. One line, not a stack: this runs on a
-    // timer and a crash loop would bury everything else in the log.
-    console.error(`[discovery] adb unavailable: ${(e as Error).message}`);
-    return [];
+    throw new AdbUnavailableError((e as Error).message);
   }
 
   const found = parseAdbDevices(stdout);
@@ -266,6 +288,20 @@ export function watchForChanges(
    * passed. None of that was testing this function.
    */
   probe: () => Promise<DiscoveredDevice[]> = discover,
+  /**
+   * Every pass's full result, whether or not the usable set changed.
+   *
+   * `onChange` above is deliberately narrow — it fires only on an arrival or a departure, because
+   * its caller drains and restarts the agent and must not do that over cable churn. The window
+   * needs the opposite: the WHOLE list, including the phone sitting at `unauthorized` that
+   * `onChange` is right to ignore, on every tick, so a row can update the moment somebody taps
+   * Allow.
+   *
+   * A second caller rather than a second poller. `discover()` spawns adb several times, and a
+   * window that ran its own timer would double that load on the USB stack — which on a bad day is
+   * the thing being diagnosed.
+   */
+  onPass?: (found: DiscoveredDevice[]) => void,
 ): { stop: () => void } {
   let current = new Set(known);
   let stopped = false;
@@ -296,10 +332,20 @@ export function watchForChanges(
     let found: DiscoveredDevice[];
     try {
       found = await probe();
-    } catch {
+    } catch (e) {
       // adb hiccupped. Returning without touching `current` means the next tick compares against
       // the same baseline — a transient failure must not read as "every phone was unplugged".
+      //
+      // AND WITHOUT CALLING `onPass`, which is the same rule applied to the window: the last good
+      // picture is a better answer than a blank one, because a blank one says "no phone here" about
+      // a phone that is sitting right there. One line, not a stack — this runs on a timer.
+      console.error(`[discovery] adb did not answer: ${(e as Error).message}`);
       return;
+    }
+    // Before the change comparison and outside it: a pass that finds nothing new still carries a
+    // state a person is waiting on, and a throw from a listener must not skip the fleet update.
+    if (onPass) {
+      try { onPass(found); } catch (e) { console.error(`[discovery] pass listener threw: ${(e as Error).message}`); }
     }
     const usable = new Set(found.filter((d) => d.state === 'device').map((d) => d.serial));
     const added = [...usable].filter((s) => !current.has(s));
