@@ -22,6 +22,7 @@
  */
 
 import { ATTACHED, LiveSession, parseLogLine, parseHierarchy, nodeAt, selectorsFor } from '/live.js';
+import { chromeFor, geometryText, hasChrome } from '/profiles.js';
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -988,7 +989,11 @@ function deviceCard(d) {
     h('p', { class: 'help row tight' }, h('span', { class: `dot ${st.tone}` }), st.note),
 
     h('div', { class: 'device-meta' },
-      [['Platform', d.platform], ['OS', d.osVersion], ['Tier', d.tier], ['Region', d.region]].map(([k, v]) =>
+      // Screen joins the four facts that were always here, and it is the one a tester reads first:
+      // a result is only meaningful if you know what panel it was taken on. Omitted entirely rather
+      // than shown as "—" when the worker sent no geometry — see `geometryText`.
+      [['Platform', d.platform], ['OS', d.osVersion], ['Tier', d.tier], ['Region', d.region],
+        ...(geometryText(d) ? [['Screen', geometryText(d)]] : [])].map(([k, v]) =>
         h('div', null, h('p', { class: 'micro', text: k }), h('p', { class: 'v', text: v || '—' }))),
     ),
 
@@ -1848,6 +1853,8 @@ const ICONS = {
   zoomin: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5M11 8.5v5', 'stroke-linecap': 'round' })); },
   zoomout: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5', 'stroke-linecap': 'round' })); },
   fit: (g) => { g.appendChild(svgEl('path', { d: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
+  // The chrome toggle: a phone body with its camera dot — the two things the button adds or removes.
+  phone: (g) => { g.appendChild(svgEl('rect', { x: 7, y: 2.5, width: 10, height: 19, rx: 2.4 })); g.appendChild(svgEl('circle', { cx: 12, cy: 5.4, r: 0.7, fill: 'currentColor', stroke: 'none' })); },
   // A cursor over a box: pick a thing on the screen. Reads as "inspect" the way a magnifier reads
   // as "zoom", and the bar already has two magnifiers doing that job.
   inspect: (g) => {
@@ -1902,8 +1909,24 @@ function stagePanel(sess, live) {
     const overlay = h('div', { class: 'dev-overlay' });
     // Local echo of your own taps. `pointer-events: none`, so it can never intercept a gesture.
     const taps = h('div', { class: 'dev-taps' });
-    const frame = h('div', { class: 'dev-frame' }, video, overlay, taps);
-    const screenWrap = h('div', { class: 'dev-fit' }, frame);
+    /**
+     * The punch-hole camera. DRAWN ON TOP OF THE DEVICE SCREEN, which reverses a rule this panel
+     * used to hold absolutely — see the comment on the keyboard hint below, which still holds for
+     * everything else.
+     *
+     * The reversal is deliberate (ADR-0016): a real Galaxy's camera IS in the display, so a body
+     * that puts it in the bezel is drawing a phone nobody makes. What makes it acceptable is that it
+     * is the ONLY thing allowed over the screen, it never takes a pointer event, and the chrome
+     * toggle in the toolbar removes it — so the status bar underneath it is always one click away.
+     * Anything else that wants to sit on the video does not get to cite this as precedent.
+     */
+    const cutout = h('div', { class: 'dev-cutout' });
+    const frame = h('div', { class: 'dev-frame' }, video, overlay, taps, cutout);
+    // The physical body. Buttons hang off it, outside the screen box, so they cost the device no
+    // pixels at all.
+    const buttons = h('div', { class: 'dev-buttons' });
+    const body = h('div', { class: 'dev-body' }, frame, buttons);
+    const screenWrap = h('div', { class: 'dev-fit' }, body);
     const toolbar = h('div', { class: 'devbar' });
 
     /**
@@ -1925,7 +1948,14 @@ function stagePanel(sess, live) {
       toolbar,
       h('div', { class: 'dev-stage' }, screenWrap),
     );
-    state.stage = { root, video, overlay, frame, toolbar, caption, zoom: 1 };
+    state.stage = {
+      root, video, overlay, frame, body, buttons, cutout, toolbar, caption, zoom: 1,
+      // Per-viewer, and remembered: someone comparing a screenshot against the device wants the
+      // chrome gone, and wants it to stay gone on the next device they open. Wrapped because a
+      // browser with site data blocked THROWS on read rather than returning null, and the panel
+      // must still render for that viewer.
+      chrome: readChromePref(),
+    };
     root.appendChild(captionRow);
   }
 
@@ -1940,13 +1970,72 @@ function stagePanel(sess, live) {
   return st.root;
 }
 
-/** Aspect ratio and zoom, written as CSS custom properties so resizing costs no layout thrash. */
+/**
+ * Shape, chrome and zoom, written as CSS custom properties so resizing costs no layout thrash.
+ *
+ * GEOMETRY COMES FROM THE DEVICE, chrome comes from the profile, and the two are never mixed. The
+ * live socket's `screen` wins over the registered one because it is the panel the stream is
+ * actually being encoded from; the registered one is what a card has before a session exists.
+ */
 function paintFrame(device) {
   const st = state.stage;
   const s = state.live?.screen || device?.screen;
   const ratio = s?.width && s?.height ? s.width / s.height : 0.5625;
   st.frame.style.setProperty('--dev-aspect', String(ratio));
   st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+
+  const chrome = chromeFor(device);
+  st.frame.style.setProperty('--dev-radius', `${chrome.radiusPct}%`);
+  st.body.style.setProperty('--dev-bezel', `${chrome.bezelPx}px`);
+
+  // Hidden rather than absent when there is no cutout, so the element never has to be created or
+  // destroyed on a panel that is deliberately not rebuilt between polls.
+  if (chrome.cutout) {
+    st.cutout.style.setProperty('--cut-x', `${chrome.cutout.xPct}%`);
+    st.cutout.style.setProperty('--cut-y', `${chrome.cutout.yPct}%`);
+    st.cutout.style.setProperty('--cut-d', `${chrome.cutout.dPct}%`);
+  }
+  st.cutout.hidden = !chrome.cutout;
+
+  // Rebuilt only when the set of buttons actually changes — an unconditional rebuild would drop and
+  // recreate DOM on every poll, which is exactly what this panel exists to avoid.
+  const signature = chrome.buttons.map((b) => `${b.side}:${b.topPct}:${b.lenPct}`).join('|');
+  if (st.buttonSignature !== signature) {
+    st.buttonSignature = signature;
+    st.buttons.replaceChildren(...chrome.buttons.map((b) => h('span', {
+      class: `dev-btn-${b.side}`,
+      style: `top:${b.topPct}%;height:${b.lenPct}%`,
+    })));
+  }
+
+  // One attribute drives every piece of chrome in CSS, so hiding it is a class flip and not a
+  // re-layout of the video.
+  st.root.dataset.chrome = st.chrome && hasChrome(device) ? 'on' : 'off';
+  st.root.dataset.hasChrome = hasChrome(device) ? 'yes' : 'no';
+}
+
+/** Chrome preference, defaulting to shown, and never throwing on a browser that blocks site data. */
+function readChromePref() {
+  try {
+    return localStorage.getItem('mfarm.chrome') !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function setChromePref(on) {
+  const st = state.stage;
+  if (!st) return;
+  st.chrome = on;
+  try {
+    localStorage.setItem('mfarm.chrome', on ? 'on' : 'off');
+  } catch {
+    // A viewer with site data blocked keeps the setting for this panel only. Losing a preference is
+    // not worth failing the click over.
+  }
+  const device = deviceById(state.detail?.deviceId);
+  paintFrame(device);
+  paintToolbar(state.detail, true, device?.capabilities || []);
 }
 
 function setZoom(z) {
@@ -2013,6 +2102,20 @@ function paintToolbar(sess, live, caps) {
     toolBtn('zoomin', 'Zoom in', streaming, () => setZoom(st.zoom + 0.15)),
     toolBtn('zoomout', 'Zoom out', streaming, () => setZoom(st.zoom - 0.15)),
     toolBtn('fit', 'Fit to panel', streaming, () => setZoom(1)),
+    /**
+     * Hide the phone body — and with it the punch-hole, which is the only thing this console draws
+     * over the device screen.
+     *
+     * OFFERED ONLY ON A DEVICE THAT HAS CHROME, because on the two unprofiled devices there is
+     * nothing to hide and a control that visibly does nothing is worse than no control. It is not
+     * gated on the stream: the body is drawn whether or not video has negotiated, so hiding it has
+     * to work in exactly the state where someone is squinting at a black rectangle wondering what
+     * is covering it.
+     */
+    hasChrome(deviceById(sess?.deviceId))
+      ? toolBtn('phone', st.chrome ? 'Hide device body' : 'Show device body',
+          true, () => setChromePref(!st.chrome), { active: st.chrome })
+      : null,
   );
 }
 

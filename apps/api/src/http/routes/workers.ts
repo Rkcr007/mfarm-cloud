@@ -169,10 +169,18 @@ export async function workerRoutes(app: FastifyInstance) {
         const { rows: dev } = await c.query(
           `INSERT INTO devices (host_id, region, platform, tier, model, os_version,
                                 capabilities, local_id, state, automation_endpoint,
-                                adb_serial, system_port, mjpeg_server_port, org_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14)
+                                adb_serial, system_port, mjpeg_server_port, org_id,
+                                profile, screen, abis)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,
+                   $15,$16::jsonb,$17::jsonb)
            ON CONFLICT (host_id, local_id) WHERE local_id IS NOT NULL DO UPDATE SET
              capabilities = EXCLUDED.capabilities,
+             -- Re-asserted every registration, exactly like model and os_version above. A device
+             -- that was re-created from a different profile — or from none — is describing itself
+             -- differently, and the last registration is the truth (ADR-0016).
+             profile = EXCLUDED.profile,
+             screen = EXCLUDED.screen,
+             abis = EXCLUDED.abis,
              -- Inherited from the host, which is what keeps a device that cannot be powerwashed
              -- out of the shared pool. allocate_device already filters on
              -- (d.org_id IS NULL OR d.org_id = p_org), so this single column is the whole of
@@ -234,7 +242,14 @@ export async function workerRoutes(app: FastifyInstance) {
            // v1 workers name one server for the whole host; v2 names one per device. Resolved in
            // `packages/protocol` so the hub's COALESCE and this write cannot drift apart.
            deviceAutomationEndpoint(reg, d) ?? null,
-           d.adbSerial ?? null, d.systemPort ?? null, d.mjpegServerPort ?? null, orgId],
+           d.adbSerial ?? null, d.systemPort ?? null, d.mjpegServerPort ?? null, orgId,
+           // NULL rather than an empty object or an empty array when a worker does not send these.
+           // An N-1 worker sends none of the three, and "did not say" has to stay distinguishable
+           // from "said none" — an empty `abis` would otherwise read as a device that can execute
+           // nothing and block every install on it (ADR-0016).
+           d.profile ?? null,
+           d.screen ? JSON.stringify(d.screen) : null,
+           d.abis ? JSON.stringify(d.abis) : null],
         );
         if (d.localId && dev[0]?.id) deviceIds[d.localId] = dev[0].id as string;
       }

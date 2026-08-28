@@ -31,6 +31,7 @@ export async function deviceRoutes(app: FastifyInstance) {
       const rows = await withTenant(orgId, async (c) => {
         const { rows } = await c.query(
           `SELECT id, region, platform, tier, model, os_version, state, capabilities,
+                  profile, screen, abis,
                   (org_id IS NOT NULL) AS dedicated
              FROM devices
             WHERE ($1::text IS NULL OR region = $1)
@@ -47,6 +48,13 @@ export async function deviceRoutes(app: FastifyInstance) {
           id: r.id, region: r.region, platform: r.platform, tier: r.tier,
           model: r.model, osVersion: r.os_version, state: r.state,
           capabilities: r.capabilities, dedicated: r.dedicated,
+          // Null-coalesced away rather than sent as null. A device card reads these as "draw the
+          // chrome for this profile" and "show this geometry"; absent is a meaningful answer for
+          // both, and an explicit null in the payload is one more shape every reader has to handle
+          // to arrive at the same place (ADR-0016).
+          ...(r.profile ? { profile: r.profile } : {}),
+          ...(r.screen ? { screen: r.screen } : {}),
+          ...(r.abis ? { abis: r.abis } : {}),
         })),
         // Availability is what callers actually decide on, so it is computed here rather than
         // leaving every client to derive it from the state enum.
@@ -59,7 +67,8 @@ export async function deviceRoutes(app: FastifyInstance) {
     const { orgId } = requireTenant(req);
     const row = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, region, platform, tier, model, os_version, state, capabilities, last_reset_at
+        `SELECT id, region, platform, tier, model, os_version, state, capabilities, last_reset_at,
+                profile, screen, abis
            FROM devices WHERE id = $1`,
         [req.params.id],
       );
@@ -71,6 +80,9 @@ export async function deviceRoutes(app: FastifyInstance) {
         id: row.id, region: row.region, platform: row.platform, tier: row.tier,
         model: row.model, osVersion: row.os_version, state: row.state,
         capabilities: row.capabilities, lastResetAt: row.last_reset_at,
+        ...(row.profile ? { profile: row.profile } : {}),
+        ...(row.screen ? { screen: row.screen } : {}),
+        ...(row.abis ? { abis: row.abis } : {}),
       },
     };
   });

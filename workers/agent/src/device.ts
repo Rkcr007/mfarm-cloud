@@ -29,6 +29,24 @@ export interface DeviceInfo {
   capabilities: Capability[];
   screen: Screen;
   /**
+   * Which device profile this one was configured from, if any (ADR-0016).
+   *
+   * A STABLE KEY, NOT A NAME — the console keys its bezel art off it, and matching that on the
+   * human-readable model string would break the moment a marketing name is retyped. Absent on every
+   * unprofiled device, which is most of them: physical handsets ARE the real device and need no
+   * profile, and `cf-1`/`cf-2` deliberately have none.
+   */
+  profile?: string;
+  /**
+   * ABIs the device can execute, most-preferred first — `ro.product.cpu.abilist`.
+   *
+   * Published so an APK carrying only `lib/arm64-v8a/` can be refused before it is pushed, with the
+   * reason said out loud. Optional because a tier that has not been taught to report it should
+   * degrade to today's behaviour (install and find out) rather than have every install blocked by an
+   * empty list.
+   */
+  abis?: string[];
+  /**
    * The serial the platform's own tooling matches on — `0.0.0.0:6520` for Cuttlefish,
    * `emulator-5560` for an AVD, a hardware serial for a physical handset.
    *

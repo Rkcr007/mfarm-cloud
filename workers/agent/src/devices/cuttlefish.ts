@@ -6,6 +6,7 @@ import type {
   SignalChannel, SignalOptions,
 } from '../device.ts';
 import { openSignalChannel } from './operator.ts';
+import type { DeviceProfile } from './profiles.ts';
 
 /**
  * Cuttlefish backend — the target tier.
@@ -61,6 +62,18 @@ export interface CuttlefishOptions {
   publicHost?: string;
   osVersion?: string;
   gpuMode?: 'guest_swiftshader' | 'none';
+  /**
+   * What this device is configured to look like — panel, density, RAM, cores, reported identity.
+   *
+   * OPTIONAL, AND THE ABSENT CASE IS LOAD-BEARING. A device with no profile produces byte-identical
+   * cvd arguments to the ones this file produced before profiles existed, and keeps `cuttlefish` as
+   * its model and 720x1280 as its panel. That is what lets `cf-3` and `cf-4` join a host without
+   * `cf-1` and `cf-2` changing underneath a farm that is working (ADR-0016), and it is asserted
+   * directly in cuttlefish.test.ts rather than left to inspection.
+   *
+   * Applies on COLD BOOT ONLY — see `coldBoot`.
+   */
+  profile?: DeviceProfile;
   /**
    * TEST SEAM — production leaves this unset and gets the real environment probe.
    *
@@ -189,6 +202,33 @@ function runBinary(bin: string, args: string[], timeoutMs: number): Promise<Buff
  */
 const INSTALL_TIMEOUT_MS = 600_000;
 
+/**
+ * The cvd flags that make a device match its profile — and NO FLAGS AT ALL without one.
+ *
+ * The empty return is the contract `cf-1` and `cf-2` depend on. It is a separate function rather
+ * than three inline ternaries precisely so that "an unprofiled device gets exactly what it always
+ * got" is one assertable statement instead of a property of how three expressions happen to
+ * evaluate (ADR-0016).
+ *
+ * `refresh_rate_hz` is pinned to 60 even for a 120Hz panel. docs/RENDER_BASELINE.md measures jank as
+ * a share of frame intervals longer than 1.5 refresh periods, and SwiftShader rasterises on the CPU
+ * — asking for 120 would report the renderer's ceiling as the app's jank, on every app.
+ *
+ * NOT VERIFIED AGAINST cvd 1.55.1 YET. `--display0` is the flag `launch_cvd` documented and `cvd
+ * create` is expected to pass through; `--displays_textproto` is the alternative spelling. Confirm
+ * with `cvd create --help | grep -i -e display -e memory` on the lab VM before trusting a boot, and
+ * record the answer in HANDOFF.md the way every other non-obvious cvd flag here is.
+ */
+export function profileFlags(profile: DeviceProfile | undefined): string[] {
+  if (!profile) return [];
+  const { width, height, density } = profile.screen;
+  return [
+    `--display0=width=${width},height=${height},dpi=${density},refresh_rate_hz=60`,
+    `--memory_mb=${profile.memoryMb}`,
+    `--cpus=${profile.cpus}`,
+  ];
+}
+
 export class CuttlefishDevice implements DeviceControl {
   readonly info: DeviceInfo;
   private readonly opts: Required<Pick<CuttlefishOptions, 'webrtcPort' | 'gpuMode'>> & CuttlefishOptions;
@@ -204,7 +244,15 @@ export class CuttlefishDevice implements DeviceControl {
       localId: opts.localId,
       platform: 'android',
       tier: 'cuttlefish',
-      model: 'cuttlefish',
+      // The profile's model, or the tier's own name when there is none. `cuttlefish` is not a phone
+      // anybody owns, which is the point of profiles — but it stays the honest answer for a device
+      // that was not configured to be anything else.
+      //
+      // A PROFILED DEVICE REPORTS A MODEL IT IS NOT. That is ADR-0016's deliberate exception, and it
+      // is only defensible because the console still tags every one of these VIRTUAL DEVICE and the
+      // install preflight still refuses an APK this ABI cannot run. If either of those goes away,
+      // this line becomes a plain lie with nothing holding it to account.
+      model: opts.profile?.model ?? 'cuttlefish',
       osVersion: opts.osVersion ?? 'unknown',
       // `snapshot-reset` is NOT here, and its absence is the point. It is added by start() only
       // once a snapshot actually exists on disk — a capability is a claim about observed state, not
@@ -221,7 +269,17 @@ export class CuttlefishDevice implements DeviceControl {
         'screen-stream', 'input-datachannel',
         'app-install', 'logcat', 'screenshot', 'ui-hierarchy',
       ] as Capability[],
-      screen: { width: 720, height: 1280, density: 320 },
+      // The panel this device actually boots with. Unlike `model` above, this is not a claim that
+      // could be false: `coldBoot` passes these exact numbers to cvd, and the console divides by
+      // them to map a click to a device coordinate — so a profile that lied here would simply make
+      // the device untappable.
+      screen: opts.profile?.screen ?? { width: 720, height: 1280, density: 320 },
+      // x86_64, on every host this tier can run on. Published so the control plane can refuse an
+      // arm64-only APK with the real reason instead of letting `adb install` fail opaquely — which
+      // matters far more now that a profiled device answers `Build.MODEL` with a Samsung part
+      // number no x86 phone has ever carried.
+      abis: ['x86_64', 'x86'],
+      profile: opts.profile?.id,
       // Published, not just used internally. This class has always known the serial — every adb
       // call below uses it — but it never left the object, so the hub sent `cf-1` as `appium:udid`
       // and UiAutomator2 matched it against nothing (B3).
@@ -327,7 +385,19 @@ export class CuttlefishDevice implements DeviceControl {
       .catch(() => this.opts.osVersion ?? 'unknown');
   }
 
-  /** `cvd create` — the cold path. 38s measured. */
+  /**
+   * `cvd create` — the cold path. 38s measured.
+   *
+   * ALSO THE ONLY PATH THAT APPLIES A PROFILE. `restoreSnapshot` and `restartExisting` pass no
+   * device-configuration flags on purpose (see their comments): the configuration comes back out of
+   * cvd's instance database, so geometry, RAM and cores are fixed at create time and cannot be
+   * changed on a device that already exists.
+   *
+   * The operational consequence is worth stating where someone changing a profile will read it:
+   * editing `profiles.ts` does nothing to a device already in cvd's database. That device has to be
+   * created again. On this farm that means creating a NEW instance group — never `cvd reset`, which
+   * takes down every other device on the host along with it.
+   */
   private async coldBoot(): Promise<void> {
     // `create`, not `start`. cvd 1.x keeps an instance database and the verbs are not
     // interchangeable: create builds a new group from artifacts, start only restarts an existing
@@ -349,6 +419,7 @@ export class CuttlefishDevice implements DeviceControl {
       // one is ever snapshotted — a device booted without it cannot be made resettable later.
       '--enable_virtiofs=false',
       '--report_anonymous_usage_stats=n',
+      ...profileFlags(this.opts.profile),
       '--daemon',
     ], this.opts.imageDir);
     // cvd names the group itself and prints "group:cvd_2|instance(s):2". Every later command needs

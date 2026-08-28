@@ -134,6 +134,35 @@ export interface WorkerRegistration {
     osVersion: string;
     capabilities: Capability[];
     /**
+     * v2. Which device profile this one was configured from — `galaxy-s25-ultra` (ADR-0016).
+     *
+     * A stable key, never a display name: the console keys its device chrome off it, and matching
+     * that on `model` would break the first time a marketing name is retyped. Absent on physical
+     * handsets, which ARE the real device, and on any virtual device nobody profiled.
+     *
+     * Its presence is also the console's only way to know that `model` is a configured claim rather
+     * than something read off hardware. That distinction is what keeps the VIRTUAL DEVICE tag
+     * meaningful next to a name like "Samsung Galaxy S25 Ultra".
+     */
+    profile?: string;
+    /**
+     * v2. The device's own panel, as the worker observes it.
+     *
+     * Sent so a device CARD can show geometry and draw a correctly-shaped phone. Before this, screen
+     * only ever reached a browser over the live data-plane socket, so anything outside an open
+     * session fell back to 16:9 — which is not the shape of any phone made in the last decade.
+     */
+    screen?: { width: number; height: number; density: number };
+    /**
+     * v2. ABIs the device can execute, most-preferred first.
+     *
+     * The install preflight refuses an APK whose native libraries none of these can run, rather than
+     * letting `adb install` fail with something that reads like a broken device. Optional: a worker
+     * that does not report them keeps the old behaviour (install and find out) instead of having
+     * every install blocked by an empty list.
+     */
+    abis?: string[];
+    /**
      * v2. Base url the hub should dial for THIS device — the worker's automation gateway
      * (`https://<host>:<port>/automation/<localId>`), not Appium itself. Appium stays on loopback;
      * see ADR-0004.

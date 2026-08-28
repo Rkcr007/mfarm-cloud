@@ -30,7 +30,7 @@ gcloud compute instances start mfarm-lab --project mfarm-lab --zone asia-south1-
 ```
 
 That is genuinely all. The worker is a systemd unit (`mfarm-worker.service`, enabled), so on boot it
-starts itself, brings up both Cuttlefish devices, starts an Appium per device, and registers with the
+starts itself, brings up every Cuttlefish device, starts an Appium per device, and registers with the
 control plane over its public URL.
 
 **Budget the time.** A host boot discards the device snapshots baked into the disk (known issue 24),
@@ -50,7 +50,58 @@ gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c
   --command 'journalctl -u mfarm-worker -f'
 ```
 
-You are waiting for `"available":2`.
+You are waiting for `"available":4` — see the next section for what those four are.
+
+## The four devices, and which two you must not touch
+
+| | model | panel | profile |
+|---|---|---|---|
+| `cf-1`, `cf-2` | `cuttlefish` | 720×1280 @ 320 | none |
+| `cf-3` | Samsung Galaxy S25 Ultra | 1440×3120 @ 600 | `galaxy-s25-ultra` |
+| `cf-4` | Samsung Galaxy S25 | 1080×2340 @ 480 | `galaxy-s25` |
+
+`cf-3` and `cf-4` are configured to reproduce a real handset — geometry, RAM, cores and the build
+properties the guest reports about itself (ADR-0016). `cf-1` and `cf-2` are deliberately left exactly
+as they were: they work, the render baseline was measured on them, and they are the fallback if a
+profiled device misbehaves.
+
+Which device gets which profile is `CF_PROFILES` in `/etc/mfarm/worker.env`, keyed by local id:
+
+```
+CF_INSTANCES=4
+CF_PROFILES=cf-3=galaxy-s25-ultra,cf-4=galaxy-s25
+```
+
+A local id absent from that list gets no profile, and an unprofiled device takes byte-identical cvd
+arguments to the ones it took before profiles existed. An unknown profile id fails the agent at
+startup rather than quietly booting a default.
+
+### NEVER `cvd reset` to change a profile
+
+A profile applies on **cold boot only** — `restoreSnapshot` and `restartExisting` pass no
+device-configuration flags, because configuration comes back out of cvd's instance database. So
+editing `profiles.ts` does nothing to a device that already exists.
+
+The device has to be created again, and the way to do that is a **new instance group**
+(`cvd create --instance_nums=<n>`), which sits alongside the running ones. `cvd reset` tears down
+**every device on the host**, including `cf-1` and `cf-2`.
+
+### Applying the Samsung build properties
+
+Geometry comes from the boot flags. The reported identity does not — it is applied once per device,
+after cold boot and **before the first snapshot**:
+
+```bash
+deploy/apply-device-profile.sh 0.0.0.0:6522 galaxy-s25-ultra   # cf-3
+deploy/apply-device-profile.sh 0.0.0.0:6523 galaxy-s25         # cf-4
+```
+
+Then take a fresh snapshot. A restore from a snapshot taken before this reverts the identity.
+
+**Unverified, and worth checking the first time:** the properties live in an `adb remount` overlay
+whose backing store may be on `/data`, and this farm runs `CF_RESET_MODE=powerwash`, which wipes
+`/data`. Reset a profiled device once and re-read `getprop ro.product.model`. If it reverts, the
+script's header says what to do about it.
 
 ## Put it away (cost, not a teardown)
 

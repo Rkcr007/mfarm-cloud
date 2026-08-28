@@ -534,6 +534,12 @@ export class Agent {
           model: d.control.info.model,
           osVersion: d.control.info.osVersion,
           capabilities: [...d.control.info.capabilities, ...automation],
+          // What the device is configured to look like, and what shape it actually is (ADR-0016).
+          // Both travel on registration rather than only over the live socket, because a device card
+          // has to draw a phone before anyone opens a session on it.
+          profile: d.control.info.profile,
+          screen: d.control.info.screen,
+          abis: d.control.info.abis,
           automationEndpoint: endpoint,
           // The device's real identity, as the driver knows it (B3).
           adbSerial: d.control.info.adbSerial,

@@ -57,7 +57,20 @@ CF_IMAGE_DIR="${CF_IMAGE_DIR:-$HOME/cf/image}"
 # lab box, and an agent started with a bogus ANDROID_HOME advertises `webdriver` and then fails every
 # Appium session with a driver that cannot find adb.
 ANDROID_HOME_RESOLVED="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/lib/android-sdk}}"
-CF_INSTANCES="${CF_INSTANCES:-2}"
+# FOUR devices, of which the last two are configured to reproduce a real handset (ADR-0016).
+#
+# cf-1 and cf-2 keep exactly the configuration they have always had — 720x1280, model `cuttlefish`,
+# the same cvd flags — because they are working and nobody asked to change them. The profiled pair
+# is ADDITIVE: `cvd create --instance_nums=3` builds a new instance group beside the running ones.
+#
+# NEVER `cvd reset` to pick this up. Reset tears down every device on the host, including the two
+# this arrangement exists to leave alone.
+CF_INSTANCES="${CF_INSTANCES:-4}"
+# `<localId>=<profileId>`, comma separated. A device not named here gets no profile, which is the
+# whole mechanism keeping cf-1 and cf-2 out of the way. Known ids live in
+# workers/agent/src/devices/profiles.ts; an unknown one fails the agent at startup rather than
+# quietly booting a default.
+CF_PROFILES="${CF_PROFILES:-cf-3=galaxy-s25-ultra,cf-4=galaxy-s25}"
 REGION="${REGION:-lab}"
 
 say "Writing $ENV_FILE"
@@ -81,6 +94,7 @@ ANDROID_HOME=$ANDROID_HOME_RESOLVED
 ANDROID_SDK_ROOT=$ANDROID_HOME_RESOLVED
 CF_IMAGE_DIR=$CF_IMAGE_DIR
 CF_INSTANCES=$CF_INSTANCES
+CF_PROFILES=$CF_PROFILES
 ENV
 chmod 600 "$ENV_FILE"
 

@@ -13,6 +13,7 @@ import { DataPlane } from './dataplane.ts';
 import { AgentTunnel } from './tunnel.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
 import { createAvdBackend } from './devices/avd.ts';
+import { parseProfileAssignments } from './devices/profiles.ts';
 import { createPhysicalBackend, PhysicalDevice } from './devices/physical.ts';
 import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DiscoveredDevice } from './devices/discovery.ts';
@@ -257,6 +258,20 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
   if (avail.ok) {
     const count = Number(process.env.CF_INSTANCES ?? 1);
     const imageDir = env('CF_IMAGE_DIR');
+    /**
+     * `CF_PROFILES=cf-3=galaxy-s25-ultra,cf-4=galaxy-s25` — which devices are configured to look
+     * like a real handset (ADR-0016).
+     *
+     * Parsed BEFORE anything is constructed so a typo fails the agent at startup with the list of
+     * known profiles, rather than booting four devices of which two are quietly not what the
+     * operator asked for.
+     *
+     * A local id absent from the map gets no profile, and a backend with no profile is
+     * indistinguishable from one built before this option existed. That is the entire mechanism
+     * keeping `cf-1` and `cf-2` — which are working, and which nobody asked to change — out of the
+     * way of this feature.
+     */
+    const profiles = parseProfileAssignments(process.env.CF_PROFILES);
     // One directory PER DEVICE, and a default rather than a required variable.
     //
     // Both halves are load-bearing. A shared directory means device 2 restores device 1's state,
@@ -267,11 +282,18 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
     // inside because bootstrap_cuttlefish.sh locates the image roots by searching for
     // `bin/launch_cvd` and `super.img`, and a 4 GB snapshot under imageDir would confuse that.
     const snapshotRoot = process.env.CF_SNAPSHOT_DIR ?? join(imageDir, '..', 'snapshots');
-    console.log(`[agent] Cuttlefish available — starting ${count} instance(s), snapshots under ${snapshotRoot}`);
+    // Says which devices are profiled, because "cf-3 is a Galaxy S25 Ultra" is exactly the fact an
+    // operator wants confirmed from the logs before they go looking at the console for it.
+    const profiled = [...profiles.entries()].map(([id, p]) => `${id}=${p.label}`).join(', ');
+    console.log(
+      `[agent] Cuttlefish available — starting ${count} instance(s), snapshots under ${snapshotRoot}`
+      + (profiled ? `; profiles: ${profiled}` : ''),
+    );
     return [...physical, ...Array.from({ length: count }, (_, i) =>
       createCuttlefishBackend({
         localId: `cf-${i + 1}`,
         instanceNum: i + 1,
+        profile: profiles.get(`cf-${i + 1}`),
         imageDir,
         snapshotDir: join(snapshotRoot, `cf-${i + 1}`),
         publicHost: process.env.PUBLIC_HOST,

@@ -221,6 +221,14 @@ export interface ApkOptions extends ManifestOptions {
   stored?: boolean;
   /** Extra padding entry, so the manifest is not the only member of the archive. */
   padBytes?: number;
+  /**
+   * Native libraries to ship, as ABI directory names — `['arm64-v8a']`.
+   *
+   * Written as real `lib/<abi>/libnative.so` members, because that layout IS the thing the ABI
+   * preflight reads. An option that injected a metadata field instead would test the parser against
+   * a fiction and pass while the real reader found nothing.
+   */
+  abis?: string[];
 }
 
 export function buildManifest(opts: ApkOptions = {}): Buffer {
@@ -344,6 +352,12 @@ export function buildApk(opts: ApkOptions = {}): Buffer {
     // Local extra of 3 by default: every real APK's local and central extra lengths disagree.
     { name: 'AndroidManifest.xml', content: buildManifest(opts), stored: opts.stored, localExtra: 3 },
     { name: 'classes.dex', content: Buffer.alloc(opts.padBytes ?? 64, 0x7a) },
+    // A directory entry as well as the .so, because real archives carry both and the reader has to
+    // ignore the directory — it holds no code and is not evidence that an ABI is supported.
+    ...(opts.abis ?? []).flatMap((abi) => ([
+      { name: `lib/${abi}/`, content: Buffer.alloc(0) },
+      { name: `lib/${abi}/libnative.so`, content: Buffer.from(`native code for ${abi}`) },
+    ])),
   ]);
 }
 

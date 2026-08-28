@@ -4,7 +4,7 @@ import type { Readable } from 'node:stream';
 import { withTenant, withSystem } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import { appStore, BlobTooLargeError } from '../../appstore.ts';
-import { ApkParseError, readApkMetadata } from '../../apk.ts';
+import { abiMismatchReason, ApkParseError, readApkMetadata } from '../../apk.ts';
 import type { AppActionKind } from '@mfarm/protocol';
 import { LIVE_SESSION_STATES, requestAppAction, type AppActionRow } from '../../appactions.ts';
 import { requireTenant, requireWorker } from '../server.ts';
@@ -38,6 +38,7 @@ interface AppRow {
   version_code: string | number | null;
   label: string | null;
   min_sdk: number | null;
+  abis: string[] | null;
   sha256: string;
   size_bytes: string | number;
   filename: string | null;
@@ -54,6 +55,10 @@ function appJson(r: AppRow) {
     versionCode: r.version_code === null ? null : Number(r.version_code),
     label: r.label,
     minSdk: r.min_sdk,
+    // `[]` (no native code) and `null` (uploaded before we parsed for it) are deliberately NOT
+    // collapsed: the first is a finding, the second is an absence, and only the second is worth
+    // backfilling. Both allow an install.
+    abis: r.abis,
     sha256: r.sha256,
     sizeBytes: Number(r.size_bytes),
     filename: r.filename,
@@ -179,12 +184,12 @@ export async function appRoutes(app: FastifyInstance) {
     const { row, created } = await withTenant(orgId, async (c) => {
       const insert = await c.query<AppRow>(
         `INSERT INTO app_builds (org_id, package_name, version_name, version_code, label,
-                                 min_sdk, sha256, size_bytes, filename)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                                 min_sdk, sha256, size_bytes, filename, abis)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
          ON CONFLICT (org_id, sha256) DO NOTHING
          RETURNING *`,
         [orgId, meta.packageName, meta.versionName, meta.versionCode, meta.label,
-         meta.minSdk, blob.sha256, blob.sizeBytes, filename],
+         meta.minSdk, blob.sha256, blob.sizeBytes, filename, JSON.stringify(meta.abis)],
       );
       if (insert.rows[0]) return { row: insert.rows[0], created: true };
       // Lost the race, or simply a re-upload. Either way the existing row is the answer, and it is
@@ -344,9 +349,13 @@ export async function appRoutes(app: FastifyInstance) {
         // anything — so demanding `app-install` for it would refuse the one device that could
         // actually serve it.
         const needs = kind === 'screenshot' ? 'screenshot' : 'app-install';
-        const { rows: pre } = await c.query<{ state: string; device_id: string | null; capable: boolean | null }>(
+        const { rows: pre } = await c.query<{
+          state: string; device_id: string | null; capable: boolean | null;
+          device_abis: string[] | null; device_model: string | null;
+        }>(
           `SELECT s.state::text AS state, s.device_id,
-                  (d.capabilities ? $2) AS capable
+                  (d.capabilities ? $2) AS capable,
+                  d.abis AS device_abis, d.model AS device_model
              FROM sessions s LEFT JOIN devices d ON d.id = s.device_id
             WHERE s.id = $1`,
           [sessionId, needs],
@@ -360,6 +369,31 @@ export async function appRoutes(app: FastifyInstance) {
             'capability_missing',
             `The device on this session does not declare the \`${needs}\` capability.`,
           );
+        }
+
+        /**
+         * ABI PREFLIGHT — ADR-0016, and the reason a device is allowed to call itself a Galaxy.
+         *
+         * Two devices in this farm report a Samsung `Build.MODEL` while executing x86_64. Every real
+         * Galaxy is arm64-v8a and most real APKs ship arm64-only native libraries, so without this
+         * the first such upload dies inside `adb install` with INSTALL_FAILED_NO_MATCHING_ABIS — on
+         * a device named after the exact phone the customer builds for. Refusing here, by name,
+         * costs one field on a query that was already running.
+         *
+         * ONLY for `install`. A `launch` or `uninstall` acts on something already on the device, and
+         * a build's ABIs say nothing about whether that is possible.
+         */
+        if (kind === 'install' && appId) {
+          const { rows: build } = await c.query<{ abis: string[] | null }>(
+            'SELECT abis FROM app_builds WHERE id = $1', [appId],
+          );
+          // A missing row is left to `requestAppAction` below, which already answers it as a 404 —
+          // RLS hides another org's build, and duplicating that here would leak its existence.
+          const reason = build[0] && abiMismatchReason(
+            { abis: build[0].abis ?? [] },
+            { abis: pre[0].device_abis, model: pre[0].device_model },
+          );
+          if (reason) throw conflict('abi_mismatch', reason);
         }
 
         const action = await requestAppAction(c, { sessionId, appId, kind });

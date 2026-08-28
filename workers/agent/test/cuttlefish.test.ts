@@ -23,7 +23,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, chmod } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CuttlefishDevice, findFleetInstance } from '../src/devices/cuttlefish.ts';
+import { CuttlefishDevice, findFleetInstance, profileFlags } from '../src/devices/cuttlefish.ts';
+import { DEVICE_PROFILES } from '../src/devices/profiles.ts';
 
 /**
  * Stands in for `cvd` and `adb`.
@@ -574,5 +575,82 @@ describe('a group that exists but does not work is rebuilt, once', () => {
     const { readdir } = await import('node:fs/promises');
     assert.deepEqual(await readdir(snapshotDir).catch(() => []), []);
     assert.equal(d.info.capabilities.includes('snapshot-reset'), false);
+  });
+});
+
+/**
+ * Device profiles (ADR-0016).
+ *
+ * The first test is the important one, and it is a REGRESSION TEST FOR DEVICES THAT ARE NOT BEING
+ * CHANGED. `cf-3` and `cf-4` join a host that is already serving `cf-1` and `cf-2`, and the whole
+ * safety argument for doing that rests on one claim: a device with no profile is handed exactly the
+ * command line it was handed before profiles existed. So that claim is asserted as a whole string
+ * equality rather than a set of `assert.match` calls — a subset assertion cannot catch a flag ADDED
+ * to the shared path, which is precisely the mistake that would re-boot the working pair into a
+ * configuration nobody chose.
+ */
+describe('device profiles', () => {
+  const UNPROFILED_CREATE = (image: string) => 'cvd create'
+    + ` --host_path=${image}`
+    + ` --product_path=${image}`
+    + ' --instance_nums=1'
+    + ' --start_webrtc=true'
+    + ' --webrtc_device_id=cf-1'
+    + ' --gpu_mode=guest_swiftshader'
+    + ' --enable_virtiofs=false'
+    + ' --report_anonymous_usage_stats=n'
+    + ' --daemon';
+
+  test('a device with NO profile cold boots exactly as it did before profiles existed', async () => {
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+
+    const d = device();
+    await d.start();
+
+    // Whole-line equality on purpose. If this fails because a flag was added deliberately, the fix
+    // is to update this string AND to understand that every unprofiled device on every existing
+    // farm changes its boot configuration the next time it is created.
+    assert.equal(await callTo('cvd', 'create'), UNPROFILED_CREATE(imageDir));
+    assert.equal(d.info.model, 'cuttlefish');
+    assert.deepEqual(d.info.screen, { width: 720, height: 1280, density: 320 });
+    assert.equal(d.info.profile, undefined);
+  });
+
+  test('a profiled device carries its panel, memory and cores to cvd', async () => {
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+
+    const d = device({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] });
+    await d.start();
+
+    const create = await callTo('cvd', 'create');
+    assert.match(create, /--display0=width=1440,height=3120,dpi=600,refresh_rate_hz=60/);
+    assert.match(create, /--memory_mb=8192/);
+    assert.match(create, /--cpus=4/);
+    // The flags it shares with every other device are still there — a profile ADDS, it never
+    // replaces, and a profiled device that lost --enable_virtiofs=false could never be snapshotted.
+    assert.match(create, /--enable_virtiofs=false/);
+    assert.match(create, /--daemon/);
+  });
+
+  test('a profiled device reports the profile it was built from', () => {
+    const d = device({ profile: DEVICE_PROFILES['galaxy-s25'] });
+    assert.equal(d.info.model, 'Samsung Galaxy S25');
+    assert.deepEqual(d.info.screen, { width: 1080, height: 2340, density: 480 });
+    assert.equal(d.info.profile, 'galaxy-s25');
+  });
+
+  test('every Cuttlefish device publishes its ABIs, profiled or not', () => {
+    // The install preflight refuses an arm64-only APK on the strength of this. A profiled device
+    // needs it MORE than an unprofiled one, not less: it answers Build.MODEL with a Samsung part
+    // number, so "the phone I ship for" is exactly what a tester will assume it can run.
+    assert.deepEqual(device().info.abis, ['x86_64', 'x86']);
+    assert.deepEqual(device({ profile: DEVICE_PROFILES['galaxy-s25'] }).info.abis, ['x86_64', 'x86']);
+  });
+
+  test('profileFlags is empty without a profile', () => {
+    // Stated on its own because it is the single fact cf-1 and cf-2 depend on.
+    assert.deepEqual(profileFlags(undefined), []);
   });
 });

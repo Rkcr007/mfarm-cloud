@@ -950,25 +950,102 @@ kbd {
 }
 .dev-fit { display: grid; place-items: center; }
 
+/* The physical body a profiled device is drawn in — ADR-0016.
+
+   THIS REVERSES WHAT USED TO BE HERE. The frame was deliberately "a thin bezel, not a phone
+   illustration ... no speaker grille, no camera dot, no chrome pretending to be hardware this farm
+   does not have", and that was right while every device was a nameless 720x1280 rectangle. Two of
+   them are now configured to reproduce a specific handset, panel and density and all, and a body
+   drawn to match is not pretence — it is the rest of the same fact, and it carries real information
+   a rectangle cannot: where the thumb falls, how much of the screen a real hand covers, what the
+   safe area actually is.
+
+   What survives the reversal, in full: an UNPROFILED device still gets the plain bezel, because
+   there is no handset to draw. `PLAIN_CHROME` in profiles.js is that case, and it is the ordinary
+   one — physical devices and the two original Cuttlefish devices all take it. */
+.dev-body {
+  position: relative;
+  display: block;
+  /* Hangs off the frame rather than wrapping it in padding: padding would change the box the video
+     is sized against, and the video's box has to stay exactly the device's panel. */
+  padding: 0;
+}
+
 .dev-frame {
   position: relative;
   /* Sized from the device's own reported panel, and from nothing else. `--dev-aspect` and
-     `--dev-zoom` are written by `paintFrame`; changing zoom is one property, not a re-render. */
+     `--dev-zoom` are written by `paintFrame`; changing zoom is one property, not a re-render.
+     `--dev-radius` comes from the PROFILE, not the panel — it is the shape of the body, and the
+     plain fallback keeps the old near-square corner. */
   aspect-ratio: var(--dev-aspect, 0.5625);
   height: calc(min(68vh, 760px) * var(--dev-zoom, 1));
   max-width: 100%;
   background: #000;
-  border-radius: 10px;
-  /* A thin bezel, not a phone illustration. Enough to separate the screen from the panel and to
-     make a black frame legible; no speaker grille, no camera dot, no chrome pretending to be
-     hardware this farm does not have. */
+  border-radius: var(--dev-radius, 10px);
+  /* The bezel, thickened for a device with a body and left thin for one without.
+
+     `--dev-bezel` is a LENGTH, not a percentage. box-shadow spread does not accept `%`, so a
+     percentage here is discarded silently and every device ends up on the same bezel — which is
+     exactly what happened the first time, and it is invisible until two devices are compared. */
   box-shadow:
     0 0 0 1px #2A2A2E,
-    0 0 0 8px #101012,
-    0 0 0 9px #2A2A2E,
+    0 0 0 var(--dev-bezel, 8px) #101012,
+    0 0 0 calc(var(--dev-bezel, 8px) + 1px) #2A2A2E,
     0 24px 60px rgba(0, 0, 0, .6);
   overflow: hidden;
+  transition: border-radius .12s ease;
 }
+
+/* Chrome off — every profile-driven flourish disappears and the panel is the plain bezel again.
+   One attribute, no re-layout of the video, which is the rule the whole panel is built on. */
+.devpanel[data-chrome="off"] .dev-cutout,
+.devpanel[data-chrome="off"] .dev-buttons { display: none; }
+.devpanel[data-chrome="off"] .dev-frame { border-radius: 10px; }
+
+/* -------------------------------------------------------------------- the punch-hole
+
+   THE ONLY THING THIS CONSOLE DRAWS OVER THE DEVICE SCREEN, and it is allowed for one reason: on a
+   real Galaxy the camera IS in the display, so putting it in the bezel would be drawing a phone
+   nobody makes. Three constraints keep it honest, and any one of them going away should take the
+   cutout with it:
+
+     - `pointer-events: none` — it can never eat a tap meant for the device.
+     - The toolbar's chrome toggle removes it, so the status bar underneath is always one click away.
+     - Nothing else gets to sit on the video by citing this. The keyboard hint below is still
+       rendered outside the frame, for exactly the reasons written there. */
+.dev-cutout {
+  position: absolute;
+  left: var(--cut-x, 50%);
+  top: var(--cut-y, 2%);
+  width: var(--cut-d, 3.5%);
+  aspect-ratio: 1;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #050506;
+  /* A hairline rim, so it reads as a lens rather than as a dead pixel on someone's stream. */
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16), 0 0 0 1px rgba(0, 0, 0, .8);
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* -------------------------------------------------------------------- side buttons
+
+   OUTSIDE the screen box, so they cost the device no pixels. Decorative — they are not wired to
+   anything, and the toolbar's Power and Volume controls are the ones that actually send. That is a
+   deliberate asymmetry: a drawn button that looked pressable and did nothing would be exactly the
+   thing this console refuses to ship, so these are drawn thin, flush and unhighlighted, and never
+   take a hover or a cursor. */
+.dev-buttons { position: absolute; inset: 0; pointer-events: none; }
+.dev-btn-left,
+.dev-btn-right {
+  position: absolute;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #2E2E33, #1A1A1D);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .6);
+}
+.dev-btn-left  { left: -12px; }
+.dev-btn-right { right: -12px; }
 
 .dev-video {
   width: 100%; height: 100%;
@@ -992,8 +1069,12 @@ kbd {
 
 /* Says where the keystrokes are going, because the focus ring alone does not explain itself the
    first time. BELOW the phone, never on it: an earlier version floated this inside the bezel, where
-   it covered Android's navigation bar and sat in the swipe-up gesture zone. Nothing overlays the
-   device screen — that screen is the thing under test and must be seen as the device draws it. */
+   it covered Android's navigation bar and sat in the swipe-up gesture zone. The screen is the thing
+   under test and must be seen as the device draws it.
+
+   The punch-hole above is the single exception to that, and it is narrow on purpose: it is what a
+   real Galaxy's display genuinely contains, it takes no pointer events, and one toolbar click
+   removes it. This hint is not in that category and stays outside the frame. */
 .dev-kbd {
   font-size: 11px; letter-spacing: .04em; white-space: nowrap;
   color: var(--mf-accent, #755EB8);

@@ -1428,6 +1428,51 @@ device is covered by the same URL. Caught by a test, not by review.
     seconds. **Trust the timestamps over the error text.** That gap is what identified this in one
     step after the logs had suggested a device problem.
 
+32. **DEVICE PROFILES — three things unverified against real hardware, in the order they will bite.**
+    2026-08-29, with ADR-0016. The code is written and tested; none of it has met cvd.
+
+    a. **The cvd display flag spelling is a guess.** `coldBoot` emits
+       `--display0=width=…,height=…,dpi=…,refresh_rate_hz=60`, `--memory_mb` and `--cpus`. That is
+       the `launch_cvd`-era spelling, expected to pass through `cvd create`; `--displays_textproto`
+       is the alternative. **Run `cvd create --help | grep -i -e display -e memory` before trusting
+       a boot**, and record the answer here the way issues 11 and 12 recorded theirs. A wrong flag
+       here fails at create time, so it is the cheap one.
+
+    b. **The Samsung build properties may not survive a reset, and this one is silent.**
+       `deploy/apply-device-profile.sh` writes them through an `adb remount` overlay whose backing
+       store may live on `/data`. This farm runs `CF_RESET_MODE=powerwash`, which wipes `/data`. If
+       they do not survive, a profiled device reverts to `Cuttlefish x86_64` at the first reset,
+       mid-session, with **nothing in any log saying so** — the device stays up, keeps serving, and
+       simply stops being the phone the console says it is. Verify by resetting cf-3 once and
+       re-reading `getprop ro.product.model`. If it reverts, re-application belongs inside
+       `powerwash()` in `cuttlefish.ts`, not in a one-shot script.
+
+    c. **QHD+ on SwiftShader is unmeasured.** `docs/RENDER_BASELINE.md` measured 60fps for ordinary
+       UI at 720×1280 with no GPU; cf-3 is ~4.9× the pixels through the same software rasteriser.
+       Keeping cf-1 unprofiled makes this a same-host A/B rather than a comparison across two farm
+       states — run `deploy/verify-render.mjs` against both. Gate: ≥55fps on cf-3, else drop the
+       Ultra profile to FHD+ 1080×2340 (which is how Samsung ships it anyway).
+
+    Also unmeasured, and new with four devices: **four concurrent live sessions.** SwiftShader
+    rasterises on the CPU, so four streams contend on 16 vCPU in a way two never did.
+
+    The specification numbers themselves are from published sources, **not read off a handset**.
+    Density is the one worth confirming with `adb shell wm density` on a real S25: Samsung ships a
+    default display-size setting that is not the panel's native ppi, and it is the shipped density
+    that decides dp — which is what layout bugs are expressed in.
+
+33. **`AppStore.put` leaves a `.part` file behind when an upload is refused for size — PRE-EXISTING,
+    and it makes one test flaky.** Noticed 2026-08-29 while working on something else; **not
+    introduced by that work**, and confirmed by running `test/apps.test.ts` five times on a clean
+    tree, where *an oversized stream is refused without writing it out* failed 4 times out of 5.
+
+    The `unlink` after the failed `pipeline` IS awaited, so the shape of the bug is a race rather
+    than a missing cleanup: `createWriteStream` opens lazily and asynchronously, and an open still in
+    flight when the transform throws can recreate the file *after* the unlink has run. The leftover
+    is harmless to the product — nothing reads `tmp/` — but it is real, and the test is right to
+    object. Left alone deliberately as unrelated scope; it wants a `finally` that unlinks after the
+    write stream has actually closed.
+
 ## Working notes for whoever picks this up
 
 **Context is cache; disk is truth.** This file, `docs/adrs/`, and the test suite are the system of
