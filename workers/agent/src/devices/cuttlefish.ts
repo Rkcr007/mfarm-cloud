@@ -279,11 +279,20 @@ export class CuttlefishDevice implements DeviceControl {
       // them to map a click to a device coordinate — so a profile that lied here would simply make
       // the device untappable.
       screen: opts.profile?.screen ?? { width: 720, height: 1280, density: 320 },
-      // x86_64, on every host this tier can run on. Published so the control plane can refuse an
-      // arm64-only APK with the real reason instead of letting `adb install` fail opaquely — which
-      // matters far more now that a profiled device answers `Build.MODEL` with a Samsung part
-      // number no x86 phone has ever carried.
-      abis: ['x86_64', 'x86'],
+      // ABSENT UNTIL THE DEVICE IS ASKED. `refreshAbis()` fills this in after boot from
+      // `ro.product.cpu.abilist`, and undefined means "not yet observed", which the preflight reads
+      // as "do not block".
+      //
+      // THIS WAS HARD-CODED TO `['x86_64', 'x86']` AND THAT WAS WRONG ON BOTH ENTRIES. The lab
+      // image (AOSP 17, build 16102939) actually reports `x86_64,arm64-v8a`: no 32-bit x86 at all
+      // — it is a 64-bit-only image with `ro.zygote=zygote64` — and arm64-v8a IS advertised, which
+      // the guess denied. Caught on hardware 2026-08-29, by which point it would have made the
+      // install preflight refuse arm64 builds the platform's own PackageManager accepts.
+      //
+      // The lesson is ADR-0003's, in the one place this file had quietly broken it: a capability is
+      // observed state, not configuration. An ABI list is a claim about the guest, so it has to come
+      // from the guest.
+      abis: undefined,
       profile: opts.profile?.id,
       // Published, not just used internally. This class has always known the serial — every adb
       // call below uses it — but it never left the object, so the hub sent `cf-1` as `appium:udid`
@@ -357,6 +366,9 @@ export class CuttlefishDevice implements DeviceControl {
     if (await this.snapshotIsStale(seen?.instanceDir)) {
       await this.dropSnapshot(`it belongs to a group that no longer exists (${seen?.instanceDir})`);
     }
+
+    // Before the branch, because start() has two exits and both must publish it.
+    await this.refreshAbis();
 
     // In powerwash mode there is nothing to take and nothing to be stale: the reset is a first-boot
     // restore, so the whole snapshot apparatus below is skipped rather than kept warm for a path
@@ -731,6 +743,93 @@ export class CuttlefishDevice implements DeviceControl {
     // already out of the schedulable pool while it runs, so the cost of waiting is bounded.
     await run('cvd', this.sel('powerwash'), this.opts.imageDir, 600_000);
     await this.waitForBoot(120_000);
+    // A POWERWASH TAKES THE DEVICE'S IDENTITY WITH IT. Measured, not assumed — see the method.
+    await this.applyProfileProps();
+  }
+
+  /**
+   * Re-establish the guest's reported identity — `ro.product.model` and friends — after a wipe.
+   *
+   * WHY THIS IS IN THE RESET PATH AND NOT A ONE-SHOT SETUP STEP. Measured on the lab VM 2026-08-29:
+   * `deploy/apply-device-profile.sh` writes these properties into an overlayfs whose upper directory
+   * lives on `/mnt/scratch`, and `cvd powerwash` wipes it. Directly after a powerwash:
+   *
+   *     ro.product.model         Cuttlefish x86_64 phone 64-bit only   (was SM-S938B)
+   *     ro.product.manufacturer  Google                                (was samsung)
+   *     wm size / wm density     1440x3120 / 600                       (unchanged)
+   *
+   * The geometry survives because it is a boot flag in cvd's instance database rather than guest
+   * state. The identity does not. This farm runs `CF_RESET_MODE=powerwash`, so without this call
+   * every profiled device silently reverts to a Cuttlefish at its FIRST reset — mid-session, with
+   * nothing in any log saying so, on a device the console still labels a Galaxy. That is the exact
+   * failure ADR-0016 flagged as the one to check, and it is real.
+   *
+   * THE COST IS TWO REBOOTS, and it is not hidden: `adb remount` needs a reboot before the overlay
+   * is writable, and `ro.*` properties are read once at init, so the write needs another. A
+   * powerwash reset on a profiled device therefore costs roughly 40s + ~80s instead of 40s.
+   * Unprofiled devices pay nothing — the method returns immediately.
+   *
+   * Failure is logged and swallowed rather than thrown. A device that resets but comes back as
+   * `cuttlefish` is wrong about its name and completely serviceable; failing the reset would take a
+   * working device out of the pool over a cosmetic property.
+   */
+  private async applyProfileProps(): Promise<void> {
+    const props = this.opts.profile?.props;
+    if (!props) return;
+
+    const adb = (args: string[], timeoutMs = 60_000) =>
+      run('adb', ['-s', this.adbSerial, ...args], process.cwd(), timeoutMs);
+    const expected = props['ro.product.model'];
+
+    try {
+      await adb(['root']);
+      await adb(['wait-for-device']);
+      // `adb remount` EXITS 0 AND LEAVES THE PARTITION READ-ONLY until the device has rebooted. It
+      // even prints "Now reboot your device for settings to take effect" while returning success,
+      // so its exit code proves nothing and the write below is the only real check.
+      await adb(['disable-verity']).catch(() => {});
+      await adb(['remount']).catch(() => {});
+      await adb(['reboot']);
+      await this.waitForBoot(120_000);
+      await adb(['root']);
+      await adb(['wait-for-device']);
+      await adb(['remount']).catch(() => {});
+
+      // Split by partition the way the property source order expects. Writing only the bare
+      // `ro.product.model` is the classic mistake here: Android has DERIVED it from the
+      // partition-scoped keys since 10, so the edit appears to work and getprop still says
+      // Cuttlefish.
+      const forVendor: string[] = [];
+      const forSystem: string[] = [];
+      for (const [key, value] of Object.entries(props)) {
+        (key.startsWith('ro.product.vendor.') || key.startsWith('ro.vendor.build.')
+          ? forVendor : forSystem).push(`${key}=${value}`);
+      }
+      for (const [lines, target] of [[forSystem, '/system/build.prop'], [forVendor, '/vendor/build.prop']] as const) {
+        if (!lines.length) continue;
+        // Appended, because later assignments win in build.prop — so this overrides without a sed
+        // that has to match whatever the image already contains.
+        await adb(['shell', `cat >> ${target} << 'MFARM_EOF'\n${lines.join('\n')}\nMFARM_EOF`]);
+      }
+
+      await adb(['reboot']);
+      await this.waitForBoot(120_000);
+
+      const actual = (await adb(['shell', 'getprop', 'ro.product.model'])).trim();
+      if (expected && actual !== expected) {
+        console.warn(
+          `[cuttlefish] ${this.info.localId}: identity did not take — ro.product.model is `
+          + `"${actual}", expected "${expected}". The device works; it is reporting the wrong name.`,
+        );
+        return;
+      }
+      console.log(`[cuttlefish] ${this.info.localId}: re-applied ${this.opts.profile?.id} identity (${actual})`);
+    } catch (e) {
+      console.warn(
+        `[cuttlefish] ${this.info.localId}: could not re-apply its ${this.opts.profile?.id} identity `
+        + `(${(e as Error).message}). The device is serviceable and will report itself as a Cuttlefish.`,
+      );
+    }
   }
 
   private snapshotPath(): string {
@@ -802,6 +901,30 @@ export class CuttlefishDevice implements DeviceControl {
    * the next tenant gets first-boot state. Withholding the capability in powerwash mode would make
    * every device unschedulable for the sake of a word.
    */
+  /**
+   * Read the guest's own ABI list. Called once the device answers adb.
+   *
+   * Failure leaves `abis` undefined rather than guessing or emptying it, and the difference matters:
+   * the control plane reads an empty list as "this device executes nothing" and would block every
+   * install on it, while undefined means "nobody looked" and blocks none.
+   *
+   * WHAT THIS LIST DOES AND DOES NOT TELL YOU. It is exactly what PackageManager matches an APK's
+   * `lib/<abi>/` entries against, so it is the right input for deciding whether an install will be
+   * ACCEPTED. It is not a promise that the code will RUN — see HANDOFF known issue 34, where this
+   * image advertises arm64-v8a with no translation layer behind it.
+   */
+  private async refreshAbis(): Promise<void> {
+    try {
+      const out = await run('adb', ['-s', this.adbSerial, 'shell', 'getprop', 'ro.product.cpu.abilist'],
+        process.cwd(), 15_000);
+      const abis = out.trim().split(',').map((a) => a.trim()).filter(Boolean);
+      if (abis.length) this.info.abis = abis;
+    } catch {
+      // Leave it undefined. A device that cannot answer getprop has bigger problems, and they will
+      // surface somewhere that can say more than this can.
+    }
+  }
+
   private async refreshResetCapability(): Promise<void> {
     const has = this.opts.resetMode === 'powerwash' || Boolean(await this.snapshotOnDisk());
     const listed = this.info.capabilities.includes('snapshot-reset');

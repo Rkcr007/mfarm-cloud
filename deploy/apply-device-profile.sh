@@ -70,18 +70,40 @@ c_info "currently: $(adb -s "$SERIAL" shell getprop ro.product.model | tr -d '\r
 adb -s "$SERIAL" root >/dev/null
 adb -s "$SERIAL" wait-for-device
 
-# Cuttlefish ships with verity off, so this is usually a no-op — but a build that has it on fails
-# `remount` with a message about verity that reads like a permissions problem. Asking for it
-# unconditionally costs a reboot at most, and only the first time.
-if ! adb -s "$SERIAL" remount >/dev/null 2>&1; then
-  c_warn "remount refused; disabling verity and rebooting once"
-  adb -s "$SERIAL" disable-verity >/dev/null || true
-  adb -s "$SERIAL" reboot
+# `adb remount` EXITS 0 AND LEAVES THE PARTITIONS READ-ONLY. Verified on the lab VM 2026-08-29:
+# it sets up the overlays, prints "Now reboot your device for settings to take effect", and returns
+# success — after which `cat >> /system/build.prop` still fails with "Read-only file system". So the
+# exit code proves nothing, and the first version of this script trusted it and died one step later
+# with an error that looks like a permissions problem rather than a missing reboot.
+#
+# The sequence that actually works is remount -> REBOOT -> root -> remount, and then a real write
+# test. Verity is disabled on the way through; on this image `ro.boot.veritymode` reads `enforcing`
+# even though remount reports "Verity disabled; overlayfs enabled", so that property is not a usable
+# signal either.
+wait_boot() {
   adb -s "$SERIAL" wait-for-device
-  adb -s "$SERIAL" root >/dev/null
-  adb -s "$SERIAL" wait-for-device
-  adb -s "$SERIAL" remount >/dev/null || die "remount still refused; the image is not writable"
-fi
+  until [ "$(adb -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+    sleep 2
+  done
+}
+
+writable() {
+  adb -s "$SERIAL" shell 'touch /system/.mfarm_write_test 2>/dev/null && rm -f /system/.mfarm_write_test && echo YES' \
+    2>/dev/null | tr -d '\r' | grep -q YES
+}
+
+c_info "enabling overlayfs (this reboots the device once)"
+adb -s "$SERIAL" disable-verity >/dev/null 2>&1 || true
+adb -s "$SERIAL" remount >/dev/null 2>&1 || true
+adb -s "$SERIAL" reboot
+wait_boot
+adb -s "$SERIAL" root >/dev/null
+adb -s "$SERIAL" wait-for-device
+adb -s "$SERIAL" remount >/dev/null 2>&1 || true
+
+# The only check that means anything: write something and see whether it lands.
+writable || die "/system is still read-only after remount + reboot. Nothing below would have taken."
+c_ok "/system is writable"
 
 # WRITTEN TO EVERY PARTITION'S build.prop, not just one.
 #
