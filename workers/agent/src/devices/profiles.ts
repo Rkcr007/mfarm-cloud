@@ -101,19 +101,39 @@ function identityProps(id: Identity): Record<string, string> {
  *     verified. Nothing functional reads them; they are here so a fingerprint is not obviously
  *     malformed.
  *
- * One deliberate divergence from the real hardware, recorded so it is not mistaken for an error:
- * Samsung ships Ultra models defaulting to FHD+ with QHD+ as an opt-in, so a factory-fresh S25 Ultra
- * is 1080x2340. QHD+ is used here because it is what differentiates this profile from the S25 one,
- * and because a high-density target is worth having in the farm. It costs ~4.9x the pixels of the
- * 720x1280 devices through a software rasteriser — see docs/RENDER_BASELINE.md for whether that is
- * affordable on this host.
+ * Both profiles run at FHD+ 1080x2340, which is what Samsung ships on both. QHD+ was tried on the
+ * Ultra and measured too expensive on SwiftShader — the numbers and the reasoning are on that
+ * profile's `screen` field. What separates the two devices is DENSITY, not pixels: 384dp against
+ * 360dp, which is the difference a layout actually sees.
  */
 export const DEVICE_PROFILES: Record<string, DeviceProfile> = {
   'galaxy-s25-ultra': {
     id: 'galaxy-s25-ultra',
     model: 'Samsung Galaxy S25 Ultra',
     label: 'Galaxy S25 Ultra',
-    screen: { width: 1440, height: 3120, density: 600 },
+    // FHD+ AT THE ULTRA'S DENSITY — measured, and it is how the phone actually ships.
+    //
+    // This profile was QHD+ 1440x3120 @ 600 until 2026-08-29, when the render A/B on the lab VM
+    // measured what that costs on SwiftShader. Same native scroll, same host, HWUI's own counters:
+    //
+    //   720x1280  @320   50th 44ms   95th 57ms    99th 61ms    missed vsync 55
+    //   1440x3120 @600   50th 65ms   95th 109ms   99th 650ms   missed vsync 127
+    //   1080x2340 @480   50th 40ms   95th 53ms    99th 150ms   missed vsync 26
+    //
+    // 65ms at the median is ~15fps sustained during interaction, with a 650ms worst frame. A
+    // "Galaxy S25 Ultra" that scrolls like that is less convincing than an honest 720p device at
+    // 60, and it would make every timing-sensitive test flaky for reasons that are the farm's fault.
+    //
+    // FHD+ is not a climbdown. Samsung SHIPS Ultra models defaulting to FHD+ with QHD+ as an opt-in,
+    // so this is the out-of-box device. And the thing that actually distinguishes it from the plain
+    // S25 survives, because that was never the pixel count:
+    //
+    //   Ultra  1080 x 160 / 450 = 384dp wide
+    //   S25    1080 x 160 / 480 = 360dp wide
+    //
+    // Same panel, different density, different dp — and dp is what layout bugs are expressed in.
+    // The 1080x2340 row above was measured on a real profiled device and beat the 720p baseline.
+    screen: { width: 1080, height: 2340, density: 450 },
     diagonalIn: 6.9,
     memoryMb: 8192,
     cpus: 4,

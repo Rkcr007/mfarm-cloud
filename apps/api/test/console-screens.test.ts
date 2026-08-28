@@ -509,7 +509,7 @@ describe('device profiles', () => {
         id: 'dev-3', region: 'lab', platform: 'android', tier: 'cuttlefish',
         model: 'Samsung Galaxy S25 Ultra', osVersion: '17', state: 'READY', dedicated: false,
         profile: 'galaxy-s25-ultra',
-        screen: { width: 1440, height: 3120, density: 600 },
+        screen: { width: 1080, height: 2340, density: 450 },
         abis: ['x86_64', 'x86'],
         capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install',
           'logcat', 'screenshot', 'ui-hierarchy'],
@@ -529,7 +529,7 @@ describe('device profiles', () => {
 
   test('the card shows the panel it actually boots with', () => {
     withProfiled();
-    assert.match(textOf(mod.SCREENS.devices()), /1440 × 3120 · 600dpi/);
+    assert.match(textOf(mod.SCREENS.devices()), /1080 × 2340 · 450dpi/);
   });
 
   test('a device that reported no screen shows no geometry row rather than an empty one', () => {

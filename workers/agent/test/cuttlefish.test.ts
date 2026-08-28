@@ -652,7 +652,7 @@ describe('device profiles', () => {
     await d.start();
 
     const create = await callTo('cvd', 'create');
-    assert.match(create, /--display0=width=1440,height=3120,dpi=600,refresh_rate_hz=60/);
+    assert.match(create, /--display0=width=1080,height=2340,dpi=450,refresh_rate_hz=60/);
     assert.match(create, /--memory_mb=8192/);
     assert.match(create, /--cpus=4/);
     // The flags it shares with every other device are still there — a profile ADDS, it never
@@ -757,7 +757,7 @@ describe('a reset re-establishes the device identity', () => {
  * A RESTART MUST NOT SILENTLY RESIZE A PROFILED DEVICE.
  *
  * Measured on hardware: `cvd start --daemon` brought cf-3 back at the image default 720x1280
- * instead of its profile's 1440x3120, while the guest kept reporting itself as a Galaxy S25 Ultra.
+ * instead of its profile's own panel, while the guest kept reporting itself as a Galaxy S25 Ultra.
  * A device that lies about its size is worse than one that never claimed a size, and this is the
  * path a host reboot takes.
  */
@@ -776,7 +776,7 @@ describe('a restart preserves the profile geometry', () => {
     await restarted({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] });
     const start = (await calls()).find((c) => /^cvd .*\bstart\b/.test(c) && !c.includes('fleet'));
     assert.ok(start, 'expected a restart');
-    assert.match(start, /--display0=width=1440,height=3120,dpi=600/);
+    assert.match(start, /--display0=width=1080,height=2340,dpi=450/);
     assert.match(start, /--memory_mb=8192/);
     assert.match(start, /--cpus=4/);
   });

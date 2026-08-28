@@ -41,7 +41,9 @@ describe('the catalog', () => {
 
   test('the two Samsung profiles are the geometries they claim', () => {
     // Spelled out rather than derived, so a change to either number is a change a reviewer sees.
-    assert.equal(dp(DEVICE_PROFILES['galaxy-s25-ultra'].screen.width, 600), 384);
+    // Same panel as the S25; the density is what makes it an Ultra. QHD+ was measured off on
+    // SwiftShader — see the comment on that profile.
+    assert.equal(dp(DEVICE_PROFILES['galaxy-s25-ultra'].screen.width, 450), 384);
     assert.equal(dp(DEVICE_PROFILES['galaxy-s25'].screen.width, 480), 360);
   });
 
