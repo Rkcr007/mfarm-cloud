@@ -393,6 +393,23 @@ export class Agent {
           localId,
           caps: [...d.control.info.capabilities].sort(),
           automation: this.automation.get(localId) ?? null,
+          // WHAT THE DEVICE IS, not just what it can do — and it is here for the reason the comment
+          // below gives, learned again the hard way on 2026-08-29.
+          //
+          // These four are re-asserted by the registration upsert and by nothing else. Until device
+          // profiles (ADR-0016) they could not change on a running host: `model` was the constant
+          // `cuttlefish`, and screen/profile/abis did not exist. Now a profile edit changes all of
+          // them, and a device rebuilt at a new geometry changes `screen` on its own.
+          //
+          // The symptom was the whole reason this line exists: cf-3 was rebuilt at 1080x2340 @450,
+          // the guest agreed, the agent had the right value in memory, the worker was restarted —
+          // and the console kept showing 1440x3120 @600 for as long as the capabilities stayed
+          // equal. A device whose reported panel disagrees with the one it draws is worse than one
+          // that reports nothing: the console divides by it to place a tap.
+          model: d.control.info.model,
+          screen: d.control.info.screen,
+          profile: d.control.info.profile ?? null,
+          abis: d.control.info.abis ?? null,
         };
       })
       .sort((a, b) => a.localId.localeCompare(b.localId));

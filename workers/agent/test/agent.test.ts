@@ -959,6 +959,55 @@ describe('per-device automation endpoints', () => {
       're-registration would have minted a new worker token');
   });
 
+  test('a rebuilt device re-registers its new panel instead of resuming onto the old one', async () => {
+    /**
+     * `devices.screen`, `model`, `profile` and `abis` are written at registration and nowhere else,
+     * so a change that does not move the fingerprint can never reach the control plane.
+     *
+     * Found on hardware 2026-08-29 (ADR-0016): cf-3 was rebuilt at 1080x2340 @450, the guest agreed,
+     * the agent had the right value in memory, the worker was restarted — and the console kept
+     * showing 1440x3120 @600, because the capabilities had not changed. A device whose reported
+     * panel disagrees with the one it draws is worse than one that reports nothing: the console
+     * divides by it to place a tap.
+     */
+    const hostname = `panel-${randomUUID().slice(0, 8)}`;
+    const before = fakeBackend('cf-1');
+    before.control.info.screen = { width: 1440, height: 3120, density: 600 };
+    await makeAgent([before], hostname).start();
+
+    const after = fakeBackend('cf-1');
+    after.control.info.screen = { width: 1080, height: 2340, density: 450 };
+    const second = makeAgent([after], hostname);
+    await second.start();
+
+    assert.equal(second.registeredThisStart, true, 'a changed panel has to be re-registered');
+    const row = await withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT screen FROM devices WHERE host_id = $1 AND local_id = 'cf-1'`, [second.hostId]);
+      return rows[0] as { screen: { width: number; height: number; density: number } };
+    });
+    assert.deepEqual(row.screen, { width: 1080, height: 2340, density: 450 });
+  });
+
+  test('a device whose shape did not change still resumes', async () => {
+    // The other half, again: four new fields in the fingerprint must not make every restart a
+    // registration and mint a fresh worker token each time.
+    const hostname = `panel-stable-${randomUUID().slice(0, 8)}`;
+    const mk = () => {
+      const b = fakeBackend('cf-1');
+      b.control.info.screen = { width: 1080, height: 2340, density: 450 };
+      b.control.info.model = 'Samsung Galaxy S25 Ultra';
+      b.control.info.profile = 'galaxy-s25-ultra';
+      b.control.info.abis = ['x86_64', 'arm64-v8a'];
+      return b;
+    };
+    const firstState = await makeAgent([mk()], hostname).start();
+    const second = makeAgent([mk()], hostname);
+    const secondState = await second.start();
+    assert.equal(second.registeredThisStart, false);
+    assert.equal(secondState.workerToken, firstState.workerToken);
+  });
+
   test('the agent says which of the two things it did', async () => {
     /**
      * `registeredThisStart` exists because the log line lied. `index.ts` printed "registered as
