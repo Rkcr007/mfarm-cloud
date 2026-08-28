@@ -2004,7 +2004,7 @@ function paintFrame(device) {
     st.buttonSignature = signature;
     st.buttons.replaceChildren(...chrome.buttons.map((b) => h('span', {
       class: `dev-btn-${b.side}`,
-      style: `top:${b.topPct}%;height:${b.lenPct}%`,
+      style: { top: `${b.topPct}%`, height: `${b.lenPct}%` },
     })));
   }
 

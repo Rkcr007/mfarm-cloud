@@ -1610,3 +1610,50 @@ What is left, in this order:
    c. Open a session from the console and watch the bring-up. **Exercise BOTH ICE modes** — ADR-0005
       is explicit that a viewer tested only on a LAN has not been tested, so the second run is from a
       phone on mobile data, checking the cockpit's Stream panel reports `relayed (TURN)`.
+
+37. **A STRING WHERE `h()` WANTED AN OBJECT KILLED EVERY SESSION IN PRODUCTION, AND 991 TESTS SAID
+    IT WAS FINE.** 2026-08-29.
+
+    `paintFrame` drew the side buttons with `h('span', { style: `top:${b.topPct}%;…` })`. `h()`
+    writes styles as `Object.assign(node.style, value)`, so a STRING there is spread across the keys
+    `0`, `1`, `2`… A real `CSSStyleDeclaration` answers that with
+
+    ```
+    TypeError: Failed to set an indexed property [0] on 'CSSStyleDeclaration'
+    ```
+
+    thrown out of `paintFrame` -> `stagePanel` -> `screenCockpit` -> `render`. The cockpit therefore
+    threw partway through building its tree on EVERY session, on the one screen the product is
+    about. The visible symptom was not an error: the page rendered blank, then the live view sat at
+    "Negotiating the media connection" forever, and the session stayed `ALLOCATING` for its whole
+    life — because `session_attach` (migration 017) is reported by the worker when a client attaches,
+    and the client never got far enough to attach. **Three layers of honest-looking status, all
+    downstream of a `TypeError` nothing surfaced.**
+
+    Only the side buttons take this path; the cutout and the frame use `setProperty`, which is why
+    the panel drew its body and its punch-hole and lost only the code after them.
+
+    **WHY THE SUITE WAS GREEN, which is the part worth keeping.** Two independent blind spots, and
+    either one alone would have hidden it:
+
+    a. **`dom-shim.ts` modelled `style` as a plain object**, and `Object.assign({}, 'abc')` succeeds —
+       it just produces `{0:'a',1:'b',2:'c'}`. The one CSSOM behaviour that distinguishes a real
+       declaration from a bag of properties was the one the shim did not have. It now throws on an
+       indexed write. That is not CSSOM support and does not pretend to be; it is a single guard
+       against a mistake the shim was previously blind to by construction.
+
+    b. **The profiled-cockpit test set `state.sessionDetail`, a key that appears NOWHERE in
+       `console.js`** — the cockpit reads `state.detail`. So the test spread `undefined`, rendered the
+       UNPROFILED `dev-1`, and asserted `dev-body` and `dev-cutout`, both of which are built once
+       with the panel and exist for every device, profiled or not. It was green because it asserted
+       two things that are true of everything, about a device it never loaded.
+
+    **THE GENERAL LESSON, and it is not "add a test".** An assertion that holds for the fallback path
+    cannot detect that you are on the fallback path. `dev-body` and `dev-cutout` were the wrong
+    things to assert precisely because they always exist; `dev-btn-right` was the right one because
+    it exists ONLY when `chromeFor` matched a real profile. When a feature has a graceful fallback,
+    at least one assertion has to be false in the fallback — otherwise the test passes hardest
+    exactly when the feature is not working.
+
+    Both halves are fixed, and reverting the one-line source bug now fails the suite with the real
+    browser's error text.

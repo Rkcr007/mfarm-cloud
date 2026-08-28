@@ -546,11 +546,29 @@ describe('device profiles', () => {
   test('the stage draws a body and a punch-hole for a profiled device', () => {
     withProfiled();
     mod.state.route = { name: 'cockpit', id: 'sess-1' };
-    mod.state.sessionDetail = { ...mod.state.sessionDetail, deviceId: 'dev-3' };
+    // `state.detail`, which is the key the cockpit actually reads. It was `state.sessionDetail`
+    // here — a name that appears nowhere in console.js — so this test spread `undefined` and then
+    // rendered the UNPROFILED `dev-1` while asserting things about a Galaxy. Every assertion still
+    // passed, because the two it made are true of every device.
+    mod.state.detail = { ...mod.state.detail, deviceId: 'dev-3' };
     mod.state.stage = null;
     const classes = classesOf(mod.SCREENS.cockpit());
     assert.ok(classes.includes('dev-body'), 'the phone body');
     assert.ok(classes.includes('dev-cutout'), 'the camera, which is IN the display on a real Galaxy');
+    /**
+     * The SIDE BUTTONS, and this is the assertion that carries the test.
+     *
+     * `dev-body` and `dev-cutout` are built once with the panel and exist for EVERY device, profiled
+     * or not — so asserting them proves the panel was built and nothing more. This one is different:
+     * a button only exists when `chromeFor` matched a real profile, so it is the only line here that
+     * fails if the device never resolves and the chrome silently falls back to plain.
+     *
+     * It is also the line that would have caught the crash. Buttons are the one piece of chrome
+     * written through `h()`, and `h()` writes styles as `Object.assign(node.style, value)` — a
+     * string there spreads across the indices `0`, `1`, `2`… A real `CSSStyleDeclaration` throws on
+     * that; the shim used to accept it. Both halves are fixed, and this reaches the code.
+     */
+    assert.ok(classes.includes('dev-btn-right'), 'the volume and power keys down the right edge');
   });
 
   test('an unprofiled device still renders — the plain bezel is the ordinary case', () => {
