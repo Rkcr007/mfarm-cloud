@@ -127,6 +127,18 @@ export const state = {
    */
   org: { members: [], keys: [], loaded: false, newKey: null },
   /**
+   * The pairing screen's own state — ADR-0014.
+   *
+   * `machine` is what the agent SAID about itself, held between the two halves of an approval:
+   * inspect, look at it, then confirm. That gap is the whole mitigation for the flow's one real
+   * weakness — somebody talked into typing a code they were sent — so it is a deliberate stop
+   * rather than an extra click to be optimised away later.
+   *
+   * The code lives here rather than in the input element because a poll-driven re-render replaces
+   * the DOM underneath it, and half-typed input that vanishes is worse than no screen at all.
+   */
+  pair: { code: '', machine: null, busy: false, error: null, enrollments: [], loaded: false },
+  /**
    * Artifacts for the session detail screen, keyed by session id.
    *
    * Per session rather than one org-wide list: a session's evidence is only ever looked at from
@@ -705,7 +717,7 @@ async function refreshAll() {
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'team', 'settings']);
+const ROUTES = new Set(['devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'team', 'settings']);
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
@@ -3430,7 +3442,7 @@ $('palette-input').addEventListener('keydown', (e) => {
 let gPending = 0;
 // `r` was already Sessions when Runs arrived, and rebinding it would have broken the one shortcut
 // people here use most. `u` is what "run" has left once r, n and s are taken.
-const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', t: 'team', s: 'settings' };
+const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', t: 'team', s: 'settings' };
 
 /**
  * Is this keystroke meant for something that takes typing, rather than for the console?
@@ -3510,8 +3522,169 @@ function orgGate() {
   return h('p', { class: 'empty' }, h('strong', { text: 'Loading…' }));
 }
 
+/**
+ * The same skeleton-then-fill rule as `orgGate`, over the enrollment list.
+ *
+ * Its own gate rather than reusing `orgGate`, because this screen needs neither members nor API
+ * keys — loading them to render a pairing box would be two requests for data nothing on the page
+ * shows.
+ */
+function pairGate() {
+  if (state.pair.loaded) return null;
+  void refreshPairings().then(render).catch((e) => toast('Could not load paired machines', e.message, 'bad'));
+  return h('p', { class: 'empty' }, h('strong', { text: 'Loading…' }));
+}
+
 function roleBadge(role) {
   return h('span', { class: `pill ${role === 'owner' ? 'accent' : ''}`.trim(), text: role });
+}
+
+/* ---------------------------------------------------------------------------- agents (ADR-0014) */
+
+/**
+ * Pair a machine — the console half of the device authorization grant.
+ *
+ * The agent shows a code; somebody signed in here types it. THE ORG COMES FROM THIS SESSION, never
+ * from anything the agent said, which is the whole reason the code travels in this direction: it
+ * proves possession of a machine and nothing else, and the identity it is attached to is the
+ * identity of whoever is looking at this screen.
+ *
+ * TWO STEPS ON PURPOSE. Inspect names the machine; approving is a separate press. The flow's one
+ * genuine weakness is a person talked into typing a code that was sent to them, and the only
+ * defence is showing them what they are about to admit before they admit it.
+ */
+function screenAgents() {
+  const pending = pairGate();
+  const admin = isOrgAdmin();
+  const p = state.pair;
+
+  const codeInput = h('input', {
+    class: 'field mono tall', type: 'text', placeholder: 'XXXX-XXXX',
+    value: p.code, autocomplete: 'off', spellcheck: 'false', maxlength: '20',
+    // Straight into state, so the five-second poll cannot swallow half a typed code.
+    oninput: (e) => { state.pair.code = e.target.value; },
+    onkeydown: (e) => { if (e.key === 'Enter' && !p.busy) inspectCode(); },
+  });
+
+  const enterCode = card('Pair a machine', {},
+    h('p', { class: 'caption' },
+      'Run the MFARM agent on the machine your phone is plugged into. It opens a window showing a '
+      + 'code — type it here.'),
+    h('div', { class: 'row tight mt-md' },
+      codeInput,
+      btn(p.busy ? 'Checking…' : 'Find machine', 'primary', () => inspectCode(), { disabled: p.busy || !admin })),
+    p.error ? h('p', { class: 'error-text mt-sm', text: p.error }) : null,
+    admin ? null : h('p', { class: 'caption mt-sm', text: 'Only an owner or admin can pair a machine.' }),
+  );
+
+  // What the agent said about itself. Self-reported and labelled as such — it is a description for
+  // a person to recognise, never an identifier the farm relies on.
+  const confirm = p.machine ? card('Is this your machine?', { class: 'highlight' },
+    h('p', { class: 'caption' },
+      'This is what the machine says about itself. If you do not recognise it, do not approve it — '
+      + 'a code you were sent by someone else would look exactly like this.'),
+    h('dl', { class: 'facts mt-md' },
+      h('dt', { text: 'Hostname' }), h('dd', { class: 'mono', text: p.machine.hostname || 'unnamed' }),
+      h('dt', { text: 'Platform' }), h('dd', { class: 'mono', text: p.machine.platform || 'unknown' }),
+      h('dt', { text: 'Agent' }), h('dd', { class: 'mono', text: p.machine.agentVersion || 'unknown' }),
+      h('dt', { text: 'Asked to pair' }), h('dd', { text: when(p.machine.requestedAt) }),
+    ),
+    h('div', { class: 'row tight mt-lg' },
+      btn(p.busy ? 'Pairing…' : 'Yes, pair this machine', 'primary', () => approveCode(), { disabled: p.busy }),
+      btn('Cancel', 'ghost', () => { state.pair.machine = null; state.pair.error = null; render(); }),
+    ),
+  ) : null;
+
+  const paired = card('Machines paired here', {},
+    pending || (p.enrollments.length
+      ? h('div', { class: 'stack' }, p.enrollments.map((e) => h('div', { class: 'inset row between' },
+          h('div', { class: 'stack tight' },
+            h('span', { class: 'row tight' },
+              h('span', { class: 'secondary', text: e.label || 'unnamed machine' }),
+              e.revokedAt ? h('span', { class: 'pill', text: 'revoked' })
+                : e.usedAt ? h('span', { class: 'pill', text: 'in use' })
+                  : h('span', { class: 'pill', text: 'not yet used' })),
+            h('p', { class: 'caption', text: e.usedAt ? `paired ${when(e.usedAt)}` : `created ${when(e.createdAt)}` }),
+          ),
+          h('span', { class: 'mono caption', text: `${e.prefix}…` }),
+        )))
+      : empty('No machines paired yet.',
+          'Run the agent on a laptop with a phone on it, and the code it shows goes in the box above.')));
+
+  return [
+    pageHead([{ label: 'Organisation' }], 'Agents',
+      'Machines that put devices into this farm'),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' }, enterCode, confirm, paired),
+      h('div', { class: 'rail' },
+        card('How pairing works', {},
+          h('p', { class: 'caption' },
+            'The agent asks this farm for a code and shows it. You type it here, and because you '
+            + 'are signed in, the machine joins THIS organisation — the code itself carries no '
+            + 'identity, only proof that somebody is standing in front of that machine.'),
+          h('p', { class: 'caption mt-sm' },
+            'Codes last ten minutes. If one lapses the agent shows a new one automatically, so the '
+            + 'window always has a code that currently works.'),
+          h('p', { class: 'caption mt-sm' },
+            'Pairing happens once per machine. Afterwards it holds its own credential and rejoins '
+            + 'on its own after a restart.'),
+        ),
+      ),
+    ),
+  ];
+}
+
+async function inspectCode() {
+  const code = state.pair.code.trim();
+  if (!code) return;
+  state.pair.busy = true;
+  state.pair.error = null;
+  state.pair.machine = null;
+  render();
+  try {
+    const { pairing } = await api('/v1/pair/inspect', { method: 'POST', body: { userCode: code } });
+    state.pair.machine = pairing;
+    if (pairing.approved) {
+      state.pair.machine = null;
+      state.pair.error = 'That code has already been approved — the agent should have paired. Check its window.';
+    }
+  } catch (e) {
+    state.pair.error = e.message;
+  } finally {
+    state.pair.busy = false;
+    render();
+  }
+}
+
+async function approveCode() {
+  state.pair.busy = true;
+  state.pair.error = null;
+  render();
+  try {
+    const { pairing } = await api('/v1/pair/approve', { method: 'POST', body: { userCode: state.pair.code.trim() } });
+    state.pair.machine = null;
+    state.pair.code = '';
+    await refreshPairings();
+    toast('Paired', `${pairing.hostname || 'That machine'} is joining the farm — its window should say so.`);
+  } catch (e) {
+    state.pair.error = e.message;
+  } finally {
+    state.pair.busy = false;
+    render();
+  }
+}
+
+/**
+ * Which machines were paired, from the enrollment list this already had.
+ *
+ * Reusing `agent_enrollments` rather than adding a listing over `agent_pairings`: the enrollment IS
+ * the durable record of a machine having joined, and pairings are a ten-minute holding area whose
+ * rows mean nothing to a person once they are collected.
+ */
+async function refreshPairings() {
+  const { enrollments } = await api('/v1/account/agent-enrollments');
+  state.pair.enrollments = enrollments || [];
+  state.pair.loaded = true;
 }
 
 function screenTeam() {
@@ -3735,6 +3908,7 @@ export const SCREENS = {
   cockpit: () => screenCockpit(state.route.id),
   queue: () => screenQueue(),
   health: () => screenHealth(),
+  agents: () => screenAgents(),
   team: () => screenTeam(),
   settings: () => screenSettings(),
 };

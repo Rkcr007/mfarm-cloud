@@ -60,9 +60,9 @@ names nobody, and revoking it revokes every machine.
 [agent] pairing code RSMB-MR9J — type it into the console to connect this machine
 ```
 
-Type that code into the console, signed in as an owner or admin. You are shown which machine is
-asking — hostname, platform, agent version — before you confirm, because the one real weakness of
-this flow is being talked into approving somebody else's machine.
+Type that code into the console under **Organisation → Agents**, signed in as an owner or admin.
+You are shown which machine is asking — hostname, platform, agent version — before you confirm,
+because the one real weakness of this flow is being talked into approving somebody else's machine.
 
 The agent polls, receives an ordinary `mae_` enrollment token, and registers. Nothing is pasted
 anywhere and no credential passes through a chat message.

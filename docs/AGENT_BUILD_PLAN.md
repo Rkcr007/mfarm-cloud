@@ -258,8 +258,13 @@ showed `RSMB-MR9J`, an admin inspected it (seeing hostname, platform and agent v
 it, and the agent registered — then a restart paired nothing, because the host now carries its own
 `mwk_`.
 
-**Still to build here:** the console screen (the flow above was driven by `curl` against the same
-endpoints a screen will call), credentials into the Keychain, and unpair.
+**The console screen is built too** — *Organisation → Agents*. Enter the code, see which machine is
+asking, confirm. Approval is deliberately two presses: the flow's one genuine weakness is somebody
+talked into typing a code that was sent to them, and the only defence is showing them what they are
+about to admit before they admit it.
+
+**Still to build here:** credentials into the Keychain (they are in `~/.mfarm/agent-state.json` at
+`0600` today), and unpair.
 
 The agent shows `XXXX-XXXX`; the user types it into the console they are already signed into; the
 agent polls and receives the `mae_` token the API already mints. This is RFC 8628's device
