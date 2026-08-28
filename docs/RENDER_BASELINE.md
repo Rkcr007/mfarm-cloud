@@ -82,3 +82,28 @@ Recorded because each produced a confident, wrong, healthy-looking answer:
 - **Which layer holds the frames depends on how the app renders.** Flutter's frames are on the
   `(BLAST)` SurfaceView layer; a native app has no BLAST layer at all and its frames are on the
   `VRI-` (ViewRootImpl) child, while its window layer reports zero. Probe candidates, do not assume.
+
+## Geometry A/B — what a bigger panel costs (2026-08-29)
+
+Measured on the same lab box, same native workload (AOSP Settings, 28 swipes), HWUI's own counters
+via `dumpsys gfxinfo`. Three devices differing only in panel, so the delta is geometry and nothing
+else — which is the reason `cf-1` and `cf-2` were kept unprofiled rather than converted.
+
+| Device | Panel | 50th | 95th | 99th | Missed vsync |
+|---|---|---|---|---|---|
+| cf-1 (unprofiled) | 720×1280 @320 | 44ms | 57ms | 61ms | 55 |
+| cf-3 (Galaxy S25 Ultra, QHD+) | 1440×3120 @600 | **65ms** | **109ms** | **650ms** | **127** |
+| cf-4 (Galaxy S25) | 1080×2340 @480 | 40ms | 53ms | 150ms | 26 |
+
+**QHD+ does not hold.** 65ms at the median is roughly 15fps sustained during interaction, with a
+650ms worst frame — on a device the console calls a Galaxy S25 Ultra. Every timing-sensitive test on
+it would be flaky for reasons that are the farm's fault.
+
+**FHD+ is free.** 1080×2340 measured BETTER than the 720×1280 baseline on median, 95th and missed
+vsyncs. So the S25 Ultra profile moved to 1080×2340 @450 — which is also how Samsung ships it, with
+QHD+ as an opt-in — and the two Samsung profiles are now separated by density rather than pixels:
+384dp against 360dp. dp is what a layout bug is expressed in; pixel count is not.
+
+Note these numbers are NOT comparable to the table above: different driver (adb `input swipe`
+rather than WebDriver flings), different app, fewer samples. The A/B between rows is the finding;
+the absolute values are not a re-baseline.
