@@ -251,7 +251,15 @@ be in flight while M3 is built.
 The milestone that turns the table above into three steps. **No certificate needed**, which is why
 it comes first.
 
-### 3a. Pairing — [ADR-0014](adrs/0014-pairing-is-a-device-authorization-grant.md)
+### 3a. Pairing — [ADR-0014](adrs/0014-pairing-is-a-device-authorization-grant.md) — **built**
+
+Verified end to end on a real control plane 2026-08-28: an agent with no credential of any kind
+showed `RSMB-MR9J`, an admin inspected it (seeing hostname, platform and agent version), approved
+it, and the agent registered — then a restart paired nothing, because the host now carries its own
+`mwk_`.
+
+**Still to build here:** the console screen (the flow above was driven by `curl` against the same
+endpoints a screen will call), credentials into the Keychain, and unpair.
 
 The agent shows `XXXX-XXXX`; the user types it into the console they are already signed into; the
 agent polls and receives the `mae_` token the API already mints. This is RFC 8628's device

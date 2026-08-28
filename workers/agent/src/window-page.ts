@@ -145,6 +145,32 @@ dl.facts dd { color: var(--t-body); overflow-wrap: anywhere; }
 .btn.primary { border-color: var(--accent-line); background: var(--accent-soft); }
 .btn-note { color: var(--t-caption); font-size: 11px; }
 
+/* ---------------------------------------------------------------------------- pairing */
+.pair {
+  border: 1px solid var(--accent-line); background: var(--accent-soft);
+  border-radius: 6px; padding: 26px 22px; margin-bottom: 18px; text-align: center;
+}
+.pair .lead { color: var(--t-primary); font-size: 14px; margin-bottom: 4px; }
+.pair .sub { color: var(--t-body); margin-bottom: 20px; }
+.code {
+  font-size: clamp(28px, 8vw, 46px); font-weight: 700; letter-spacing: .22em;
+  color: var(--t-primary); margin: 0 0 6px; line-height: 1.15;
+  /* The dash is the only place the code may break, and it should not wrap at all if it fits. */
+  white-space: nowrap; overflow-x: auto;
+}
+.pair .expiry { color: var(--t-caption); font-size: 11.5px; }
+.pair ol {
+  text-align: left; max-width: 460px; margin: 20px auto 0; padding: 0;
+  counter-reset: step; color: var(--t-body);
+}
+.pair ol li { counter-increment: step; padding: 5px 0 5px 28px; position: relative; }
+.pair ol li::before {
+  content: counter(step); position: absolute; left: 0; top: 5px;
+  width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--accent-line);
+  color: #B8A6E8; font-size: 10.5px; display: grid; place-items: center;
+}
+.pair .waiting { margin-top: 18px; color: var(--t-label); font-size: 11.5px; }
+
 .empty {
   border: 1px dashed #303033; border-radius: 6px; padding: 34px 20px; text-align: center;
   color: var(--t-help);
@@ -163,15 +189,19 @@ footer { margin-top: 26px; color: var(--t-caption); font-size: 11px; line-height
     <span class="pill" id="conn"><span class="dot"></span><span id="conn-text">connecting</span></span>
   </header>
 
-  <section class="card">
-    <p class="eyebrow">This machine</p>
-    <dl class="facts" id="facts"></dl>
-  </section>
+  <div id="pair"></div>
 
-  <div id="notices"></div>
+  <div id="rest">
+    <section class="card">
+      <p class="eyebrow">This machine</p>
+      <dl class="facts" id="facts"></dl>
+    </section>
 
-  <p class="eyebrow">Devices</p>
-  <div id="devices"></div>
+    <div id="notices"></div>
+
+    <p class="eyebrow">Devices</p>
+    <div id="devices"></div>
+  </div>
 
   <footer id="foot"></footer>
 </div>
@@ -332,7 +362,55 @@ footer { margin-top: 26px; color: var(--t-caption); font-size: 11px; line-height
     for (var i = 0; i < devices.length; i++) box.appendChild(deviceEl(devices[i]));
   }
 
+  /**
+   * The pairing panel — ADR-0014.
+   *
+   * When it is present it is the ONLY thing worth reading, so everything else on the page is hidden
+   * behind it. An unpaired agent showing an empty device list next to a code invites somebody to
+   * start debugging the empty list.
+   */
+  function renderPairing(state) {
+    var box = document.getElementById('pair');
+    var rest = document.getElementById('rest');
+    clear(box);
+    var p = state.pairing;
+    rest.hidden = Boolean(p);
+    if (!p) return;
+
+    var el = h('section', 'pair');
+    if (p.status === 'approved') {
+      el.appendChild(h('div', 'lead', 'Paired'));
+      el.appendChild(h('div', 'sub', 'Connecting to the farm\u2026'));
+      box.appendChild(el);
+      return;
+    }
+
+    el.appendChild(h('div', 'lead', 'Connect this machine to your farm'));
+    el.appendChild(h('div', 'sub', 'Type this code into the MFARM console.'));
+    el.appendChild(h('div', 'code', p.userCode));
+
+    var mins = Math.max(0, Math.round((new Date(p.expiresAt).getTime() - Date.now()) / 60000));
+    el.appendChild(h('div', 'expiry',
+      mins > 0 ? 'Expires in about ' + mins + (mins === 1 ? ' minute' : ' minutes')
+        + ' \u2014 a new one appears here automatically.'
+        : 'Expired \u2014 a new code is on its way.'));
+
+    var steps = h('ol');
+    steps.appendChild(h('li', null, 'Open the MFARM console and sign in.'));
+    steps.appendChild(h('li', null, 'Go to Agents and choose Pair a machine.'));
+    steps.appendChild(h('li', null, 'Enter the code above and confirm this machine.'));
+    el.appendChild(steps);
+
+    var waiting = h('div', 'waiting',
+      'Waiting for someone to approve it\u2026 this machine is '
+      + (state.host.hostname || 'unnamed')
+      + (state.agentVersion ? ' \u00b7 agent ' + state.agentVersion : ''));
+    el.appendChild(waiting);
+    box.appendChild(el);
+  }
+
   function render(state) {
+    renderPairing(state);
     renderFacts(state.host);
     renderNotices(state.notices || []);
     renderDevices(state.devices || []);

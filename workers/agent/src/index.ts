@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 const { X_OK } = fsConstants;
 import { automationIsTunnelled, dataPlaneEndpoint, gatewayBase, tunnelEnabled } from './automation-endpoint.ts';
-import { Agent } from './agent.ts';
+import { Agent, persistedWorkerToken } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
 import { AutomationGateway } from './gateway.ts';
 import { DataPlane } from './dataplane.ts';
@@ -16,7 +16,8 @@ import { createAvdBackend } from './devices/avd.ts';
 import { createPhysicalBackend, PhysicalDevice } from './devices/physical.ts';
 import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DiscoveredDevice } from './devices/discovery.ts';
-import { AgentWindow, openInBrowser, type WindowDevice, type WindowNotice, type WindowState } from './window.ts';
+import { AgentWindow, openInBrowser, type WindowDevice, type WindowNotice, type WindowPairing, type WindowState } from './window.ts';
+import { agentVersion, pairForToken, PairingError } from './pairing.ts';
 import type { DeviceBackend } from './device.ts';
 
 /**
@@ -472,62 +473,18 @@ async function main(): Promise<void> {
     ? await resolveAutomationEndpoints(supervisors, (localId) => gatewayBase(gatewayPort, localId))
     : {};
 
-  const agent = new Agent({
-    controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
-    registrationToken: env('WORKER_REGISTRATION_TOKEN'),
-    hostname: env('WORKER_HOSTNAME', osHostname()),
-    region: env('REGION'),
-    // NOT `env('PUBLIC_ENDPOINT')` any more. It had no default, so an agent on a laptop refused to
-    // start over an address that a tunnelled host has never used — see `dataPlaneEndpoint`.
-    endpoint: dataPlaneEndpoint(),
-    // The gateway's public path per device (ADR-0004), or — when Appium is managed outside this
-    // agent — whatever AUTOMATION_ENDPOINT names, which stays host-level and must not be publicly
-    // routable, because an open Appium port is unauthenticated device control.
-    automationEndpoint: supervisors.length === 0 ? process.env.AUTOMATION_ENDPOINT : undefined,
-    automationEndpoints,
-    devices: backends,
-    cores: cpus().length,
-    memoryMb: Math.round(totalmem() / 1_048_576),
-  });
-
   /**
-   * The gateway comes up BEFORE registration, and that order is load-bearing.
+   * `agent` DOES NOT EXIST YET, and that is the point of this reference.
    *
-   * Registration is what puts this host in the scheduler's pool for WebDriver work, so the hub may
-   * dial the advertised endpoint the moment it returns. A gateway started afterwards leaves a window
-   * where the endpoint is published and nothing is listening on it.
-   *
-   * It binds the CONFIGURED port, never an ephemeral one: the url was already composed from that
-   * number and handed to the agent above. A failure to bind is therefore fatal rather than something
-   * to work around — the alternative is registering an endpoint that resolves to nothing.
+   * The window comes up before the credential does — a first-run machine has no registration token
+   * at all until somebody pairs it (ADR-0014), and the pairing code has to be on a screen for that
+   * to happen. So the snapshot reads through a nullable reference that is filled the moment the
+   * object is constructed, a few lines below.
    */
-  const gatewayBindHost = process.env.AUTOMATION_BIND_HOST?.trim()
-    || process.env.BIND_HOST?.trim()
-    || (automationIsTunnelled() ? '127.0.0.1' : undefined);
-
-  const gateway = supervisors.length > 0
-    ? new AutomationGateway({
-        agent,
-        targets: new Map(supervisors.map((s) => [s.localId, s.port])),
-      })
-    : undefined;
-  if (gateway) {
-    // AUTOMATION_BIND_HOST, falling back to the older shared BIND_HOST.
-    //
-    // The two listeners are bound SEPARATELY as of ADR-0005/ADR-0007, and that split is the whole
-    // point: this one only ever has to be reachable by the containerised hub on the same box, so it
-    // belongs on the docker bridge or on loopback. The data plane has to be reachable by a browser
-    // and cannot live there. Sharing one variable meant satisfying the hub broke the viewer, which
-    // is exactly what happened (HANDOFF known issue 15).
-    //
-    // ON THE TUNNEL PATH IT IS LOOPBACK, and not as a default an operator can drift off: the only
-    // client is this same process, replaying what arrived on the tunnel. That is what makes
-    // ADR-0009 §3's "nothing listens on the network" true of a laptop rather than aspirational —
-    // an explicit bind variable is still honoured, because an operator who set one is describing
-    // a deployment we cannot see, but nothing else can widen it by accident.
-    await gateway.listen(gatewayPort, gatewayBindHost);
-    console.log(`[agent] automation gateway listening on ${gatewayBindHost ?? '0.0.0.0'}:${gatewayPort}`);
-  }
+  let agentRef: Agent | undefined;
+  /** The pairing code, while there is one. Absent on every path where a credential already exists. */
+  let pairing: WindowPairing | undefined;
+  const version = await agentVersion();
 
   /**
    * ------------------------------------------------------------------ the window (ADR-0009 §1, M2)
@@ -561,9 +518,9 @@ async function main(): Promise<void> {
       const serial = info.adbSerial;
       if (serial) adopted.add(serial);
       const seen = serial ? lastDiscovery.find((d) => d.serial === serial) : undefined;
-      const deviceId = agent.deviceIdFor(info.localId);
-      const sessions = deviceId ? agent.sessionsOn(deviceId) : 0;
-      const health = agent.healthOf(info.localId);
+      const deviceId = agentRef?.deviceIdFor(info.localId);
+      const sessions = deviceId ? (agentRef?.sessionsOn(deviceId) ?? 0) : 0;
+      const health = agentRef?.healthOf(info.localId);
       const phone = b.control as Partial<PhysicalDevice>;
 
       // Adopted at start-up and no longer in a discovery pass that found SOMETHING: the cable is
@@ -619,7 +576,7 @@ async function main(): Promise<void> {
     }
 
     const notices: WindowNotice[] = [];
-    if (!agent.hostId) {
+    if (!agentRef?.hostId) {
       notices.push({
         level: 'warn',
         title: 'Not registered with the control plane yet',
@@ -652,10 +609,12 @@ async function main(): Promise<void> {
         hostname: env('WORKER_HOSTNAME', osHostname()),
         region: env('REGION'),
         controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
-        hostId: agent.hostId,
+        hostId: agentRef?.hostId,
         endpoint: dataPlaneEndpoint(),
         tunnel: tunnelEnabled(),
       },
+      agentVersion: version,
+      pairing,
       devices,
       notices,
     };
@@ -700,6 +659,120 @@ async function main(): Promise<void> {
     // Only where a person is present. `isTTY` is false under systemd, where launching a browser
     // would be a process that fails for no reason anybody asked for.
     if (flagUnless('MFARM_WINDOW_OPEN') && process.stdout.isTTY) openInBrowser(win.url);
+  }
+
+  /**
+   * ------------------------------------------------------------- the credential (ADR-0014)
+   *
+   * THREE ANSWERS, IN THIS ORDER:
+   *
+   * 1. `WORKER_REGISTRATION_TOKEN` wins outright. It is what a scripted fleet rollout sets — the
+   *    machine in the corner with six phones on a hub should not have to drive a GUI — and it is
+   *    also how the existing farm starts, so nothing about it changes.
+   * 2. A host that has REGISTERED BEFORE needs nothing. Its own `mwk_` is in the state file and
+   *    `register()` presents that first, falling back to the configured credential only if it is
+   *    refused. So a machine pairs once and never again, and the empty string here is honest: there
+   *    is no configured credential, and the only path that would reach for one is the recovery path.
+   * 3. Otherwise PAIR — show a code and wait for somebody signed into the console to approve it.
+   *
+   * This is what used to be `env('WORKER_REGISTRATION_TOKEN')`, which threw. A first run on a
+   * stranger's laptop hit that line before anything was on screen, so the product's first act was
+   * to exit with the name of an environment variable.
+   */
+  const configured = process.env.WORKER_REGISTRATION_TOKEN?.trim();
+  let registrationToken = configured ?? '';
+  if (!configured && !(await persistedWorkerToken())) {
+    console.log('[agent] this machine is not paired with a farm yet — showing a code in the window');
+    try {
+      registrationToken = await pairForToken({
+        controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
+        hostname: env('WORKER_HOSTNAME', osHostname()),
+        agentVersion: version,
+        onProgress: (p) => {
+          pairing = p;
+          // Straight to any open tab. This is the one moment where a person is watching the window
+          // for something to change, so it must not wait for the next discovery tick.
+          win?.push();
+          if (p.status === 'waiting') {
+            console.log(`[agent] pairing code ${p.userCode} — type it into the console to connect this machine`);
+          }
+        },
+      });
+    } catch (e) {
+      // A pairing that cannot be completed is fatal, and says why in words rather than pointing at
+      // a variable. There is nothing useful for the agent to do next: it has no credential.
+      throw new Error(
+        e instanceof PairingError ? e.message : `pairing failed: ${(e as Error).message}`,
+      );
+    }
+    // `onProgress` always fires before the first poll, so this is set — but a non-null assertion on
+    // the path that just succeeded would turn a future refactor into a TypeError at the moment of
+    // success, which is the worst possible place for one.
+    if (pairing) pairing = { ...pairing, status: 'approved' };
+    win?.push();
+    console.log('[agent] paired');
+  }
+
+  const agent = new Agent({
+    controlPlaneUrl: env('CONTROL_PLANE_URL', 'http://localhost:3000'),
+    registrationToken,
+    hostname: env('WORKER_HOSTNAME', osHostname()),
+    region: env('REGION'),
+    // NOT `env('PUBLIC_ENDPOINT')` any more. It had no default, so an agent on a laptop refused to
+    // start over an address that a tunnelled host has never used — see `dataPlaneEndpoint`.
+    endpoint: dataPlaneEndpoint(),
+    // The gateway's public path per device (ADR-0004), or — when Appium is managed outside this
+    // agent — whatever AUTOMATION_ENDPOINT names, which stays host-level and must not be publicly
+    // routable, because an open Appium port is unauthenticated device control.
+    automationEndpoint: supervisors.length === 0 ? process.env.AUTOMATION_ENDPOINT : undefined,
+    automationEndpoints,
+    devices: backends,
+    cores: cpus().length,
+    memoryMb: Math.round(totalmem() / 1_048_576),
+  });
+  // The window has been rendering `agentRef?.` since before this existed. From here it is live.
+  agentRef = agent;
+  // Registration is what clears the code from the screen; leaving it up beside a working fleet
+  // would be an invitation to type it in again.
+  pairing = undefined;
+
+  /**
+   * The gateway comes up BEFORE registration, and that order is load-bearing.
+   *
+   * Registration is what puts this host in the scheduler's pool for WebDriver work, so the hub may
+   * dial the advertised endpoint the moment it returns. A gateway started afterwards leaves a window
+   * where the endpoint is published and nothing is listening on it.
+   *
+   * It binds the CONFIGURED port, never an ephemeral one: the url was already composed from that
+   * number and handed to the agent above. A failure to bind is therefore fatal rather than something
+   * to work around — the alternative is registering an endpoint that resolves to nothing.
+   */
+  const gatewayBindHost = process.env.AUTOMATION_BIND_HOST?.trim()
+    || process.env.BIND_HOST?.trim()
+    || (automationIsTunnelled() ? '127.0.0.1' : undefined);
+
+  const gateway = supervisors.length > 0
+    ? new AutomationGateway({
+        agent,
+        targets: new Map(supervisors.map((s) => [s.localId, s.port])),
+      })
+    : undefined;
+  if (gateway) {
+    // AUTOMATION_BIND_HOST, falling back to the older shared BIND_HOST.
+    //
+    // The two listeners are bound SEPARATELY as of ADR-0005/ADR-0007, and that split is the whole
+    // point: this one only ever has to be reachable by the containerised hub on the same box, so it
+    // belongs on the docker bridge or on loopback. The data plane has to be reachable by a browser
+    // and cannot live there. Sharing one variable meant satisfying the hub broke the viewer, which
+    // is exactly what happened (HANDOFF known issue 15).
+    //
+    // ON THE TUNNEL PATH IT IS LOOPBACK, and not as a default an operator can drift off: the only
+    // client is this same process, replaying what arrived on the tunnel. That is what makes
+    // ADR-0009 §3's "nothing listens on the network" true of a laptop rather than aspirational —
+    // an explicit bind variable is still honoured, because an operator who set one is describing
+    // a deployment we cannot see, but nothing else can widen it by accident.
+    await gateway.listen(gatewayPort, gatewayBindHost);
+    console.log(`[agent] automation gateway listening on ${gatewayBindHost ?? '0.0.0.0'}:${gatewayPort}`);
   }
 
   const state = await agent.start();

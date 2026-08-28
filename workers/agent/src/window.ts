@@ -73,7 +73,27 @@ export interface WindowNotice {
   detail: string;
 }
 
+/**
+ * The pairing code, while there is one — ADR-0014.
+ *
+ * Present ONLY while the agent has no credential. Its presence is what tells the page to lead with
+ * the code instead of the device list: an unpaired agent has exactly one thing worth saying, and
+ * burying it under a fleet summary would be showing somebody the answer to a question they have not
+ * reached yet.
+ *
+ * NEVER CARRIES THE DEVICE CODE. That is the credential authenticating the poll; this is the eight
+ * characters a human reads. They are different secrets doing different jobs, and only one of them
+ * belongs on a screen.
+ */
+export interface WindowPairing {
+  userCode: string;
+  expiresAt: string;
+  status: 'waiting' | 'approved';
+  attempt: number;
+}
+
 export interface WindowState {
+  pairing?: WindowPairing;
   host: {
     hostname: string;
     region: string;
@@ -83,6 +103,8 @@ export interface WindowState {
     endpoint: string;
     tunnel: boolean;
   };
+  /** Shown beside the code, so the person approving can tell this machine from another. */
+  agentVersion?: string;
   devices: WindowDevice[];
   notices: WindowNotice[];
 }

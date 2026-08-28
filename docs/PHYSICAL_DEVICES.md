@@ -49,7 +49,32 @@ attached — see §4.
 ## 3. Enrolling the host
 
 The host needs a credential. **Do not paste the fleet secret into a laptop** — it never expires,
-names nobody, and revoking it revokes every machine. Mint a single-use enrollment token instead.
+names nobody, and revoking it revokes every machine.
+
+### 3a. The short way: pair it (ADR-0014)
+
+**Start the agent with no credential at all.** It shows a code in its window:
+
+```
+[agent] this machine is not paired with a farm yet — showing a code in the window
+[agent] pairing code RSMB-MR9J — type it into the console to connect this machine
+```
+
+Type that code into the console, signed in as an owner or admin. You are shown which machine is
+asking — hostname, platform, agent version — before you confirm, because the one real weakness of
+this flow is being talked into approving somebody else's machine.
+
+The agent polls, receives an ordinary `mae_` enrollment token, and registers. Nothing is pasted
+anywhere and no credential passes through a chat message.
+
+**Pairing happens once.** The host keeps its own `mwk_` worker token afterwards and re-registers
+with that, so a restart pairs nothing — there is no environment variable to keep, either. A code
+that lapses unapproved is replaced automatically; the window always shows one that currently works.
+
+### 3b. The scripted way: mint a token by hand
+
+Still supported and unchanged — for the dedicated machine with six phones on a hub, which should not
+have to drive a GUI. Mint a single-use enrollment token:
 
 **Minting is admin-only and there is no console screen for it yet, so it is the API — but not with
 an API key.** `POST /v1/account/agent-enrollments` is guarded by `requireOrgAdmin`, which resolves a
