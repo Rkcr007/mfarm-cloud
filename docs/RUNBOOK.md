@@ -103,6 +103,42 @@ so they had to be rewritten after **every reset**, at the cost of two extra rebo
 **The rule, if you are ever tempted to add guest state to a profile:** it must be a boot flag. A
 guest edit does not survive a powerwash, and this farm resets by powerwash.
 
+### Never stop the worker to get at `cvd`
+
+`systemctl stop mfarm-worker` **takes every Cuttlefish instance down with it** — the worker owns the
+device lifecycle, and the instances do not outlive it. So the sequence "stop the worker, run a `cvd`
+command by hand, start it again" does not work: by the time the worker is stopped there is nothing
+to run the command against, and `cvd powerwash` fails with
+
+```
+Failed to connect to instance monitor socket (/tmp/cf_avd_1001/cvd-3/launcher_monitor.sock)
+```
+
+Everything comes back on `systemctl start` (~30s per device, sequentially), so this costs time rather
+than data — but there is no reason to pay it. **Reset a device through the product**: allocate a
+session and use *Release & reset*, which is the same powerwash the worker would run, with the
+control plane kept in step.
+
+Two more things that only bite from a shell:
+
+- `cvd` must run **as the user that owns the host config** (`sudo -u <owner> -H bash -lc 'cvd …'`).
+  As anyone else it fails with `Run 'cvd setup' to configure the host`.
+- `cvd fleet` on 1.55.1 frequently dies with `Failed to parse XML memory` from its own gflags
+  parser. It is not a sign the fleet is unhealthy — `adb devices` and the worker's log are the
+  reliable readouts.
+
+### Stale guest properties clear on the first reset, not on restart
+
+If a farm ran the pre-ADR-0017 build, its profiled devices still have Samsung build properties in the
+guest overlay. **A restart does not clear them; only a powerwash does.** So immediately after
+upgrading, the console correctly says *MFARM X1 Pro* while the guest still answers
+`ro.product.model = SM-S938B` — and an app under test still branches on it.
+
+It is self-healing: the first *Release & reset* on each profiled device wipes the overlay and the
+device reverts to the image's own `Cuttlefish x86_64 phone 64-bit only`. To do it deliberately,
+allocate a session on each profiled device and release it with reset. Devices cannot be pinned by the
+allocator, so the practical move is to allocate every device at once and then release them all.
+
 ### `CF_PROFILES` after the rename
 
 The profile ids are `mfarm-x1-pro` and `mfarm-x1`:
