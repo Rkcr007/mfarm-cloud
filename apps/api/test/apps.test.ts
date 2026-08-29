@@ -239,12 +239,12 @@ describe('APK metadata', () => {
  * The install preflight (ADR-0016).
  *
  * This is the check that makes it defensible for a virtual x86_64 device to report `Build.MODEL` as
- * a Samsung Galaxy. Its DEFAULT MUST BE TO ALLOW: it exists to turn one specific known-impossible
+ * an MFARM X1 Pro. Its DEFAULT MUST BE TO ALLOW: it exists to turn one specific known-impossible
  * install into a clear sentence, not to be an authority on what can run. Every "unknown" case below
  * therefore asserts that nothing is blocked.
  */
 describe('ABI preflight', () => {
-  const CF = { abis: ['x86_64', 'x86'], model: 'Samsung Galaxy S25 Ultra' };
+  const CF = { abis: ['x86_64', 'x86'], model: 'MFARM X1 Pro' };
 
   test('an arm64-only build on an x86_64 device is refused, naming both sides', () => {
     const reason = abiMismatchReason({ abis: ['arm64-v8a'] }, CF);
@@ -252,7 +252,7 @@ describe('ABI preflight', () => {
     assert.match(reason, /arm64-v8a/);
     assert.match(reason, /x86_64/);
     // The model is in the message because the model is what made the reader expect this to work.
-    assert.match(reason, /Samsung Galaxy S25 Ultra/);
+    assert.match(reason, /MFARM X1 Pro/);
   });
 
   test('a build that includes a matching ABI is allowed', () => {

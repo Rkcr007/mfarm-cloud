@@ -1,14 +1,22 @@
 ---
 id: ADR-0016
 title: Virtual devices present as named real handsets
-status: Accepted
+status: Superseded
 date: 2026-08-28
+superseded_by: ADR-0017
 authors:
   - Claude Code
 tags: [devices, cuttlefish, console, honesty, apk, profiles]
 supersedes: []
 extends: [ADR-0003, ADR-0008]
 ---
+
+> **SUPERSEDED BY [ADR-0017](0017-devices-are-mfarm-hardware.md) on 2026-08-29.** The devices are
+> MFARM's own — *MFARM X1 Pro* and *MFARM X1* — and a profile no longer writes any identity into the
+> guest. The geometry decisions below stand and were carried forward; the identity spoofing did not.
+> The consequence this ADR accepted at its own decision 4 — that an app branching on
+> `Build.MANUFACTURER === "samsung"` takes a Samsung code path AOSP cannot answer — is precisely
+> what made it untenable once application testing became P0.
 
 ## Context
 

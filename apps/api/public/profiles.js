@@ -1,10 +1,10 @@
 /**
- * How a profiled device is DRAWN — ADR-0016.
+ * How a profiled device is DRAWN — ADR-0017.
  *
  * PRESENTATION ONLY. Nothing here reaches the device, and nothing here is a claim about it. The
  * worker's `workers/agent/src/devices/profiles.ts` owns what a device actually IS — panel, density,
- * RAM, reported identity — and sends the profile id and the real screen geometry up with
- * registration. This file only answers "what does that phone look like".
+ * RAM, cores — and sends the profile id and the real screen geometry up with registration. This file
+ * only answers "what does that device look like".
  *
  * The split matters: geometry is drawn from the DEVICE'S OWN `screen`, never from the table below.
  * If the two ever disagree, the device is right and this file is stale, and drawing from here would
@@ -21,7 +21,7 @@
 
 /**
  * @typedef {object} Chrome
- * @property {string} label           Short name for the body, e.g. "Galaxy S25 Ultra".
+ * @property {string} label           Short name for the body, e.g. "MFARM X1 Pro".
  * @property {number} radiusPct       Screen corner radius, as a % of the frame's WIDTH.
  * @property {number} bezelPct        Body thickness around the screen, as a % of the frame's width.
  * @property {{xPct:number,yPct:number,dPct:number}|null} cutout
@@ -38,14 +38,15 @@
  * for `d.profile` and gets the matching body, with no string matching on a marketing name that
  * somebody will eventually retype.
  *
- * The metrics are eyeballed to read as the right phone, not measured off a caliper. They are honest
- * as "this is a Galaxy-shaped body" and are not a dimensional reference for anything.
+ * The metrics are eyeballed to read as a modern flagship body, not measured off a caliper. They are
+ * MFARM's own industrial design (ADR-0017) and are not a dimensional reference for anything.
  */
 export const DEVICE_CHROME = {
-  'galaxy-s25-ultra': {
-    label: 'Galaxy S25 Ultra',
-    // The Ultra is the squarer-cornered one of the pair; that is most of what distinguishes the two
-    // bodies at a glance.
+  'mfarm-x1-pro': {
+    label: 'MFARM X1 Pro',
+    // The Pro is the squarer-cornered, thinner-bezelled body of the two; that is most of what
+    // separates them at a glance, and it is MFARM's own industrial design rather than a trace of
+    // somebody else's (ADR-0017).
     radiusPct: 4.5,
     bezelPx: 9,
     cutout: { xPct: 50, yPct: 1.55, dPct: 3.4 },
@@ -54,8 +55,8 @@ export const DEVICE_CHROME = {
       { side: 'right', topPct: 29, lenPct: 5 },   // power
     ],
   },
-  'galaxy-s25': {
-    label: 'Galaxy S25',
+  'mfarm-x1': {
+    label: 'MFARM X1',
     radiusPct: 7.5,
     bezelPx: 10,
     cutout: { xPct: 50, yPct: 1.8, dPct: 3.8 },
@@ -101,7 +102,7 @@ export function hasChrome(device) {
 }
 
 /**
- * `1440 × 3120 · 600dpi` — the geometry line on a device card, or '' when the worker sent no screen.
+ * `1080 × 2340 · 450dpi` — the geometry line on a device card, or '' when the worker sent no screen.
  *
  * Empty rather than a placeholder: a device that did not report its panel has nothing to say here,
  * and a row reading "— × —" is worse than no row.

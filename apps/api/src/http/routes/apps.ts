@@ -372,13 +372,16 @@ export async function appRoutes(app: FastifyInstance) {
         }
 
         /**
-         * ABI PREFLIGHT — ADR-0016, and the reason a device is allowed to call itself a Galaxy.
+         * ABI PREFLIGHT — every virtual device in this farm executes x86_64.
          *
-         * Two devices in this farm report a Samsung `Build.MODEL` while executing x86_64. Every real
-         * Galaxy is arm64-v8a and most real APKs ship arm64-only native libraries, so without this
-         * the first such upload dies inside `adb install` with INSTALL_FAILED_NO_MATCHING_ABIS — on
-         * a device named after the exact phone the customer builds for. Refusing here, by name,
-         * costs one field on a query that was already running.
+         * Most real APKs ship arm64-only native libraries, so without this the upload dies inside
+         * `adb install` with INSTALL_FAILED_NO_MATCHING_ABIS and the customer is left to work out
+         * that the farm, not their build, is what cannot do this. Refusing here, by name, costs one
+         * field on a query that was already running.
+         *
+         * It predates ADR-0017, when the devices claimed Samsung model names and this was the thing
+         * that made the claim defensible. The claim is gone and the wall remains, because the wall
+         * was never caused by the claim.
          *
          * ONLY for `install`. A `launch` or `uninstall` acts on something already on the device, and
          * a build's ABIs say nothing about whether that is possible.

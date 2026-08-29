@@ -134,15 +134,16 @@ export interface WorkerRegistration {
     osVersion: string;
     capabilities: Capability[];
     /**
-     * v2. Which device profile this one was configured from — `galaxy-s25-ultra` (ADR-0016).
+     * v2. Which device profile this one was configured from — `mfarm-x1-pro` (ADR-0017).
      *
      * A stable key, never a display name: the console keys its device chrome off it, and matching
      * that on `model` would break the first time a marketing name is retyped. Absent on physical
      * handsets, which ARE the real device, and on any virtual device nobody profiled.
      *
-     * Its presence is also the console's only way to know that `model` is a configured claim rather
-     * than something read off hardware. That distinction is what keeps the VIRTUAL DEVICE tag
-     * meaningful next to a name like "Samsung Galaxy S25 Ultra".
+     * Its presence is also the console's only way to know that `model` names a CONFIGURED device
+     * rather than one read off hardware. Since ADR-0017 that is a smaller distinction than it was —
+     * an MFARM X1 Pro is a device this farm genuinely provides, not a handset it is imitating — but
+     * it is still what the VIRTUAL DEVICE tag is drawn from.
      */
     profile?: string;
     /**

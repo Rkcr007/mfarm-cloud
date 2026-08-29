@@ -54,22 +54,25 @@ You are waiting for `"available":4` — see the next section for what those four
 
 ## The four devices, and which two you must not touch
 
-| | model | panel | profile |
-|---|---|---|---|
-| `cf-1`, `cf-2` | `cuttlefish` | 720×1280 @ 320 | none |
-| `cf-3` | Samsung Galaxy S25 Ultra | 1440×3120 @ 600 | `galaxy-s25-ultra` |
-| `cf-4` | Samsung Galaxy S25 | 1080×2340 @ 480 | `galaxy-s25` |
+| | model | panel | dp width | profile |
+|---|---|---|---|---|
+| `cf-1`, `cf-2` | `cuttlefish` | 720×1280 @ 320 | 360dp | none |
+| `cf-3` | MFARM X1 Pro | 1080×2340 @ 450 | 384dp | `mfarm-x1-pro` |
+| `cf-4` | MFARM X1 | 1080×2340 @ 480 | 360dp | `mfarm-x1` |
 
-`cf-3` and `cf-4` are configured to reproduce a real handset — geometry, RAM, cores and the build
-properties the guest reports about itself (ADR-0016). `cf-1` and `cf-2` are deliberately left exactly
-as they were: they work, the render baseline was measured on them, and they are the fallback if a
-profiled device misbehaves.
+`cf-3` and `cf-4` are configured with a panel, density, RAM and cores (ADR-0017). Everything a
+profile sets is a cold-boot flag and true of the device; nothing is written into the guest. The two
+differ in **density, not pixels** — 384dp against 360dp — because dp is what a layout bug is
+expressed in.
+
+`cf-1` and `cf-2` are deliberately left exactly as they were: they work, the render baseline was
+measured on them, and they are the fallback if a profiled device misbehaves.
 
 Which device gets which profile is `CF_PROFILES` in `/etc/mfarm/worker.env`, keyed by local id:
 
 ```
 CF_INSTANCES=4
-CF_PROFILES=cf-3=galaxy-s25-ultra,cf-4=galaxy-s25
+CF_PROFILES=cf-3=mfarm-x1-pro,cf-4=mfarm-x1
 ```
 
 A local id absent from that list gets no profile, and an unprofiled device takes byte-identical cvd
@@ -86,22 +89,31 @@ The device has to be created again, and the way to do that is a **new instance g
 (`cvd create --instance_nums=<n>`), which sits alongside the running ones. `cvd reset` tears down
 **every device on the host**, including `cf-1` and `cf-2`.
 
-### Applying the Samsung build properties
+### A profile writes nothing into the guest
 
-Geometry comes from the boot flags. The reported identity does not — it is applied once per device,
-after cold boot and **before the first snapshot**:
+Everything a profile does is a **cold-boot flag** — panel, density, RAM, cores. There is no
+per-device setup step and no property to apply, so a device that boots is already correct and a
+snapshot taken at any point stays correct.
 
-```bash
-deploy/apply-device-profile.sh 0.0.0.0:6522 galaxy-s25-ultra   # cf-3
-deploy/apply-device-profile.sh 0.0.0.0:6523 galaxy-s25         # cf-4
+This is deliberate (ADR-0017). Until 2026-08-29 profiled devices also wrote Samsung build properties
+into the guest, and those lived in an `adb remount` overlay that `CF_RESET_MODE=powerwash` wipes —
+so they had to be rewritten after **every reset**, at the cost of two extra reboots. Reset went from
+~40s to ~100s on those devices. Both the properties and the cost are gone.
+
+**The rule, if you are ever tempted to add guest state to a profile:** it must be a boot flag. A
+guest edit does not survive a powerwash, and this farm resets by powerwash.
+
+### `CF_PROFILES` after the rename
+
+The profile ids are `mfarm-x1-pro` and `mfarm-x1`:
+
+```
+CF_PROFILES=cf-3=mfarm-x1-pro,cf-4=mfarm-x1
 ```
 
-Then take a fresh snapshot. A restore from a snapshot taken before this reverts the identity.
-
-**Unverified, and worth checking the first time:** the properties live in an `adb remount` overlay
-whose backing store may be on `/data`, and this farm runs `CF_RESET_MODE=powerwash`, which wipes
-`/data`. Reset a profiled device once and re-read `getprop ro.product.model`. If it reverts, the
-script's header says what to do about it.
+A unit file still naming `galaxy-s25-ultra` **fails the agent at startup**, by design — the
+alternative is a device booting unprofiled at 720×1280 while the console shows it as an X1 Pro.
+Fix `deploy/.state/worker.env` and restart the service.
 
 ## Put it away (cost, not a teardown)
 

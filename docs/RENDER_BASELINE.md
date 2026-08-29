@@ -92,11 +92,15 @@ else — which is the reason `cf-1` and `cf-2` were kept unprofiled rather than 
 | Device | Panel | 50th | 95th | 99th | Missed vsync |
 |---|---|---|---|---|---|
 | cf-1 (unprofiled) | 720×1280 @320 | 44ms | 57ms | 61ms | 55 |
-| cf-3 (Galaxy S25 Ultra, QHD+) | 1440×3120 @600 | **65ms** | **109ms** | **650ms** | **127** |
-| cf-4 (Galaxy S25) | 1080×2340 @480 | 40ms | 53ms | 150ms | 26 |
+| cf-3 (X1 Pro, then QHD+) | 1440×3120 @600 | **65ms** | **109ms** | **650ms** | **127** |
+| cf-4 (X1) | 1080×2340 @480 | 40ms | 53ms | 150ms | 26 |
+
+> The devices were named *Samsung Galaxy S25 Ultra* / *S25* when these numbers were taken; they
+> are *MFARM X1 Pro* / *X1* since ADR-0017. Only the names changed — the panels, densities and
+> therefore every measurement below are the same devices.
 
 **QHD+ does not hold.** 65ms at the median is roughly 15fps sustained during interaction, with a
-650ms worst frame — on a device the console calls a Galaxy S25 Ultra. Every timing-sensitive test on
+650ms worst frame — on the farm's headline device. Every timing-sensitive test on
 it would be flaky for reasons that are the farm's fault.
 
 **FHD+ is free.** 1080×2340 measured BETTER than the 720×1280 baseline on median, 95th and missed

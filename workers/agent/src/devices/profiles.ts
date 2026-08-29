@@ -1,38 +1,42 @@
 /**
- * Device profiles — what a virtual device is configured to LOOK LIKE.
+ * Device profiles — what a virtual device is configured to BE.
  *
- * A profile is a bundle of guest configuration: panel geometry, density, RAM, cores, and the build
- * properties the guest reports about itself. `cf-3` and `cf-4` boot from one; `cf-1` and `cf-2`
- * deliberately do not, and a device with no profile takes exactly the code path it took before this
- * file existed (ADR-0016).
+ * A profile is a bundle of guest configuration: panel geometry, density, RAM and cores. `cf-3` and
+ * `cf-4` boot from one; `cf-1` and `cf-2` deliberately do not, and a device with no profile takes
+ * exactly the code path it took before this file existed (ADR-0017).
  *
- * WHAT A PROFILE IS AND IS NOT
+ * EVERYTHING HERE IS TRUE OF THE DEVICE, and that is the change ADR-0017 made.
  *
- * The geometry half is honest by construction: the panel really is 1440x3120, the guest really does
- * render at that density, and a layout bug found at 384dp is a real layout bug. Nothing here is a
- * claim about state that could drift from reality, so it does not touch ADR-0003.
+ * This file used to carry a second half: `props`, a set of guest build properties that made the
+ * device report `ro.product.model = SM-S938B` and `ro.product.manufacturer = samsung`. That was a
+ * lie told to the app under test, and it is gone. What remains is honest by construction — the panel
+ * really is 1080x2340, the guest really does render at that density, and a layout bug found at 384dp
+ * is a real layout bug. Nothing here is a claim that could drift from reality, so nothing here
+ * touches ADR-0003.
  *
- * The `props` half IS a lie the guest tells the app under test, and it is a deliberate one made with
- * eyes open (ADR-0016). Two consequences a reader will eventually hit:
+ * WHY THE SPOOFING WENT, in the order the reasons actually bite:
  *
- *   1. The ABI is still x86_64. `Build.MODEL` says SM-S938B and `Build.SUPPORTED_ABIS` says x86_64,
- *      which no real handset has ever reported. An arm64-only APK does not install here, and the
- *      preflight in `apps/api/src/apk.ts` exists to say so in those words rather than let it fail as
- *      a mystery on a device calling itself a Galaxy.
- *   2. An app that branches on `Build.MANUFACTURER === "samsung"` takes a Samsung code path — Knox,
- *      the Samsung IME, One UI APIs — that AOSP does not implement. Failures from that branch are
- *      the farm's fault, not the app's. This is the first place to look when a test passes on a real
- *      Samsung and fails here.
+ *   1. It could not be finished. A Samsung device is Samsung FIRMWARE — Knox, the `Sem*` services,
+ *      Samsung's HALs and IME. None of that exists on AOSP and none of it can be added by writing
+ *      properties. So an app that branches on `Build.MANUFACTURER === "samsung"` took a Samsung code
+ *      path into an AOSP device that could not answer it, and failed for reasons that were the
+ *      farm's fault. The profile made the farm WORSE at its actual job.
+ *   2. It contradicted the ABI. `Build.MODEL` said SM-S938B while `Build.SUPPORTED_ABIS` said
+ *      x86_64, which no handset has ever reported. The identity was the half that made that
+ *      combination confusing rather than merely limited.
+ *   3. It cost 60 seconds on every reset. The properties live in an overlayfs that `cvd powerwash`
+ *      wipes, so every reset had to rewrite them and reboot twice — ~100s against ~40s. The
+ *      counterfeit half was also the expensive half.
  *
- * WHAT IS DELIBERATELY NOT SPOOFED: the OS version. The guest is whatever the pinned AOSP build
- * actually is, and `ro.build.version.*` is left alone. Telling an app it is on Android 15 while it
- * runs on 17 changes which API-level-conditional branch it takes, so the app under test would be
- * exercising code that never runs on the device it claims to be — a false result in both directions,
- * which is worse than an obviously-wrong version string.
+ * The device is MFARM's own now. An MFARM X1 Pro is a real thing this farm really provides, at a
+ * real geometry, and it is not pretending to be a phone somebody else makes.
+ *
+ * WHAT IS STILL NOT SPOOFED, and never was: the OS version. The guest is whatever the pinned AOSP
+ * build actually is, and `ro.build.version.*` is left alone.
  */
 
 export interface DeviceProfile {
-  /** Stable key. Travels to the control plane and keys the console's bezel art. Never displayed. */
+  /** Stable key. Travels to the control plane and keys the console's device art. Never displayed. */
   id: string;
   /** `DeviceInfo.model`, and what the console shows as the device's name. */
   model: string;
@@ -44,125 +48,54 @@ export interface DeviceProfile {
   /** Guest RAM. Also sets snapshot size roughly 1:1 — see the note in cuttlefish.ts. */
   memoryMb: number;
   cpus: number;
-  /** Guest build properties, applied by `deploy/apply-device-profile.sh`. */
-  props: Record<string, string>;
 }
 
 /**
- * Partitions Android composes `ro.product.model` from, in the order `ro.product.property_source_order`
- * usually lists them.
+ * THE MFARM DEVICE FAMILY.
  *
- * Setting the bare `ro.product.model` alone is NOT enough and is the mistake to avoid here: since
- * Android 10 the bare properties are derived, and a getprop that still shows `Cuttlefish x86_64`
- * after an edit almost always means only the legacy key was written.
- */
-const PARTITIONS = ['system', 'system_ext', 'product', 'vendor', 'odm'] as const;
-
-interface Identity {
-  brand: string;
-  manufacturer: string;
-  model: string;
-  /** Codename, e.g. `e3q`. Cosmetic here; almost nothing an app does reads it. */
-  device: string;
-  name: string;
-  fingerprint: string;
-}
-
-/** Expand one identity into every property Android actually consults. */
-function identityProps(id: Identity): Record<string, string> {
-  const out: Record<string, string> = {};
-  const fields = {
-    brand: id.brand, manufacturer: id.manufacturer, model: id.model,
-    device: id.device, name: id.name,
-  };
-  for (const [field, value] of Object.entries(fields)) {
-    // The legacy bare key, still read by older apps and by some analytics SDKs.
-    out[`ro.product.${field}`] = value;
-    for (const part of PARTITIONS) out[`ro.product.${part}.${field}`] = value;
-  }
-  out['ro.build.fingerprint'] = id.fingerprint;
-  out['ro.vendor.build.fingerprint'] = id.fingerprint;
-  out['ro.system.build.fingerprint'] = id.fingerprint;
-  return out;
-}
-
-/**
- * THE NUMBERS BELOW ARE FROM PUBLISHED SPECIFICATIONS AND HAVE NOT BEEN READ OFF A HANDSET.
+ * Two devices separated by DENSITY rather than pixels — 384dp against 360dp on the same 1080x2340
+ * panel. That is deliberate, and it is the axis that matters: dp is what a layout bug is expressed
+ * in, and two devices with the same dp width differ in nothing a layout can see.
  *
- * Panel and diagonal are straightforward. The two worth checking against a real device with
- * `adb shell wm density` before anyone trusts a layout result are:
+ * THE PANEL IS FHD+ ON BOTH, AND THAT IS A MEASURED CHOICE. The Pro ran at QHD+ 1440x3120 @600 until
+ * 2026-08-29, when a render A/B on the lab VM measured what that costs on SwiftShader. Same native
+ * scroll, same host, HWUI's own counters:
  *
- *   - `density`, because Samsung ships a default display-size setting that is NOT the panel's native
- *     ppi, and it is the SHIPPED density that decides dp — which is what actually finds layout bugs.
- *     The values here are chosen so the dp width lands where a real device lands:
- *       Ultra  1440 x 160 / 600 = 384dp
- *       S25    1080 x 160 / 480 = 360dp
- *   - `device` / `name` codenames and the fingerprint build ids, which are plausible rather than
- *     verified. Nothing functional reads them; they are here so a fingerprint is not obviously
- *     malformed.
+ *   720x1280  @320   50th 44ms   95th 57ms    99th 61ms    missed vsync 55
+ *   1440x3120 @600   50th 65ms   95th 109ms   99th 650ms   missed vsync 127
+ *   1080x2340 @480   50th 40ms   95th 53ms    99th 150ms   missed vsync 26
  *
- * Both profiles run at FHD+ 1080x2340, which is what Samsung ships on both. QHD+ was tried on the
- * Ultra and measured too expensive on SwiftShader — the numbers and the reasoning are on that
- * profile's `screen` field. What separates the two devices is DENSITY, not pixels: 384dp against
- * 360dp, which is the difference a layout actually sees.
+ * 65ms at the median is ~15fps sustained during interaction, with a 650ms worst frame — every
+ * timing-sensitive test flaky for reasons that are the farm's fault. FHD+ measured BETTER than the
+ * 720p baseline on median, 95th and missed vsyncs, so it is not a climbdown; it is the fast option.
+ * Revisit only with a GPU, and only with the A/B re-run rather than by assumption.
+ *
+ * RAM AND CORES ARE UNCHANGED FROM THE PROFILES THESE REPLACED, on purpose. Those numbers are
+ * measured and working, and `--memory_mb` / `--cpus` only take effect on a COLD BOOT — so leaving
+ * them alone makes the rename a re-registration rather than a rebuild of every instance. The
+ * direction document's larger figures are a deliberate follow-up, gated on a recreate window.
  */
 export const DEVICE_PROFILES: Record<string, DeviceProfile> = {
-  'galaxy-s25-ultra': {
-    id: 'galaxy-s25-ultra',
-    model: 'Samsung Galaxy S25 Ultra',
-    label: 'Galaxy S25 Ultra',
-    // FHD+ AT THE ULTRA'S DENSITY — measured, and it is how the phone actually ships.
-    //
-    // This profile was QHD+ 1440x3120 @ 600 until 2026-08-29, when the render A/B on the lab VM
-    // measured what that costs on SwiftShader. Same native scroll, same host, HWUI's own counters:
-    //
-    //   720x1280  @320   50th 44ms   95th 57ms    99th 61ms    missed vsync 55
-    //   1440x3120 @600   50th 65ms   95th 109ms   99th 650ms   missed vsync 127
-    //   1080x2340 @480   50th 40ms   95th 53ms    99th 150ms   missed vsync 26
-    //
-    // 65ms at the median is ~15fps sustained during interaction, with a 650ms worst frame. A
-    // "Galaxy S25 Ultra" that scrolls like that is less convincing than an honest 720p device at
-    // 60, and it would make every timing-sensitive test flaky for reasons that are the farm's fault.
-    //
-    // FHD+ is not a climbdown. Samsung SHIPS Ultra models defaulting to FHD+ with QHD+ as an opt-in,
-    // so this is the out-of-box device. And the thing that actually distinguishes it from the plain
-    // S25 survives, because that was never the pixel count:
-    //
-    //   Ultra  1080 x 160 / 450 = 384dp wide
-    //   S25    1080 x 160 / 480 = 360dp wide
-    //
-    // Same panel, different density, different dp — and dp is what layout bugs are expressed in.
-    // The 1080x2340 row above was measured on a real profiled device and beat the 720p baseline.
+  'mfarm-x1-pro': {
+    id: 'mfarm-x1-pro',
+    model: 'MFARM X1 Pro',
+    label: 'MFARM X1 Pro',
+    // 1080 x 160 / 450 = 384dp wide — the roomier of the two layouts.
     screen: { width: 1080, height: 2340, density: 450 },
-    diagonalIn: 6.9,
+    diagonalIn: 6.7,
     memoryMb: 8192,
     cpus: 4,
-    props: identityProps({
-      brand: 'samsung',
-      manufacturer: 'samsung',
-      model: 'SM-S938B',
-      device: 'pa3q',
-      name: 'pa3qxxx',
-      fingerprint: 'samsung/pa3qxxx/pa3q:15/AP3A.240905.015.A2/S938BXXU1AYA1:user/release-keys',
-    }),
   },
 
-  'galaxy-s25': {
-    id: 'galaxy-s25',
-    model: 'Samsung Galaxy S25',
-    label: 'Galaxy S25',
+  'mfarm-x1': {
+    id: 'mfarm-x1',
+    model: 'MFARM X1',
+    label: 'MFARM X1',
+    // 1080 x 160 / 480 = 360dp wide — the width most Android phones actually report.
     screen: { width: 1080, height: 2340, density: 480 },
-    diagonalIn: 6.2,
+    diagonalIn: 6.5,
     memoryMb: 6144,
     cpus: 4,
-    props: identityProps({
-      brand: 'samsung',
-      manufacturer: 'samsung',
-      model: 'SM-S931B',
-      device: 'pa1q',
-      name: 'pa1qxxx',
-      fingerprint: 'samsung/pa1qxxx/pa1q:15/AP3A.240905.015.A2/S931BXXU1AYA1:user/release-keys',
-    }),
   },
 };
 
@@ -171,16 +104,16 @@ export function profileById(id: string | undefined): DeviceProfile | undefined {
 }
 
 /**
- * Parse `CF_PROFILES` — `cf-3=galaxy-s25-ultra,cf-4=galaxy-s25`.
+ * Parse `CF_PROFILES` — `cf-3=mfarm-x1-pro,cf-4=mfarm-x1`.
  *
  * KEYED BY LOCAL ID, NOT POSITIONAL, and that is the whole reason the existing devices are safe. A
- * positional list (`,,galaxy-s25-ultra,galaxy-s25`) makes cf-1's configuration depend on the
- * ordering of a string cf-1 is not mentioned in, so a typo three fields away silently re-profiles a
- * working device. Here, a local id that does not appear gets nothing, and nothing is exactly what it
- * got before this existed.
+ * positional list (`,,mfarm-x1-pro,mfarm-x1`) makes cf-1's configuration depend on the ordering of a
+ * string cf-1 is not mentioned in, so a typo three fields away silently re-profiles a working
+ * device. Here, a local id that does not appear gets nothing, and nothing is exactly what it got
+ * before this existed.
  *
  * An unknown profile id THROWS rather than being skipped. A silently-ignored typo would boot the
- * device at the default 720x1280 while every operator involved believed it was a Galaxy — the kind
+ * device at the default 720x1280 while every operator involved believed it was an X1 Pro — the kind
  * of mismatch that is only discovered by someone puzzling over a screenshot.
  */
 export function parseProfileAssignments(spec: string | undefined): Map<string, DeviceProfile> {

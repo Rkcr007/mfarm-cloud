@@ -1005,7 +1005,7 @@ kbd {
 /* -------------------------------------------------------------------- the punch-hole
 
    THE ONLY THING THIS CONSOLE DRAWS OVER THE DEVICE SCREEN, and it is allowed for one reason: on a
-   real Galaxy the camera IS in the display, so putting it in the bezel would be drawing a phone
+   modern phone the camera IS in the display, so putting it in the bezel would be drawing a device
    nobody makes. Three constraints keep it honest, and any one of them going away should take the
    cutout with it:
 
@@ -1073,7 +1073,7 @@ kbd {
    under test and must be seen as the device draws it.
 
    The punch-hole above is the single exception to that, and it is narrow on purpose: it is what a
-   real Galaxy's display genuinely contains, it takes no pointer events, and one toolbar click
+   modern display genuinely contains, it takes no pointer events, and one toolbar click
    removes it. This hint is not in that category and stays outside the frame. */
 .dev-kbd {
   font-size: 11px; letter-spacing: .04em; white-space: nowrap;

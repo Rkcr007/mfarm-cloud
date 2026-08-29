@@ -259,7 +259,7 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
     const count = Number(process.env.CF_INSTANCES ?? 1);
     const imageDir = env('CF_IMAGE_DIR');
     /**
-     * `CF_PROFILES=cf-3=galaxy-s25-ultra,cf-4=galaxy-s25` — which devices are configured to look
+     * `CF_PROFILES=cf-3=mfarm-x1-pro,cf-4=mfarm-x1` — which devices are configured to look
      * like a real handset (ADR-0016).
      *
      * Parsed BEFORE anything is constructed so a typo fails the agent at startup with the list of
@@ -282,7 +282,7 @@ async function chooseBackends(): Promise<DeviceBackend[]> {
     // inside because bootstrap_cuttlefish.sh locates the image roots by searching for
     // `bin/launch_cvd` and `super.img`, and a 4 GB snapshot under imageDir would confuse that.
     const snapshotRoot = process.env.CF_SNAPSHOT_DIR ?? join(imageDir, '..', 'snapshots');
-    // Says which devices are profiled, because "cf-3 is a Galaxy S25 Ultra" is exactly the fact an
+    // Says which devices are profiled, because "cf-3 is an MFARM X1 Pro" is exactly the fact an
     // operator wants confirmed from the logs before they go looking at the console for it.
     const profiled = [...profiles.entries()].map(([id, p]) => `${id}=${p.label}`).join(', ');
     console.log(

@@ -1657,3 +1657,47 @@ What is left, in this order:
 
     Both halves are fixed, and reverting the one-line source bug now fails the suite with the real
     browser's error text.
+
+38. **THE SAMSUNG IDENTITY IS GONE, AND THE RESET GOT 2.5× FASTER BECAUSE OF IT.** 2026-08-29,
+    ADR-0017.
+
+    `MFARM_PRODUCT_DIRECTION_AND_DEVELOPMENT_RESET.md` replaced the imitate-a-handset direction with
+    an MFARM-owned one. `cf-3` and `cf-4` are now **MFARM X1 Pro** (1080×2340 @450, 384dp) and
+    **MFARM X1** (1080×2340 @480, 360dp). Profile ids are `mfarm-x1-pro` and `mfarm-x1`.
+
+    **WHAT WAS DELETED:** `props` and `identityProps` from `profiles.ts`, `applyProfileProps()` from
+    `cuttlefish.ts`, `workers/agent/src/bin/profile-props.ts`, `deploy/apply-device-profile.sh`.
+
+    **THE NUMBER THAT MATTERS.** A powerwash reset on a profiled device measured **~100s**; it is now
+    **~40s**, the same as an unprofiled one. All of that difference was two reboots spent rewriting
+    build properties that `cvd powerwash` had just wiped. Confirmed on hardware before the change —
+    the worker logged `[cuttlefish] cf-3: re-applied galaxy-s25-ultra identity (SM-S938B)` 101
+    seconds after the reset began.
+
+    **THE RULE THAT SURVIVES THE DELETION, and the reason this entry exists at all:**
+
+    > Anything a profile needs must be a **BOOT FLAG**, never a guest edit.
+
+    Geometry survives a powerwash because it lives in cvd's instance database. Guest edits do not,
+    because they live in an overlayfs on `/mnt/scratch` that the wipe clears — and this farm runs
+    `CF_RESET_MODE=powerwash`. Any future profile field that cannot be expressed as a `cvd` flag is
+    signing up for a re-application step on every single reset. That is what the deleted code was.
+
+    **OPERATIONAL — this WILL bite an existing farm.** `CF_PROFILES` still naming `galaxy-s25-ultra`
+    now **fails the agent at startup**. That is deliberate and tested: the alternative is the device
+    booting unprofiled at 720×1280 while the console shows it as an X1 Pro, which is only ever
+    discovered by someone puzzling over a screenshot. Fix `deploy/.state/worker.env` and restart.
+
+    No migration. `model` and `profile` are both inside `capabilityFingerprint()` (issue 36), so
+    every device re-registers on worker restart and the rows correct themselves.
+
+    **WHAT DID NOT CHANGE, deliberately:** geometry, RAM and cores. Those are measured, and
+    `--memory_mb`/`--cpus` only apply on a COLD BOOT — so holding them makes this a re-registration
+    instead of a rebuild of every instance. The direction document's larger RAM figures need a
+    recreate window. Its "120Hz-class display" is not adoptable at all: the render baseline is
+    measured against 60Hz vsync, and 120 would report jank belonging to SwiftShader rather than to
+    the app under test.
+
+    **The ABI preflight stays** and its justification changed. It was introduced as the counterweight
+    that made claiming a Samsung name defensible. The name is gone; the x86_64 wall is not, because
+    it was never caused by the name. See issue 34, still open.

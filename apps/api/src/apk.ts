@@ -465,12 +465,18 @@ export async function readApkMetadata(apkPath: string): Promise<ApkMetadata> {
 /**
  * Why an APK cannot run on a device, when the reason is its native code — or null when it can.
  *
- * THE FAILURE THIS EXISTS TO PREVENT. Two devices in this farm report `Build.MODEL` as a Samsung
- * Galaxy (ADR-0016). Every real Galaxy is arm64-v8a; these are virtual x86_64 devices, and most
+ * THE FAILURE THIS EXISTS TO PREVENT. Every virtual device in this farm executes x86_64, and most
  * real APKs ship arm64-only native libraries. Without this check the first such upload dies inside
- * `adb install` with `INSTALL_FAILED_NO_MATCHING_ABIS` — on a device calling itself the exact phone
- * the customer builds for. That is a worse outcome than never having claimed the name, and the
- * whole justification for claiming it rests on this function existing.
+ * `adb install` with `INSTALL_FAILED_NO_MATCHING_ABIS`, which names a constraint of the runtime in
+ * the vocabulary of a package manager and leaves the customer to work out that the farm, not their
+ * build, is the thing that cannot do this.
+ *
+ * IT WAS WRITTEN FOR A SHARPER VERSION OF THAT PROBLEM and outlived it. Until ADR-0017 two devices
+ * reported a Samsung `Build.MODEL` while executing x86_64 — so an arm64 APK failed on a device
+ * calling itself the exact phone the customer builds for, and this preflight was the whole
+ * justification for claiming that name. The name is gone; the ABI wall is not, because it was never
+ * caused by the name. An MFARM X1 Pro is honestly a virtual x86_64 device, and this function is what
+ * lets it say so at the moment it matters.
  *
  * BOTH UNKNOWNS MEAN "ALLOW", and for the same reason: this is a preflight that turns one specific
  * known-impossible install into a clear sentence. It is not an authority on what can run. A device

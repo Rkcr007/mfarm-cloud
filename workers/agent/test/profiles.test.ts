@@ -1,14 +1,18 @@
 /**
- * Device profile catalog (ADR-0016).
+ * Device profile catalog (ADR-0017).
  *
- * Two things worth testing here, and neither is "does the object literal have the fields I typed".
+ * Three things worth testing here, and none of them is "does the object literal have the fields I
+ * typed".
  *
- *   1. The DENSITY ARITHMETIC. A profile exists to reproduce a real device's dp geometry, because dp
- *      is what layout bugs are expressed in. A density that yields 512dp on a phone profile is not a
+ *   1. The DENSITY ARITHMETIC. A profile exists to give a device a real dp geometry, because dp is
+ *      what layout bugs are expressed in. A density that yields 512dp on a phone profile is not a
  *      cosmetic error — every layout result taken on that device is measuring the wrong device, and
  *      nothing else in the system would ever notice.
  *   2. `parseProfileAssignments`, which is the mechanism protecting the devices this feature is NOT
  *      supposed to touch. Its failure modes matter more than its success one.
+ *   3. That a profile CONFIGURES AND DOES NOT CLAIM. ADR-0017 removed the guest build-property
+ *      spoofing, and the test below is what stops it coming back by accident — a profile carrying a
+ *      `props`-shaped field again is the regression, and it would otherwise be invisible.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -39,33 +43,52 @@ describe('the catalog', () => {
     }
   });
 
-  test('the two Samsung profiles are the geometries they claim', () => {
+  test('the two MFARM devices are the geometries they claim', () => {
     // Spelled out rather than derived, so a change to either number is a change a reviewer sees.
-    // Same panel as the S25; the density is what makes it an Ultra. QHD+ was measured off on
-    // SwiftShader — see the comment on that profile.
-    assert.equal(dp(DEVICE_PROFILES['galaxy-s25-ultra'].screen.width, 450), 384);
-    assert.equal(dp(DEVICE_PROFILES['galaxy-s25'].screen.width, 480), 360);
+    // Same panel on both; DENSITY is the whole difference, and dp is what a layout can see.
+    // QHD+ was measured off on SwiftShader — see the comment on the catalog.
+    assert.equal(dp(DEVICE_PROFILES['mfarm-x1-pro'].screen.width, 450), 384);
+    assert.equal(dp(DEVICE_PROFILES['mfarm-x1'].screen.width, 480), 360);
   });
 
-  test('identity props are written for every partition Android composes model from', () => {
-    // The mistake this catches: setting only the bare `ro.product.model`, which Android has derived
-    // rather than read since 10 — so the edit appears to work, and getprop still says Cuttlefish.
-    const p = DEVICE_PROFILES['galaxy-s25-ultra'];
-    for (const part of ['system', 'system_ext', 'product', 'vendor', 'odm']) {
-      assert.equal(p.props[`ro.product.${part}.model`], 'SM-S938B', `missing ${part} model`);
-      assert.equal(p.props[`ro.product.${part}.manufacturer`], 'samsung', `missing ${part} manufacturer`);
-    }
-    assert.equal(p.props['ro.product.model'], 'SM-S938B', 'the legacy key is still read by older SDKs');
-    assert.ok(p.props['ro.build.fingerprint'].startsWith('samsung/'));
+  test('the two devices differ in dp, not merely in name', () => {
+    // The trap this catches: giving both profiles the same density while changing the marketing
+    // name. Two devices with the same dp width differ in NOTHING a layout can observe, so a farm
+    // offering both would be offering the same test twice under two labels.
+    const pro = DEVICE_PROFILES['mfarm-x1-pro'];
+    const base = DEVICE_PROFILES['mfarm-x1'];
+    assert.notEqual(
+      dp(pro.screen.width, pro.screen.density),
+      dp(base.screen.width, base.screen.density),
+      'both MFARM devices present the same dp width, so one of them tests nothing new',
+    );
   });
 
-  test('no profile spoofs the OS version', () => {
-    // Deliberate: telling an app it is on an Android it is not changes which API-level-conditional
-    // branch it takes, so the app under test exercises code that never runs on the real device. An
-    // obviously-wrong version string is a smaller lie than a silently-wrong code path.
+  test('a profile configures a device and makes no claim about its identity', () => {
+    /**
+     * ADR-0017, and the reason this assertion is worth a test of its own.
+     *
+     * Profiles used to carry a `props` map that wrote `ro.product.model = SM-S938B` and
+     * `ro.product.manufacturer = samsung` into the guest. It was removed because it could not be
+     * finished — a Samsung device is Samsung FIRMWARE, and an app branching on
+     * `Build.MANUFACTURER === "samsung"` took a code path AOSP cannot answer — and because it cost
+     * two reboots on every reset.
+     *
+     * Nothing in the type system prevents somebody adding it back, so this checks the SHAPE rather
+     * than any particular key: a profile is geometry and capacity, and identity is not a field.
+     */
+    const allowed = new Set(['id', 'model', 'label', 'screen', 'diagonalIn', 'memoryMb', 'cpus']);
     for (const [key, p] of Object.entries(DEVICE_PROFILES)) {
-      const versionKeys = Object.keys(p.props).filter((k) => k.startsWith('ro.build.version.'));
-      assert.deepEqual(versionKeys, [], `${key} sets ${versionKeys.join(', ')}`);
+      const extra = Object.keys(p).filter((k) => !allowed.has(k));
+      assert.deepEqual(extra, [], `${key} carries ${extra.join(', ')} — a profile does not spoof guest state`);
+    }
+  });
+
+  test('no device is named after a manufacturer this farm is not', () => {
+    // The devices are MFARM's own (ADR-0017). This is a cheap guard against the rename being
+    // half-done — one profile relabelled and the other left as a handset somebody else makes.
+    for (const [key, p] of Object.entries(DEVICE_PROFILES)) {
+      assert.match(p.model, /^MFARM /, `${key} is called "${p.model}", which is not an MFARM device`);
     }
   });
 });
@@ -79,36 +102,43 @@ describe('parseProfileAssignments', () => {
   });
 
   test('assigns only the local ids named, leaving every other device alone', () => {
-    const m = parseProfileAssignments('cf-3=galaxy-s25-ultra,cf-4=galaxy-s25');
-    assert.equal(m.get('cf-3')?.model, 'Samsung Galaxy S25 Ultra');
-    assert.equal(m.get('cf-4')?.model, 'Samsung Galaxy S25');
+    const m = parseProfileAssignments('cf-3=mfarm-x1-pro,cf-4=mfarm-x1');
+    assert.equal(m.get('cf-3')?.model, 'MFARM X1 Pro');
+    assert.equal(m.get('cf-4')?.model, 'MFARM X1');
     // The assertion this whole feature's safety rests on.
     assert.equal(m.get('cf-1'), undefined);
     assert.equal(m.get('cf-2'), undefined);
   });
 
   test('tolerates whitespace around the entries a human typed into a unit file', () => {
-    const m = parseProfileAssignments(' cf-3 = galaxy-s25-ultra , cf-4 = galaxy-s25 ');
-    assert.equal(m.get('cf-3')?.id, 'galaxy-s25-ultra');
-    assert.equal(m.get('cf-4')?.id, 'galaxy-s25');
+    const m = parseProfileAssignments(' cf-3 = mfarm-x1-pro , cf-4 = mfarm-x1 ');
+    assert.equal(m.get('cf-3')?.id, 'mfarm-x1-pro');
+    assert.equal(m.get('cf-4')?.id, 'mfarm-x1');
   });
 
   test('an unknown profile id throws, naming what it knows', () => {
     // Skipping it would boot the device at the default 720x1280 while everyone involved believed it
-    // was a Galaxy — a mismatch only discovered by someone puzzling over a screenshot later.
-    assert.throws(() => parseProfileAssignments('cf-3=galaxy-s26-ultra'), /unknown profile/);
-    assert.throws(() => parseProfileAssignments('cf-3=galaxy-s26-ultra'), /galaxy-s25-ultra/);
+    // was an X1 Pro — a mismatch only discovered by someone puzzling over a screenshot later.
+    assert.throws(() => parseProfileAssignments('cf-3=mfarm-x2-pro'), /unknown profile/);
+    assert.throws(() => parseProfileAssignments('cf-3=mfarm-x2-pro'), /mfarm-x1-pro/);
+  });
+
+  test('the retired Samsung ids are not silently still accepted', () => {
+    // A farm whose unit file still reads `cf-3=galaxy-s25-ultra` must FAIL LOUDLY at start rather
+    // than boot the device unprofiled at 720x1280 while the console shows it as an X1 Pro.
+    assert.throws(() => parseProfileAssignments('cf-3=galaxy-s25-ultra'), /unknown profile/);
+    assert.throws(() => parseProfileAssignments('cf-4=galaxy-s25'), /unknown profile/);
   });
 
   test('a malformed entry throws rather than being silently dropped', () => {
-    assert.throws(() => parseProfileAssignments('galaxy-s25-ultra'), /is not <localId>=<profileId>/);
-    assert.throws(() => parseProfileAssignments('=galaxy-s25'), /is not <localId>=<profileId>/);
+    assert.throws(() => parseProfileAssignments('mfarm-x1-pro'), /is not <localId>=<profileId>/);
+    assert.throws(() => parseProfileAssignments('=mfarm-x1'), /is not <localId>=<profileId>/);
   });
 });
 
 describe('profileById', () => {
   test('resolves a known id and is undefined for anything else', () => {
-    assert.equal(profileById('galaxy-s25')?.model, 'Samsung Galaxy S25');
+    assert.equal(profileById('mfarm-x1')?.model, 'MFARM X1');
     assert.equal(profileById(undefined), undefined);
     assert.equal(profileById('nope'), undefined);
   });
