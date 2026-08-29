@@ -65,6 +65,37 @@ const FILES: Record<string, { file: string; type: string }> = {
   // Not a degraded console: a blank page. Caught by curl against the deployed host, and by nothing
   // else, which is why `ui.test.ts` now derives this list from console.js's own imports.
   '/profiles.js': { file: 'profiles.js', type: 'text/javascript; charset=utf-8' },
+
+  /**
+   * THE NEW CONSOLE, served at `/app` beside the old one at `/`.
+   *
+   * Both ship in the same image on purpose. The new console is not at parity yet, so the old one
+   * stays the front door; a cutover is repointing `/` at `app/index.html`, and a rollback is
+   * pointing it back. Nobody has to choose a release to find out.
+   *
+   * THE FILENAMES ARE FIXED, NOT HASHED, and that is what makes this table possible — see the note
+   * in `apps/console/vite.config.ts`. A content hash changes every build, so an allowlist could
+   * never name it, and the alternative is a static-file plugin that would undo the security
+   * decision this table exists to make. It costs nothing: every response here is `no-store`, so a
+   * cache-busting name has no cache to bust.
+   */
+  '/app': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
+  '/app/': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
+  '/app/app.js': { file: 'app/app.js', type: 'text/javascript; charset=utf-8' },
+  '/app/app.css': { file: 'app/app.css', type: 'text/css; charset=utf-8' },
+
+  /**
+   * Three faces, latin only — the console declares them by hand rather than importing a package
+   * entry point precisely so this list stays three lines instead of eleven. Adding a subset means
+   * adding it here too, and `ui.test.ts` derives that requirement from the built stylesheet so a
+   * font added without an allowlist entry fails the suite rather than 404ing in production.
+   */
+  '/app/fonts/instrument-sans-latin-wght-normal.woff2':
+    { file: 'app/fonts/instrument-sans-latin-wght-normal.woff2', type: 'font/woff2' },
+  '/app/fonts/bricolage-grotesque-latin-wght-normal.woff2':
+    { file: 'app/fonts/bricolage-grotesque-latin-wght-normal.woff2', type: 'font/woff2' },
+  '/app/fonts/jetbrains-mono-latin-wght-normal.woff2':
+    { file: 'app/fonts/jetbrains-mono-latin-wght-normal.woff2', type: 'font/woff2' },
 };
 
 /** Exported so a test can assert this table covers every module `console.js` actually imports. */
@@ -73,13 +104,26 @@ export const SERVED_PATHS = Object.keys(FILES);
 export async function uiRoutes(app: FastifyInstance): Promise<void> {
   const dp = dataPlaneOrigin();
   for (const [route, { file, type }] of Object.entries(FILES)) {
+    /**
+     * FONTS ARE BINARY AND ARE NOT CREDENTIALED, and both halves of that change how they are served.
+     *
+     * Read as a Buffer, never as utf8 — decoding a woff2 as text and re-encoding it produces a file
+     * the browser silently refuses, and the only symptom is the fallback face. And cached rather
+     * than `no-store`: `no-store` is here because the console renders somebody's fleet, which is
+     * true of the markup and false of a typeface. Sending 110 KB of identical font on every page
+     * load to protect a secret it does not contain is a cost with nothing on the other side.
+     */
+    const isFont = type.startsWith('font/');
+
     app.get(route, async (_req, reply) => {
-      const body = await readFile(join(PUBLIC_DIR, file), 'utf8');
+      const body = isFont
+        ? await readFile(join(PUBLIC_DIR, file))
+        : await readFile(join(PUBLIC_DIR, file), 'utf8');
       return reply
         .header('content-type', type)
         // The console is a credentialed surface; a shared cache holding it is a shared cache
-        // holding somebody's fleet page.
-        .header('cache-control', 'no-store')
+        // holding somebody's fleet page. A font is not — see above.
+        .header('cache-control', isFont ? 'public, max-age=604800, immutable' : 'no-store')
         // Defence in depth for a page that renders device names and app package ids from the API.
         .header('x-content-type-options', 'nosniff')
         .header('referrer-policy', 'same-origin')
@@ -101,7 +145,12 @@ export async function uiRoutes(app: FastifyInstance): Promise<void> {
           // `default-src 'none'` never governed them. Saying it out loud means the next person to
           // read this line does not have to work that out, and a future `webrtc 'block'` becomes a
           // one-word change rather than an archaeology exercise.
-          "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+          // `font-src 'self'` is the ONE directive the new console adds, and it names no external
+          // origin. The faces are self-hosted and served from this same allowlist; a self-hosted
+          // product that phones a font CDN on every page load is not self-hosted, and it would put
+          // a third party in the load path of a page somebody's fleet depends on.
+          "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; " +
+          "img-src 'self' data: blob:; " +
           `connect-src 'self'${dp ? ` ${dp}` : ''}; media-src 'self' blob:; webrtc 'allow'; ` +
           "form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
         )

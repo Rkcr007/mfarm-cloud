@@ -40,6 +40,59 @@ describe('the console is served from an allowlist', () => {
     assert.match(console_js, /from '\/live\.js'/, 'console.js imports live.js by absolute path');
   });
 
+  /**
+   * EVERY entry in the allowlist, not a list somebody remembered to keep in step.
+   *
+   * This is the generalised form of the bug that took the console down in production: `/profiles.js`
+   * was missing from the table, so the browser could not resolve an import, the module graph failed
+   * and the page came up blank — while the suite stayed green, because the test above names its
+   * paths by hand and nobody added the new one.
+   *
+   * Derived from `SERVED_PATHS` instead, so an entry added to the table is automatically covered and
+   * an entry whose file does not exist fails HERE rather than in somebody's browser. That is also
+   * what makes this the test that fails if CI forgets to build the console: `/app/*` is emitted by
+   * `npm run build --workspace apps/console`, and without it these paths 404.
+   */
+  test('every allowlisted path serves real bytes with the type it promises', async () => {
+    const { SERVED_PATHS } = await import('../src/http/routes/ui.ts');
+    assert.ok(SERVED_PATHS.length > 0, 'the allowlist is empty, which cannot be right');
+
+    for (const path of SERVED_PATHS) {
+      const res = await get(path);
+      assert.equal(res.statusCode, 200, `${path} is allowlisted but does not serve`);
+      assert.ok(res.rawPayload.length > 0, `${path} serves an empty body`);
+
+      // A font decoded as text and re-encoded is a file the browser silently refuses, and the only
+      // symptom is the fallback face. `wOF2` is the woff2 magic number; if it survived the round
+      // trip, the bytes were not mangled.
+      if (path.endsWith('.woff2')) {
+        assert.equal(
+          res.rawPayload.subarray(0, 4).toString('latin1'), 'wOF2',
+          `${path} is not intact woff2 — it was probably read as utf8`,
+        );
+        assert.match(String(res.headers['content-type']), /^font\/woff2/);
+      }
+    }
+  });
+
+  test('the new console at /app names assets the allowlist actually serves', async () => {
+    // Same failure mode as the module-graph test above, one build system further along: vite writes
+    // the script and stylesheet paths into index.html, and a filename change there that is not
+    // mirrored in the allowlist is a blank page with a 401 in the network tab.
+    const html = (await get('/app')).body;
+    for (const ref of html.matchAll(/(?:src|href)="(\/app\/[^"]+)"/g)) {
+      const res = await get(ref[1]!);
+      assert.equal(res.statusCode, 200, `/app/index.html references ${ref[1]}, which is not served`);
+    }
+
+    // And the stylesheet's own font references, which no HTML attribute mentions.
+    const css = (await get('/app/app.css')).body;
+    for (const ref of css.matchAll(/url\((\/app\/[^)]+)\)/g)) {
+      const res = await get(ref[1]!);
+      assert.equal(res.statusCode, 200, `app.css references ${ref[1]}, which is not served`);
+    }
+  });
+
   test('nothing outside the allowlist resolves, however it is spelled', async () => {
     for (const path of ['/../src/config.ts', '/console.js/../../package.json', '/.env', '/turn.ts']) {
       const res = await get(path);
