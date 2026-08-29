@@ -105,7 +105,7 @@ Control plane
   ✓ /dp reaches the device host's data plane (426 = websocket only)
 
 Fleet
-  ✓ 2 devices READY
+  ✓ 4 devices READY
   ✓ devices declare screen-stream (live view available)
 
 Media relay

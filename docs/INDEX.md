@@ -17,7 +17,13 @@ on an emulator on somebody's laptop.
 The devices are **Cuttlefish** virtual Android instances on a Linux host with KVM. The bet is
 "physical-device-like testing at virtual-device economics".
 
-**Live now:** `https://farm.mfarm.dev`, two devices, running commit `95f6701`.
+**Live now:** `https://farm.mfarm.dev`, running commit `1920d2f`. **Four virtual devices** —
+*MFARM X1 Pro* and *MFARM X1* (profiled, ADR-0017) plus two unprofiled `cuttlefish` — and one
+physical handset. A second console is served at `/app`: the new React build, device view only,
+alongside the current one at `/` until it reaches parity.
+
+**`mfarm-lab` is stopped between sessions; `mfarm-cp` stays up.** `./deploy/farm-online.sh`
+brings the devices back.
 
 | Piece | Where | State |
 |---|---|---|

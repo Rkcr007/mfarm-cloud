@@ -1,13 +1,21 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-24. **New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:
+Last updated 2026-08-29. **New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:
 what is built, every decision and what it rejected, the roads not taken, and every measured number.
 For the hands-on path instead, `docs/START_HERE.md` goes from a closed laptop to a device you can
 tap in seven steps.** This file is the state of play and every known issue.
 
 **Two machines (ADR-0006): `mfarm-cp` holds the control plane and console at
-https://farm.mfarm.dev; `mfarm-lab` holds the devices. Both are stopped between sessions;
-`./deploy/farm-online.sh` and `./deploy/farm-check.sh` bring them back.**
+https://farm.mfarm.dev; `mfarm-lab` holds the devices.**
+
+**As of 2026-08-29 `mfarm-lab` is STOPPED and `mfarm-cp` is RUNNING.** That is deliberate rather
+than half-finished: the lab is the ~₹65/hour half and there is no reason to pay it between
+sessions, while the control plane is a few rupees an hour and keeping it up means the console, the
+API and every link into them still resolve. `./deploy/farm-online.sh` starts both and re-points the
+media relay; `./deploy/farm-check.sh` waits for the devices and reports what is actually live.
+
+**Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
+section written for someone arriving cold.
 
 **2026-08-24 — on-demand screenshots (§4.5).** `POST /v1/sessions/:id/app-actions
 {"kind":"screenshot"}` captures the screen while the suite still holds the device, instead of the
@@ -1572,45 +1580,6 @@ reports.
 **Give parallel agents disjoint file ownership and one database owner.** See constraint 6 — a second
 agent running a DB-backed suite will corrupt the first's run.
 
-## Suggested next step
-
-Blockers 1, 2 and 3 are closed; the `cvd` flags and snapshot/restore are verified (B7). What is
-left, in this order:
-
-**B8 and B9 are done (issues 15 and 17), and the automation path is proven end to end.** Two disk
-snapshots exist: `mfarm-cf-ready` (Cuttlefish + image) and `mfarm-farm-ready` (that plus node 22,
-docker, appium, and both device snapshots). Restore the latter and `deploy/farm-up.sh` brings the
-farm to `available: 2` **without reinstalling anything — but not quickly.** Restoring an image is a
-host boot, so the baked-in device snapshots are discarded on the way up and both devices cold boot
-and re-snapshot first; budget minutes, not seconds, and read issue 24 before planning a metered
-session around it.
-
-What is left, in this order:
-
-1. ~~**Settle blocker 6 (media routing) in an ADR before any viewer work.**~~ **DONE 2026-08-19 —
-   ADR-0005.** A coturn relay with per-session credentials, no client software, and the data plane
-   moving off the docker bridge address it was bound to for issue 15. Decided only; the viewer work
-   it unblocks is item 5 below, and M4 of `docs/E2E_MVP_PLAN.md`.
-2. **Run a real Appium suite**, not just `verify-webdriver.mjs` — the Kotlin one and the Flutter/RN
-   one, sharded across both devices. That is Phase 1's exit and the first honest look at what
-   SwiftShader costs a rendering-heavy app.
-3. **Spikes 1 and 2a**, which still gate *scaling* rather than shipping.
-4. **Phase 3** — artifacts, logcat, video — all buildable for ₹0 against the snapshots above.
-   App upload, install, launch and uninstall landed 2026-08-19 (issues 21 and 22), and the console
-   can drive all of them. The first thing to do with a live box is push a real APK through it: that
-   path has only ever met a fake device, and `adb install` has never run from this code.
-5. ~~**The interactive viewer**~~ — **built 2026-08-19 (issue 28, ADR-0007)**, and what remains is
-   a box rather than more code. In order, on the device host:
-   a. `deploy/install-worker-service.sh` (it now writes `DATA_PLANE_BIND_HOST` and `CF_OPERATOR_URL`)
-      and confirm the operator really is on 1080 — `curl -s localhost:1080/devices`. If it is not,
-      that is one environment variable.
-   b. `deploy/setup-turn.sh` on the device host, then `TURN_URLS`/`TURN_SECRET` into the control
-      plane's `.env`, then `WORKER_DATA_PLANE=10.160.0.2:8080 deploy/setup-ingress.sh` and
-      `DATA_PLANE_PUBLIC_BASE=wss://<console-host>/dp` on the API.
-   c. Open a session from the console and watch the bring-up. **Exercise BOTH ICE modes** — ADR-0005
-      is explicit that a viewer tested only on a LAN has not been tested, so the second run is from a
-      phone on mobile data, checking the cockpit's Stream panel reports `relayed (TURN)`.
-
 37. **A STRING WHERE `h()` WANTED AN OBJECT KILLED EVERY SESSION IN PRODUCTION, AND 991 TESTS SAID
     IT WAS FINE.** 2026-08-29.
 
@@ -1701,3 +1670,96 @@ What is left, in this order:
     **The ABI preflight stays** and its justification changed. It was introduced as the counterweight
     that made claiming a Samsung name defensible. The name is gone; the x86_64 wall is not, because
     it was never caused by the name. See issue 34, still open.
+
+---
+
+## Next session — pick up here
+
+Written 2026-08-29, cold-start first. Everything below is verified unless it says otherwise.
+
+### Where things stand
+
+The product direction changed: `MFARM_PRODUCT_DIRECTION_AND_DEVELOPMENT_RESET.md` (repo root)
+replaced the imitate-a-Samsung direction with an MFARM-owned one, and **ADR-0017 supersedes
+ADR-0016**. The devices are `MFARM X1 Pro` (384dp) and `MFARM X1` (360dp). Nothing pretends to be a
+handset somebody else makes.
+
+Four PRs shipped that day, all deployed and hardware-verified: **#43** (the cockpit crash), **#44**
+(the MFARM identity), **#45** (runbook), **#46** (the new console). Control plane and worker both on
+`1920d2f`. 995 tests green.
+
+### Bring the farm back
+
+```bash
+./deploy/farm-online.sh     # starts both machines, re-points the media relay
+./deploy/farm-check.sh      # waits for the devices, reports what is actually live
+```
+
+`mfarm-cp` is already running, so in practice this is starting `mfarm-lab`. Budget ~3 minutes: the
+four devices restart sequentially at ~30s each.
+
+### Do these first, in this order
+
+1. **PUSH THE DEMO APK THROUGH AN INSTALL.** This is the largest open risk in the product and it is
+   not a UI problem. The image advertises `arm64-v8a` in `ro.product.cpu.abilist` while native-bridge
+   translation is off and `binfmt_misc` is empty (issue 34), so an arm64-only APK most likely
+   installs and then dies at `System.loadLibrary`. Every other priority is downstream of whether
+   "test a real Android application" is true. The user was going to supply the APK; ask for it.
+
+2. **Port the live view into the new console.** `/app` currently renders real devices at real
+   geometry with an honest empty screen. The next slice is the WebRTC path — `apps/api/public/live.js`
+   is the working implementation to port, and it is the one part of the old console that holds a
+   socket and a peer connection open rather than being a render function.
+
+3. **Instrument latency in the product.** There is still no number for input-to-photon or for
+   capture+encode on the host, and §13 and §24 of the direction document both ask for them. The
+   receive path IS measured (below) and is not where the remaining latency lives.
+
+### Numbers measured 2026-08-29, so nobody re-derives them
+
+| | |
+|---|---|
+| Live stream | 50 fps, 1080×2340, VP8 |
+| Network RTT | 30–35 ms, direct (srflx), no TURN relay |
+| Jitter buffer | **18.7 ms** |
+| Decode | 6.3 ms per frame |
+| Frames dropped / lost / freezes | 0 / 0 / 0 |
+| Reset (powerwash) | ~40 s, down from ~100 s |
+| Data-plane socket open | 124 ms |
+| Host | 16 vCPU, 62 GB, 106 GB free, load 0.52 with 4 devices idle |
+
+**`playoutDelayHint` is NOT the lever it looks like.** The expectation was a 100–200ms jitter
+buffer; it measured 18.7ms, so that change is worth ~10ms and not the 150 it was budgeted at.
+
+### Traps that cost time on 2026-08-29
+
+- **`systemctl stop mfarm-worker` takes every Cuttlefish instance down with it.** The worker owns
+  the device lifecycle. Reset through the product (*Release & reset*), never by stopping the worker
+  to reach `cvd`. Full note in `docs/RUNBOOK.md`.
+- **`cvd` must run as the user that owns the host config**, and `cvd fleet` on 1.55.1 frequently
+  dies in its own gflags XML parser. Neither means the fleet is unhealthy.
+- **Navigating to the same `#/hash` URL does not reload the console.** A stale DOM looked exactly
+  like a state bug for several minutes. Use a real reload.
+- **The devices cannot be pinned by the allocator.** To reset a specific one, allocate every device
+  and release them all.
+
+### The rule that keeps being paid for
+
+> An assertion that holds on the fallback path cannot detect that you are on the fallback path.
+
+Three separate bugs on 2026-08-29 shared this shape. When a feature has a graceful fallback, at
+least one assertion must be **false** in the fallback — otherwise the test passes hardest exactly
+when the feature is broken. See issues 37 and 38.
+
+### Still open
+
+- **Issue 34** — arm64 advertised with no translation layer. Item 1 above.
+- **Issue 33** — `AppStore.put` leaves a `.part` file on an oversized upload. Pre-existing.
+- **Touch accuracy has no test coverage.** Coordinate scaling uses `getBoundingClientRect`, which
+  the DOM shim returns as zeroes. It is a P0 requirement in the direction document.
+- **A crashed client holds its device for the full 30-minute lease**, with no recovery path because
+  the UI is the thing that crashed. Direction document §14.
+- **`recording` is a capability string nothing implements.** The largest genuinely-new build in the
+  direction document, and §27 means the button cannot exist until the recorder does.
+- **GPU is deferred by decision**, not blocked by engineering. It is a GCP billing-tier conversion.
+  Cost of deferring: continuously-painting apps stay at 30fps with ~1.35s frozen frames.
