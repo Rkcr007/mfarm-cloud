@@ -70,7 +70,7 @@ CF_INSTANCES="${CF_INSTANCES:-4}"
 # whole mechanism keeping cf-1 and cf-2 out of the way. Known ids live in
 # workers/agent/src/devices/profiles.ts; an unknown one fails the agent at startup rather than
 # quietly booting a default.
-CF_PROFILES="${CF_PROFILES:-cf-3=galaxy-s25-ultra,cf-4=galaxy-s25}"
+CF_PROFILES="${CF_PROFILES:-cf-3=mfarm-x1-pro,cf-4=mfarm-x1}"
 REGION="${REGION:-lab}"
 
 say "Writing $ENV_FILE"

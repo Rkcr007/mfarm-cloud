@@ -496,19 +496,19 @@ describe('failure classification on the run detail', () => {
  *
  * The panel is drawn from two independent sources and the split is the thing worth protecting:
  * GEOMETRY comes from the device's own reported screen, CHROME comes from its profile. A test that
- * only checked "the Samsung looks like a Samsung" would pass just as happily if the console had
+ * only checked "the X1 Pro looks like an X1 Pro" would pass just as happily if the console had
  * started drawing the panel from the chrome table — which would show a shape the device is not.
  */
 describe('device profiles', () => {
-  /** cf-3 as the agent registers it: profiled, Samsung-named, and still a virtual device. */
+  /** cf-3 as the agent registers it: profiled, MFARM-named, and still a virtual device. */
   function withProfiled() {
     seed({ name: 'devices' });
     mod.state.devices = [
       ...mod.state.devices,
       {
         id: 'dev-3', region: 'lab', platform: 'android', tier: 'cuttlefish',
-        model: 'Samsung Galaxy S25 Ultra', osVersion: '17', state: 'READY', dedicated: false,
-        profile: 'galaxy-s25-ultra',
+        model: 'MFARM X1 Pro', osVersion: '17', state: 'READY', dedicated: false,
+        profile: 'mfarm-x1-pro',
         screen: { width: 1080, height: 2340, density: 450 },
         abis: ['x86_64', 'x86'],
         capabilities: ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install',
@@ -523,7 +523,7 @@ describe('device profiles', () => {
     // beside it — if the tag is ever dropped, this is the test that should fail.
     withProfiled();
     const text = textOf(mod.SCREENS.devices());
-    assert.match(text, /Samsung Galaxy S25 Ultra/);
+    assert.match(text, /MFARM X1 Pro/);
     assert.match(text, /VIRTUAL DEVICE/);
   });
 
@@ -548,13 +548,13 @@ describe('device profiles', () => {
     mod.state.route = { name: 'cockpit', id: 'sess-1' };
     // `state.detail`, which is the key the cockpit actually reads. It was `state.sessionDetail`
     // here — a name that appears nowhere in console.js — so this test spread `undefined` and then
-    // rendered the UNPROFILED `dev-1` while asserting things about a Galaxy. Every assertion still
+    // rendered the UNPROFILED `dev-1` while asserting things about an X1 Pro. Every assertion still
     // passed, because the two it made are true of every device.
     mod.state.detail = { ...mod.state.detail, deviceId: 'dev-3' };
     mod.state.stage = null;
     const classes = classesOf(mod.SCREENS.cockpit());
     assert.ok(classes.includes('dev-body'), 'the phone body');
-    assert.ok(classes.includes('dev-cutout'), 'the camera, which is IN the display on a real Galaxy');
+    assert.ok(classes.includes('dev-cutout'), 'the camera, which sits IN the display on this body');
     /**
      * The SIDE BUTTONS, and this is the assertion that carries the test.
      *
@@ -585,7 +585,7 @@ describe('device profiles', () => {
     // A worker can be a version ahead of the console it is registering with. A profile added after
     // this file was written must render as a plain phone, not take out the whole live view.
     seed({ name: 'cockpit', id: 'sess-1' });
-    mod.state.devices[0].profile = 'galaxy-s99-from-the-future';
+    mod.state.devices[0].profile = 'mfarm-x9-from-the-future';
     mod.state.stage = null;
     assert.ok(classesOf(mod.SCREENS.cockpit()).includes('dev-frame'));
   });

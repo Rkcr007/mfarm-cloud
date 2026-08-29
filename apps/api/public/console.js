@@ -1914,7 +1914,7 @@ function stagePanel(sess, live) {
      * used to hold absolutely — see the comment on the keyboard hint below, which still holds for
      * everything else.
      *
-     * The reversal is deliberate (ADR-0016): a real Galaxy's camera IS in the display, so a body
+     * The reversal is deliberate (ADR-0017): a modern phone's camera IS in the display, so a body
      * that puts it in the bezel is drawing a phone nobody makes. What makes it acceptable is that it
      * is the ONLY thing allowed over the screen, it never takes a pointer event, and the chrome
      * toggle in the toolbar removes it — so the status bar underneath it is always one click away.

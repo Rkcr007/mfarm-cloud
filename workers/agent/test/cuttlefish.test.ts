@@ -648,7 +648,7 @@ describe('device profiles', () => {
     await answer('cvd', 'fleet', '[]');
     await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
 
-    const d = device({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] });
+    const d = device({ profile: DEVICE_PROFILES['mfarm-x1-pro'] });
     await d.start();
 
     const create = await callTo('cvd', 'create');
@@ -662,10 +662,10 @@ describe('device profiles', () => {
   });
 
   test('a profiled device reports the profile it was built from', () => {
-    const d = device({ profile: DEVICE_PROFILES['galaxy-s25'] });
-    assert.equal(d.info.model, 'Samsung Galaxy S25');
+    const d = device({ profile: DEVICE_PROFILES['mfarm-x1'] });
+    assert.equal(d.info.model, 'MFARM X1');
     assert.deepEqual(d.info.screen, { width: 1080, height: 2340, density: 480 });
-    assert.equal(d.info.profile, 'galaxy-s25');
+    assert.equal(d.info.profile, 'mfarm-x1');
   });
 
   test('ABIs are READ FROM THE GUEST, never assumed', async () => {
@@ -701,14 +701,22 @@ describe('device profiles', () => {
 });
 
 /**
- * A profiled device's IDENTITY does not survive a wipe — measured, not assumed.
+ * A RESET WRITES NOTHING INTO THE GUEST — ADR-0017, and this suite is the guard on that.
  *
- * `cvd powerwash` wipes the overlayfs the build properties live in, so a device that was a Galaxy
- * before the reset comes back a Cuttlefish. Geometry is unaffected, because that is a boot flag in
- * cvd's instance database rather than guest state. This farm resets by powerwash, so without
- * re-application the very first reset silently un-names every profiled device.
+ * Until 2026-08-29 a profiled device rewrote its build properties after every powerwash, so that it
+ * came back reporting `ro.product.model = SM-S938B`. Measured, not assumed: `cvd powerwash` wipes
+ * the overlayfs those properties live in, so they had to be re-applied on every single reset, at the
+ * cost of two extra reboots — ~100s against ~40s.
+ *
+ * That went away with the spoofing. The device is an MFARM X1 Pro, which is a true statement needing
+ * no guest edit at all, and geometry comes back on its own because it is a boot flag in cvd's
+ * instance database rather than guest state.
+ *
+ * These tests assert the ABSENCE of that machinery, which is the only way an absence stays absent.
+ * They would all pass trivially if `resetToSnapshot` stopped running — so each one first proves the
+ * reset actually happened.
  */
-describe('a reset re-establishes the device identity', () => {
+describe('a reset touches guest state and nothing else', () => {
   async function poweredWash(overrides: Record<string, unknown> = {}) {
     await answer('cvd', 'fleet', '[]');
     await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
@@ -718,38 +726,46 @@ describe('a reset re-establishes the device identity', () => {
     return d;
   }
 
-  test('a profiled device rewrites its build properties after a powerwash', async () => {
-    await answerProp('adb', 'ro.product.model', 'SM-S938B');
-    await poweredWash({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] });
-
+  test('a PROFILED device writes no build properties and needs no extra reboot', async () => {
+    await poweredWash({ profile: DEVICE_PROFILES['mfarm-x1-pro'] });
     const all = await calls();
-    // Joined, because the heredoc argument spans lines and the fake logs argv verbatim — so a
-    // single `adb shell` call appears in the log as several lines.
     const log = all.join('\n');
-    assert.match(log, /cat >> \/system\/build\.prop/, `no system write:\n${log}`);
-    assert.match(log, /cat >> \/vendor\/build\.prop/, 'vendor properties go to the vendor partition');
-    // The partition-scoped keys, not just the bare one — Android has DERIVED ro.product.model from
-    // them since 10, so writing only the bare key looks like it worked and changes nothing.
-    assert.match(log, /ro\.product\.vendor\.model=SM-S938B/, 'vendor-scoped model');
-    assert.match(log, /ro\.product\.system\.model=SM-S938B/, 'system-scoped model');
-    // remount is worthless until the device has rebooted, so the sequence has to include one.
-    assert.match(log, /remount/, 'the overlay has to be enabled');
-    assert.ok(all.filter((c) => /\breboot\b/.test(c)).length >= 2, 'one reboot for the overlay, one for the props');
+
+    // The reset really ran — otherwise every assertion below is vacuous.
+    assert.ok(all.some((c) => /\bpowerwash\b/.test(c)), `no powerwash happened:\n${log}`);
+
+    assert.equal(all.some((c) => c.includes('build.prop')), false, `wrote guest properties:\n${log}`);
+    assert.equal(all.some((c) => c.includes('remount')), false, 'no partition is remounted');
+    assert.equal(all.some((c) => /\bdisable-verity\b/.test(c)), false, 'verity is left alone');
+    // The two reboots were the whole ~60s cost. A powerwash reboots the device itself; the reset
+    // path must add none of its own.
+    assert.equal(all.filter((c) => /\badb\b.*\breboot\b/.test(c)).length, 0, 'no adb-driven reboots');
   });
 
-  test('an UNPROFILED device pays none of that cost', async () => {
-    // cf-1 and cf-2 reset by powerwash several times a day. None of the above may run for them.
+  test('an UNPROFILED device resets exactly as it always did', async () => {
+    // cf-1 and cf-2 reset by powerwash several times a day, and this path never changed.
     await poweredWash();
     const all = await calls();
+    assert.ok(all.some((c) => /\bpowerwash\b/.test(c)));
     assert.equal(all.some((c) => c.includes('build.prop')), false, `nothing written:\n${all.join('\n')}`);
     assert.equal(all.some((c) => c.includes('remount')), false, 'and no remount');
   });
 
-  test('an identity that will not take is logged, not thrown — the device still works', async () => {
-    // A device that resets but comes back named `cuttlefish` is wrong about its name and completely
-    // serviceable. Failing the reset would pull a working device out of the pool over a property.
-    await answerProp('adb', 'ro.product.model', 'Cuttlefish x86_64 phone 64-bit only');
-    await assert.doesNotReject(poweredWash({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] }));
+  test('a profiled and an unprofiled reset issue the SAME adb calls', async () => {
+    // The strongest form of the claim: after ADR-0017 a profile changes what a device is CREATED
+    // with and nothing about how it is reset. Asserted as an equality so a new adb step added to
+    // one path and not the other fails here rather than as a timing difference in production.
+    await poweredWash({ profile: DEVICE_PROFILES['mfarm-x1-pro'] });
+    const profiled = (await calls()).filter((c) => c.startsWith('adb'));
+
+    // Truncate the recorded calls rather than rebuild the fake environment: `beforeEach` runs
+    // between TESTS, and both halves of this comparison have to happen inside one.
+    await writeFile(log, '');
+    await poweredWash();
+    const plain = (await calls()).filter((c) => c.startsWith('adb'));
+
+    assert.ok(profiled.length > 0, 'the profiled reset issued no adb calls at all — check the fake');
+    assert.deepEqual(profiled, plain, 'a profile still changes the reset path');
   });
 });
 
@@ -757,7 +773,7 @@ describe('a reset re-establishes the device identity', () => {
  * A RESTART MUST NOT SILENTLY RESIZE A PROFILED DEVICE.
  *
  * Measured on hardware: `cvd start --daemon` brought cf-3 back at the image default 720x1280
- * instead of its profile's own panel, while the guest kept reporting itself as a Galaxy S25 Ultra.
+ * instead of its profile's own panel, so the console drew a device shape the guest was not using.
  * A device that lies about its size is worse than one that never claimed a size, and this is the
  * path a host reboot takes.
  */
@@ -773,7 +789,7 @@ describe('a restart preserves the profile geometry', () => {
   }
 
   test('a profiled device restarts WITH its display, memory and cores', async () => {
-    await restarted({ profile: DEVICE_PROFILES['galaxy-s25-ultra'] });
+    await restarted({ profile: DEVICE_PROFILES['mfarm-x1-pro'] });
     const start = (await calls()).find((c) => /^cvd .*\bstart\b/.test(c) && !c.includes('fleet'));
     assert.ok(start, 'expected a restart');
     assert.match(start, /--display0=width=1080,height=2340,dpi=450/);

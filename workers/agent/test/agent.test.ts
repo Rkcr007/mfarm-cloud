@@ -996,8 +996,8 @@ describe('per-device automation endpoints', () => {
     const mk = () => {
       const b = fakeBackend('cf-1');
       b.control.info.screen = { width: 1080, height: 2340, density: 450 };
-      b.control.info.model = 'Samsung Galaxy S25 Ultra';
-      b.control.info.profile = 'galaxy-s25-ultra';
+      b.control.info.model = 'MFARM X1 Pro';
+      b.control.info.profile = 'mfarm-x1-pro';
       b.control.info.abis = ['x86_64', 'arm64-v8a'];
       return b;
     };
