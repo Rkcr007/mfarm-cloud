@@ -5,10 +5,17 @@
 #
 #   docker build -f apps/api/Dockerfile -t mfarm-api .
 #
-# There is no build step and no bundler. Node strips TypeScript natively (>=22.6), which is why the
-# repo has no `dist/`. That also means types are ERASED, NEVER CHECKED — `npm run typecheck` in CI is
-# the only thing standing between this image and a wrong field name, so an image that builds proves
-# nothing about types.
+# The API ITSELF has no build step and no bundler. Node strips TypeScript natively (>=22.6), which is
+# why the repo has no `dist/`. That also means types are ERASED, NEVER CHECKED — `npm run typecheck`
+# in CI is the only thing standing between this image and a wrong field name, so an image that builds
+# proves nothing about types.
+#
+# THE CONSOLE IS THE ONE EXCEPTION, and it is built here rather than committed. Its output could have
+# been checked into `apps/api/public/app/`, which would have kept this file a pure copy — but a
+# committed build artifact drifts the moment somebody edits a component and forgets to rebuild, and
+# the symptom is a deployed console that is silently one commit stale with nothing anywhere saying
+# so. Building it in the image makes that impossible: the assets in the image are always the assets
+# the source in the image produces.
 
 FROM node:22-alpine AS deps
 
@@ -23,6 +30,25 @@ COPY apps/api/package.json apps/api/
 # resolving something newer than what CI tested. --omit=dev keeps typescript and @types out of the
 # runtime image.
 RUN npm ci --omit=dev
+
+# ---------------------------------------------------------------- console
+
+# Its own stage, with dev dependencies, so vite and react never reach the runtime image.
+FROM node:22-alpine AS console
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY packages/protocol/package.json packages/protocol/
+COPY apps/api/package.json apps/api/
+COPY apps/console/package.json apps/console/
+
+# The full install, unlike the deps stage: a bundler IS a dev dependency.
+RUN npm ci
+
+COPY apps/console ./apps/console
+
+# Emits `apps/api/public/app/` — fixed filenames, no hashing, so the API's allowlist can name them.
+RUN npm run build --workspace apps/console
 
 # ---------------------------------------------------------------- runtime
 
@@ -47,6 +73,10 @@ COPY --from=deps /app ./
 # installed above is clobbered here.
 COPY packages/protocol ./packages/protocol
 COPY apps/api ./apps/api
+
+# AFTER `apps/api`, because that copy would otherwise land on top of it. `public/app` is gitignored
+# and absent from the build context, so this is the only thing that puts the console in the image.
+COPY --from=console /app/apps/api/public/app ./apps/api/public/app
 
 # The app library's blobs (migration 014) and session artifacts (migration 019). Created in the
 # image, owned by `node`, and that ownership is the entire reason this line exists: Docker seeds a

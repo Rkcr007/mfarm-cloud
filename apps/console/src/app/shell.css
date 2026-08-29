@@ -1,0 +1,159 @@
+/**
+ * The shell — Studio's discipline: flat surfaces, hairline rules, air, nothing glowing.
+ *
+ * Everything outside the device stage lives here, and its whole job is to be quiet. The only
+ * saturated colour on this surface is a status dot; the accent is reserved for the one primary
+ * action on a screen, so a violet thing is always the thing to reach for.
+ */
+
+.shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100dvh;
+  background: var(--bg);
+}
+
+/* ---------- top bar ------------------------------------------------------------------------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  height: 52px;
+  padding: 0 var(--s-4);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raise);
+}
+.brand {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--t-md);
+  letter-spacing: -.03em;
+  color: var(--ink);
+}
+.topbar-sep { width: 1px; height: 18px; background: var(--line-strong); }
+.topbar-ctx { font-size: var(--t-base); color: var(--ink-2); }
+.grow { flex: 1; }
+
+.pill {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: .04em;
+  padding: 3px var(--s-2);
+  border-radius: var(--r-pill);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.pill-warn { background: var(--warn-wash); color: var(--warn); border-color: rgba(255,196,107,.28); }
+
+/* ---------- body ---------------------------------------------------------------------------- */
+.body {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr) 288px;
+  min-height: 0;
+}
+@media (max-width: 1100px) {
+  .body { grid-template-columns: 220px minmax(0, 1fr); }
+  .side { display: none; }
+}
+
+.devlist {
+  border-right: 1px solid var(--line);
+  background: var(--bg-raise);
+  padding: var(--s-4);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.lbl {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 var(--s-2);
+}
+
+.quiet { color: var(--ink-3); font-size: var(--t-sm); margin: 0; }
+.quiet.bad { color: var(--bad); }
+.quiet a { color: var(--accent); }
+
+/* A device row is a button, not a div with a click handler — it has to be reachable by keyboard
+   and announce itself, and `aria-current` is what says which one is open. */
+.devrow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: 'name dot' 'meta meta';
+  gap: 2px var(--s-2);
+  align-items: center;
+  text-align: left;
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.devrow:hover { background: var(--bg-raise-2); }
+.devrow[aria-current='true'] {
+  background: var(--bg-raise-2);
+  border-color: var(--line-strong);
+}
+.devrow-name { grid-area: name; color: var(--ink); font-size: var(--t-base); font-weight: 500; }
+.devrow-meta {
+  grid-area: meta;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--ink-3);
+}
+.dot { grid-area: dot; width: 7px; height: 7px; border-radius: 50%; }
+.dot-ok   { background: var(--ok); }
+.dot-warn { background: var(--warn); }
+.dot-bad  { background: var(--ink-4); }
+
+.main { min-width: 0; min-height: 0; display: grid; }
+
+/* The honest empty screen. Centred, quiet, and clearly not a device screenshot. */
+.screen-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: var(--s-2);
+  padding: var(--s-5);
+  text-align: center;
+  color: var(--ink-3);
+  font-size: var(--t-sm);
+}
+.screen-empty p { margin: 0; }
+
+/* ---------- right rail ---------------------------------------------------------------------- */
+.side {
+  border-left: 1px solid var(--line);
+  background: var(--bg-raise);
+  padding: var(--s-4);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  padding: var(--s-4);
+}
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--ink-3);
+  padding: 3px 0;
+}
+.row b { color: var(--ink); font-weight: 500; font-family: var(--font-mono); font-size: var(--t-sm); }

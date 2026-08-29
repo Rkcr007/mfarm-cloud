@@ -1,0 +1,123 @@
+/**
+ * MFARM console design tokens.
+ *
+ * THE DIRECTION, decided 2026-08-29: Stage for the device view, Studio's discipline everywhere
+ * else. Those are not two palettes — they are one dark product with two levels of drama.
+ *
+ *   STAGE      the session screen. The device is LIT, not framed: a single violet light source
+ *              behind it, deep falloff, panels as glass. Everything that is not the device recedes.
+ *   STUDIO     every other screen. Same palette, drama removed: flat surfaces, hairline borders,
+ *              generous air, nothing glowing. Calm enough to sit in for six hours.
+ *
+ * A light session screen beside a dark one would be jarring, so "Studio's discipline" is its
+ * RESTRAINT and craft, not its light ground. Light mode is a later token swap, not a second design.
+ *
+ * ONE ACCENT, and it is already MFARM's: violet. It is spent on the stage light and on the single
+ * primary action per screen. Everywhere else is neutral, so the one violet thing on a screen is
+ * always the thing to look at. Semantic colours (live / warn / bad) are separate from the accent
+ * on purpose — a status must not read as a call to action.
+ *
+ * The neutrals carry a violet bias rather than being pure grey, so the accent sits in the same
+ * family as the ground instead of on top of it.
+ */
+
+:root {
+  /* --- ground -------------------------------------------------------------------------------- */
+  --bg:            #08070C;   /* the page itself */
+  --bg-raise:      #0E0D15;   /* cards, rails, anything sitting on the page */
+  --bg-raise-2:    #15131F;   /* hover, and the layer above a card */
+  --bg-sunken:     #050409;   /* the stage the device stands on */
+
+  /* --- line ---------------------------------------------------------------------------------- */
+  --line:          #1C1A28;   /* the ordinary divider */
+  --line-strong:   #2A2739;   /* a border that has to be seen */
+  --line-glass:    rgba(255, 255, 255, .08);   /* on the session screen only */
+
+  /* --- ink ----------------------------------------------------------------------------------- */
+  --ink:           #F2F0F8;   /* headings, values, anything being read */
+  --ink-2:         #B9B3CC;   /* body copy */
+  --ink-3:         #837C9B;   /* labels, captions, units */
+  --ink-4:         #57516B;   /* disabled, and the quietest possible mark */
+
+  /* --- accent -------------------------------------------------------------------------------- */
+  --accent:        #7C5CFF;
+  --accent-hover:  #8E72FF;
+  --accent-press:  #6A49F0;
+  --accent-ink:    #FFFFFF;   /* text ON the accent */
+  --accent-wash:   rgba(124, 92, 255, .14);
+  --accent-line:   rgba(124, 92, 255, .38);
+
+  /* --- semantic — never the accent ----------------------------------------------------------- */
+  --live:          #FF6B9D;   /* streaming, recording: the thing that is happening NOW */
+  --live-wash:     rgba(255, 107, 157, .14);
+  --ok:            #3FD69C;
+  --ok-wash:       rgba(63, 214, 156, .13);
+  --warn:          #FFC46B;
+  --warn-wash:     rgba(255, 196, 107, .13);
+  --bad:           #FF6B6B;
+  --bad-wash:      rgba(255, 107, 107, .13);
+
+  /* --- the stage light ----------------------------------------------------------------------- */
+  --stage-ground:  radial-gradient(120% 90% at 50% 6%, #1B1435 0%, #0C0A16 54%, #08070C 100%);
+  --stage-pool:    radial-gradient(52% 40% at 50% 44%, rgba(124, 92, 255, .32) 0%, transparent 70%);
+  --device-cast:   0 0 0 1px rgba(255, 255, 255, .10), 0 32px 72px -20px rgba(124, 92, 255, .55);
+  --card-glass:    rgba(255, 255, 255, .05);
+
+  /* --- type ---------------------------------------------------------------------------------- */
+  /**
+   * Self-hosted, never a CDN. The console's CSP is `default-src 'none'` and it stays that way; the
+   * only widening is `font-src 'self'`, so these files come from our own origin like everything
+   * else. A self-hosted product that phones a font host on every page load is not self-hosted.
+   */
+  --font-display: 'Bricolage Grotesque Variable', 'Instrument Sans Variable', system-ui, sans-serif;
+  --font-ui:      'Instrument Sans Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:    'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* A fourth-root scale, rounded to whole pixels. Small enough steps that a heading and the line
+     under it are obviously related, wide enough that a jump reads as a jump. */
+  --t-xs:   11px;
+  --t-sm:   12px;
+  --t-base: 14px;
+  --t-md:   16px;
+  --t-lg:   19px;
+  --t-xl:   23px;
+  --t-2xl:  30px;
+  --t-3xl:  40px;
+
+  /* --- space — a 4px grid, named by role rather than by number ------------------------------- */
+  --s-1:  4px;
+  --s-2:  8px;
+  --s-3:  12px;
+  --s-4:  16px;
+  --s-5:  24px;
+  --s-6:  32px;
+  --s-7:  48px;
+  --s-8:  64px;
+
+  /* --- shape --------------------------------------------------------------------------------- */
+  --r-sm:  6px;
+  --r-md:  10px;
+  --r-lg:  14px;
+  --r-pill: 999px;
+
+  /* --- motion -------------------------------------------------------------------------------- */
+  /* Fast enough to feel like a response, slow enough to be seen. Nothing on the session screen
+     animates while the device is streaming — the eye belongs on the device. */
+  --ease:      cubic-bezier(.2, .8, .2, 1);
+  --dur-fast:  120ms;
+  --dur:       200ms;
+  --dur-slow:  320ms;
+}
+
+/**
+ * Reduced motion is honoured globally rather than per-component, because the components that most
+ * need it are the ones nobody remembers to check.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

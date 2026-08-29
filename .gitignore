@@ -21,3 +21,8 @@ deploy/.state/
 
 # Session scratch: worktrees, checkpoints, local agent config. Never part of a release.
 .claude/
+
+# Built by `npm run build --workspace apps/console`, and by the console stage in
+# apps/api/Dockerfile. Never committed: a checked-in build artifact goes stale silently the first
+# time somebody edits a component and does not rebuild.
+apps/api/public/app/
