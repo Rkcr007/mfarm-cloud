@@ -192,6 +192,17 @@ const DEVICE_STATE = {
   EVICTED:        { label: 'Evicted',   tone: '',       note: 'Removed from the fleet' },
 };
 
+/**
+ * States a device comes back from ON ITS OWN — the ones "busy" honestly describes.
+ *
+ * Deliberately a set of the states that RESOLVE, not the complement of READY. `QUARANTINED`,
+ * `OFFLINE` and `EVICTED` need somebody to do something, and grouping them under "busy" on the
+ * Launch screen told a tester to wait for a device that was never coming. Found by exploratory
+ * testing on 2026-08-31: the Launch screen said `1 busy` for a handset the Health screen — reading
+ * the same API — correctly called `Quarantined`.
+ */
+const BUSY_STATES = new Set(['RESERVED', 'SESSION_ACTIVE', 'CLEANING', 'BOOTING']);
+
 const SESSION_STATE = {
   QUEUED:     { label: 'Queued',     tone: 'warn' },
   ALLOCATING: { label: 'Allocating', tone: 'accent' },
@@ -1308,7 +1319,7 @@ function deviceProfiles() {
       p = {
         key, platform: d.platform, tier: d.tier, region: d.region,
         model: d.model, osVersion: d.osVersion,
-        total: 0, free: 0, devices: [],
+        total: 0, free: 0, coming: 0, devices: [],
         // The INTERSECTION, not the union: a profile can only promise what every device in it can
         // do, because the allocator may hand over any of them.
         capabilities: null,
@@ -1317,6 +1328,10 @@ function deviceProfiles() {
     }
     p.total += 1;
     if (d.state === 'READY') p.free += 1;
+    // COMING BACK vs NEVER COMING BACK, and the distinction is the whole point of counting twice.
+    // A device someone else is using frees up on its own; a quarantined or offline one does not,
+    // and calling it "busy" invites a tester to wait for something that is never arriving.
+    else if (BUSY_STATES.has(d.state)) p.coming += 1;
     p.devices.push(d);
     const caps = d.capabilities || [];
     p.capabilities = p.capabilities === null ? [...caps] : p.capabilities.filter((c) => caps.includes(c));
@@ -1338,7 +1353,11 @@ function profileRow(p) {
     h('span', { class: 'pick-side' },
       p.free
         ? pill(`${p.free} free`, 'ok', { dot: false })
-        : pill(`${p.total} busy`, 'warn', { dot: false }),
+        : p.coming
+          ? pill(`${p.coming} busy`, 'warn', { dot: false })
+          // Nothing free and nothing on its way back. Said in the strongest terms the row has,
+          // because picking this profile queues a session that will never be served.
+          : pill(`${p.total} unavailable`, 'bad', { dot: false }),
       live ? null : h('span', { class: 'caption', text: 'no live view' }),
     ),
   );
@@ -1390,7 +1409,9 @@ function screenLaunch() {
         : 'Pick a device. Add a build if you want one installed before you get there.',
       h('div', { class: 'row tight' },
         profile && !profile.free
-          ? h('span', { class: 'caption', text: 'nothing free — you will be queued' })
+          ? h('span', { class: 'caption', text: profile.coming
+              ? 'nothing free — you will be queued'
+              : 'no device here can be scheduled — a session would wait forever' })
           : null,
         btn(ready ? 'Start' : 'Pick a device', 'primary lg', () => ready && startLaunch(), { disabled: !ready }),
       ),
