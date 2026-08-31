@@ -60,23 +60,52 @@ say "Checking the public addresses are still what the configuration says"
 LAB_IP="$(g instances describe "$LAB" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
 CP_IP="$(g instances describe "$CP" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
 
-DRIFT=0
-if [ "$LAB_IP" = "$MFARM_TURN_HOST" ]; then
-  note "device host is $LAB_IP, as configured"
-else
-  note "DRIFT: device host is $LAB_IP but deploy/farm.env says $MFARM_TURN_HOST"
-  DRIFT=1
-fi
+# BOTH NAMES IN farm.env ARE NOW DOMAINS, so the comparison has to go through DNS.
+#
+# This check was broken from 2026-08-20 — the day `mfarm.dev` landed — until 2026-09-01. It compared
+# the VM's address to `$MFARM_TURN_HOST` directly, which was an IP literal under sslip.io and became
+# `turn.mfarm.dev` when the domain did. An IP is never string-equal to a hostname, so BOTH branches
+# went to DRIFT on every single start, with both addresses perfectly correct.
+#
+# That is worse than having no check. A warning that fires every time is one people learn to scroll
+# past, so the run where an address genuinely moved would have looked exactly like the twelve days
+# before it. Same shape as the invariant in docs/INDEX.md §7: a check that cannot come out both ways
+# cannot detect anything.
+#
+# Resolution failure is reported as its own outcome rather than folded into DRIFT. "DNS is not
+# answering" and "the address moved" need different actions, and collapsing them would send someone
+# to re-reserve an address when their resolver is the thing that is down.
+resolve() {
+  # An IP literal resolves to itself, so farm.env can go back to a bare address without this
+  # breaking again.
+  case "$1" in
+    *[!0-9.]*) ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  dig +short "$1" 2>/dev/null | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1
+}
 
-# The console's address is load-bearing twice over: the sslip.io hostname encodes it, and the
-# Let's Encrypt certificate was issued for that hostname. If this ever drifts, the URL and the cert
-# die together and no amount of restarting fixes it.
-if printf '%s' "$MFARM_PUBLIC_HOST" | grep -q "$(printf '%s' "$CP_IP" | tr '.' '-')" || [ "$CP_IP" = "$MFARM_PUBLIC_HOST" ]; then
-  note "control plane is $CP_IP, matching $MFARM_PUBLIC_HOST"
-else
-  note "DRIFT: control plane is $CP_IP but the console name is $MFARM_PUBLIC_HOST"
-  DRIFT=1
-fi
+DRIFT=0
+check_address() {
+  local what="$1" name="$2" actual="$3" want
+  want="$(resolve "$name")"
+  if [ -z "$want" ]; then
+    note "UNRESOLVED: $what is $actual; could not resolve $name to compare (DNS problem, not drift)"
+    return
+  fi
+  if [ "$actual" = "$want" ]; then
+    note "$what is $actual, matching $name"
+  else
+    note "DRIFT: $what is $actual but $name resolves to $want"
+    DRIFT=1
+  fi
+}
+
+check_address "device host" "$MFARM_TURN_HOST" "$LAB_IP"
+# The console's address is load-bearing twice over: the name resolves to it, and the Let's Encrypt
+# certificate was issued for that name. If this drifts, the URL and the cert die together and no
+# amount of restarting fixes it.
+check_address "control plane" "$MFARM_PUBLIC_HOST" "$CP_IP"
 
 if [ "$DRIFT" -eq 1 ]; then
   printf '\n\033[33m  An address moved. Both are supposed to be reserved:\n'
