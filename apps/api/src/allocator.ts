@@ -138,6 +138,21 @@ function hostSweepMinIntervalMs(): number {
 }
 
 /**
+ * How long a WebDriver session may go without a command before the farm takes the device back.
+ *
+ * Must exceed the longest plausible SINGLE command, not the gap between them: `last_command_at`
+ * marks when the last proxied command STARTED, so a slow install or a long `waitUntil` leaves it
+ * stale while the session is perfectly alive. It should also sit above the client's own idle timer,
+ * which is the layer meant to fire first — `examples/medishop-suite` sets
+ * `appium:newCommandTimeout: 300`. Ten minutes clears both and is still a third of the lease TTL,
+ * so this does the reclaiming in the ordinary case and the TTL goes back to being a backstop rather
+ * than the only mechanism. See migration 029.
+ */
+function webdriverIdleMs(): number {
+  return Number(process.env.WEBDRIVER_IDLE_TIMEOUT_MS ?? 600_000);
+}
+
+/**
  * Module-level: one reaper per process, and it is the only caller.
  *
  * Both knobs above are read INSIDE the sweep rather than at module scope, and that is not style.
@@ -148,11 +163,26 @@ function hostSweepMinIntervalMs(): number {
 let lastHostSweepAt = 0;
 
 export async function reap(): Promise<{
-  expired: number; promoted: number; keysPurged: number; installsOrphaned: number;
+  expired: number; idleEnded: number; promoted: number; keysPurged: number; installsOrphaned: number;
   hostsQuarantined: number; artifactsExpired: number; blobsDeleted: number;
 }> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
+    /**
+     * Clients that stopped driving without releasing (migration 029).
+     *
+     * BEFORE `promote_queued`, deliberately. These devices go to CLEANING rather than READY, so
+     * they are not allocatable this tick either way — but ending the sessions first is what lets
+     * the org's concurrency cap fall, and the cap is the thing that gates promotion. A suite whose
+     * runner was killed while holding the org at its limit would otherwise keep the queue blocked
+     * for an extra tick for no reason.
+     */
+    const w = await c.query('SELECT expire_idle_webdriver_sessions(make_interval(secs => $1)) AS n',
+      [webdriverIdleMs() / 1000]);
+    if (Number(w.rows[0].n) > 0) {
+      console.warn(`[reaper] ended ${w.rows[0].n} idle WebDriver session(s) — no command for over `
+        + `${Math.round(webdriverIdleMs() / 1000)}s`);
+    }
     const p = await c.query('SELECT promote_queued($1) AS n', [20]);
     // Nothing else ever deletes an idempotency key. Left alone the table grows by one row per
     // session created, forever, and it is on the hot path of every session creation.
@@ -248,6 +278,7 @@ export async function reap(): Promise<{
 
     return {
       expired: Number(e.rows[0].n),
+      idleEnded: Number(w.rows[0].n),
       promoted: Number(p.rows[0].n),
       keysPurged: g.rowCount ?? 0,
       installsOrphaned: i.rowCount ?? 0,
