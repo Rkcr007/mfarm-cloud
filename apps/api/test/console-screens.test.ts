@@ -537,6 +537,57 @@ describe('no screen leaks a stringified nullish', () => {
   });
 });
 
+/**
+ * A DEVICE THAT IS NEVER COMING BACK MUST NOT READ AS "BUSY".
+ *
+ * The Launch screen counted `READY` as free and lumped EVERYTHING ELSE under `N busy`. So a
+ * quarantined handset — one that failed health checks and will never be scheduled — invited a
+ * tester to wait for it. The Health screen, reading the same API, correctly said `Quarantined`;
+ * two screens disagreed about the same device.
+ *
+ * Found by exploratory testing on 2026-08-31, and worth a test because the failure is a WORD rather
+ * than an error: everything renders, nothing throws, and the screen is confidently wrong.
+ */
+describe('the launch picker distinguishes busy from unavailable', () => {
+  const withState = (state: string) => {
+    seed({ name: 'launch' });
+    mod.state.devices = [{
+      id: 'dev-q', region: 'lab', platform: 'android', tier: 'physical',
+      model: 'SM-TEST', osVersion: '16', state, dedicated: false,
+      capabilities: ['app-install', 'input-datachannel'],
+    }];
+    return textOf(mod.SCREENS.launch());
+  };
+
+  test('a quarantined device is unavailable, not busy', () => {
+    const t = withState('QUARANTINED');
+    assert.match(t, /unavailable/i, 'a device that failed health checks is not going to free up');
+    assert.doesNotMatch(t, /\bbusy\b/i);
+  });
+
+  test('an offline device is unavailable, not busy', () => {
+    const t = withState('OFFLINE');
+    assert.match(t, /unavailable/i);
+    assert.doesNotMatch(t, /\bbusy\b/i);
+  });
+
+  test('a device someone else is using IS busy — it comes back on its own', () => {
+    const t = withState('SESSION_ACTIVE');
+    assert.match(t, /\bbusy\b/i);
+    assert.doesNotMatch(t, /unavailable/i);
+  });
+
+  test('a device restoring its snapshot is busy — that finishes by itself too', () => {
+    assert.match(withState('CLEANING'), /\bbusy\b/i);
+  });
+
+  test('a ready device is free, and says so', () => {
+    const t = withState('READY');
+    assert.match(t, /\bfree\b/i);
+    assert.doesNotMatch(t, /unavailable/i);
+  });
+});
+
 describe('device profiles', () => {
   /** cf-3 as the agent registers it: profiled, MFARM-named, and still a virtual device. */
   function withProfiled() {

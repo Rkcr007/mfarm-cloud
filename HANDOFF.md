@@ -1830,3 +1830,40 @@ when the feature is broken. See issues 37 and 38.
     somewhere else.
 
     Found by looking at a real session, not by a test. That is the third time in three sessions.
+
+41. **TWO SCREENS DISAGREED ABOUT ONE DEVICE — AND ONE "DEFECT" I REPORTED WAS MY OWN TEST RIG.**
+    2026-08-31, from an exploratory pass.
+
+    **THE REAL ONE.** The Launch picker counted `READY` as free and lumped EVERYTHING ELSE under
+    `N busy`. So a QUARANTINED handset — one that failed health checks and is never scheduled —
+    displayed as `1 busy`, inviting a tester to wait for a device that was never coming. The Health
+    screen, reading the same API, correctly said `Quarantined`. Two screens, same data, different
+    stories.
+
+    Fixed by counting what RESOLVES ON ITS OWN (`RESERVED`, `SESSION_ACTIVE`, `CLEANING`, `BOOTING`)
+    separately from what needs somebody to intervene (`QUARANTINED`, `OFFLINE`, `EVICTED`). The
+    latter now reads `N unavailable`, and the launch caption says "a session would wait forever"
+    instead of "you will be queued".
+
+    Worth a test because **the failure is a WORD, not an error**: everything renders, nothing
+    throws, and the screen is confidently wrong.
+
+    **THE ONE THAT WAS NOT REAL, recorded because the mistake is instructive.** In the same pass I
+    reported that the session badge reads `Allocating` while the API says `ACTIVE` — permanently,
+    beside a `LIVE · 50 fps` pill. I measured it for 27 seconds and it never corrected.
+
+    It was my automation. `startPoll` opens with `if (document.hidden || !state.me) return;`, and a
+    Chrome window driven by CDP reports `document.hidden === true` even while `hasFocus()` is true
+    and screenshots render fine. So the poll never ran and NOTHING on the page refreshed. Proved by
+    redefining `document.hidden` to false: the badge corrected to `Active` within four seconds and
+    stayed correct.
+
+    **THE LESSON, which is not "be careful".** A headless browser is not a user, and the difference
+    is not only timing — it changes the VISIBILITY API, which real code branches on. Anything
+    measured through automation that depends on a poll, a timer, `requestAnimationFrame`, or
+    `IntersectionObserver` is suspect until it has been checked with visibility forced on. The same
+    rig also broke an input-latency probe earlier in the week for the same underlying reason
+    (rAF throttling), and I did not connect the two at the time.
+
+    Before reporting a UI defect found by automation, force visibility and re-measure. Two of the
+    findings in that exploratory pass survived that check; one did not.
