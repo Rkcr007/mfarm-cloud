@@ -17,6 +17,37 @@ media relay; `./deploy/farm-check.sh` waits for the devices and reports what is 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
 
+**2026-09-01 — FAILURE INJECTION, and three defects it found in one afternoon (issue 43).**
+`deploy/verify-failure.mjs` breaks real things on real hardware and asks whether the farm comes back
+clean. `AutomationExecutionPlan.md` §41 asks for this and ranks it 41st of 46; it should be first,
+and this is the evidence. **ADR-0018** settles that document's central question first: MFARM owns
+the execution RECORD, the customer owns the test PROCESS.
+
+The one that matters: **a lease is spent on a device that cannot automate.** With Appium at zero
+processes for 26 seconds, `GET /v1/devices` still reported `webdriver` on every device and
+`POST /session` allocated one and then returned **500 `automation_unreachable`**. That is precisely
+what ADR-0003 exists to prevent. The agent side is correct — `setAutomationEndpoint(undefined)`
+drops the capability from what the agent reports — but its own comment says the rest: *"nothing here
+reaches the control plane until the next registration"*, and `capabilityFingerprint()` is only
+consulted in `start()`. A RUNNING agent never re-registers, so `devices.capabilities` stays stale and
+`requireCapabilities` filters on it.
+
+What is NOT broken, and was measured rather than assumed: the supervisor's bounded recovery is
+right. Six consecutive failed starts → `appium-failure` incident → agent exits → systemd restarts →
+**the farm is fully back in ~110s**, cold-booting every device. That is §11 working as specified.
+
+Also fixed: **`farm-online.sh`'s address-drift check had been reporting DRIFT on every start since
+2026-08-20** and both addresses were correct the whole time. It compared the VM's IP to
+`$MFARM_TURN_HOST`, which was an IP literal under sslip.io and became `turn.mfarm.dev` when the
+domain landed. A warning that fires every time is one people scroll past, so the run where an
+address genuinely moved would have looked identical to the twelve days before it. Now resolves the
+name first, and reports an unresolvable name as its own outcome rather than as drift —
+`deploy/farm-online.test.mjs` pins all four cases.
+
+**`farm-check.sh` reports "no agent tunnel connected" as a false negative** when run straight after a
+host start: it waits for devices but checks the tunnel at a fixed point that can precede the agent
+connecting. Re-running says the farm is live. Not fixed; recorded.
+
 **2026-08-24 — on-demand screenshots (§4.5).** `POST /v1/sessions/:id/app-actions
 {"kind":"screenshot"}` captures the screen while the suite still holds the device, instead of the
 release-time one that shows the launcher because Appium force-stopped the app first. Building it
@@ -1768,7 +1799,13 @@ when the feature is broken. See issues 37 and 38.
 - **Issue 33** — `AppStore.put` leaves a `.part` file on an oversized upload. Pre-existing.
 - **Touch accuracy has no test coverage.** Coordinate scaling uses `getBoundingClientRect`, which
   the DOM shim returns as zeroes. It is a P0 requirement in the direction document.
-- **A crashed client holds its device for the full 30-minute lease**, with no recovery path because
+- **A crashed client holds its device for the full 30-minute lease** — reproduced on hardware
+  2026-09-01 by `deploy/verify-failure.mjs --only=abandon`, and the cause is now named:
+  `webdriver_sessions.last_command_at` is written on EVERY proxied command and migration 006
+  builds `webdriver_sessions_idle_idx` over it, but **nothing in the codebase reads either**.
+  The signal for an idle sweep is already being recorded, and paid for on every command, for a
+  query that was never written. Fix is a sweep in `reap()` using the index that already exists.
+  Originally filed as having no recovery path because
   the UI is the thing that crashed. Direction document §14.
 - **`recording` is a capability string nothing implements.** The largest genuinely-new build in the
   direction document, and §27 means the button cannot exist until the recorder does.
@@ -1927,3 +1964,44 @@ when the feature is broken. See issues 37 and 38.
     the automation — CDP-driven Chrome reports `document.hidden === true`, and the console's poll
     returns early on exactly that. Forcing visibility, it corrects in four seconds. Two findings from
     the pass survived that re-check; one did not.
+
+43. **FAILURE INJECTION FOUND WHAT 1022 GREEN TESTS COULD NOT — AND THREE OF THE FOUR MISTAKES WERE
+    IN THE CHECKS, NOT THE PRODUCT.** 2026-09-01.
+
+    `deploy/verify-failure.mjs`. Two scenarios built (`abandon`, `appium`), one designed and not yet
+    run (`cprestart`). The product findings are in the dated entry at the top of this file. What is
+    recorded here is how nearly each one was reported wrong, because the pattern repeated four times
+    in a single afternoon and it is the same pattern each time: **an assertion that cannot come out
+    both ways.**
+
+    - **`pkill -f appium` kills its own SSH session.** The remote `bash -c` cmdline contains the
+      pattern, so pkill matches itself. It surfaces as `ssh exited with return code [255]` and reads
+      exactly like a connectivity fault — gcloud even suggests `--troubleshoot`. Use `[a]ppium`, and
+      bracket EVERY occurrence in the command, including one in an unrelated `grep` at the end of
+      the same script. That second literal cost a second run.
+
+    - **`grep -c` exits 1 when the count is zero,** so `execFile` rejects in exactly the case the
+      scenario exists to detect — appium successfully killed. Reported "the injection did not take"
+      on runs where the injection had worked perfectly. `|| true` is load-bearing.
+
+    - **Killing Appium once proves nothing.** The supervisor has all four servers back in ~8s and
+      the heartbeat is 10s, so the outage closes inside one reporting interval and a poller sees an
+      unbroken farm. This produced a confident "ADR-0003 is violated" against a farm behaving
+      correctly. An injection must outlast the OBSERVATION interval, not merely happen. The real
+      finding was only reachable by holding Appium down across several beats and then asserting on
+      the CONSEQUENCE — asking for a session — rather than on the capability.
+
+    - **"Farm recovered" passed in 0.125s** because killing Appium never takes a device out of the
+      pool: `available` stayed non-zero throughout, so the check was already true before recovery
+      began. Recovery has to be measured on the thing the injection broke. Corrected, it measures
+      **109.6s**.
+
+    The rule this repo already had — *an assertion that holds on the fallback path cannot detect
+    that you are on the fallback path* — generalises: **an injection test is only as good as its
+    ability to fail.** Write the negative assertion first and prove it goes red before trusting the
+    green.
+
+    One scenario also **took the farm down for ~2 minutes** (`available: 0`), which is why `appium`
+    is classified disruptive and is not in the default set. That is correct behaviour under test,
+    not a defect, but it is not something to run against a farm somebody is using.
+
