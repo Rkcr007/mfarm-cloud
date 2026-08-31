@@ -797,3 +797,121 @@ describe('worker events', () => {
       `UPDATE hosts SET state='UP', quarantined_at=NULL, quarantine_source=NULL WHERE id=$1`, [hostId]));
   });
 });
+
+/**
+ * The heartbeat reconciles what a host can do RIGHT NOW.
+ *
+ * Before 2026-09-01 this handler parsed the beat body and threw it away. The agent had always sent
+ * `capabilities` and a per-device automation map on every beat; the only writer of
+ * `devices.capabilities` was registration, and a healthy agent never re-registers — so an Appium
+ * that died stayed advertised until somebody restarted the agent.
+ *
+ * Measured on hardware: with Appium at zero processes for 26s, `GET /v1/devices` still reported
+ * `webdriver` on every device and `POST /session` ALLOCATED one before failing with
+ * `automation_unreachable`. That is the sequence ADR-0003 exists to prevent — a lease spent on a
+ * device that cannot serve it.
+ */
+describe('heartbeat: per-device automation is reconciled on every beat', () => {
+  const ENDPOINT = 'http://10.0.0.9:8090/automation/hb-1';
+
+  /** A device with a known local_id and `webdriver` already advertised, as registration leaves it. */
+  async function automatedDevice(localId: string, host = hostId) {
+    return withSystem(async (c) => {
+      const { rows } = await c.query(
+        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state,
+                              capabilities, local_id, automation_endpoint)
+         VALUES ($1,$2,'android','cuttlefish','cf_x86_64','15','READY',
+                 '["screen-stream","input-datachannel","snapshot-reset","webdriver"]'::jsonb,$3,$4)
+         RETURNING id`,
+        [host, REGION, localId, ENDPOINT]);
+      return rows[0].id as string;
+    });
+  }
+  const readDevice = (id: string) => withSystem(async (c) =>
+    (await c.query('SELECT state, capabilities, automation_endpoint FROM devices WHERE id=$1', [id])).rows[0]);
+  // Two call sites rather than a conditional spread: `inject` is overloaded, and spreading an
+  // optional `payload` collapses the return type to a union TypeScript cannot narrow. `node --test`
+  // never notices — it strips types without checking them — which is why typecheck runs separately.
+  //
+  // `auth(workerToken)` is built INSIDE the function, not hoisted into a shared const. A const here
+  // is evaluated when `describe` registers, which is before `before()` has assigned the token, so
+  // every beat would carry `Bearer undefined`.
+  const HB = () => ({ method: 'POST' as const, url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+  const beat = (payload?: Record<string, unknown>) =>
+    payload === undefined ? app.inject(HB()) : app.inject({ ...HB(), payload });
+  const hasWebdriver = (row: { capabilities: string[] }) => row.capabilities.includes('webdriver');
+
+  test('a beat that stops naming a device withdraws webdriver and the endpoint', async () => {
+    await clearDevices();
+    const dev = await automatedDevice('hb-gone');
+
+    const r = await beat({ capabilities: [], devices: {} });
+    assert.equal(r.statusCode, 200);
+
+    const after = await readDevice(dev);
+    assert.equal(hasWebdriver(after), false, 'a dead Appium must stop being advertised');
+    assert.equal(after.automation_endpoint, null, 'a stale url keeps the hub dialling a server that is gone');
+    // The other capabilities are the device's own and have nothing to do with automation.
+    assert.ok(after.capabilities.includes('screen-stream'));
+  });
+
+  test('a beat that names it again restores webdriver', async () => {
+    await clearDevices();
+    const dev = await automatedDevice('hb-back');
+    await beat({ devices: {} });
+    assert.equal(hasWebdriver(await readDevice(dev)), false);
+
+    await beat({ devices: { 'hb-back': ENDPOINT } });
+    const after = await readDevice(dev);
+    assert.equal(hasWebdriver(after), true, 'recovery must not need a re-registration either');
+    assert.equal(after.automation_endpoint, ENDPOINT);
+  });
+
+  test('a beat with NO devices field withdraws nothing', async () => {
+    await clearDevices();
+    const dev = await automatedDevice('hb-old-agent');
+
+    // THE SAFETY CASE, and the reason this is a separate branch rather than a defaulted `?? {}`.
+    // An absent field is an agent that predates this change, or a malformed body. `devices: {}` is
+    // an agent SAYING it serves no automation. Collapsing the two would strip `webdriver` from an
+    // entire fleet on one bad deploy — a far worse failure than the one being fixed.
+    await beat();
+    assert.equal(hasWebdriver(await readDevice(dev)), true, 'silence is not a withdrawal');
+
+    await beat({ capabilities: ['screen-stream'] });
+    assert.equal(hasWebdriver(await readDevice(dev)), true);
+  });
+
+  test('a beat never changes device state, even while a tenant holds it', async () => {
+    await clearDevices();
+    const dev = await automatedDevice('hb-busy');
+    await withSystem((c) => c.query(`UPDATE devices SET state='SESSION_ACTIVE' WHERE id=$1`, [dev]));
+
+    await beat({ devices: {} });
+
+    const after = await readDevice(dev);
+    // Withdrawing the capability is enough to stop NEW allocations — allocate_device filters on
+    // capabilities — and a beat must never yank a device out from under the session on it.
+    assert.equal(after.state, 'SESSION_ACTIVE', 'a liveness signal is not a scheduling decision');
+    assert.equal(hasWebdriver(after), false);
+  });
+
+  test('a worker cannot withdraw another host\'s device with the same local_id', async () => {
+    await clearDevices();
+    const otherHost = await withSystem(async (c) => (await c.query(
+      `INSERT INTO hosts (region, hostname, state, protocol_version, cores, memory_mb, last_heartbeat_at)
+       VALUES ($1, $2, 'UP', 2, 4, 8192, now()) RETURNING id`,
+      [REGION, `other-${randomUUID()}`])).rows[0].id as string);
+    const mine = await automatedDevice('shared-name');
+    const theirs = await automatedDevice('shared-name', otherHost);
+
+    // Migration 008's rule: a worker learns about, and can act on, only its own hardware. The name
+    // is the worker's to choose, so without the host scope one host could describe another's.
+    await beat({ devices: {} });
+
+    assert.equal(hasWebdriver(await readDevice(mine)), false, 'its own device is reconciled');
+    assert.equal(hasWebdriver(await readDevice(theirs)), true, 'another host\'s is untouched');
+    await withSystem((c) => c.query('DELETE FROM devices WHERE host_id=$1', [otherHost]));
+    await withSystem((c) => c.query('DELETE FROM hosts WHERE id=$1', [otherHost]));
+  });
+});
