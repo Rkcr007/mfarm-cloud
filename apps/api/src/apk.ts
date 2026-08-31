@@ -43,6 +43,16 @@ export interface ApkMetadata {
  */
 export type ManifestMetadata = Omit<ApkMetadata, 'abis'>;
 
+/**
+ * What `parseManifest` returns: the published metadata, plus the label's resource id when the
+ * manifest stores one instead of a literal.
+ *
+ * `labelRef` is an INTERNAL HAND-OFF and deliberately not part of `ApkMetadata` — it is meaningless
+ * outside this module and nothing downstream should ever see a resource id. `readApkMetadata`
+ * resolves it and drops it.
+ */
+type ParsedManifest = ManifestMetadata & { labelRef: number | null };
+
 /** The upload is not an APK, or is one we cannot read. Always a 400, never a 500. */
 export class ApkParseError extends Error {
   constructor(message: string) {
@@ -70,6 +80,16 @@ const MAX_EOCD_SEARCH = 22 + 0xffff;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 
 const MANIFEST_NAME = 'AndroidManifest.xml';
+
+/**
+ * `resources.arsc` — where `android:label="@string/app_name"` actually lives.
+ *
+ * A separate, much larger ceiling than the manifest's. A manifest is a few hundred kilobytes; a
+ * resource table for an app translated into forty languages is routinely tens of megabytes, and
+ * refusing to read it would put every localised app back to showing a package name.
+ */
+const ARSC_NAME = 'resources.arsc';
+const MAX_ARSC_BYTES = 64 * 1024 * 1024;
 
 async function readAt(fh: FileHandle, offset: number, length: number): Promise<Buffer> {
   if (length <= 0) return Buffer.alloc(0);
@@ -172,34 +192,54 @@ export function nativeAbisOf(entries: { name: string }[]): string[] {
   return [...abis].sort();
 }
 
+/**
+ * One entry out of an APK, inflated.
+ *
+ * Split out of `extractManifest` when `resources.arsc` became a second thing worth reading. Takes
+ * an open handle rather than a path so a caller wanting both files opens the archive once — this is
+ * on the upload path for a build that can be a quarter of a gigabyte.
+ *
+ * Returns null for an entry that is not there, and THROWS for one that is there and unreadable.
+ * The distinction carries the whole policy: an APK with no `resources.arsc` is an ordinary APK with
+ * no resources, while an `AndroidManifest.xml` that will not inflate is a corrupt upload.
+ */
+async function extractEntry(
+  fh: FileHandle,
+  entries: ZipEntry[],
+  wanted: string,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  const entry = entries.find((e) => e.name === wanted);
+  if (!entry) return null;
+
+  const { method, compressedSize, uncompressedSize, localOffset } = entry;
+  if (uncompressedSize > maxBytes || compressedSize > maxBytes) {
+    throw new ApkParseError(`${wanted} claims ${uncompressedSize} bytes; refusing to inflate it.`);
+  }
+  // The local header repeats the name and carries its OWN extra field, which is routinely a
+  // different length from the central one (alignment padding). Reading the central directory's
+  // extraLen here lands mid-file and inflates garbage.
+  const local = await readAt(fh, localOffset, 30);
+  if (local.readUInt32LE(0) !== LOCAL_SIGNATURE) {
+    throw new ApkParseError(`Corrupt archive: ${wanted} has a bad local header.`);
+  }
+  const dataStart = localOffset + 30 + local.readUInt16LE(26) + local.readUInt16LE(28);
+  const raw = await readAt(fh, dataStart, compressedSize);
+  if (method === 0) return raw;
+  if (method !== 8) throw new ApkParseError(`${wanted} uses zip method ${method}; only stored and deflate are supported.`);
+  try {
+    return inflateRawSync(raw, { maxOutputLength: maxBytes });
+  } catch (e) {
+    throw new ApkParseError(`${wanted} could not be inflated: ${(e as Error).message}`);
+  }
+}
+
 export async function extractManifest(apkPath: string): Promise<Buffer> {
   const fh = await open(apkPath, 'r');
   try {
-    for (const entry of await readCentralDirectory(fh)) {
-      const { name, method, compressedSize, uncompressedSize, localOffset } = entry;
-      if (name === MANIFEST_NAME) {
-        if (uncompressedSize > MAX_MANIFEST_BYTES || compressedSize > MAX_MANIFEST_BYTES) {
-          throw new ApkParseError(`AndroidManifest.xml claims ${uncompressedSize} bytes; refusing to inflate it.`);
-        }
-        // The local header repeats the name and carries its OWN extra field, which is routinely a
-        // different length from the central one (alignment padding). Reading the central directory's
-        // extraLen here lands mid-file and inflates garbage.
-        const local = await readAt(fh, localOffset, 30);
-        if (local.readUInt32LE(0) !== LOCAL_SIGNATURE) {
-          throw new ApkParseError('Corrupt archive: AndroidManifest.xml has a bad local header.');
-        }
-        const dataStart = localOffset + 30 + local.readUInt16LE(26) + local.readUInt16LE(28);
-        const raw = await readAt(fh, dataStart, compressedSize);
-        if (method === 0) return raw;
-        if (method !== 8) throw new ApkParseError(`AndroidManifest.xml uses zip method ${method}; only stored and deflate are supported.`);
-        try {
-          return inflateRawSync(raw, { maxOutputLength: MAX_MANIFEST_BYTES });
-        } catch (e) {
-          throw new ApkParseError(`AndroidManifest.xml could not be inflated: ${(e as Error).message}`);
-        }
-      }
-    }
-    throw new ApkParseError('No AndroidManifest.xml in the archive. This is a zip, but not an APK.');
+    const buf = await extractEntry(fh, await readCentralDirectory(fh), MANIFEST_NAME, MAX_MANIFEST_BYTES);
+    if (!buf) throw new ApkParseError('No AndroidManifest.xml in the archive. This is a zip, but not an APK.');
+    return buf;
   } finally {
     await fh.close();
   }
@@ -286,6 +326,147 @@ function parseStringPool(buf: Buffer, start: number): StringPool {
   };
 }
 
+/* ---------------------------------------------------------------- resources.arsc */
+
+const RES_TABLE_TYPE = 0x0002;
+const RES_TABLE_PACKAGE_TYPE = 0x0200;
+const RES_TABLE_TYPE_TYPE = 0x0201;
+
+/** `ResTable_entry::flags` — a complex entry is a bag (a style, an array), not a single value. */
+const ENTRY_FLAG_COMPLEX = 0x0001;
+
+/** A missing entry in a type's offset array. */
+const NO_ENTRY = 0xffffffff;
+
+/**
+ * Resolve `@0x7f130023` to the string it names — the reason apps have names instead of package ids.
+ *
+ * WHY THIS EXISTS AT ALL. `android:label` in a real app is almost never a literal; it is
+ * `@string/app_name`, a TYPE_REFERENCE into this table. `stringOf` answers null for a reference and
+ * says why: rendering `@0x7f130023` would put a number nobody can use into the library. That was
+ * the right call, but it meant EVERY normally-built app displayed as `com.example.thing`, which is
+ * what a database row looks like rather than what a product looks like.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO. It does not resolve the caller's locale, follow a reference
+ * whose value is itself a reference, or read bags. It answers the DEFAULT configuration's string
+ * and nothing else, because that is the one an app's name is written in and because every further
+ * step is a new way to be subtly wrong about somebody's product name.
+ *
+ * Answers null for anything it cannot resolve confidently. Null is already a state every caller
+ * handles — it is what shipped before this function existed — so a resource table this parser does
+ * not understand costs a nice-to-have and never an upload.
+ */
+function resolveStringResource(buf: Buffer, resourceId: number): string | null {
+  if (buf.length < 12 || buf.readUInt16LE(0) !== RES_TABLE_TYPE) return null;
+
+  const wantPackage = (resourceId >>> 24) & 0xff;
+  const wantType = (resourceId >>> 16) & 0xff;
+  const wantEntry = resourceId & 0xffff;
+  if (wantPackage === 0 || wantType === 0) return null;
+
+  const headerSize = buf.readUInt16LE(2);
+  let globalPool: StringPool | undefined;
+
+  // The table's own chunks: one global string pool, then one chunk per package.
+  let p = headerSize;
+  while (p + 8 <= buf.length) {
+    const type = buf.readUInt16LE(p);
+    const chunkHeader = buf.readUInt16LE(p + 2);
+    const size = buf.readUInt32LE(p + 4);
+    if (size < 8 || p + size > buf.length) break;
+
+    if (type === RES_STRING_POOL_TYPE && !globalPool) {
+      globalPool = parseStringPool(buf, p);
+    } else if (type === RES_TABLE_PACKAGE_TYPE) {
+      const packageId = buf.readUInt32LE(p + 8);
+      if ((packageId & 0xff) === wantPackage && globalPool) {
+        const hit = findEntryInPackage(buf, p, chunkHeader, size, wantType, wantEntry, globalPool);
+        if (hit !== null) return hit;
+      }
+    }
+    p += size;
+  }
+  return null;
+}
+
+/**
+ * Walk one package's type chunks for the entry, preferring the DEFAULT configuration.
+ *
+ * A type appears once per configuration an app ships — `values/`, `values-fr/`, `values-ar/` and so
+ * on — so the same entry index exists many times with different strings. The default one is the
+ * app's real name; the others are translations of it. Picking the first match would hand back
+ * whichever locale happened to be laid out first, which on a heavily localised app is effectively
+ * random. Recorded because it is a bug that would look like a typo in somebody's product name.
+ */
+function findEntryInPackage(
+  buf: Buffer,
+  packageStart: number,
+  packageHeaderSize: number,
+  packageSize: number,
+  wantType: number,
+  wantEntry: number,
+  pool: StringPool,
+): string | null {
+  let fallback: string | null = null;
+  let p = packageStart + packageHeaderSize;
+  const end = packageStart + packageSize;
+
+  while (p + 8 <= end) {
+    const type = buf.readUInt16LE(p);
+    const headerSize = buf.readUInt16LE(p + 2);
+    const size = buf.readUInt32LE(p + 4);
+    if (size < 8 || p + size > end) break;
+
+    if (type === RES_TABLE_TYPE_TYPE && buf.readUInt8(p + 8) === wantType) {
+      const entryCount = buf.readUInt32LE(p + 12);
+      const entriesStart = buf.readUInt32LE(p + 16);
+
+      if (wantEntry < entryCount) {
+        const offsetAt = p + headerSize + wantEntry * 4;
+        if (offsetAt + 4 <= p + size) {
+          const offset = buf.readUInt32LE(offsetAt);
+          if (offset !== NO_ENTRY) {
+            const value = readEntryValue(buf, p + entriesStart + offset, p + size, pool);
+            if (value !== null) {
+              // `ResTable_config::size` is at the start of the config struct, which follows the
+              // 20-byte type header. A config whose bytes past that size field are all zero is the
+              // DEFAULT one — no locale, no density, no qualifier of any kind.
+              const configAt = p + 20;
+              const configSize = configAt + 4 <= p + size ? buf.readUInt32LE(configAt) : 0;
+              const isDefault = configSize > 0
+                && configAt + configSize <= p + size
+                && buf.subarray(configAt + 4, configAt + configSize).every((b) => b === 0);
+              if (isDefault) return value;
+              fallback ??= value;
+            }
+          }
+        }
+      }
+    }
+    p += size;
+  }
+  // No default configuration carried this entry. A translation is a better answer than a package
+  // name, so the first one found is used rather than discarded.
+  return fallback;
+}
+
+/** One `ResTable_entry` + its `Res_value`, when that value is a plain string. */
+function readEntryValue(buf: Buffer, at: number, limit: number, pool: StringPool): string | null {
+  if (at + 8 > limit) return null;
+  const entrySize = buf.readUInt16LE(at);
+  const flags = buf.readUInt16LE(at + 2);
+  // A bag has no single value to read, and an app label is never one.
+  if ((flags & ENTRY_FLAG_COMPLEX) !== 0) return null;
+
+  const valueAt = at + entrySize;
+  if (valueAt + 8 > limit) return null;
+  const dataType = buf.readUInt8(valueAt + 3);
+  const data = buf.readUInt32LE(valueAt + 4);
+  if (dataType !== TYPE_STRING) return null;
+  const s = pool.get(data);
+  return s && s.trim() ? s : null;
+}
+
 interface RawAttribute {
   name: string | null;
   resourceId: number | null;
@@ -301,12 +482,13 @@ interface RawAttribute {
  * caller that already has the bytes (a future `mfarm app inspect`) does not have to go through a
  * file on disk.
  */
-export function parseManifest(buf: Buffer): ManifestMetadata {
+export function parseManifest(buf: Buffer): ParsedManifest {
   if (buf.length < 8 || buf.readUInt16LE(0) !== RES_XML_TYPE) {
     throw new ApkParseError('AndroidManifest.xml is not Android binary XML. A plain-text manifest means this is a source tree, not a built APK.');
   }
 
   let pool: StringPool | undefined;
+  let labelRef: number | null = null;
   let resourceMap: number[] = [];
   let result: ManifestMetadata | undefined;
 
@@ -340,6 +522,10 @@ export function parseManifest(buf: Buffer): ManifestMetadata {
       } else if (elementName === 'application' && result && result.label === null) {
         const v = pick(attrs, 'label', ATTR_LABEL);
         result.label = v ? stringOf(v, pool) : null;
+        // A reference is not a failure — it is the NORMAL case, and the id is the only thing that
+        // can find the real name in `resources.arsc`. Reported so `readApkMetadata` can resolve it;
+        // the manifest alone genuinely cannot.
+        if (v && v.dataType === TYPE_REFERENCE && v.data) labelRef = v.data;
         // The manifest element is the last thing worth reading; once application's label is in,
         // everything after it is activities and permissions.
       }
@@ -350,7 +536,7 @@ export function parseManifest(buf: Buffer): ManifestMetadata {
   if (!result) {
     throw new ApkParseError('AndroidManifest.xml has no <manifest> element with a package name.');
   }
-  return result;
+  return { ...result, labelRef };
 }
 
 function readAttributes(
@@ -453,13 +639,39 @@ function intOf(a: RawAttribute, pool: StringPool): number | null {
 
 export async function readApkMetadata(apkPath: string): Promise<ApkMetadata> {
   const fh = await open(apkPath, 'r');
-  let entries;
   try {
-    entries = await readCentralDirectory(fh);
+    const entries = await readCentralDirectory(fh);
+    const manifestBuf = await extractEntry(fh, entries, MANIFEST_NAME, MAX_MANIFEST_BYTES);
+    if (!manifestBuf) {
+      throw new ApkParseError('No AndroidManifest.xml in the archive. This is a zip, but not an APK.');
+    }
+    const { labelRef, ...meta } = parseManifest(manifestBuf);
+
+    /**
+     * Resolve the app's real name, and NEVER fail the upload over it.
+     *
+     * A name is a nicety; a build the tester cannot install is not. So every failure here — no
+     * resource table, a table this parser does not understand, a reference that resolves to a bag —
+     * lands on `label: null`, which is exactly the state that shipped before this existed and which
+     * every caller already renders (the console falls back to the package name).
+     *
+     * Only read when there IS a reference to chase. An app with a literal label costs nothing, and
+     * on a 272 MB build this skips inflating a resource table for no reason.
+     */
+    let label = meta.label;
+    if (label === null && labelRef !== null) {
+      try {
+        const arsc = await extractEntry(fh, entries, ARSC_NAME, MAX_ARSC_BYTES);
+        if (arsc) label = resolveStringResource(arsc, labelRef);
+      } catch {
+        label = null;
+      }
+    }
+
+    return { ...meta, label, abis: nativeAbisOf(entries) };
   } finally {
     await fh.close();
   }
-  return { ...parseManifest(await extractManifest(apkPath)), abis: nativeAbisOf(entries) };
 }
 
 /**

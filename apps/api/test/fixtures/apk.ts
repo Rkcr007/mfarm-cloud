@@ -213,6 +213,15 @@ export interface ApkOptions extends ManifestOptions {
   versionName?: string | null;
   /** versionName as a resource reference (`@string/…`), which is common and unresolvable. */
   versionNameAsReference?: boolean;
+  /**
+   * `android:label="@string/app_name"` — a resource reference, which is what a NORMALLY BUILT app
+   * has. The literal label the other option produces is the rare case.
+   */
+  labelAsReference?: number;
+  /** The string that reference resolves to, written into a real `resources.arsc`. */
+  labelResourceValue?: string;
+  /** Emit the reference but NO resource table, so resolution has to fail gracefully. */
+  omitArsc?: boolean;
   minSdk?: number;
   label?: string;
   /** Name attributes by resource id only, with empty name strings. */
@@ -250,7 +259,9 @@ export function buildManifest(opts: ApkOptions = {}): Buffer {
   const elements: ElementSpec[] = [
     { name: 'manifest', attrs: manifestAttrs },
     { name: 'uses-sdk', attrs: [{ name: name('minSdkVersion'), resourceId: 0x0101020c, type: TYPE_INT_DEC, value: opts.minSdk ?? 26 }] },
-    { name: 'application', attrs: [{ name: name('label'), resourceId: 0x01010001, type: TYPE_STRING, value: opts.label ?? 'MFarm Example' }] },
+    { name: 'application', attrs: [opts.labelAsReference
+      ? { name: name('label'), resourceId: 0x01010001, type: TYPE_REFERENCE, value: opts.labelAsReference }
+      : { name: name('label'), resourceId: 0x01010001, type: TYPE_STRING, value: opts.label ?? 'MFarm Example' }] },
   ];
   return encodeBinaryXml(elements, opts);
 }
@@ -347,11 +358,106 @@ export function buildZip(entries: Entry[]): Buffer {
  * `padBytes` pads a second entry so two calls with the same manifest can still produce different
  * bytes — which is what a test of "same digest deduplicates, different digest does not" needs.
  */
+/* ---------------------------------------------------------------- resources.arsc */
+
+const RES_TABLE_TYPE = 0x0002;
+const RES_TABLE_PACKAGE_TYPE = 0x0200;
+const RES_TABLE_TYPE_TYPE = 0x0201;
+
+/**
+ * A real `resources.arsc` holding ONE string, addressable by resource id.
+ *
+ * Minimal but STRUCTURALLY HONEST — it is a table the production parser walks the same way it walks
+ * Play Store output, not a stub shaped to whatever the parser happens to read. That distinction is
+ * the whole value: a fixture that skips the package header, or writes a config block the parser
+ * never validates, would pass while the real reader found nothing.
+ *
+ * `config` is 64 zero bytes after its own size field, which is what makes this the DEFAULT
+ * configuration — the one an app's real name lives in, as opposed to a translation.
+ */
+export function buildArsc(opts: {
+  resourceId: number;
+  value: string;
+  /** Emit a non-default config (a locale), to prove the default is the one preferred. */
+  locale?: string;
+} = { resourceId: 0x7f130023, value: 'Fixture App' }): Buffer {
+  const typeId = (opts.resourceId >>> 16) & 0xff;
+  const entryIndex = opts.resourceId & 0xffff;
+  const packageId = (opts.resourceId >>> 24) & 0xff;
+
+  const globalPool = new Pool();
+  const valueIndex = globalPool.intern(opts.value);
+  const globals = globalPool.encode(true);
+
+  // --- one type chunk: header, config, offsets, entries -----------------------------------
+  const CONFIG_SIZE = 64;
+  const config = Buffer.alloc(CONFIG_SIZE);
+  config.writeUInt32LE(CONFIG_SIZE, 0);
+  if (opts.locale) {
+    // language[2] sits at offset 8 in ResTable_config. Any non-zero byte past the size field is
+    // what makes this NOT the default configuration.
+    config.write(opts.locale.slice(0, 2), 8, 'ascii');
+  }
+
+  const entryCount = entryIndex + 1;
+  const offsets = Buffer.alloc(entryCount * 4);
+  for (let i = 0; i < entryCount; i++) offsets.writeUInt32LE(0xffffffff, i * 4); // NO_ENTRY
+  offsets.writeUInt32LE(0, entryIndex * 4);
+
+  // ResTable_entry (8 bytes: size, flags, key) followed by Res_value (8 bytes).
+  const entry = Buffer.alloc(16);
+  entry.writeUInt16LE(8, 0);            // entry size — where the Res_value starts
+  entry.writeUInt16LE(0, 2);            // flags: not complex
+  entry.writeUInt32LE(0, 4);            // key index
+  entry.writeUInt16LE(8, 8);            // Res_value size
+  entry.writeUInt8(0, 10);              // res0
+  entry.writeUInt8(0x03, 11);           // TYPE_STRING
+  entry.writeUInt32LE(valueIndex, 12);
+
+  const typeHeaderSize = 20 + CONFIG_SIZE;
+  const entriesStart = typeHeaderSize + offsets.length;
+  const typeSize = entriesStart + entry.length;
+  const typeHeader = Buffer.alloc(20);
+  typeHeader.writeUInt16LE(RES_TABLE_TYPE_TYPE, 0);
+  typeHeader.writeUInt16LE(typeHeaderSize, 2);
+  typeHeader.writeUInt32LE(typeSize, 4);
+  typeHeader.writeUInt8(typeId, 8);
+  typeHeader.writeUInt32LE(entryCount, 12);
+  typeHeader.writeUInt32LE(entriesStart, 16);
+  const typeChunk = Buffer.concat([typeHeader, config, offsets, entry]);
+
+  // --- the package chunk ------------------------------------------------------------------
+  const PKG_HEADER = 288;
+  const pkgHeader = Buffer.alloc(PKG_HEADER);
+  pkgHeader.writeUInt16LE(RES_TABLE_PACKAGE_TYPE, 0);
+  pkgHeader.writeUInt16LE(PKG_HEADER, 2);
+  pkgHeader.writeUInt32LE(PKG_HEADER + typeChunk.length, 4);
+  pkgHeader.writeUInt32LE(packageId, 8);
+  pkgHeader.write('fixture', 12, 'utf16le');
+  const pkgChunk = Buffer.concat([pkgHeader, typeChunk]);
+
+  // --- the table header -------------------------------------------------------------------
+  const TABLE_HEADER = 12;
+  const header = Buffer.alloc(TABLE_HEADER);
+  header.writeUInt16LE(RES_TABLE_TYPE, 0);
+  header.writeUInt16LE(TABLE_HEADER, 2);
+  header.writeUInt32LE(TABLE_HEADER + globals.length + pkgChunk.length, 4);
+  header.writeUInt32LE(1, 8); // packageCount
+
+  return Buffer.concat([header, globals, pkgChunk]);
+}
+
 export function buildApk(opts: ApkOptions = {}): Buffer {
   return buildZip([
     // Local extra of 3 by default: every real APK's local and central extra lengths disagree.
     { name: 'AndroidManifest.xml', content: buildManifest(opts), stored: opts.stored, localExtra: 3 },
     { name: 'classes.dex', content: Buffer.alloc(opts.padBytes ?? 64, 0x7a) },
+    ...(opts.labelAsReference && !opts.omitArsc
+      ? [{ name: 'resources.arsc', content: buildArsc({
+          resourceId: opts.labelAsReference,
+          value: opts.labelResourceValue ?? 'Fixture App',
+        }) }]
+      : []),
     // A directory entry as well as the .so, because real archives carry both and the reader has to
     // ignore the directory — it holds no code and is not evidence that an ABI is supported.
     ...(opts.abis ?? []).flatMap((abi) => ([
