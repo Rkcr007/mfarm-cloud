@@ -1772,6 +1772,9 @@ when the feature is broken. See issues 37 and 38.
   the UI is the thing that crashed. Direction document §14.
 - **`recording` is a capability string nothing implements.** The largest genuinely-new build in the
   direction document, and §27 means the button cannot exist until the recorder does.
+- **Exploratory testing pays better than building right now.** One hour of using the console as a
+  user found five real defects (issue 42) — more than the preceding week of building it. Do a pass
+  before starting the next feature, and force `document.hidden = false` first (issue 41).
 - **GPU is deferred by decision**, not blocked by engineering. It is a GCP billing-tier conversion.
   Cost of deferring: continuously-painting apps stay at 30fps with ~1.35s frozen frames.
 
@@ -1867,3 +1870,60 @@ when the feature is broken. See issues 37 and 38.
 
     Before reporting a UI defect found by automation, force visibility and re-measure. Two of the
     findings in that exploratory pass survived that check; one did not.
+
+42. **FIVE DEFECTS FROM ONE EXPLORATORY PASS, AND THE THREE THAT SHARE A CAUSE.** 2026-08-31.
+
+    An hour of using the console as a user found more than the previous week of building it. All
+    five are fixed; what is worth carrying forward is that three of them are the same mistake.
+
+    **a. Apps had no names.** Every build showed as `com.alaanpay.spender.staging`. `android:label`
+    in a normally-built app is `@string/app_name`, a TYPE_REFERENCE into `resources.arsc`, and the
+    parser answered null for references with sound reasoning — rendering `@0x7f130023` helps nobody.
+    The reasoning was right; the CONSEQUENCE went unexamined. Almost nothing hardcodes its own name,
+    so the null branch was not an edge case, it was every real app.
+
+    **b. Rotate never worked.** `/vendor/bin/cuttlefish_sensor_injection` ABORTS on this image —
+    the sensors HAL does not implement `DATA_INJECTION` and the tool answers that with a CHECK. Now
+    `wm user-rotation lock`. Note the fix does NOT force `fixed-to-user-rotation`: the launcher is
+    portrait-locked and a real phone would not turn either, so rotate reads the rotation back and
+    explains whose decision it was rather than showing a layout the app never ships.
+
+    **c. A failed command tore down a working stream.** `case 'error'` failed the whole live view on
+    every error frame, justified by a comment claiming the worker closes the socket after each one.
+    It does not: `device_error` and `input_overrun` both keep it open. Worse than it looks —
+    `input_overrun` fires when a device is BUSY, so the harder somebody used the farm the more
+    likely it was to drop their video. Fixed by letting the SOCKET decide rather than enumerating
+    fatal codes, which is a list that goes stale the moment the worker adds one.
+
+    **d. Two screens disagreed about one device.** The Launch picker called a QUARANTINED handset
+    `1 busy` while Health, on the same API, said `Quarantined`. "Busy" tells a tester to wait for
+    something that is never coming.
+
+    **e. Raw logcat.** 37% of one real session's lines were a single system service retrying. §17
+    says do not dump raw logcat; it was dumping raw logcat.
+
+    ---
+
+    **THE SHARED CAUSE, in (a), (c) and the `SUCCEEDED` fixture below: A COMMENT THAT WAS TRUE WHEN
+    WRITTEN AND STOPPED BEING TRUE, WITH NOTHING CHECKING IT.**
+
+    Each of those three has a well-argued comment above it explaining why the code is right. Each
+    argument is internally sound. Each describes a world that no longer exists — the parser's "a
+    reference is unresolvable" (it is resolvable, with the resource table beside it), the socket's
+    "refusals are terminal by construction" (two paths are not). **A confident comment is not
+    evidence, and this codebase's comments are good enough to be believed without checking.** When
+    one states a fact about ANOTHER component's behaviour, that fact needs a test, or it is a
+    rumour with good grammar.
+
+    **A FIXTURE DESCRIBING AN IMPOSSIBLE STATE, found while fixing (e).** The shared console seed
+    used `state: 'SUCCEEDED'` for app actions. That value has never been emitted — migration 015
+    renamed `INSTALLED` to `DONE`, and the enum is PENDING/DONE/FAILED. So `installedOn()` found
+    nothing in every test using that seed, and every assertion about an installed build passed
+    against an empty answer. Third occurrence of this shape after `state.sessionDetail` (issue 37):
+    **a fixture keyed on something the product does not have is not a weak test, it is a test of
+    nothing that reports success.**
+
+    **AND ONE I GOT WRONG.** See issue 41: I reported the session badge as permanently stale. It was
+    the automation — CDP-driven Chrome reports `document.hidden === true`, and the console's poll
+    returns early on exactly that. Forcing visibility, it corrects in four seconds. Two findings from
+    the pass survived that re-check; one did not.
