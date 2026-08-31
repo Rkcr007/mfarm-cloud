@@ -1746,6 +1746,13 @@ buffer; it measured 18.7ms, so that change is worth ~10ms and not the 150 it was
   like a state bug for several minutes. Use a real reload.
 - **The devices cannot be pinned by the allocator.** To reset a specific one, allocate every device
   and release them all.
+- **The test suite needs Postgres on 5433, not 5432.** `apps/api/docker-compose.yml` maps
+  `5433:5432` deliberately, to dodge whatever is on the default port. If it is not running, roughly
+  a dozen tests in `account.test.ts` fail with RLS and password assertions that look like a real
+  regression and are not — the underlying error is `ECONNREFUSED ::1:5433`, several screens down in
+  the output. `npm run db:up --workspace apps/api` then `npm run migrate --workspace apps/api`.
+  A container on 5432 belonging to some other project is a red herring; check the PORT, not the
+  presence of a Postgres.
 
 ### The rule that keeps being paid for
 
