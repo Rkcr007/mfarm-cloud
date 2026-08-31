@@ -1700,16 +1700,20 @@ four devices restart sequentially at ~30s each.
 
 ### Do these first, in this order
 
-1. **PUSH THE DEMO APK THROUGH AN INSTALL.** This is the largest open risk in the product and it is
-   not a UI problem. The image advertises `arm64-v8a` in `ro.product.cpu.abilist` while native-bridge
-   translation is off and `binfmt_misc` is empty (issue 34), so an arm64-only APK most likely
-   installs and then dies at `System.loadLibrary`. Every other priority is downstream of whether
-   "test a real Android application" is true. The user was going to supply the APK; ask for it.
+1. ~~**PUSH THE DEMO APK THROUGH AN INSTALL.**~~ **DONE 2026-08-31 — issue 39.** A real 272 MB
+   customer build (`com.alaanpay.spender.staging`) went upload → install → launch → interact with no
+   special handling, at `primaryCpuAbi=x86_64` and no native-load failures. **The demo is not
+   blocked.** Note what this did and did not prove: the APK is a fat APK carrying x86_64, so issue
+   34 was SIDESTEPPED, not fixed — an arm64-only build would still fail. Do not re-run this to
+   "check arm64"; it does not test that.
 
-2. **Port the live view into the new console.** `/app` currently renders real devices at real
-   geometry with an honest empty screen. The next slice is the WebRTC path — `apps/api/public/live.js`
-   is the working implementation to port, and it is the one part of the old console that holds a
-   socket and a peer connection open rather than being a render function.
+2. **PORT THE LIVE VIEW INTO THE NEW CONSOLE — now the top item.** `/app` currently renders real
+   devices at real geometry with an honest empty screen. The next slice is the WebRTC path;
+   `apps/api/public/live.js` is the working implementation to port, and it is the one part of the old
+   console that holds a socket and a peer connection open rather than being a render function.
+
+   Everything the session screen needs is proven on the old console: 50 fps, 42 ms round trip, a real
+   customer app installing, launching and taking accurate taps. This is a port, not a discovery.
 
 3. **Instrument latency in the product.** There is still no number for input-to-photon or for
    capture+encode on the host, and §13 and §24 of the direction document both ask for them. The
@@ -1763,3 +1767,59 @@ when the feature is broken. See issues 37 and 38.
   direction document, and §27 means the button cannot exist until the recorder does.
 - **GPU is deferred by decision**, not blocked by engineering. It is a GCP billing-tier conversion.
   Cost of deferring: continuously-painting apps stay at 30fps with ~1.35s frozen frames.
+
+39. **THE ARM64 QUESTION IS ANSWERED FOR A REAL APP, AND ISSUE 34 IS SIDESTEPPED RATHER THAN
+    FIXED.** 2026-08-31.
+
+    A real 272 MB customer build — `com.alaanpay.spender.staging`, the Alaan expense app — went
+    upload → install → launch → interact on `cf-1` with no special handling:
+
+    | | |
+    |---|---|
+    | upload | HTTP 201 in 24.7s (11 MB/s) |
+    | install | succeeded in 7s |
+    | launch | succeeded |
+    | on screen | the app's real login screen, interactive |
+    | crashes / ANRs | none |
+
+    **WHY IT WORKED, and the distinction that matters.** The APK is a FAT APK: it ships
+    `arm64-v8a`, `armeabi-v7a` AND `x86_64`, 15 native libraries each. The platform chose
+    `primaryCpuAbi=x86_64`, ART compiled to `oat/x86_64/base.odex`, and Firebase Crashlytics — a
+    real native SDK — initialised without an `UnsatisfiedLinkError`.
+
+    **So issue 34 is NOT closed. It was never reached.** The farm still advertises `arm64-v8a` with
+    no translation layer behind it, and an arm64-ONLY APK would still install and then die at
+    `System.loadLibrary`. What this proves is narrower and more useful than "arm64 works": a
+    normally-built Android release carries x86_64 and runs here natively. Most production builds do.
+    The ones that do not are the ones the preflight in `apk.ts` exists to refuse by name.
+
+    Do not let a future reader conclude from this entry that arm64 execution was demonstrated. It
+    was not. It was avoided, correctly.
+
+40. **`replaceChildren` STRINGIFIES `null`; `add()` SKIPS IT — AND THE SHIM SIDED WITH `add()`.**
+    2026-08-31.
+
+    Every session on an unprofiled device (`cf-1`, `cf-2`, any physical handset) drew the literal
+    word **`null`** under the device toolbar. `paintToolbar` ends with
+
+    ```js
+    hasChrome(device) ? toolBtn('phone', …) : null
+    ```
+
+    passed straight into `st.toolbar.replaceChildren(...)`. `add()` filters null; `replaceChildren`
+    is a NATIVE method that converts every argument with `String()`, so the conditional child became
+    a text node reading `null`.
+
+    **The same shape as issue 37, twice over.** First, a helper that handles the edge case is
+    bypassed at one call site — and `paintOverlay` at `console.js:2130` ALREADY carried
+    `.filter(Boolean)`, which means somebody hit this before and fixed only the site in front of
+    them. Second, `dom-shim.ts` skipped null in `append()` — copying `add()`'s behaviour rather than
+    the DOM's — so the suite could not see a null that a browser renders.
+
+    **A shim that is kinder than the platform does not fail safe; it fails silent.** That is now
+    two production defects from the same cause: the indexed-style crash in issue 37, and this. The
+    shim now stringifies the way the DOM does, and a new test asserts NO screen renders the words
+    `null` or `undefined` — across every screen, not just the toolbar, because the next one will be
+    somewhere else.
+
+    Found by looking at a real session, not by a test. That is the third time in three sessions.

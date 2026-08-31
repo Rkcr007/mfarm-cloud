@@ -22,9 +22,23 @@ class ShimNode {
   parentElement: ShimNode | null = null;
   textContent = '';
 
+  /**
+   * STRINGIFIES `null` THE WAY A BROWSER DOES, rather than skipping it.
+   *
+   * This used to skip null, undefined and false — copying what the console's own `add()` helper
+   * does. That made the shim MORE FORGIVING THAN THE DOM, and hid a real bug: `replaceChildren`
+   * and `append` are native methods that convert whatever they are given with `String()`, so
+   * `replaceChildren(cond ? btn : null)` appends the literal text "null". Every session on an
+   * unprofiled device drew `null` under the device toolbar for exactly this reason, and the suite
+   * could not see it because the shim quietly dropped the null that a browser would have rendered.
+   *
+   * Second time this shape has cost something — see the indexed-style guard on `makeStyle` below.
+   * A shim that is kinder than the platform does not fail safe; it fails silent.
+   *
+   * `add()` is unaffected: it filters before it ever calls this.
+   */
   append(...kids: unknown[]): void {
     for (const k of kids.flat(9)) {
-      if (k === null || k === undefined || k === false) continue;
       if (k instanceof ShimNode) { k.parentElement = this; this.children.push(k); }
       else this.children.push(new ShimText(String(k)));
     }

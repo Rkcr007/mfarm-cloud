@@ -2078,7 +2078,19 @@ function paintToolbar(sess, live, caps) {
   };
   const send = (msg) => () => state.live?.sendControl(msg);
 
-  st.toolbar.replaceChildren(
+  /**
+   * `.filter(Boolean)` because the last entry is CONDITIONAL, and `replaceChildren` is not `add()`.
+   *
+   * `add()` skips null; the DOM does not — `replaceChildren(null)` appends the literal text "null".
+   * The chrome toggle at the end of this list is `… : null` on an unprofiled device, so every
+   * session on `cf-1`, `cf-2` or a physical handset drew the word `null` under the toolbar. Seen on
+   * a real session 2026-08-31.
+   *
+   * Same shape as the crash in issue 37: a helper that handles the edge case, bypassed at one call
+   * site. `paintOverlay` already carries this exact filter, which means somebody hit it once and
+   * fixed only the site in front of them.
+   */
+  st.toolbar.replaceChildren(...[
     toolBtn('power', 'Power', ctrl, press('power')),
     toolBtn('volup', 'Volume up', attached, send({ t: 'key', name: 'volume_up' })),
     toolBtn('voldown', 'Volume down', attached, send({ t: 'key', name: 'volume_down' })),
@@ -2116,7 +2128,7 @@ function paintToolbar(sess, live, caps) {
       ? toolBtn('phone', st.chrome ? 'Hide device body' : 'Show device body',
           true, () => setChromePref(!st.chrome), { active: st.chrome })
       : null,
-  );
+  ].filter(Boolean));
 }
 
 /**

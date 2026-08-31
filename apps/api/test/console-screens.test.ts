@@ -499,6 +499,44 @@ describe('failure classification on the run detail', () => {
  * only checked "the X1 Pro looks like an X1 Pro" would pass just as happily if the console had
  * started drawing the panel from the chrome table — which would show a shape the device is not.
  */
+/**
+ * NO SCREEN RENDERS THE WORD "null".
+ *
+ * `add()` skips null; the DOM does not. `replaceChildren(x ? node : null)` and `append(null)` are
+ * native methods that convert their arguments with `String()`, so a conditional child that
+ * evaluates to null becomes the literal text "null" on the page.
+ *
+ * That shipped: the device toolbar's chrome toggle is `… : null` on an unprofiled device, so every
+ * session on `cf-1`, `cf-2` or a physical handset drew `null` under the toolbar. Found by looking
+ * at a real session on 2026-08-31, not by a test — the shim was skipping the null a browser would
+ * have rendered, which is the same "kinder than the platform" blind spot as the style-string crash.
+ *
+ * Asserted across EVERY screen rather than on the toolbar, because the next one will be somewhere
+ * else. A screen legitimately displaying the word "null" would need this test taught about it,
+ * which is a conversation worth having at that point.
+ */
+describe('no screen leaks a stringified nullish', () => {
+  for (const name of Object.keys(mod?.SCREENS ?? {})) {
+    void name;
+  }
+
+  test('every screen is free of "null" and "undefined" text', () => {
+    const leaks: string[] = [];
+    for (const [name, screen] of Object.entries(mod.SCREENS as Record<string, () => unknown>)) {
+      seed({ name, id: 'sess-1' });
+      mod.state.stage = null;
+      let text = '';
+      try {
+        text = textOf(screen());
+      } catch {
+        continue; // a screen that cannot render at all is the other tests' business, not this one
+      }
+      if (/\b(null|undefined)\b/.test(text)) leaks.push(`${name}: ${text.match(/.{0,40}\b(null|undefined)\b.{0,20}/)?.[0]}`);
+    }
+    assert.deepEqual(leaks, [], `a conditional child reached the DOM as text:\n${leaks.join('\n')}`);
+  });
+});
+
 describe('device profiles', () => {
   /** cf-3 as the agent registers it: profiled, MFARM-named, and still a virtual device. */
   function withProfiled() {
