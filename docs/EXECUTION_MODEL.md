@@ -161,8 +161,12 @@ Five things decided while building it that are not obvious from the capability:
   client-chosen names.** Every CI system on earth numbers builds from 1, so two tenants both running
   `mfarm:runId: '412'` is the ordinary case. A global index would have merged them — each org
   reading the other's session list with no policy violated, because both genuinely own the row.
-- **There is no `ended_at` and no `status`, deliberately.** A run has no end signal, and the obvious
-  substitute is wrong in a way that would be believed: "the last session ended" would mark a
+- **There is no `ended_at` and no `status`, deliberately** — and **ADR-0018 (2026-09-01) is what
+  changes this**, though the column still does not exist yet. The reasoning below was that a run has
+  no *derivable* end. It does not; what it can have is a **declared** one, from the suite or from
+  `mfarm run` at child exit. That is the piece that makes a status honest rather than inferred, and
+  it is the next slice after the timeline in §4.6. The original reasoning, which still rules out
+  every derived substitute: "the last session ended" would mark a
   sequential twenty-test run finished nineteen times before it was. The window is derived from the
   sessions and the live count is reported as a count; §4.3 is what makes a real end knowable. Same
   reasoning as 019 removing `video` from the artifact kinds.
@@ -303,6 +307,44 @@ Four things it turned up:
 The local workaround in `examples/medishop-suite` stays, deliberately: it needs no round trip and no
 capability, and a suite that wants a screenshot at an exact instant is better served by taking one
 itself. This exists for everything that cannot — CI with no tab open, and the console.
+
+### 4.6 The execution timeline — BUILT (2026-09-01)
+
+`AutomationExecutionPlan.md` asks for an explicit state machine whose transitions are persisted
+(§4), a live event feed (§17) and a per-run timeline (§18). They are the same rows read three ways,
+so migration 030 adds one table, `execution_events`, and `GET /v1/runs/:id/timeline` reads it.
+
+The gap it closes is the same shape as the one §4.2 closed. A run's rollup is DERIVED at read time
+from `sessions` and `test_results`, which answers *what ran* and *what failed* but not *what
+happened*: a session that waited four minutes for capacity and one allocated instantly leave
+identical rows behind, so "why was this run slow" was not a slow question, it was unanswerable.
+
+Five things decided while building it:
+
+- **Append-only, and `mfarm_app` has no UPDATE or DELETE.** A timeline that can be rewritten is not
+  evidence, and the entire value of this table is explaining a run that has already gone wrong. The
+  revoke is the point rather than the tidy-up it was in 014, 023 and 024.
+- **`run_id` is NOT NULL, so a session naming no run writes nothing.** This is the timeline OF A
+  RUN; a lease taken by somebody poking at a device from the console is not one. It is expressed as
+  an `INSERT ... SELECT` that matches no rows, rather than as a branch a caller could forget.
+- **No `state` column on the event.** A transition is `kind` plus `occurred_at`, and deriving the
+  current state from the last event cannot disagree with the history — whereas a denormalised state
+  can, and eventually does.
+- **A queued session emits BOTH `session-queued` and `device-allocated`.** One combined event would
+  make "how much did anything queue last week" a scan of a jsonb key instead of a count of a kind.
+- **An event never fails the thing it describes.** Every write is wrapped and swallowed. A timeline
+  is diagnostic; a session is the product, and failing a customer's session to protect a chart is
+  the wrong trade in a way that is only obvious afterwards.
+
+The events today are the farm's own actions — `run-created`, `session-queued`, `device-allocated`,
+`session-active`, `session-ended` — plus install and incident kinds the schema allows and the hub
+does not yet emit. **Nothing here is ever a claim about the test.** Per ADR-0018 that is the
+customer's to report, and §4.3 is where it lives.
+
+Still to come on top of this: the declared end (§4.2's note above), and SSE so the console can watch
+a run progress rather than poll (§17).
+
+---
 
 ## 5. Other capabilities worth having
 
