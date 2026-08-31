@@ -311,5 +311,55 @@ for (const id of [s1, s2].filter(Boolean)) {
   r && r.status < 400 ? ok(`released ${id}`) : bad(`could not release ${id}`);
 }
 
+// ---------------------------------------------------------------- 8. the timeline (migration 030)
+//
+// AFTER the release, deliberately: `session-ended` is emitted on quit, so checking before it would
+// assert on a timeline that is genuinely still being written and would pass or fail on timing.
+//
+// Resolved by the NAME the suite chose rather than by a uuid, because that is the path a CI job
+// actually has — it passed `mfarm:runId` and never saw a uuid.
+
+say('Reading the execution timeline');
+const tl = await api(`/v1/runs/${encodeURIComponent(RUN)}/timeline`);
+if (tl.status !== 200) {
+  bad(`the timeline did not resolve by name: ${tl.status}`);
+} else {
+  const events = tl.json?.events ?? [];
+  const kinds = events.map((e) => e.kind);
+  note(kinds.join(' → ') || '(no events)');
+
+  kinds.includes('run-created')
+    ? ok('the run records its own creation')
+    : bad('no run-created event');
+
+  // Two sessions joined this run, so two allocations and two activations. A timeline that recorded
+  // one would be describing a different run than the one that just executed.
+  const allocated = kinds.filter((k) => k === 'device-allocated').length;
+  allocated === 2
+    ? ok('both sessions recorded an allocation')
+    : bad(`expected 2 device-allocated events, found ${allocated}`);
+
+  const ended = kinds.filter((k) => k === 'session-ended').length;
+  ended === 2
+    ? ok('both sessions recorded their end')
+    : bad(`expected 2 session-ended events, found ${ended}`);
+
+  // ORDER IS THE POINT. A set of kinds is not a timeline; if these arrive out of sequence the
+  // table is recording facts but not history, and every "why was this slow" answer built on it
+  // would be wrong.
+  const firstAlloc = kinds.indexOf('device-allocated');
+  const firstEnd = kinds.indexOf('session-ended');
+  kinds.indexOf('run-created') === 0 && firstAlloc < firstEnd
+    ? ok('the events are in the order they happened')
+    : bad(`out of order: ${kinds.join(', ')}`);
+
+  // Every event must name the run's own sessions, never a stray one. `sessionId` is read off the
+  // session row inside the INSERT, so a mismatch here would mean the attribution itself is broken.
+  const stray = events.filter((e) => e.sessionId && ![s1, s2].includes(e.sessionId));
+  stray.length === 0
+    ? ok('every event is attributed to one of this run\'s sessions')
+    : bad(`${stray.length} event(s) named a session outside this run`);
+}
+
 say(failed === 0 ? `\x1b[32mAll checks passed\x1b[0m (${since()})` : `\x1b[31m${failed} check(s) failed\x1b[0m (${since()})`);
 process.exit(failed === 0 ? 0 : 1);
