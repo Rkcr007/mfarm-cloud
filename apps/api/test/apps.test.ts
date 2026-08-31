@@ -21,7 +21,7 @@ process.env.HOST_SWEEP_MIN_INTERVAL_MS = '0';
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -37,7 +37,7 @@ import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { reap } from '../src/allocator.ts';
 import { abiMismatchReason, ApkParseError, parseManifest, readApkMetadata } from '../src/apk.ts';
 import { AppStore } from '../src/appstore.ts';
-import { buildApk, buildManifest, buildNonApkZip, buildZip } from './fixtures/apk.ts';
+import { buildApk, buildArsc, buildManifest, buildNonApkZip, buildZip } from './fixtures/apk.ts';
 
 const REGION = 'apps-test';
 const APK_TYPE = 'application/vnd.android.package-archive';
@@ -777,5 +777,92 @@ describe('the screenshot action', () => {
       headers: auth(keyA), payload: { kind: 'reboot' },
     });
     assert.equal(res.statusCode, 400);
+  });
+});
+
+/**
+ * AN APP HAS A NAME, NOT A PACKAGE ID.
+ *
+ * `android:label` in a normally-built app is `@string/app_name` — a TYPE_REFERENCE into
+ * `resources.arsc`, not a literal. The parser used to answer null for a reference and say why:
+ * rendering `@0x7f130023` would put a number nobody can use into the library.
+ *
+ * That reasoning was right and the CONSEQUENCE was not: essentially every real app displayed as
+ * `com.example.thing`. Found by exploratory testing on 2026-08-31 — a real 272 MB customer build
+ * uploaded as `com.alaanpay.spender.staging` when the APK plainly contains "Alaan staging".
+ *
+ * These use a REAL resource table from `buildArsc`, walked exactly as the production parser walks
+ * Play Store output. A stub shaped to what the parser happens to read would pass while the real
+ * reader found nothing.
+ */
+describe('an app is named from its resource table', () => {
+  let dir: string;
+  before(async () => { dir = await mkdtemp(join(tmpdir(), 'apk-label-')); });
+  after(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const write = async (name: string, buf: Buffer) => {
+    const path = join(dir, name);
+    await writeFile(path, buf);
+    return path;
+  };
+
+  test('a referenced label resolves to the string it names', async () => {
+    const path = await write('ref.apk', buildApk({
+      labelAsReference: 0x7f130023,
+      labelResourceValue: 'Alaan staging',
+    }));
+    assert.equal((await readApkMetadata(path)).label, 'Alaan staging');
+  });
+
+  test('a literal label is still read, and needs no resource table', async () => {
+    const path = await write('literal.apk', buildApk({ label: 'Written In The Manifest' }));
+    assert.equal((await readApkMetadata(path)).label, 'Written In The Manifest');
+  });
+
+  test('a reference with no resource table is null, not an error', async () => {
+    // The upload must survive. A name is a nicety; a build the tester cannot install is not.
+    const path = await write('noarsc.apk', buildApk({ labelAsReference: 0x7f130023, omitArsc: true }));
+    const meta = await readApkMetadata(path);
+    assert.equal(meta.label, null);
+    assert.equal(meta.packageName, 'com.example.mfarm', 'the rest of the metadata still parses');
+  });
+
+  test('a corrupt resource table costs the name and nothing else', async () => {
+    const path = await write('corrupt.apk', buildZip([
+      { name: 'AndroidManifest.xml', content: buildManifest({ labelAsReference: 0x7f130023 }), localExtra: 3 },
+      { name: 'resources.arsc', content: Buffer.from('not a resource table at all') },
+    ]));
+    const meta = await readApkMetadata(path);
+    assert.equal(meta.label, null);
+    assert.equal(meta.packageName, 'com.example.mfarm');
+  });
+
+  /** Round-trips one resource table through a real APK, which is the only public way in. */
+  const resolveViaApk = async (arsc: Buffer): Promise<string | null> => {
+    const path = await write(`rt-${randomUUID()}.apk`, buildZip([
+      { name: 'AndroidManifest.xml', content: buildManifest({ labelAsReference: 0x7f130023 }), localExtra: 3 },
+      { name: 'resources.arsc', content: arsc },
+    ]));
+    return (await readApkMetadata(path)).label;
+  };
+
+  test('a lone translation is used — better than a package name', async () => {
+    const arsc = buildArsc({ resourceId: 0x7f130023, value: 'Nom Français', locale: 'fr' });
+    assert.equal(await resolveViaApk(arsc), 'Nom Français');
+  });
+
+  test('the DEFAULT configuration is what a default table resolves to', async () => {
+    /**
+     * The bug the default-preference exists to prevent, and it would look like a typo in somebody's
+     * product name. A type appears once per configuration an app ships — `values/`, `values-fr/`,
+     * `values-ar/` — so the same entry index exists many times with different strings. Taking the
+     * first match hands back whichever locale was laid out first, which on a heavily localised app
+     * is effectively random.
+     *
+     * The real proof of the preference is the 272 MB Alaan build, which ships ~40 locales and
+     * resolves to its English name. This asserts the default path in isolation.
+     */
+    const arsc = buildArsc({ resourceId: 0x7f130023, value: 'The Real Name' });
+    assert.equal(await resolveViaApk(arsc), 'The Real Name');
   });
 });
