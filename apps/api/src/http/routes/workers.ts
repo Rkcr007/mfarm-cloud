@@ -352,6 +352,83 @@ export async function workerRoutes(app: FastifyInstance) {
           req.log.warn({ hostId, devices: n }, 'host beat again — silence quarantine cleared');
         }
       }
+      /**
+       * WHAT THE HOST CAN DO RIGHT NOW — reconciled on every beat (2026-09-01).
+       *
+       * THE BUG THIS FIXES. The agent has always sent `capabilities` and a per-device automation
+       * map on every heartbeat, and this handler read NONE of it: the body was parsed and thrown
+       * away, and the only writer of `devices.capabilities` was registration. A healthy agent never
+       * re-registers — `capabilityFingerprint()` is consulted in `start()` and nowhere else — so an
+       * Appium that died stayed advertised until somebody restarted the agent.
+       *
+       * `setAutomationEndpoint()` says as much in its own comment: it changes "what the AGENT now
+       * reports", and "nothing here reaches the control plane until the next registration". That
+       * was true, and it is what made ADR-0003's guarantee stop at the agent boundary.
+       *
+       * The cost was measured on hardware. With Appium at zero processes for 26 seconds,
+       * `GET /v1/devices` still reported `webdriver` on every device and `POST /session` ALLOCATED
+       * one before failing with `automation_unreachable` — the exact sequence ADR-0003 exists to
+       * prevent: "a device that claims what it cannot do fails at connect time, after a lease is
+       * spent." Reproduced by `deploy/verify-failure.mjs --only=appium`.
+       *
+       * ---------------------------------------------------------------- what this does NOT do
+       *
+       * **It never touches `state`.** Registration owns that, with careful rules about which states
+       * may be disturbed (never SESSION_ACTIVE, never CLEANING). A beat is a liveness signal, not a
+       * scheduling decision; withdrawing the capability is enough to stop new allocations, because
+       * `allocate_device` filters on `capabilities`.
+       *
+       * **It never withdraws on a missing field.** `devices` absent means an agent that predates
+       * this, or a malformed body; `devices: {}` means an agent saying it serves no automation
+       * anywhere. Treating the first as the second would strip `webdriver` from an entire fleet on
+       * one bad deploy, which is a far worse failure than the one being fixed.
+       *
+       * **It is host-scoped**, like every other worker-facing query (migration 008). The worker
+       * names its devices by LOCAL id and they are resolved against `(host_id, local_id)`, so a
+       * worker cannot describe another host's hardware however it spells the name.
+       */
+      const beat = (req.body ?? {}) as { devices?: unknown };
+      if (beat.devices && typeof beat.devices === 'object' && !Array.isArray(beat.devices)) {
+        const serving = beat.devices as Record<string, unknown>;
+        // Only the devices whose advertised automation actually disagrees with what is stored, so
+        // the ordinary beat — six a minute, forever — costs one indexed read and no writes.
+        await c.query(
+          `UPDATE devices d
+              SET automation_endpoint = w.endpoint,
+                  capabilities = CASE
+                    WHEN w.endpoint IS NULL
+                      THEN (SELECT coalesce(jsonb_agg(cap), '[]'::jsonb)
+                              FROM jsonb_array_elements(d.capabilities) cap
+                             WHERE cap <> '"webdriver"'::jsonb)
+                    WHEN d.capabilities @> '["webdriver"]'::jsonb THEN d.capabilities
+                    ELSE d.capabilities || '["webdriver"]'::jsonb
+                  END,
+                  updated_at = now()
+             FROM (SELECT key AS local_id, nullif(value, 'null'::jsonb) #>> '{}' AS endpoint
+                     FROM jsonb_each($2::jsonb)) w
+            WHERE d.host_id = $1
+              AND d.local_id = w.local_id
+              AND (d.automation_endpoint IS DISTINCT FROM w.endpoint
+                   OR (w.endpoint IS NULL) = (d.capabilities @> '["webdriver"]'::jsonb))`,
+          [hostId, JSON.stringify(serving)],
+        );
+        // A device this host owns that the beat did NOT mention is one the agent is no longer
+        // fronting with an automation server. Registration expresses this by re-registering without
+        // an endpoint; a running agent has no such moment, which is the half that was missing.
+        await c.query(
+          `UPDATE devices d
+              SET automation_endpoint = NULL,
+                  capabilities = (SELECT coalesce(jsonb_agg(cap), '[]'::jsonb)
+                                    FROM jsonb_array_elements(d.capabilities) cap
+                                   WHERE cap <> '"webdriver"'::jsonb),
+                  updated_at = now()
+            WHERE d.host_id = $1
+              AND NOT (d.local_id = ANY($2::text[]))
+              AND (d.automation_endpoint IS NOT NULL OR d.capabilities @> '["webdriver"]'::jsonb)`,
+          [hostId, Object.keys(serving)],
+        );
+      }
+
       // The other half of the reset story. A device is parked in CLEANING when its session ends and
       // stays unallocatable until a worker confirms the restore — and before this existed, nothing
       // ever ASKED for one, so `Agent.resetAndRelease()` had no caller and every device left the
