@@ -1076,14 +1076,74 @@ export class CuttlefishDevice implements DeviceControl {
    * "right" are the two states rather than a running total. A device that has no such binary is
    * reported as a failure rather than silently doing nothing.
    */
+  /**
+   * Turn the device, the way a person turns a phone.
+   *
+   * WHY THIS IS NOT SENSOR INJECTION ANY MORE. It used to shell out to
+   * `/vendor/bin/cuttlefish_sensor_injection`, which is the "make the guest believe gravity moved"
+   * approach and is the more faithful one in principle. On the Android 17 Cuttlefish image this farm
+   * runs, that binary ABORTS — every invocation, with no arguments needed to reproduce it:
+   *
+   *     F cuttlefish_sensor_injection: Check failed: result.isOk()
+   *       Unable to set ISensors operation mode to DATA_INJECTION:
+   *       Status(-7, EX_UNSUPPORTED_OPERATION)
+   *     F libc: Fatal signal 6 (SIGABRT)
+   *
+   * The sensors HAL does not implement data injection, and the tool responds to that with a CHECK
+   * rather than an error. So the old code's guard — which sniffed stdout for "not found" — never
+   * matched, the non-zero exit propagated as `adb exited 134:`, and a person pressing Rotate got a
+   * raw signal number. It also wrote a tombstone into logcat on every press.
+   *
+   * `wm user-rotation lock <n>` is what replaces it: the standard, supported path, and the same one
+   * a person uses when they turn a phone with auto-rotate on.
+   *
+   * WHAT IS LOST, stated so nobody assumes otherwise: an app that watches the ACCELEROMETER
+   * directly still sees a device lying flat. Display rotation, configuration changes and re-layout —
+   * which is what rotation is tested for — all happen correctly. Restoring the sensor path needs an
+   * image whose HAL supports injection.
+   *
+   * AN APP THAT WILL NOT TURN IS NOT A FAILURE OF THE FARM. AOSP's launcher is portrait-locked, so
+   * rotating on the home screen correctly does nothing — a real phone behaves identically. Verified
+   * on hardware: the launcher stays at ROTATION_0 while Settings, on the same device and the same
+   * command, goes to ROTATION_90. Rather than force it with `fixed-to-user-rotation` — which would
+   * turn a portrait-only app sideways and show a layout the app never ships — this reads the
+   * rotation back and says whose decision it was.
+   */
   async rotate(direction: 'left' | 'right'): Promise<void> {
-    const out = await run('adb', [
-      '-s', this.adbSerial, 'shell', '/vendor/bin/cuttlefish_sensor_injection',
-      'rotate', direction === 'left' ? '1' : '0',
+    const before = await this.currentRotation();
+    // Android numbers rotations 0..3 anticlockwise-to-clockwise in 90° steps. `+3` is `-1` without
+    // a negative modulo, which JavaScript's `%` would leave negative.
+    const want = (before + (direction === 'right' ? 1 : 3)) % 4;
+
+    await run('adb', [
+      '-s', this.adbSerial, 'shell', 'wm', 'user-rotation', 'lock', String(want),
     ], process.cwd(), 15_000);
-    if (/not found|No such file|Error/i.test(out)) {
-      throw new Error(`this image has no sensor injection binary, so it cannot be rotated: ${out.trim().split('\n').slice(-1)[0]}`);
+
+    // The window manager applies this asynchronously, and on a software-rendered device the
+    // relayout is not instant. Poll rather than sleep a fixed time: the common case returns fast.
+    const deadline = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+      if (await this.currentRotation() === want) return;
+      await sleep(250);
     }
+
+    throw new Error(
+      'the app on screen is locked to its current orientation, so the device did not turn — '
+      + 'the launcher and many apps are portrait-only, and a real phone does the same thing',
+    );
+  }
+
+  /** The display's current rotation as Android's own 0..3, or 0 when it cannot be read. */
+  private async currentRotation(): Promise<number> {
+    const out = await run('adb', [
+      '-s', this.adbSerial, 'shell', 'dumpsys', 'window', 'displays',
+    ], process.cwd(), 10_000).catch(() => '');
+    // `mRotation=ROTATION_90` on modern builds; older ones print `mRotation=1`. Both are read here
+    // because the fallback of guessing wrong is a rotate that turns the device the wrong way.
+    const named = /mRotation=ROTATION_(\d+)/.exec(out);
+    if (named) return (Number(named[1]) / 90) % 4;
+    const numeric = /mRotation=(\d)/.exec(out);
+    return numeric ? Number(numeric[1]) % 4 : 0;
   }
 
   async text(value: string): Promise<void> {

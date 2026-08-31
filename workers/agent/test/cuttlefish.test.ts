@@ -57,6 +57,38 @@ for a in "$@"; do
   if [ "$seen_getprop" = 1 ]; then prop="$a"; break; fi
   [ "$a" = "getprop" ] && seen_getprop=1
 done
+# A dumpsys is keyed on its SUBJECT, for the same reason getprop is keyed on the property: one
+# device answers "dumpsys window" and "dumpsys package" with entirely different things, and a single
+# shell answer cannot serve both.
+subj=""
+seen_dumpsys=0
+for a in "$@"; do
+  if [ "$seen_dumpsys" = 1 ]; then subj="$a"; break; fi
+  [ "$a" = "dumpsys" ] && seen_dumpsys=1
+done
+
+# 'wm user-rotation lock N' MOVES THE FAKE DEVICE, so a rotate that reads its own result back sees
+# what a real one would. Without this the fake is a constant and the read-back can only ever fail,
+# which would make the test pass for the wrong reason. A device whose foreground app is
+# orientation-locked is modelled by rotation.locked, and then the write is skipped -- which is
+# exactly what the launcher does on real hardware.
+seen_lock=0
+for a in "$@"; do
+  if [ "$seen_lock" = 1 ]; then
+    if [ ! -f "$FAKE_DIR/rotation.locked" ]; then
+      printf 'mRotation=ROTATION_%s' "$(( a * 90 ))" > "$FAKE_DIR/$name.dumpsys.window.out"
+    fi
+    break
+  fi
+  [ "$a" = "lock" ] && seen_lock=1
+done
+
+if [ -n "$subj" ]; then
+  if [ -f "$FAKE_DIR/$name.dumpsys.$subj.out" ]; then
+    cat "$FAKE_DIR/$name.dumpsys.$subj.out"
+    exit 0
+  fi
+fi
 if [ -n "$prop" ]; then
   if [ -f "$FAKE_DIR/$name.getprop.$prop.fail" ]; then
     cat "$FAKE_DIR/$name.getprop.$prop.fail" >&2
@@ -89,6 +121,14 @@ const ok = async () => ({ ok: true as const });
 /** Scripted answer for `<tool> <verb>`. */
 async function answer(tool: string, verb: string, stdout: string): Promise<void> {
   await writeFile(join(dir, `${tool}.${verb}.out`), stdout);
+}
+/** Scripted answer for `<tool> … dumpsys <subject>`, which beats the generic `shell` answer. */
+async function answerDumpsys(tool: string, subject: string, stdout: string): Promise<void> {
+  await writeFile(join(dir, `${tool}.dumpsys.${subject}.out`), stdout);
+}
+/** Model a foreground app that refuses to turn — the launcher, and most single-orientation apps. */
+async function lockRotation(): Promise<void> {
+  await writeFile(join(dir, 'rotation.locked'), '1');
 }
 /** Scripted answer for `<tool> … getprop <prop>`, which beats the generic `shell` answer. */
 async function answerProp(tool: string, prop: string, stdout: string): Promise<void> {
@@ -802,5 +842,86 @@ describe('a restart preserves the profile geometry', () => {
     const start = (await calls()).find((c) => /^cvd .*\bstart\b/.test(c) && !c.includes('fleet'));
     assert.ok(start);
     assert.doesNotMatch(start, /--display0|--memory_mb|--cpus/, 'cf-1 and cf-2 gain no flags');
+  });
+});
+
+/**
+ * ROTATION, which shipped broken and had no test at all.
+ *
+ * `rotate` shelled out to `/vendor/bin/cuttlefish_sensor_injection`. On this farm's Android 17
+ * image that binary ABORTS on every invocation — the sensors HAL does not implement
+ * `DATA_INJECTION` and the tool answers that with a CHECK:
+ *
+ *     F cuttlefish_sensor_injection: Check failed: result.isOk()
+ *       Unable to set ISensors operation mode to DATA_INJECTION: Status(-7, EX_UNSUPPORTED_OPERATION)
+ *     F libc: Fatal signal 6 (SIGABRT)
+ *
+ * The old guard sniffed stdout for "not found", never matched, and the exit code surfaced to the
+ * person pressing the button as `adb exited 134:`. Rotation is a P0 control and had ZERO coverage,
+ * which is the whole reason a crash could ship.
+ *
+ * The fake models a device that honours rotation, so these assert the read-back rather than just
+ * the argv — a rotate that issues a perfect command and changes nothing is the failure that was
+ * actually shipped.
+ */
+describe('rotate turns the device, or says who refused', () => {
+  async function booted(overrides: Record<string, unknown> = {}) {
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+    await answerDumpsys('adb', 'window', 'mRotation=ROTATION_0');
+    const d = device(overrides);
+    await d.start();
+    return d;
+  }
+
+  test('rotating right advances one quarter turn, and is read back', async () => {
+    const d = await booted();
+    await d.rotate('right');
+    const cmd = (await calls()).find((c) => c.includes('user-rotation'));
+    assert.ok(cmd, `no rotation command was issued:\n${(await calls()).join('\n')}`);
+    assert.match(cmd, /wm user-rotation lock 1/);
+  });
+
+  test('rotating left goes the other way without a negative modulo', async () => {
+    // `(0 - 1) % 4` is -1 in JavaScript, and `wm user-rotation lock -1` is not a rotation. The
+    // implementation adds 3 instead; this is the test that keeps it that way.
+    const d = await booted();
+    await d.rotate('left');
+    const cmd = (await calls()).find((c) => c.includes('user-rotation'));
+    assert.match(cmd!, /wm user-rotation lock 3/);
+  });
+
+  test('it turns from wherever the device already is, not from zero', async () => {
+    await answer('cvd', 'fleet', '[]');
+    await answer('cvd', 'create', 'group:cvd_1|instance(s):1');
+    await answerDumpsys('adb', 'window', 'mRotation=ROTATION_270');
+    const d = device();
+    await d.start();
+    await d.rotate('right');
+    const cmd = (await calls()).find((c) => c.includes('user-rotation'));
+    assert.match(cmd!, /wm user-rotation lock 0/, '270 + 90 wraps to 0, not to 4');
+  });
+
+  test('NEVER the sensor binary — it aborts on this image', async () => {
+    const d = await booted();
+    await d.rotate('right');
+    const all = (await calls()).join('\n');
+    assert.doesNotMatch(all, /cuttlefish_sensor_injection/,
+      'the sensor path SIGABRTs; reaching for it again is the regression this guards');
+  });
+
+  test('an app that will not turn is explained, not reported as a device fault', async () => {
+    // AOSP's launcher is portrait-locked, so rotating on the home screen correctly does nothing —
+    // a real phone behaves identically. Verified on hardware: the launcher stays at ROTATION_0
+    // while Settings, same device and same command, reaches ROTATION_90.
+    const d = await booted();
+    await lockRotation();
+    await assert.rejects(d.rotate('right'), (e: Error) => {
+      assert.match(e.message, /locked to its current orientation/);
+      assert.match(e.message, /a real phone does the same thing/,
+        'the message has to say this is not the farm failing');
+      assert.doesNotMatch(e.message, /exited \d+/, 'never a raw exit code');
+      return true;
+    });
   });
 });
