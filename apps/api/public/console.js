@@ -109,7 +109,12 @@ export const state = {
   liveDetail: null,
   liveStats: { fps: 0, kbps: 0, rtt: null, ice: null },
   /** Ring buffer of parsed logcat lines, plus what the dock is filtering to. */
-  log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0 },
+  /**
+   * `scope` is 'app' or 'all'. It defaults to 'app' the moment a build is installed on the session,
+   * because §17 of the product direction is explicit: do not dump raw logcat into the main UI.
+   * Measured on a real session, 37% of the lines were one system service retrying a connection.
+   */
+  log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0, scope: 'app' },
   /**
    * Which kind of device the fleet screen is showing (spec §25).
    *
@@ -2242,11 +2247,45 @@ const LOG_LEVELS = ['ALL', 'E', 'W', 'I', 'D'];
 /** Which levels each filter admits. Choosing E shows only errors and fatals, not "E and above". */
 const LEVEL_SET = { E: ['E', 'F'], W: ['W'], I: ['I'], D: ['D', 'V'] };
 
-function visibleLog() {
-  const { lines, filter, level } = state.log;
+/**
+ * The package whose lines the 'app' scope keeps, or null when nothing is installed.
+ *
+ * Read from the session's own confirmed actions rather than held separately, so it cannot disagree
+ * with what the Tools panel says is on the device.
+ */
+function scopedPackage() {
+  const id = state.route.name === 'cockpit' ? state.route.id : state.held?.id;
+  return id ? (installedOn(id)?.packageName ?? null) : null;
+}
+
+/**
+ * Exported for the same reason `state` is: the log pane paints itself into a node rather than
+ * through `render()`, so a screen-level test cannot see which lines survived. This IS the decision
+ * worth testing — a filter that quietly hides an error is worse than no filter — and it is a pure
+ * function of `state.log`, which makes it the right seam.
+ */
+export function visibleLog() {
+  const { lines, filter, level, scope } = state.log;
   const needle = filter.trim().toLowerCase();
+  const pkg = scope === 'app' ? scopedPackage()?.toLowerCase() : null;
+
   return lines.filter((l) => {
     if (level !== 'ALL' && !(LEVEL_SET[level] || []).includes(l.level)) return false;
+    /**
+     * SCOPE IS A NAME MATCH, AND IT IS NOT A PERFECT APP FILTER — which is why the control says
+     * "This app" and the help text says what it really does.
+     *
+     * Android's log carries no package on a line; it carries a pid and a tag. Resolving the pid
+     * would mean the worker reporting it and the protocol carrying it, and a pid changes every time
+     * the app restarts. Matching the package name catches the framework's own lines about the app
+     * (`ActivityManager`, `JobInfo`, install and launch) and any log the app tags with its own id;
+     * it MISSES a line the app writes under a bare tag like `OkHttp`.
+     *
+     * ERRORS AND FATALS ARE NEVER HIDDEN by the scope, whoever wrote them. A crash in a system
+     * service is very often the reason the app under test is misbehaving, and a filter that buries
+     * it would make this control worse than no control.
+     */
+    if (pkg && l.level !== 'E' && l.level !== 'F' && !l.raw.toLowerCase().includes(pkg)) return false;
     if (!needle) return true;
     return l.raw.toLowerCase().includes(needle);
   });
@@ -2270,7 +2309,15 @@ function paintLog() {
     h('span', { class: 'log-m', text: l.message }),
   )));
   const count = $('logcount');
-  if (count) count.textContent = `${rows.length} / ${state.log.lines.length} lines`;
+  if (count) {
+    const total = state.log.lines.length;
+    const hidden = total - rows.length;
+    // Say how many lines are NOT on screen. A filtered pane that does not admit it is filtering is
+    // how somebody concludes their app logged nothing.
+    count.textContent = hidden > 0
+      ? `${rows.length} / ${total} lines · ${hidden} hidden`
+      : `${rows.length} / ${total} lines`;
+  }
   if (state.log.follow) body.scrollTop = body.scrollHeight;
 }
 
@@ -2283,6 +2330,7 @@ function logcatDock(sess, live) {
   }
 
   const following = Boolean(state.log.streaming);
+  const pkg = scopedPackage();
   return card('Logcat', {
     aside: h('div', { class: 'row tight' },
       h('span', { class: 'caption tnum', id: 'logcount', text: `0 / ${state.log.lines.length} lines` }),
@@ -2298,6 +2346,17 @@ function logcatDock(sess, live) {
         class: 'field', id: 'logfilter', placeholder: 'Filter', value: state.log.filter,
         oninput: (e) => { state.log.filter = e.target.value; paintLog(); },
       }),
+      /**
+       * Scope, offered ONLY when there is a build to scope to. A "This app" button on a session
+       * with nothing installed is a control that cannot do anything, and §27 does not allow one.
+       */
+      pkg ? h('div', { class: 'row tight' }, [['app', 'This app'], ['all', 'Everything']].map(([v, label]) => h('button', {
+        class: `levelchip${state.log.scope === v ? ' on' : ''}`,
+        title: v === 'app'
+          ? `Lines mentioning ${pkg}, plus every error and fatal whoever wrote it`
+          : 'Every line the device produced',
+        onclick: () => { state.log.scope = v; paintLog(); },
+      }, label))) : null,
       h('div', { class: 'row tight' }, LOG_LEVELS.map((lv) => h('button', {
         class: `levelchip${state.log.level === lv ? ' on' : ''}`,
         onclick: () => { state.log.level = lv; paintLog(); },

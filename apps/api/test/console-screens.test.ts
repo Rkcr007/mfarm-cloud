@@ -117,7 +117,11 @@ function seed(route: { name: string; id?: string | null }) {
     available: 1,
     sessions: [session],
     apps: [{ id: 'app-1', packageName: 'com.acme.app', versionName: '1.0', sizeBytes: 1024, createdAt: new Date().toISOString(), label: 'Acme' }],
-    actions: [{ id: 'a1', kind: 'install', state: 'SUCCEEDED', appId: 'app-1', deviceId: 'dev-1', sessionId: 'sess-1', requestedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }],
+    // `DONE`, not `SUCCEEDED`. The latter is a state this system has never emitted — migration 015
+    // renamed `INSTALLED` to `DONE` and the enum is PENDING/DONE/FAILED. The fixture carried a
+    // fictional value, so `installedOn()` found nothing in every test that used this seed, and any
+    // assertion about an installed build was passing against an empty answer.
+    actions: [{ id: 'a1', kind: 'install', state: 'DONE', appId: 'app-1', deviceId: 'dev-1', sessionId: 'sess-1', requestedAt: new Date().toISOString(), finishedAt: new Date().toISOString() }],
     detail: { ...session, dataPlane: null, ice: null, fetchedAt: Date.now() },
     runs: [run],
     runDetail: {
@@ -548,6 +552,73 @@ describe('no screen leaks a stringified nullish', () => {
  * Found by exploratory testing on 2026-08-31, and worth a test because the failure is a WORD rather
  * than an error: everything renders, nothing throws, and the screen is confidently wrong.
  */
+/**
+ * LOGCAT IS NOT DUMPED RAW — §17 of the product direction, and a measured problem.
+ *
+ * On a real session 37% of the lines were one system service retrying a connection it never got.
+ * A tester looking for their own app's behaviour was reading somebody else's retry loop.
+ *
+ * These test `visibleLog` through the screen, because the interesting failures are about WHICH
+ * lines survive, and a filter that quietly hides an error would be worse than no filter at all.
+ */
+describe('the log pane scopes to the app under test', () => {
+  const LINES = [
+    { time: '00:01', level: 'D', tag: 'AiSealSystemService', message: 'not yet available; trying again', raw: 'D AiSealSystemService not yet available; trying again' },
+    { time: '00:02', level: 'I', tag: 'ActivityManager', message: 'Displayed com.acme.app/.Main', raw: 'I ActivityManager Displayed com.acme.app/.Main' },
+    { time: '00:03', level: 'D', tag: 'OkHttp', message: '<-- 200 https://api.acme.io', raw: 'D OkHttp <-- 200 https://api.acme.io' },
+    { time: '00:04', level: 'E', tag: 'SomeSystemThing', message: 'a crash nobody should hide', raw: 'E SomeSystemThing a crash nobody should hide' },
+  ];
+
+  /**
+   * Drives `visibleLog` rather than the screen tree, because the log pane paints itself into a node
+   * instead of going through `render()` — a screen-level assertion sees an empty div no matter what
+   * the filter did.
+   */
+  const shown = (scope: string) => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.log = { lines: [...LINES], filter: '', level: 'ALL', follow: true, dropped: 0, scope };
+    // The seeded action is a confirmed install of app-1 (com.acme.app) on sess-1.
+    return mod.visibleLog().map((l: { raw: string }) => l.raw).join('\n');
+  };
+
+  test('the app scope drops system chatter that never mentions the app', () => {
+    assert.doesNotMatch(shown('app'), /trying again/, 'the noisiest system line is not what a tester came for');
+  });
+
+  test('the app scope keeps lines that name the package', () => {
+    assert.match(shown('app'), /Displayed com\.acme\.app/);
+  });
+
+  test('AN ERROR IS NEVER HIDDEN, whoever wrote it', () => {
+    // A crash in a system service is very often the reason the app under test is misbehaving. A
+    // filter that buries it makes the control worse than no control.
+    assert.match(shown('app'), /a crash nobody should hide/);
+  });
+
+  test('the everything scope really does show everything', () => {
+    const t = shown('all');
+    assert.match(t, /trying again/);
+    assert.match(t, /OkHttp/);
+    assert.match(t, /a crash nobody should hide/);
+  });
+
+  test('the scope is inert when nothing is installed — no build, no filtering', () => {
+    // Otherwise a session with no app would hide every line and look like a dead device.
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.actions = [];
+    mod.state.log = { lines: [...LINES], filter: '', level: 'ALL', follow: true, dropped: 0, scope: 'app' };
+    assert.equal(mod.visibleLog().length, LINES.length);
+  });
+
+  test('a level chip still narrows within the scope', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.log = { lines: [...LINES], filter: '', level: 'E', follow: true, dropped: 0, scope: 'all' };
+    const out = mod.visibleLog();
+    assert.equal(out.length, 1);
+    assert.match(out[0].raw, /a crash nobody should hide/);
+  });
+});
+
 describe('the launch picker distinguishes busy from unavailable', () => {
   const withState = (state: string) => {
     seed({ name: 'launch' });
