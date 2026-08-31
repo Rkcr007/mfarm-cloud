@@ -103,6 +103,11 @@ export class LiveSession {
     this.deviceInfo = null;
     this.screen = null;
     this.closedByUs = false;
+    /**
+     * The last thing the worker objected to, kept so a close that follows an error frame can quote
+     * it. Never cleared: the only reader is the close handler, and by then it is the last word.
+     */
+    this.lastError = null;
     this.pending = new Map();
     this.stats = { fps: 0, kbps: 0, rtt: null, ice: null };
     this.statsTimer = null;
@@ -127,6 +132,9 @@ export class LiveSession {
     ws.onerror = () => { /* onclose always follows, and carries the better message */ };
     ws.onclose = () => {
       if (this.closedByUs || this.state === 'failed') return;
+      // The worker's own words win when it sent any: `reject()` closes immediately after an error
+      // frame, and "the account is not authorised for this device" beats "the connection closed".
+      if (this.lastError) return this.#state('failed', this.lastError);
       // Distinguished from a device fault on purpose: a socket that closes before the grant is
       // accepted is almost always the route (no ingress rule, wrong host id), and a socket that
       // closes afterwards is almost always the lease ending.
@@ -222,8 +230,32 @@ export class LiveSession {
       }
 
       case 'error':
-        // The worker's refusals are terminal by construction — it closes the socket after each one.
-        return this.#state('failed', msg.message || msg.code);
+        /**
+         * AN ERROR FRAME IS INFORMATION; THE CLOSE IS THE VERDICT.
+         *
+         * This used to read "the worker's refusals are terminal by construction — it closes the
+         * socket after each one" and tear the whole live view down. That was FALSE, and the farm
+         * has two error paths to prove it:
+         *
+         *   `reject()`        sends an error and CLOSES     — auth, an unknown message. Terminal.
+         *   `device_error`    sends an error and keeps going — a tap, a key, a rotate that failed.
+         *   `input_overrun`   sends an error and keeps going — the device is behind on input.
+         *
+         * So a rotate that a portrait-locked app declined took down a perfectly healthy 50fps
+         * stream, and the person got `adb exited 134:` where a video had been. Under heavy
+         * interaction `input_overrun` would have done the same thing.
+         *
+         * Rather than enumerate which codes are fatal — a list that is wrong the moment the worker
+         * adds a code — let the SOCKET decide. `onclose` already distinguishes a route failure from
+         * a lease ending and sets `failed` with a good message. A frame that arrives on a socket
+         * that stays open is a command that failed, not a connection that did; it belongs in a
+         * toast beside a device that is still streaming.
+         *
+         * The message is remembered so that if the socket DOES close straight after, the close
+         * handler can say what the worker actually objected to instead of "the connection closed".
+         */
+        this.lastError = msg.message || msg.code;
+        return void this.o.onNotice?.(this.lastError);
       default:
         return;
     }
