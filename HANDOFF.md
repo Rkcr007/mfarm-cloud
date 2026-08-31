@@ -17,6 +17,28 @@ media relay; `./deploy/farm-check.sh` waits for the devices and reports what is 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
 
+**2026-09-01 — BOTH INJECTION DEFECTS ARE FIXED AND VERIFIED ON HARDWARE.** Control plane is on
+`18367e0` (was `bcf757c`), migration 029 applied.
+
+**A lease is no longer spent on a device that cannot automate.** The heartbeat now reconciles
+`automation_endpoint` and the `webdriver` capability per device. The agent had ALWAYS sent this on
+every beat — the handler parsed the body and read none of it, so the only writer of
+`devices.capabilities` was registration, which a healthy agent never performs. Verified with Appium
+held at zero processes: the farm answered *"No android device with an automation server is free in
+region lab"* instead of allocating one and failing with `automation_unreachable`. It self-healed in
+**109.9s** (supervisor gives up at 6 failed starts → incident → systemd restart → cold boot).
+
+**An abandoned client no longer holds its device for thirty minutes.** Migration 029 adds
+`expire_idle_webdriver_sessions()` to the reaper, keyed on `last_command_at` — a column written on
+every proxied command, with an index built for exactly this in migration 006, that nothing had ever
+read. Verified against the REAL 600s production default rather than a tuned-down one: **device
+reclaimed 649.8s** after the client vanished.
+
+`WEBDRIVER_IDLE_TIMEOUT_MS` defaults to 600s and must stay above the longest single COMMAND (not the
+gap between commands) and above the client's own `appium:newCommandTimeout` — `examples/medishop-suite`
+sets 300. It is read from `process.env` inside the sweep, like `HOST_SILENCE_TIMEOUT_MS`, so it does
+not appear in the startup config line.
+
 **2026-09-01 — FAILURE INJECTION, and three defects it found in one afternoon (issue 43).**
 `deploy/verify-failure.mjs` breaks real things on real hardware and asks whether the farm comes back
 clean. `AutomationExecutionPlan.md` §41 asks for this and ranks it 41st of 46; it should be first,
