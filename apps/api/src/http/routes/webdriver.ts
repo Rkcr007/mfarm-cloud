@@ -379,12 +379,27 @@ export async function webdriverRoutes(app: FastifyInstance) {
         // AFTER the join, never before: the timeline reads `run_id` off the session row, so an
         // event emitted first would find nothing to attribute and silently write nothing.
         if (run.created) await recordRunEvent(orgId, run.id, 'run-created', { externalId: run.externalId });
-        const where = { region: caps.region ?? null, tier: caps.tier ?? null };
-        // A queued session gets BOTH events, in order: it waited, and then it was allocated. One
-        // combined event would make "how long did anything queue last week" a scan of a jsonb key
-        // instead of a count of a kind.
-        if (queuedMs > 0) await recordSessionEvent(orgId, sessionId, 'session-queued', { ...where, queuedMs });
-        await recordSessionEvent(orgId, sessionId, 'device-allocated', { ...where, queuedMs });
+        /**
+         * ONLY THE ALLOCATED PATH REPORTS AN ALLOCATION.
+         *
+         * On the bound path (`mfarm run` allocated the session and handed the hub its id) the
+         * device was claimed seconds-to-minutes earlier, by a process this handler never saw.
+         * Emitting `device-allocated` here would date somebody else's allocation to the moment we
+         * happened to bind to it — a timeline that is wrong about WHEN is worse than one that is
+         * silent, because the reader has no way to tell.
+         *
+         * The consequence is a known gap rather than a hidden one: a suite run under `mfarm run`
+         * has a timeline that begins at `session-active`. Closing it means the CLI reporting its
+         * own allocation, which it cannot do today — it holds no run id until the suite sets one.
+         */
+        if (hubAllocated) {
+          const where = { region: caps.region ?? null, tier: caps.tier ?? null };
+          // A queued session gets BOTH events, in order: it waited, and then it was allocated. One
+          // combined event would make "how long did anything queue last week" a scan of a jsonb key
+          // instead of a count of a kind.
+          if (queuedMs > 0) await recordSessionEvent(orgId, sessionId, 'session-queued', { ...where, queuedMs });
+          await recordSessionEvent(orgId, sessionId, 'device-allocated', { ...where, queuedMs });
+        }
       }
 
       const target = await withSystem(async (c) => {

@@ -966,3 +966,42 @@ describe('execution timeline', () => {
     assert.equal(body.truncated, true);
   });
 });
+
+/**
+ * The hub must not claim an allocation it did not make.
+ *
+ * On the bound path — `mfarm run` allocated the session and handed the hub its id — the device was
+ * claimed earlier, by a process this handler never saw. Reporting `device-allocated` at bind time
+ * would date somebody else's allocation to the moment we happened to attach, and a timeline that is
+ * wrong about WHEN is worse than one that is silent: the reader has no way to tell.
+ */
+describe('timeline honesty on the bound path', () => {
+  test('binding to a pre-allocated session records no device-allocated', async () => {
+    await clearFleet();
+    await seedDevices(1);
+
+    // Allocate the way `mfarm run` does, then bind a WebDriver session to it.
+    const created = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+      payload: { region: REGION, platform: 'android', requireCapabilities: ['webdriver'] },
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const owned = created.json().session.id as string;
+
+    const bound = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:sessionId': owned, 'mfarm:runId': 'tl-bound' }),
+    });
+    assert.equal(bound.statusCode, 200, bound.body);
+
+    const r = await app.inject({ method: 'GET', url: '/v1/runs/tl-bound/timeline', headers: auth(keyA) });
+    assert.equal(r.statusCode, 200);
+    const kinds = r.json().events.map((e: { kind: string }) => e.kind);
+
+    assert.ok(!kinds.includes('device-allocated'),
+      'the hub did not allocate this device and must not say it did');
+    assert.ok(!kinds.includes('session-queued'), 'nor did it wait for it');
+    // What DID happen here is still recorded, so the run is not invisible.
+    assert.ok(kinds.includes('session-active'), 'the WebDriver session going live is ours to report');
+  });
+});
