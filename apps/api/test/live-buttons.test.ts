@@ -95,3 +95,101 @@ describe('the two vocabularies', () => {
     }
   });
 });
+
+/**
+ * A FAILED COMMAND MUST NOT TAKE DOWN A WORKING STREAM.
+ *
+ * `case 'error'` used to call `#state('failed')` for every error frame, justified by a comment
+ * reading "the worker's refusals are terminal by construction — it closes the socket after each
+ * one". That was false, and the worker has three paths that prove it:
+ *
+ *   `reject()`       sends an error and CLOSES the socket — auth, an unknown message. Terminal.
+ *   `device_error`   sends an error and keeps going — a tap, a key, a rotate that failed.
+ *   `input_overrun`  sends an error and keeps going — the device is behind on input.
+ *
+ * So a rotate that a portrait-locked app declined tore down a healthy 50fps stream and replaced the
+ * video with `adb exited 134:`. Observed on a real session 2026-08-31. `input_overrun` would do the
+ * same under heavy interaction, which is worse — it fires when the device is BUSY, not broken.
+ *
+ * The fix does not enumerate fatal codes; that list is wrong the moment the worker adds one. The
+ * SOCKET decides. These drive the real `connect()` path with a fake WebSocket, because the bug was
+ * in socket lifecycle and a test that called a handler directly would not have seen it.
+ */
+describe('an error frame is information; the close is the verdict', () => {
+  /** The minimum WebSocket `connect()` needs, with the frames it received observable. */
+  function harness() {
+    const states: { state: string; detail: string | undefined }[] = [];
+    const notices: string[] = [];
+    let socket: any;
+
+    const previous = (globalThis as Record<string, unknown>).WebSocket;
+    (globalThis as Record<string, unknown>).WebSocket = class {
+      onopen: (() => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      readyState = 1;
+      constructor() { socket = this; }
+      send() { /* the hello; nothing here reads it */ }
+      close() { /* the console closing is not what these tests are about */ }
+    };
+
+    const live: any = new LiveSession({
+      url: 'ws://unused', token: 't',
+      onState: (state: string, detail?: string) => states.push({ state, detail }),
+      onStream: () => {},
+      onNotice: (m: string) => notices.push(m),
+    });
+    live.connect();
+    // Past the handshake: these tests are about a device that is already working. `connect()`
+    // reports 'connecting' on the way, which is setup noise rather than anything under test.
+    live.state = 'streaming';
+    states.length = 0;
+
+    const restore = () => { (globalThis as Record<string, unknown>).WebSocket = previous; };
+    const deliver = (msg: unknown) => socket.onmessage?.({ data: JSON.stringify(msg) });
+    return { live, states, notices, deliver, hangUp: () => socket.onclose?.(), restore };
+  }
+
+  test('a device_error is a toast, and the stream keeps streaming', () => {
+    const h = harness();
+    try {
+      h.deliver({ t: 'error', code: 'device_error', message: 'the app on screen is locked to its current orientation' });
+      assert.deepEqual(h.states.map((s) => s.state), [], 'no state change: the connection is fine');
+      assert.equal(h.live.state, 'streaming', 'the video was still arriving and must keep arriving');
+      assert.deepEqual(h.notices, ['the app on screen is locked to its current orientation']);
+    } finally { h.restore(); }
+  });
+
+  test('an input_overrun does not kill the view of a device that is merely busy', () => {
+    const h = harness();
+    try {
+      h.deliver({ t: 'error', code: 'input_overrun', message: 'Input queue full; the device is not keeping up.' });
+      assert.equal(h.live.state, 'streaming');
+      assert.equal(h.notices.length, 1);
+    } finally { h.restore(); }
+  });
+
+  test('an error the worker CLOSES on still fails, and quotes the worker', () => {
+    // `reject()` sends the frame and closes immediately. The close is what makes it terminal, and
+    // the worker's own words beat the generic "the connection to the device closed."
+    const h = harness();
+    try {
+      h.deliver({ t: 'error', code: 'forbidden', message: 'That grant is not for this device.' });
+      h.hangUp();
+      const failed = h.states.filter((s) => s.state === 'failed');
+      assert.equal(failed.length, 1, 'the close is what declares failure');
+      assert.equal(failed[0]!.detail, 'That grant is not for this device.');
+    } finally { h.restore(); }
+  });
+
+  test('a close with no preceding error still explains itself', () => {
+    const h = harness();
+    try {
+      h.hangUp();
+      const failed = h.states.filter((s) => s.state === 'failed');
+      assert.equal(failed.length, 1);
+      assert.match(failed[0]!.detail!, /connection to the device closed/);
+    } finally { h.restore(); }
+  });
+});
