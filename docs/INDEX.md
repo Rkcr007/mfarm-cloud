@@ -62,7 +62,7 @@ The two machines are separate on purpose — [ADR-0006](adrs/0006-control-plane-
 | [RUNBOOK.md](RUNBOOK.md) | Start it, ship to it, stop it. The reference under START_HERE. |
 | [RENDER_BASELINE.md](RENDER_BASELINE.md) | What SwiftShader can and cannot test. Measured, not assumed. |
 | [ci.md](ci.md) | Running your suite from CI, with the GitHub Action. |
-| [adrs/](adrs/) | Ten accepted decisions, each with its rejected alternatives. §5 below summarises them. |
+| [adrs/](adrs/) | Seventeen accepted decisions, each with its rejected alternatives. §5 below summarises them. |
 | [../examples/medishop-suite/README.md](../examples/medishop-suite/README.md) | The worked example: 8 tests, one build, one run, real outcomes. |
 | [../apps/api/README.md](../apps/api/README.md), [../apps/cli/README.md](../apps/cli/README.md), [../workers/agent/README.md](../workers/agent/README.md), [../deploy/README.md](../deploy/README.md) | Per-package detail. |
 
@@ -125,12 +125,23 @@ useful half.
 | [0015](adrs/0015-the-agent-is-not-an-app-on-the-device.md) | An MFARM **app on the phone cannot be the agent** — a device cannot host the thing that tests it | Shizuku-style self-pairing. Real privileges, and still killed by Doze, wiped by a reset, and absent on iOS. |
 | [0016](adrs/0016-virtual-devices-present-as-named-handsets.md) | ~~Two virtual devices are configured to **be a Galaxy S25 / S25 Ultra**~~ — **superseded by 0017** | Matching the geometry but keeping `model` honest. That is the alternative 0017 went on to choose. |
 | [0017](adrs/0017-devices-are-mfarm-hardware.md) | The devices are **MFARM's own hardware** — *MFARM X1 Pro* / *X1*. A profile configures geometry, density, RAM and cores, and writes **no identity into the guest** | Keeping the Samsung profiles alongside MFARM ones. Rejected: it preserves every cost — apps taking Samsung code paths AOSP cannot answer, an x86_64 device named after an arm64 phone, and 60s added to every reset — for a capability the product direction does not want. |
+| [0018](adrs/0018-an-execution-is-a-record-the-client-drives.md) | An execution is a **record MFARM owns**, not a suite MFARM runs. The test process stays the customer's; the end of a run is **declared**, never derived | The hosted runner — upload a suite, MFARM installs deps and executes it. Rejected for now: it buys a RUN button and costs a sandbox, per-framework knowledge, custody of customer source and CI secrets, and ADR-0002's exit-code contract. BrowserStack has no RUN button for Appium either. |
 
 ---
 
 ## 6. Roads not taken — and why
 
 These are choices, not gaps. Each was considered and declined with a reason.
+
+**A hosted test runner** — upload a suite, MFARM installs dependencies and runs it, and the console
+grows a RUN button. Declined 2026-09-01 in [ADR-0018](adrs/0018-an-execution-is-a-record-the-client-drives.md).
+The customer's suite runs on the customer's CI against the hub; MFARM owns everything around it and
+nothing inside it. **BrowserStack has no RUN button for Appium either** — a hosted runner exists in
+this market only where the framework forces it (Espresso and XCUITest put the test code on the
+device) or as a separate orchestration product. The cost of building it is a sandbox with egress
+control, per-framework version tracking, custody of customer source and CI secrets, and ADR-0002's
+exit-code contract. Espresso/XCUITest support will eventually require it; when it does it is an
+addition alongside the hub, not a replacement for it.
 
 **Video recording.** Costed 2026-08-24 and deliberately unbuilt. At 1 Mbps a 5-minute recording is
 **~12× all other artifacts combined** (measured: 3.1 MB/session today) and would exhaust the control
