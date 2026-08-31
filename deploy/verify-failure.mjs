@@ -105,14 +105,14 @@ const scenarios = {};
  * exactly one backstop, the 30-minute lease TTL, and one CI job that crashes on every run therefore
  * takes a device out of the pool for half an hour at a time.
  *
- * `webdriver_sessions.last_command_at` is updated on EVERY proxied command and migration 006 builds
- * `webdriver_sessions_idle_idx` over it — but nothing in the codebase ever reads either. The signal
- * needed to fix this is already being recorded, and paid for on every command, for a sweep that was
- * never written. That is the inverse of invariant 5 in docs/INDEX.md, and it is the finding this
- * scenario exists to pin.
+ * FOUND BY THIS SCENARIO, FIXED IN MIGRATION 029. `webdriver_sessions.last_command_at` was updated
+ * on EVERY proxied command and migration 006 built `webdriver_sessions_idle_idx` over it, and
+ * nothing in the codebase read either — the signal was being recorded, and paid for on every
+ * command, for a sweep that was never written. That is the inverse of invariant 5 in
+ * docs/INDEX.md: not a column nothing writes, but a column nothing READS.
  *
- * The check is bounded at 90s rather than waiting out the TTL: proving "not reclaimed quickly" is
- * enough, and a 30-minute assertion is one nobody would run.
+ * `expire_idle_webdriver_sessions()` now runs in `reap()`. This scenario stays as the regression
+ * check, and it is the only kind that can catch this one — no unit test can abandon a socket.
  */
 scenarios.abandon = async () => {
   say('Scenario: a client crashes mid-session and never releases');
@@ -135,17 +135,25 @@ scenarios.abandon = async () => {
     ? ok(`device is held (${during} available, was ${before})`)
     : bad(`expected ${before - 1} available while held, got ${during}`);
 
-  const reclaimed = await waitFor(async () => (await available()) >= before, 90_000);
+  // HOW LONG TO WAIT IS THE FARM'S SETTING, NOT THIS SCRIPT'S. Migration 029 added the sweep and
+  // `WEBDRIVER_IDLE_TIMEOUT_MS` defaults to 600s, which is deliberately longer than the slowest
+  // plausible single command and longer than the client's own `appium:newCommandTimeout`. So a
+  // 90-second wait would report a correctly-configured farm as broken — the check has to be told
+  // what the farm is set to, or told to wait past it.
+  //
+  //   IDLE_WAIT_SECONDS=660 node deploy/verify-failure.mjs --only=abandon
+  //
+  // For a quick hardware check, set the farm to a small timeout and match it here.
+  const idleWait = Number(process.env.IDLE_WAIT_SECONDS ?? 120);
+  note(`waiting up to ${idleWait}s for the idle sweep (farm's WEBDRIVER_IDLE_TIMEOUT_MS must be under this)`);
+  const reclaimed = await waitFor(async () => (await available()) >= before, idleWait * 1000, 5000);
   if (reclaimed === null) {
-    // This is the EXPECTED result today, and it is a defect, so it is reported as one.
-    bad('device not reclaimed within 90s of the client vanishing');
-    note('The only backstop is the 30-minute lease TTL, so a crash-looping CI job holds a device');
-    note('for half an hour per run. `last_command_at` and `webdriver_sessions_idle_idx` already');
-    note('exist and are written on every command — nothing reads them. The fix is an idle sweep');
-    note('in reap() using the index that is already being maintained.');
+    bad(`device not reclaimed within ${idleWait}s of the client vanishing`);
+    note('Either the farm\'s WEBDRIVER_IDLE_TIMEOUT_MS is longer than this wait — raise');
+    note('IDLE_WAIT_SECONDS to just past it — or the sweep from migration 029 is not running.');
+    note('Check `[reaper] ended N idle WebDriver session(s)` in the control plane log.');
   } else {
-    ok(`device came back after ${reclaimed}s — something DOES reclaim an abandoned session`);
-    note('If this passes, the 30-minute-lease finding in HANDOFF is stale and should be corrected.');
+    ok(`device reclaimed ${reclaimed}s after the client vanished — the idle sweep took it back`);
   }
 
   // Give the device back regardless, so the scenario does not cost the farm a lease.

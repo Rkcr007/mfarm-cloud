@@ -465,3 +465,122 @@ describe('worker protocol negotiation', () => {
     assert.equal(acceptFence(5, 4), false, 'a partitioned client must not drive a reallocated device');
   });
 });
+
+/**
+ * The idle sweep (migration 029).
+ *
+ * A WebDriver client that is killed sends no `deleteSession`, and WebDriver is stateless HTTP, so
+ * the farm has no connection whose loss it could notice. Before 029 the ONLY thing that took the
+ * device back was the 30-minute lease TTL — reproduced on hardware by
+ * `deploy/verify-failure.mjs --only=abandon`.
+ *
+ * The negative cases below are the ones worth having. A sweep that ends too much is far worse than
+ * the gap it closes: it would kill live suites mid-run, and it would do it most often to the slowest
+ * command in the slowest test, which is exactly the one someone is trying to debug.
+ */
+describe('idle WebDriver sweep', () => {
+  /** Put a session's last command in the past, as a client that stopped driving would leave it. */
+  const backdate = (sessionId: string, seconds: number) => withSystem(async (c) => {
+    await c.query(
+      `UPDATE webdriver_sessions SET last_command_at = now() - make_interval(secs => $2)
+        WHERE session_id = $1`, [sessionId, seconds]);
+  });
+
+  /** A session with a webdriver_sessions row, which is what makes it sweepable at all. */
+  async function webdriverSession(orgId: string) {
+    const [dev] = await seedDevices(1);
+    const a = await allocate({ orgId, userId: null, region: REGION, platform: 'android' });
+    assert.ok(a.deviceId, 'fixture needs a device');
+    await activate(orgId, a.sessionId, a.fence!);
+    await withSystem(async (c) => {
+      await c.query(
+        `INSERT INTO webdriver_sessions (session_id, org_id, device_id, upstream_session_id, upstream_base_url)
+         VALUES ($1, $2, $3, 'upstream-1', 'http://127.0.0.1:4723')`,
+        [a.sessionId, orgId, a.deviceId]);
+    });
+    return { ...a, seededDevice: dev };
+  }
+
+  const stateOf = (sessionId: string) => withSystem(async (c) =>
+    (await c.query('SELECT state, end_reason FROM sessions WHERE id = $1', [sessionId])).rows[0]);
+  const deviceState = (deviceId: string) => withSystem(async (c) =>
+    (await c.query('SELECT state FROM devices WHERE id = $1', [deviceId])).rows[0].state);
+
+  test('a session whose client stopped driving is ended, and its device goes to CLEANING', async () => {
+    await resetFleet();
+    const s = await webdriverSession(orgA);
+    await backdate(s.sessionId, 3600);
+
+    const r = await reap();
+    assert.equal(r.idleEnded, 1, 'the idle session should have been counted');
+
+    const row = await stateOf(s.sessionId);
+    assert.equal(row.state, 'ENDED');
+    // NOT 'timeout'. The lease running out and the client vanishing are different events with
+    // different fixes, and a support question that cannot tell them apart gets a guess.
+    assert.equal(row.end_reason, 'idle_timeout');
+
+    // CLEANING, never READY: this path exists for sessions that ended badly, which are precisely
+    // the ones most likely to have left something on the device.
+    assert.equal(await deviceState(s.deviceId!), 'CLEANING');
+  });
+
+  test('a session that issued a command recently is LEFT ALONE', async () => {
+    await resetFleet();
+    const s = await webdriverSession(orgA);
+    // Well inside the default 600s window — a suite between two commands, or mid-command.
+    await backdate(s.sessionId, 30);
+
+    const r = await reap();
+    assert.equal(r.idleEnded, 0, 'a live suite must never be swept');
+    assert.equal((await stateOf(s.sessionId)).state, 'ACTIVE');
+    assert.equal(await deviceState(s.deviceId!), 'SESSION_ACTIVE');
+  });
+
+  test('a session with no webdriver_sessions row is never swept, however old', async () => {
+    await resetFleet();
+    const [dev] = await seedDevices(1);
+    const a = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    await activate(orgA, a.sessionId, a.fence!);
+    assert.equal(dev, a.deviceId);
+
+    // `mfarm run --no-webdriver` allocates a device for something speaking the raw data plane. It
+    // produces no WebDriver commands at all, so a sweep keyed on command activity would see every
+    // such session as permanently idle and end it instantly. Its lifecycle belongs to the CLI.
+    const r = await reap();
+    assert.equal(r.idleEnded, 0);
+    assert.equal((await stateOf(a.sessionId)).state, 'ACTIVE', 'a raw data-plane lease is not idle');
+  });
+
+  test('the threshold is configurable, and the knob is read per sweep', async () => {
+    await resetFleet();
+    const s = await webdriverSession(orgA);
+    await backdate(s.sessionId, 60);
+
+    // 60s idle is not enough at the default 600s...
+    assert.equal((await reap()).idleEnded, 0);
+
+    // ...and is enough at 30s. Read INSIDE the sweep rather than at module scope, which is the trap
+    // `hostSilenceMs` documents: ES imports are hoisted, so a module-scope read has already happened
+    // before a test can set the variable.
+    const prev = process.env.WEBDRIVER_IDLE_TIMEOUT_MS;
+    process.env.WEBDRIVER_IDLE_TIMEOUT_MS = '30000';
+    try {
+      assert.equal((await reap()).idleEnded, 1);
+    } finally {
+      if (prev === undefined) delete process.env.WEBDRIVER_IDLE_TIMEOUT_MS;
+      else process.env.WEBDRIVER_IDLE_TIMEOUT_MS = prev;
+    }
+  });
+
+  test('the app pool cannot execute the sweep', async () => {
+    // Invariant 4: fleet-wide definer mutations must be unreachable from the tenant pool, and
+    // Postgres grants EXECUTE to PUBLIC by default — never having granted it is not the same as it
+    // being unreachable.
+    await assert.rejects(
+      () => withAppUnscoped(async (c) =>
+        c.query("SELECT expire_idle_webdriver_sessions(make_interval(secs => 1))")),
+      /permission denied/i,
+    );
+  });
+});
