@@ -26,3 +26,8 @@ deploy/.state/
 # apps/api/Dockerfile. Never committed: a checked-in build artifact goes stale silently the first
 # time somebody edits a component and does not rebuild.
 apps/api/public/app/
+
+# macOS writes one of these into any directory somebody opens in Finder. It is not the project's,
+# it changes on its own, and left untracked it sits in every `git status` until someone adds it by
+# accident.
+.DS_Store
