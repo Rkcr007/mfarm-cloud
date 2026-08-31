@@ -15,6 +15,7 @@ import {
 import { parseTunnelAutomationUrl } from '@mfarm/protocol';
 import { callOverTunnel } from '../automation-tunnel.ts';
 import type { TunnelRegistry } from '../tunnel.ts';
+import { recordSessionEvent, recordRunEvent } from '../../executionEvents.ts';
 
 /**
  * The W3C WebDriver hub — v2 decision 10, and the actual adoption path.
@@ -298,6 +299,15 @@ export async function webdriverRoutes(app: FastifyInstance) {
     let sessionId: string;
     let deviceId: string | null;
     let fence: number | null;
+    /**
+     * How long capacity was waited for before this session got a device.
+     *
+     * Declared out here with the other three rather than beside the wait that sets it, because the
+     * timeline is written further down in a different block — and it is the single most common
+     * question about a slow run ("four of those six minutes were queueing"), which the session rows
+     * cannot answer afterwards: a queued allocation and an instant one leave identical rows.
+     */
+    let queuedMs = 0;
     const hubAllocated = bound === null;
 
     if (bound) {
@@ -329,6 +339,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
 
       if (deviceId === null) {
         const wait = await waitForCapacity(gone, orgId, sessionId, caps.queueTimeoutSeconds);
+        queuedMs = wait.waitedMs;
         if (!wait.promoted) {
           await release(orgId, sessionId, 'no_capacity');
           // Every branch reports what actually happened. The old single message quoted
@@ -363,7 +374,18 @@ export async function webdriverRoutes(app: FastifyInstance) {
       // Both paths land here. On the allocated path the session is seconds old and its `run_id` is
       // trivially NULL; on the bound path the caller allocated it themselves and may already have
       // labelled it, which is why this can fail rather than just assign.
-      if (run) await joinRun(orgId, sessionId, run);
+      if (run) {
+        await joinRun(orgId, sessionId, run);
+        // AFTER the join, never before: the timeline reads `run_id` off the session row, so an
+        // event emitted first would find nothing to attribute and silently write nothing.
+        if (run.created) await recordRunEvent(orgId, run.id, 'run-created', { externalId: run.externalId });
+        const where = { region: caps.region ?? null, tier: caps.tier ?? null };
+        // A queued session gets BOTH events, in order: it waited, and then it was allocated. One
+        // combined event would make "how long did anything queue last week" a scan of a jsonb key
+        // instead of a count of a kind.
+        if (queuedMs > 0) await recordSessionEvent(orgId, sessionId, 'session-queued', { ...where, queuedMs });
+        await recordSessionEvent(orgId, sessionId, 'device-allocated', { ...where, queuedMs });
+      }
 
       const target = await withSystem(async (c) => {
         const { rows } = await c.query(
@@ -504,6 +526,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
       // WebDriver session on the same allocation already activated it), and activate() answering
       // false for that is not a failure.
       await activate(orgId, sessionId, fence!);
+      if (run) await recordSessionEvent(orgId, sessionId, 'session-active', { deviceId });
 
       // The session id we hand back is the mfarm session id, not Appium's. One id in the test log,
       // the API, the artifact index and the invoice.
@@ -575,6 +598,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
     // device away mid-run — and a suite that quits between tests would then need a fresh allocation
     // for every one of them, which is the double-billing defect in a different shape.
     if (row.hub_allocated) {
+      await recordSessionEvent(orgId, req.params.sessionId, 'session-ended', { reason: 'webdriver_quit' });
       await release(orgId, req.params.sessionId, 'webdriver_quit');
     }
 

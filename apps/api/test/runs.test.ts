@@ -869,3 +869,100 @@ describe('sessions link back to their run', () => {
     assert.equal(detail.json().session.run.id, listed.run.id);
   });
 });
+
+/**
+ * The execution timeline (migration 030).
+ *
+ * A run's rollup is derived at read time and answers "what ran" and "what failed". It cannot answer
+ * "what happened": a session that waited four minutes for capacity and one allocated instantly
+ * leave identical rows behind. These events are the farm's own record of its actions — never a
+ * claim about the test, which per ADR-0018 is the customer's to report.
+ */
+describe('execution timeline', () => {
+  const readTimeline = async (key: string, ref: string, qs = '') => {
+    const r = await app.inject({
+      method: 'GET', url: `/v1/runs/${encodeURIComponent(ref)}/timeline${qs}`, headers: auth(key),
+    });
+    return r;
+  };
+  const kinds = (body: { events: Array<{ kind: string }> }) => body.events.map((e) => e.kind);
+
+  test('a run records allocation, activation and the end of each session, in order', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'tl-basic' });
+    await quit(keyA, s);
+
+    const r = await readTimeline(keyA, 'tl-basic');
+    assert.equal(r.statusCode, 200);
+    const body = r.json();
+    const k = kinds(body);
+
+    assert.deepEqual(k, ['run-created', 'device-allocated', 'session-active', 'session-ended'],
+      'the order is the timeline; a set of kinds would not be one');
+    assert.equal(body.truncated, false);
+    // The run-level event belongs to no lease; every other one names the session it happened to.
+    assert.equal(body.events[0].sessionId, null);
+    for (const e of body.events.slice(1)) assert.equal(e.sessionId, s);
+    assert.equal(body.events[3].detail.reason, 'webdriver_quit');
+  });
+
+  test('a session that names no run produces no events at all', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA);      // no mfarm:runId
+    await quit(keyA, s);
+
+    // `execution_events.run_id` is NOT NULL on purpose: this is the timeline OF A RUN, and a lease
+    // taken by somebody poking at a device from the console is not one. Making it nullable would
+    // fill the table with rows no screen can show and no query would group. The INSERT ... SELECT
+    // simply matches nothing, so there is no branch that can forget this.
+    const n = await withSystem(async (c) =>
+      Number((await c.query('SELECT count(*) AS n FROM execution_events WHERE session_id = $1', [s])).rows[0].n));
+    assert.equal(n, 0);
+  });
+
+  test('the timeline resolves by the name the suite chose, not only by uuid', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': '4471' });
+    await quit(keyA, s);
+
+    const byName = await readTimeline(keyA, '4471');
+    assert.equal(byName.statusCode, 200);
+    const runId = byName.json().runId;
+
+    // A CI job that passed `mfarm:runId: '4471'` never saw a uuid. Making it find one to read its
+    // own timeline would defeat the point of client-chosen names.
+    const byId = await readTimeline(keyA, runId);
+    assert.equal(byId.statusCode, 200);
+    assert.deepEqual(kinds(byId.json()), kinds(byName.json()));
+  });
+
+  test('another org cannot read a run timeline, and cannot tell it exists', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'tl-private' });
+    await quit(keyA, s);
+
+    // 404, not 403: run names are guessable by construction — every CI system numbers builds from
+    // 1 — so "exists but not yours" would be a disclosure on a name anyone can try.
+    const r = await readTimeline(keyB, 'tl-private');
+    assert.equal(r.statusCode, 404);
+  });
+
+  test('a truncated timeline says so rather than stopping silently', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'tl-cap' });
+    await quit(keyA, s);
+
+    const r = await readTimeline(keyA, 'tl-cap', '?limit=2');
+    assert.equal(r.statusCode, 200);
+    const body = r.json();
+    assert.equal(body.events.length, 2);
+    // A timeline that stops without saying so reads as "nothing else happened", which is the one
+    // conclusion it must not invite from a run somebody is debugging.
+    assert.equal(body.truncated, true);
+  });
+});

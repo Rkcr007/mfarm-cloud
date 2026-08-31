@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { withTenant } from '../../db.ts';
 import { requireTenant } from '../server.ts';
 import { notFound } from '../errors.ts';
+import { timeline } from '../../executionEvents.ts';
 
 /**
  * Runs — the screen that makes a hundred executions legible (docs/EXECUTION_MODEL.md §4.2).
@@ -308,6 +309,54 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         detail: i.detail,
         device: i.device_local_id ?? i.device_model ?? null,
         occurredAt: i.occurred_at,
+      })),
+    };
+  });
+
+  /**
+   * The execution timeline — what the FARM did during this run (migration 030).
+   *
+   * Separate from `GET /runs/:id` rather than folded into it, because the two answer different
+   * questions and have very different sizes. The detail view is a summary somebody opens for every
+   * run; the timeline can be hundreds of rows and is opened for the one run that went wrong.
+   * Returning it inline would make every run page pay for the rare case.
+   *
+   * Resolves by uuid OR by the name the suite chose, exactly as `GET /runs/:id` does — a CI job
+   * that passed `mfarm:runId: '4471'` never saw a uuid, and asking it to find one to read its own
+   * timeline would defeat the point of client-chosen names.
+   */
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>('/runs/:id/timeline', async (req) => {
+    const { orgId } = requireTenant(req);
+    const key = req.params.id;
+
+    const runId = await withTenant(orgId, async (c) => {
+      if (UUID.test(key)) {
+        const byId = await c.query<{ id: string }>('SELECT id FROM runs WHERE id = $1::uuid', [key]);
+        if (byId.rows[0]) return byId.rows[0].id;
+      }
+      const byName = await c.query<{ id: string }>('SELECT id FROM runs WHERE external_id = $1', [key]);
+      return byName.rows[0]?.id ?? null;
+    });
+    // RLS makes another org's run indistinguishable from one that never existed — which matters
+    // more here than usual, because run names are guessable by construction.
+    if (!runId) throw notFound('Run');
+
+    // Bounded, and the cap is REPORTED rather than silently applied. A timeline that stops without
+    // saying so reads as "nothing else happened", which is the one conclusion it must not invite
+    // from a run somebody is debugging.
+    const cap = Math.min(Math.max(Number(req.query.limit ?? 1000) || 1000, 1), 5000);
+    const events = await timeline(orgId, runId, cap + 1);
+    const truncated = events.length > cap;
+
+    return {
+      runId,
+      truncated,
+      events: events.slice(0, cap).map((e) => ({
+        kind: e.kind,
+        detail: e.detail,
+        sessionId: e.sessionId,
+        deviceId: e.deviceId,
+        occurredAt: e.occurredAt,
       })),
     };
   });
