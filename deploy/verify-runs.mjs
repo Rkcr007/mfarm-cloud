@@ -361,5 +361,84 @@ if (tl.status !== 200) {
     : bad(`${stray.length} event(s) named a session outside this run`);
 }
 
+// ---------------------------------------------------------------- 9. the live stream (§17)
+//
+// Opened AFTER the run already has events, so the backlog is what proves the stream is
+// self-sufficient: a viewer that fetched /timeline and then subscribed would lose anything in
+// between, and that hole is invisible — the stream looks healthy and the run appears to skip a step.
+//
+// This is also the one check here that cannot be written with `app.inject()` at all. It has no
+// socket, so a handler that closed the connection instantly would pass every injected assertion.
+
+say('Watching the run live (server-sent events)');
+{
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    const res = await fetch(`${HUB}/v1/runs/${encodeURIComponent(RUN)}/events`, {
+      headers: { authorization: `Bearer ${KEY}` }, signal: ctrl.signal,
+    });
+    res.status === 200 && /text\/event-stream/.test(res.headers.get('content-type') ?? '')
+      ? ok('the stream opened as text/event-stream')
+      : bad(`the stream did not open: ${res.status} ${res.headers.get('content-type')}`);
+
+    if (res.status === 200) {
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      const seen = [];
+      const deadline = Date.now() + 8000;
+      while (seen.length < 3 && Date.now() < deadline) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const line of dec.decode(value, { stream: true }).split('\n')) {
+          const m = /^event: (.+)$/.exec(line.trim());
+          if (m) seen.push(m[1]);
+        }
+      }
+      await reader.cancel().catch(() => {});
+      seen.includes('run-created') && seen.includes('session-ended')
+        ? ok(`the backlog replayed on connect (${seen.length} event(s))`)
+        : bad(`the backlog did not replay; saw ${seen.join(', ') || 'nothing'}`);
+    }
+  } catch (e) {
+    bad(`the stream failed: ${e.message}`);
+  } finally {
+    clearTimeout(timer);
+    ctrl.abort();
+  }
+}
+
+// ---------------------------------------------------------------- 10. the declared end (§4.7)
+
+say('Completing the run');
+const done1 = await fetch(`${HUB}/v1/runs/${encodeURIComponent(RUN)}/complete`, {
+  method: 'POST', headers: { authorization: `Bearer ${KEY}` },
+});
+const body1 = await done1.json().catch(() => null);
+done1.status === 200 && body1?.status === 'completed'
+  ? ok(`the run is completed (${body1.completedAt})`)
+  : bad(`completing failed: ${done1.status} ${JSON.stringify(body1)?.slice(0, 160)}`);
+
+// The outcome still comes from the suite, never from completion. A run that reported failures is
+// still a run with failures after it closes; completion only means nothing more is coming.
+body1 && body1.tests && Number(body1.tests.failed) === 2
+  ? ok('completion declared no outcome — the suite\'s counts are unchanged')
+  : bad(`completion changed the outcome: ${JSON.stringify(body1?.tests)}`);
+
+// The natural caller is an `after` hook or a CI `always` step, both of which run twice on a retry.
+const done2 = await fetch(`${HUB}/v1/runs/${encodeURIComponent(RUN)}/complete`, {
+  method: 'POST', headers: { authorization: `Bearer ${KEY}` },
+});
+const body2 = await done2.json().catch(() => null);
+done2.status === 200 && body2?.completedAt === body1?.completedAt
+  ? ok('completing twice is harmless and does not move the timestamp')
+  : bad(`the second completion misbehaved: ${done2.status} ${body2?.completedAt} vs ${body1?.completedAt}`);
+
+const tlAfter = await api(`/v1/runs/${encodeURIComponent(RUN)}/timeline`);
+const completions = (tlAfter.json?.events ?? []).filter((e) => e.kind === 'run-completed').length;
+completions === 1
+  ? ok('the timeline records ONE completion, not one per call')
+  : bad(`expected 1 run-completed event, found ${completions}`);
+
 say(failed === 0 ? `\x1b[32mAll checks passed\x1b[0m (${since()})` : `\x1b[31m${failed} check(s) failed\x1b[0m (${since()})`);
 process.exit(failed === 0 ? 0 : 1);
