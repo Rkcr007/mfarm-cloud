@@ -17,6 +17,27 @@ media relay; `./deploy/farm-check.sh` waits for the devices and reports what is 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
 
+**2026-09-01 — two checks that lied, and a flake that turned CI red.** All three were the same
+shape: an answer that depends on when you happened to look.
+
+- **`verify-live.sh`'s tunnel count** — sampled once, asserted on minutes later. Fixed and verified
+  on a cold start; details below where it used to be listed as open.
+- **The hub recorded nothing for a bound-path allocation.** `mfarm run` allocates the session and
+  hands the hub its id, so the device was claimed minutes before the hub saw it, and stamping it
+  `now()` would date somebody else's allocation wrong. That reasoning stands — but the objection was
+  only ever about the TIME, and `sessions.created_at` was in the row being read anyway. It is now
+  recorded honestly, `detail.allocatedBy` says `hub` or `client`, and a `mfarm run` timeline no
+  longer mysteriously begins at `session-active`. **A bound run can show `device-allocated` BEFORE
+  `run-created`** — which looks odd and is exactly what happened.
+- **`lifecycle.test.ts` flaked in CI**, and the flake was in the assertion. "Nothing carries on after
+  the pools are gone" inserted its expired session BEFORE the shutdown — it had to, since
+  `insertExpiredSession()` uses the pool the close ends — while the reaper still ticked every 100ms
+  through the drain. A tick in that window ended the row legitimately and failed a perfectly good
+  shutdown (`'ENDED' !== 'ACTIVE'`). The row is now created AFTER the close through the independent
+  `verifier` pool, so it cannot have been reaped by the drain. **The first fix written for it
+  compared the state against itself, which passes vacuously in exactly the case the race produces** —
+  the same trap as everything else in issue 43.
+
 **2026-09-01 — THE EXECUTION RECORD IS BUILT AND VERIFIED ON HARDWARE.** Control plane on
 `1dbbc2f`, migrations through 031. `AutomationExecutionPlan.md` §4, §17, §18 and §35 are done, and
 ADR-0018 is what made them expressible.
@@ -45,9 +66,14 @@ alert, and most of §26 and §30 predate the document. See [[mfarm-spec-docs-ove
 **`farm-online.sh`'s drift check is confirmed fixed in production**: the first real start since
 2026-08-20 that printed no DRIFT, with both addresses matching their names.
 
-**Still not fixed:** `farm-check.sh` reports "no agent tunnel connected" as a false negative when
-run straight after a host start — it checks the tunnel at a fixed point that can precede the agent
-connecting. Re-running says the farm is live. Recorded, not fixed.
+**`farm-check.sh`'s false-negative tunnel line is FIXED and verified on hardware (2026-09-01).**
+`$TUNNELS` was sampled once, up with the control-plane checks, and asserted on after a fleet wait
+that can run for minutes — so on a cold start it was always a snapshot from before the agent
+existed. It now re-reads with a short wait of its own (`TUNNEL_WAIT_SECONDS`, default 60), gated on
+there being devices so the common control-plane-only run does not gain a minute. Verified on a cold
+start: `✓ 1 agent tunnel(s) connected` and **`Farm is live.`** on the FIRST run, where the two
+previous starts that day both needed a re-run. `deploy/verify-live.test.mjs` pins all three cases,
+including the one that matters — a tunnel that never arrives must still fail.
 
 **2026-09-01 — BOTH INJECTION DEFECTS ARE FIXED AND VERIFIED ON HARDWARE.** Control plane is on
 `18367e0` (was `bcf757c`), migration 029 applied.
@@ -98,9 +124,8 @@ address genuinely moved would have looked identical to the twelve days before it
 name first, and reports an unresolvable name as its own outcome rather than as drift —
 `deploy/farm-online.test.mjs` pins all four cases.
 
-**`farm-check.sh` reports "no agent tunnel connected" as a false negative** when run straight after a
-host start: it waits for devices but checks the tunnel at a fixed point that can precede the agent
-connecting. Re-running says the farm is live. Not fixed; recorded.
+**`farm-check.sh` reported "no agent tunnel connected" as a false negative** when run straight after
+a host start. FIXED the same day and verified on a cold start — see the 2026-09-01 entry above.
 
 **2026-08-24 — on-demand screenshots (§4.5).** `POST /v1/sessions/:id/app-actions
 {"kind":"screenshot"}` captures the screen while the suite still holds the device, instead of the
