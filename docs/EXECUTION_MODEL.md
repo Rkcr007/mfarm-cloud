@@ -331,6 +331,15 @@ Five things decided while building it:
   can, and eventually does.
 - **A queued session emits BOTH `session-queued` and `device-allocated`.** One combined event would
   make "how much did anything queue last week" a scan of a jsonb key instead of a count of a kind.
+- **A bound session's allocation is recorded with the time it ACTUALLY happened.** `mfarm run`
+  allocates the session and hands the hub its id, so the device was claimed minutes before the hub
+  saw it. The first version recorded nothing rather than stamp it `now()` — a timeline that is wrong
+  about WHEN is worse than one that is silent — but the objection was only about the time, and the
+  right time is in the session row. `detail.allocatedBy` says `hub` or `client`, and `queuedMs`
+  rides only on the hub's own allocation because the CLI's wait happened somewhere this handler
+  cannot see. The visible consequence is that a `mfarm run` timeline can show `device-allocated`
+  BEFORE `run-created`, which looks odd and is exactly what happened: the CLI took the device, and
+  the suite named the run afterwards.
 - **An event never fails the thing it describes.** Every write is wrapped and swallowed. A timeline
   is diagnostic; a session is the product, and failing a customer's session to protect a chart is
   the wrong trade in a way that is only obvious afterwards.

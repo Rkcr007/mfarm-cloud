@@ -134,15 +134,32 @@ export async function recordSessionEvent(
   sessionId: string,
   kind: ExecutionEventKind,
   detail: Record<string, unknown> = {},
+  opts: { at?: 'now' | 'session-created' } = {},
 ): Promise<void> {
   await safely(`${kind} for session ${sessionId}`, () => withTenant(orgId, async (c) => {
+    /**
+     * `at: 'session-created'` stamps the event with the session's OWN creation time instead of now.
+     *
+     * It exists for one case and should stay rare: the hub binding to a session somebody else
+     * allocated (`mfarm run`). The device was genuinely claimed minutes earlier, and the first
+     * version of this refused to record the allocation at all rather than date it wrong — a
+     * timeline that is wrong about WHEN is worse than one that is silent, because the reader cannot
+     * tell. But the objection was never "we did not do it", it was "we would say the wrong time",
+     * and `sessions.created_at` is the right time sitting in the row being read anyway. So the
+     * event is recorded, honestly, with no extra query.
+     *
+     * The visible consequence is that a `mfarm run` timeline can show `device-allocated` BEFORE
+     * `run-created`, which looks odd and is exactly what happened: the CLI took the device, and the
+     * suite named the run afterwards.
+     */
     const { rows } = await c.query(
-      `INSERT INTO execution_events (org_id, run_id, session_id, device_id, kind, detail)
-       SELECT s.org_id, s.run_id, s.id, s.device_id, $2, $3::jsonb
+      `INSERT INTO execution_events (org_id, run_id, session_id, device_id, kind, detail, occurred_at)
+       SELECT s.org_id, s.run_id, s.id, s.device_id, $2, $3::jsonb,
+              CASE WHEN $4 THEN s.created_at ELSE now() END
          FROM sessions s
         WHERE s.id = $1 AND s.run_id IS NOT NULL
        RETURNING run_id, session_id, device_id, kind, detail, occurred_at`,
-      [sessionId, kind, JSON.stringify(detail)],
+      [sessionId, kind, JSON.stringify(detail), opts.at === 'session-created'],
     );
     // Zero rows is the ordinary case for a session with no run, and there is nothing to publish.
     // Publishing what was PASSED IN rather than what came back would let a viewer see an event the

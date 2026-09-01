@@ -24,6 +24,9 @@ HOST_PUBLIC="${HOST_PUBLIC:-https://${MFARM_PUBLIC_HOST:-34-100-138-213.sslip.io
 API="${API:-http://127.0.0.1:3000}"
 TURN_HOST="${TURN_HOST:-${MFARM_TURN_HOST:-34.100.159.34}}"
 DEVICE_WAIT_SECONDS="${DEVICE_WAIT_SECONDS:-600}"
+# How long to keep re-reading the tunnel gauge once devices are up. Configurable so the
+# test can exercise the "never connects" branch without waiting a real minute for it.
+TUNNEL_WAIT_SECONDS="${TUNNEL_WAIT_SECONDS:-60}"
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
@@ -93,12 +96,13 @@ DP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$HOST_PUBLIC/dp/prob
 # somewhere without the secret; an unreadable gauge downgrades the verdict rather than failing it.
 METRICS_PORT="${METRICS_PORT:-9464}"
 METRICS_TOKEN_FILE="${METRICS_TOKEN_FILE:-$REPO_ROOT/deploy/secrets/metrics_token}"
-TUNNELS=""
-if [ -f "$METRICS_TOKEN_FILE" ]; then
-  TUNNELS="$(curl -s --max-time 5 -H "Authorization: Bearer $(cat "$METRICS_TOKEN_FILE")" \
+read_tunnels() {
+  [ -f "$METRICS_TOKEN_FILE" ] || { printf ''; return; }
+  curl -s --max-time 5 -H "Authorization: Bearer $(cat "$METRICS_TOKEN_FILE")" \
     "http://127.0.0.1:${METRICS_PORT}/metrics" 2>/dev/null \
-    | sed -n 's/^mfarm_tunnel_hosts_connected \([0-9][0-9]*\).*/\1/p' | head -1)"
-fi
+    | sed -n 's/^mfarm_tunnel_hosts_connected \([0-9][0-9]*\).*/\1/p' | head -1
+}
+TUNNELS="$(read_tunnels)"
 
 # ---------------------------------------------------------------- 2. the fleet
 say "Fleet (waiting up to ${DEVICE_WAIT_SECONDS}s — devices cold boot after a host start)"
@@ -116,6 +120,35 @@ else
     sleep 15
   done
   printf '\r'
+
+  # RE-READ THE TUNNEL COUNT, because the value sampled in section 1 is from BEFORE this wait.
+  #
+  # This is the bug that made `farm-check.sh` lie on every cold start: `$TUNNELS` was read once,
+  # up with the control-plane checks, and then asserted on down here after a wait that can run for
+  # minutes. On a farm that had just been started it was always a snapshot from before the agent
+  # existed, so the script reported "no agent tunnel connected — every live view is dead" while the
+  # worker log showed `data-plane tunnel connected` seconds later. Re-running always said the farm
+  # was live, which is the tell: a check whose answer depends on when you happened to sample it is
+  # not measuring the farm.
+  #
+  # It also gets its own short wait rather than a single re-read. The agent connects its tunnel
+  # around the time its devices finish booting, not strictly before, so a device-ready farm can
+  # legitimately be a few seconds short of a tunnel — and asserting on that instant would swap a
+  # guaranteed false negative for an occasional one.
+  #
+  # ONLY WHEN THERE ARE DEVICES. A farm with none is almost always the deliberate idle state — the
+  # device host is off between sessions and is 95% of the bill — and that case is detected by
+  # `AVAIL = 0` together with no agent. Waiting a minute for a tunnel that nobody is bringing up
+  # would add a minute to the most common invocation of this script to learn nothing.
+  if [ "$AVAIL" -ge 1 ] && [ -f "$METRICS_TOKEN_FILE" ]; then
+    TUNNEL_DEADLINE=$(( $(date +%s) + TUNNEL_WAIT_SECONDS ))
+    while [ "$(date +%s)" -lt "$TUNNEL_DEADLINE" ]; do
+      TUNNELS="$(read_tunnels)"
+      [ -n "$TUNNELS" ] && [ "$TUNNELS" -ge 1 ] && break
+      sleep 5
+    done
+  fi
+
   # A STOPPED DEVICE HOST IS A NORMAL STATE, NOT A FAILURE. It is off between sessions by design and
   # it is 95% of the bill. Reported as a note so that `farm-check.sh` after starting only the control
   # plane does not print a wall of red for a farm that is behaving exactly as intended.
