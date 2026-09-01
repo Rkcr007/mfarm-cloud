@@ -198,6 +198,16 @@ it is; a deploy that cannot confirm its own sha fails rather than reporting succ
 **Confirm it landed without asking anyone**: reload the console. The header shows the running commit,
 and hovering gives the full sha, CI's build time, process start and schema version.
 
+**The live view comes back on its own now, but give it a minute.** Restarting the API drops the
+agent's data-plane tunnel. Since ADR-0021 both ends ping, so the agent notices within ~60s and
+redials with its own backoff — `deploy/farm-check.sh` run immediately after a deploy can still show
+`no agent tunnel connected`, and re-running it shortly after is the right response.
+
+Before ADR-0021 it never came back: the socket went half-open, no `close` event fired, and the agent
+sat on a dead tunnel indefinitely while every device stayed `READY` and the console looked perfect.
+The workaround was `systemctl restart mfarm-worker` after every deploy — **no longer necessary**, and
+worth not doing, because that restart takes every Cuttlefish instance down with it.
+
 Worker-side changes are their own step, and cheap — the agent adopts running cvd groups in ~0.1s, so
 this does not reboot a device:
 

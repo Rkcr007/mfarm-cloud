@@ -167,6 +167,76 @@ describe('the agent tunnel', () => {
   });
 });
 
+/**
+ * The control plane's half of the keepalive — a host that goes away without saying so.
+ *
+ * THE OPPOSITE FAILURE to the agent's own keepalive (`workers/agent/test/tunnel-keepalive.test.ts`,
+ * which covers a control plane that vanishes under a running agent). Here the DEVICE HOST is the one
+ * that dies: power cut, network drop, a laptop lid closing. TCP will not report that for minutes,
+ * and until it does `tunnels.has(hostId)` answers true and `openChannel` hands every viewer a
+ * channel whose frames go nowhere — a live view that fails as a frozen picture rather than an error.
+ *
+ * ITS OWN SERVER, because `tunnelPingIntervalMs()` is read once when `attachTunnel` runs and the
+ * shared `app` above is built with the 30-second default. Setting the variable here and building a
+ * second server is the only way to exercise this in a test that finishes.
+ *
+ * THE DEAD HOST IS SIMULATED BY PAUSING ITS SOCKET — `res.socket.pause()` on the client's `upgrade`
+ * event, which is public API and gives the real underlying socket. The connection stays ESTABLISHED
+ * and is never closed; the agent simply stops reading, so the server's ping is never answered. That
+ * is the condition, and it is the one where doing nothing means never noticing.
+ */
+describe('an agent that stops answering', () => {
+  let keepaliveApp: FastifyInstance;
+  let keepaliveBase: string;
+  const previous = process.env.TUNNEL_PING_INTERVAL_MS;
+
+  before(async () => {
+    process.env.TUNNEL_PING_INTERVAL_MS = '40';
+    keepaliveApp = await buildServer({ logger: false });
+    await keepaliveApp.listen({ port: 0, host: '127.0.0.1' });
+    const addr = keepaliveApp.server.address();
+    keepaliveBase = `ws://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  });
+
+  after(async () => {
+    await keepaliveApp.close();
+    if (previous === undefined) delete process.env.TUNNEL_PING_INTERVAL_MS;
+    else process.env.TUNNEL_PING_INTERVAL_MS = previous;
+  });
+
+  test('has its tunnel reclaimed, so no viewer is handed a dead channel', { timeout: 10_000 }, async () => {
+    const ws = new WebSocket(`${keepaliveBase}${TUNNEL_PATH}`, {
+      headers: { authorization: `Bearer ${workerToken}` },
+    });
+    // Go silent the moment the handshake completes, without closing.
+    ws.on('upgrade', (res) => res.socket.pause());
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+
+    try {
+      assert.equal(keepaliveApp.tunnels.has(hostId), true, 'the tunnel should register first');
+
+      // Nothing closes this socket from either end. The only thing that can drop it is the server
+      // deciding, on its own, that a host which answers no pings is not there.
+      const deadline = Date.now() + 8_000;
+      while (keepaliveApp.tunnels.has(hostId) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.equal(keepaliveApp.tunnels.has(hostId), false,
+        'an unresponsive agent must be reaped, or every live view on that host relays into nothing');
+
+      // And a viewer arriving afterwards is TOLD, rather than being given a channel to a corpse.
+      const browser = new WebSocket(`${keepaliveBase}/dp/${hostId}`);
+      const code = await new Promise<number>((resolve) => browser.once('close', (c) => resolve(c)));
+      assert.equal(code, 1013, 'no agent is connected for this host');
+    } finally {
+      try { ws.terminate(); } catch { /* already gone */ }
+    }
+  });
+});
+
 // ---------------------------------------------------------------- relaying
 
 describe('relaying a viewer', () => {
