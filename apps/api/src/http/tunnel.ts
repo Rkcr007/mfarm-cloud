@@ -56,6 +56,21 @@ const MAX_CHANNELS_PER_HOST = 32;
 const MAX_AUTOMATION_CHANNELS_PER_HOST = 64;
 
 /**
+ * How often the control plane pings each agent tunnel, and so how fast a dead one is reclaimed.
+ *
+ * THE SYMMETRIC HALF of the agent's own keepalive (`workers/agent/src/tunnel.ts`), and it is needed
+ * for the opposite failure: a device host that loses power or drops off its network leaves a socket
+ * here that TCP will not report for minutes, and until it is reaped `has(hostId)` answers true and
+ * `openChannel` hands viewers a channel whose frames go nowhere. `attach` already replaces a stale
+ * socket when the SAME agent redials — this covers the one that never comes back.
+ *
+ * A missed pong on the next tick terminates the socket, so detection takes one to two intervals.
+ */
+function tunnelPingIntervalMs(): number {
+  return Number(process.env.TUNNEL_PING_INTERVAL_MS ?? 30_000);
+}
+
+/**
  * Where a channel's inbound frames go, and how it is torn down.
  *
  * An indirection over `WebSocket` so that a channel does not have to be a browser. ADR-0011 adds
@@ -269,6 +284,34 @@ export function attachTunnel(app: FastifyInstance, registry: TunnelRegistry): vo
   const browserWss = new WebSocketServer({ noServer: true, maxPayload: TUNNEL_MAX_FRAME_BYTES });
 
   /**
+   * Which agent sockets have answered a ping since the last tick.
+   *
+   * A `WeakSet` rather than a property bolted onto the socket: `ws.WebSocket` has no field for this
+   * and adding one means either an `any` or a declaration-merge, both of which put a liveness detail
+   * into the type of every socket in the process. Membership here means "answered"; the sweep
+   * removes it before each ping, so a socket that misses one is not in the set on the next tick.
+   */
+  const answered = new WeakSet<WebSocket>();
+
+  /**
+   * Ping every agent tunnel; terminate the ones that stopped answering.
+   *
+   * `terminate()` rather than `close()`, for the reason the agent's own keepalive gives: a graceful
+   * close is a handshake and the premise is that the far end is not answering. Terminating
+   * synthesises the `close` event that `attach()` already listens for, so `dropHost` runs and every
+   * viewer riding that tunnel is told — rather than being left on a channel relaying into nothing.
+   */
+  const keepalive = setInterval(() => {
+    for (const ws of agentWss.clients) {
+      if (!answered.has(ws)) { ws.terminate(); continue; }
+      answered.delete(ws);
+      try { ws.ping(); } catch { ws.terminate(); }
+    }
+  }, tunnelPingIntervalMs());
+  // Never the reason the process cannot exit — a live interval would hang every test in this file.
+  keepalive.unref?.();
+
+  /**
    * A PLAIN GET of `/dp/<anything>` answers 426, exactly as the worker's own listener does
    * (`workers/agent/src/dataplane.ts`).
    *
@@ -311,6 +354,10 @@ export function attachTunnel(app: FastifyInstance, registry: TunnelRegistry): vo
         if (principal?.kind !== 'worker') return refuse(socket, '401 Unauthorized');
         agentWss.handleUpgrade(req, socket, head, (ws) => {
           app.log.info({ hostId: principal.hostId }, 'worker tunnel connected');
+          // Seeded as answered, so a socket that arrives just after a sweep is not terminated
+          // before it has been asked anything.
+          answered.add(ws);
+          ws.on('pong', () => answered.add(ws));
           registry.attach(principal.hostId, ws, app.log);
         });
       }).catch(() => refuse(socket, '500 Internal Server Error'));
@@ -334,6 +381,7 @@ export function attachTunnel(app: FastifyInstance, registry: TunnelRegistry): vo
   });
 
   app.addHook('onClose', async () => {
+    clearInterval(keepalive);
     registry.closeAll();
     agentWss.close();
     browserWss.close();

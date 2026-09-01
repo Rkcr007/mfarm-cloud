@@ -27,6 +27,15 @@ export interface TunnelOptions {
   minBackoffMs?: number;
   maxBackoffMs?: number;
   /**
+   * How often to ping the control plane, and so how fast a DEAD tunnel is noticed.
+   *
+   * A missed pong on the next tick terminates the socket, so detection takes between one and two
+   * intervals. 30s is chosen against the thing this protects: a control-plane deploy, after which
+   * the live view is down until the agent redials. A minute of that is a blip; forever is what it
+   * used to be.
+   */
+  pingIntervalMs?: number;
+  /**
    * Where this agent's own automation gateway listens, for `automation` channels (ADR-0011).
    *
    * Absent means this host does not serve WebDriver over the tunnel, and an `automation` channel is
@@ -106,6 +115,12 @@ export class AgentTunnel {
   private stopped = false;
   private backoff: number;
   private timer?: NodeJS.Timeout;
+  /**
+   * KEEPALIVE STATE. See `startPing` — the reason this class needs any is that `ws.on('close')`,
+   * which every recovery here hangs off, is not guaranteed to fire.
+   */
+  private pingTimer?: NodeJS.Timeout;
+  private awaitingPong = false;
   private readonly opts: TunnelOptions;
 
   constructor(opts: TunnelOptions) {
@@ -130,6 +145,7 @@ export class AgentTunnel {
   stop(): void {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    this.stopPing();
     this.dropAllChannels('agent shutting down');
     this.ws?.close();
     this.ws = undefined;
@@ -160,11 +176,15 @@ export class AgentTunnel {
     ws.on('open', () => {
       this.backoff = this.opts.minBackoffMs ?? 1_000;
       this.log('data-plane tunnel connected', { url });
+      this.startPing(ws);
     });
 
     ws.on('message', (raw) => this.onFrame(raw.toString()));
 
     ws.on('close', (code) => {
+      // Stopped even for a socket that is no longer current: a replaced connection's ping timer
+      // would otherwise keep firing against a dead socket for the life of the process.
+      this.stopPing();
       if (ws !== this.ws) return;
       // Every viewer on this tunnel is gone with it. Closing them explicitly is what stops a
       // dropped tunnel from leaving an `adb logcat` child and a signalling socket running against
@@ -176,6 +196,58 @@ export class AgentTunnel {
     // A failed dial emits error THEN close, so recovery lives in the close handler only — retrying
     // in both would halve the backoff on every failure and turn it into a hot loop.
     ws.on('error', (err) => this.log('data-plane tunnel error', { error: (err as Error).message }));
+  }
+
+  /**
+   * Ping the control plane, and TERMINATE the socket when it stops answering.
+   *
+   * WHY THIS EXISTS, precisely. Every recovery in this class hangs off `ws.on('close')` — the retry
+   * with its backoff, and `dropAllChannels`. None of it runs if `close` never fires, and `close`
+   * does not fire when the far end vanishes without a TCP FIN reaching us. A control-plane deploy
+   * does exactly that: `mfarm-deploy.sh` recreates the API container, the agent keeps a half-open
+   * socket, and the tunnel is dead with nobody aware of it.
+   *
+   * That was not hypothetical. Observed on the lab farm 2026-09-02: the agent logged `data-plane
+   * tunnel connected` at 21:02 and then stayed COMPLETELY SILENT across both a control-plane reset
+   * and a container recreate — no retry, no error — while `farm-check.sh` correctly reported no
+   * agent tunnel. The fleet looked perfect throughout, because the heartbeat is plain HTTPS and the
+   * devices stayed READY. Only the live view was gone.
+   *
+   * `terminate()` rather than `close()`: a graceful close is a handshake, and the entire premise
+   * here is that the far end is not answering. `terminate()` destroys the socket locally, which
+   * synthesises the `close` event that the recovery below is already waiting for — so this adds a
+   * detector and reuses the whole existing recovery path rather than duplicating it.
+   *
+   * Nothing is needed on the other end for this to work: `ws` answers a ping with a pong
+   * automatically, so this detects any dead peer, including a control plane too old to ping back.
+   */
+  private startPing(ws: WebSocket): void {
+    this.stopPing();
+    this.awaitingPong = false;
+    ws.on('pong', () => { this.awaitingPong = false; });
+
+    this.pingTimer = setInterval(() => {
+      // A socket that has been replaced or is not open yet is not this timer's business; the close
+      // handler owns teardown, and racing it here would drop a channel twice.
+      if (ws !== this.ws || ws.readyState !== WebSocket.OPEN) return;
+      if (this.awaitingPong) {
+        this.log('data-plane tunnel unresponsive — terminating', { missedPongs: 1 });
+        ws.terminate();
+        return;
+      }
+      this.awaitingPong = true;
+      try { ws.ping(); } catch { ws.terminate(); }
+    }, this.opts.pingIntervalMs ?? 30_000);
+
+    // A keepalive must never be the reason a draining agent cannot exit — the same rule the retry
+    // timer follows below.
+    this.pingTimer.unref?.();
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = undefined;
+    this.awaitingPong = false;
   }
 
   private retry(why: string): void {
