@@ -1005,3 +1005,92 @@ describe('timeline honesty on the bound path', () => {
     assert.ok(kinds.includes('session-active'), 'the WebDriver session going live is ours to report');
   });
 });
+
+/**
+ * The declared end of a run (migration 031, ADR-0018).
+ *
+ * Migration 020 refused a run status because a run has no DERIVABLE end. ADR-0018 changes the input
+ * rather than that reasoning: the customer owns the test process, so the process can SAY when it is
+ * done. A declared end is not an inference — which is the whole difference, and the reason this can
+ * exist now when it could not before.
+ */
+describe('run completion', () => {
+  const complete = (key: string, ref: string) =>
+    app.inject({ method: 'POST', url: `/v1/runs/${encodeURIComponent(ref)}/complete`, headers: auth(key) });
+  const getRun = (key: string, ref: string) =>
+    app.inject({ method: 'GET', url: `/v1/runs/${encodeURIComponent(ref)}`, headers: auth(key) });
+
+  test('a run is incomplete until the suite says otherwise, and never failed', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'rc-open' });
+    await quit(keyA, s);
+
+    // GET /runs/:id nests the rollup under `run`; POST /complete returns it flat, because a CI
+    // step that just closed the run wants the counts without another level to reach through.
+    const before = await getRun(keyA, 'rc-open');
+    assert.equal(before.json().run.status, 'incomplete');
+    assert.equal(before.json().run.completedAt, null);
+
+    const done = await complete(keyA, 'rc-open');
+    assert.equal(done.statusCode, 200);
+    assert.equal(done.json().status, 'completed');
+    assert.ok(done.json().completedAt, 'a completed run carries when it completed');
+  });
+
+  test('completing twice is not an error, and does not move the timestamp', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'rc-twice' });
+    await quit(keyA, s);
+
+    const first = await complete(keyA, 'rc-twice');
+    const at = first.json().completedAt;
+
+    // The natural caller is an `after` hook or a CI `always` step, both of which run more than once
+    // when a suite retries or a job is re-run. A 409 here would turn a green pipeline red for doing
+    // the right thing twice.
+    const second = await complete(keyA, 'rc-twice');
+    assert.equal(second.statusCode, 200);
+    assert.equal(second.json().completedAt, at,
+      'a re-run hook must not move when the suite finished, or run duration changes on every retry');
+
+    // And the timeline records ONE completion, not one per call.
+    const tl = await app.inject({ method: 'GET', url: '/v1/runs/rc-twice/timeline', headers: auth(keyA) });
+    const completions = tl.json().events.filter((e: { kind: string }) => e.kind === 'run-completed');
+    assert.equal(completions.length, 1);
+  });
+
+  test('completion declares no outcome — the counts still come from the suite', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'rc-outcome' });
+    await app.inject({
+      method: 'POST', url: `/v1/sessions/${s}/result`, headers: auth(keyA),
+      payload: { status: 'failed', name: 'checkout applies a promo', failure: 'expected 10, got 0' },
+    });
+    await quit(keyA, s);
+
+    const done = await complete(keyA, 'rc-outcome');
+    const body = done.json();
+    // Completion says "nothing more is coming", not "it passed". Whether it passed is test_results,
+    // from the only party that can observe an assertion (§4.3). Two sources for one fact would
+    // eventually disagree.
+    assert.equal(body.status, 'completed');
+    assert.equal(body.tests.failed, 1, 'the outcome is still the suite\'s to report');
+    assert.equal(body.tests.passed, 0);
+  });
+
+  test('completing resolves by name, and another org cannot do it', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': '9912' });
+    await quit(keyA, s);
+
+    // 404 rather than 403: run names are guessable by construction, so "exists but not yours" would
+    // be a disclosure on a name anyone can try.
+    assert.equal((await complete(keyB, '9912')).statusCode, 404);
+    assert.equal((await complete(keyA, '9912')).statusCode, 200);
+    assert.equal((await getRun(keyA, '9912')).json().run.status, 'completed');
+  });
+});

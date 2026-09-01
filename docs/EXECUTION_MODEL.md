@@ -161,12 +161,11 @@ Five things decided while building it that are not obvious from the capability:
   client-chosen names.** Every CI system on earth numbers builds from 1, so two tenants both running
   `mfarm:runId: '412'` is the ordinary case. A global index would have merged them — each org
   reading the other's session list with no policy violated, because both genuinely own the row.
-- **There is no `ended_at` and no `status`, deliberately** — and **ADR-0018 (2026-09-01) is what
-  changes this**, though the column still does not exist yet. The reasoning below was that a run has
-  no *derivable* end. It does not; what it can have is a **declared** one, from the suite or from
-  `mfarm run` at child exit. That is the piece that makes a status honest rather than inferred, and
-  it is the next slice after the timeline in §4.6. The original reasoning, which still rules out
-  every derived substitute: "the last session ended" would mark a
+- ~~**There is no `ended_at` and no `status`, deliberately.**~~ **Changed 2026-09-01 by ADR-0018 and
+  migration 031 — see §4.7.** The reasoning below was that a run has no *derivable* end. It does not,
+  and that still rules out every derived substitute. What it can have is a **declared** one, from the
+  suite or from `mfarm run` at child exit, and a declared end is not an inference. The original
+  reasoning, which is why the column is `completed_at` and not a status: "the last session ended" would mark a
   sequential twenty-test run finished nineteen times before it was. The window is derived from the
   sessions and the live count is reported as a count; §4.3 is what makes a real end knowable. Same
   reasoning as 019 removing `video` from the artifact kinds.
@@ -343,6 +342,38 @@ customer's to report, and §4.3 is where it lives.
 
 Still to come on top of this: the declared end (§4.2's note above), and SSE so the console can watch
 a run progress rather than poll (§17).
+
+---
+
+### 4.7 The declared end of a run — BUILT (2026-09-01)
+
+`POST /v1/runs/:id/complete`, from an `after` hook or a CI `always` step. Migration 031 adds one
+column, `runs.completed_at`.
+
+This is the section §4.2 said could not be written. It still cannot be *derived* — "the last session
+ended" would mark a twenty-test run finished nineteen times before it was — but ADR-0018 settled that
+the customer owns the test process, and a process can SAY when it is done. That is the whole
+difference between this and the inference §4.2 refused.
+
+Four decisions:
+
+- **One column, not a status.** Whether the run PASSED is already answered by `test_results`, from
+  the only party that can observe an assertion (§4.3). A status here would either duplicate that —
+  two numbers that can disagree, and eventually will — or invite a caller to declare an outcome the
+  farm cannot check. Completion says exactly one thing: **nobody is going to add more to this run.**
+- **That one thing is what the rollup was missing.** `tests.failed = 0` on a live run means "so
+  far"; on a completed run it means "none". Same number, and only the second is safe to gate a merge
+  on.
+- **A run with no completion is INCOMPLETE, never FAILED.** A killed suite, a timed-out CI job, a
+  laptop that slept — none is evidence about the product. Rendering them as failure is the same
+  manufactured claim 021 refuses when it declines to infer pass/fail from an exit code.
+- **Completing twice is not an error.** The natural caller is an `after` hook or an `always` step,
+  both of which run more than once when a suite retries or a job is re-run. A 409 would turn a green
+  pipeline red for doing the right thing twice, so the first completion stands, the timestamp does
+  not move, and the timeline records one `run-completed` rather than one per call.
+
+The rollup comes back in the same response, so CI can close the run and read its final result in one
+call instead of completing and then polling what it just closed.
 
 ---
 

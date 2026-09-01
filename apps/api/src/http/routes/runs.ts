@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { withTenant } from '../../db.ts';
 import { requireTenant } from '../server.ts';
 import { notFound } from '../errors.ts';
-import { timeline } from '../../executionEvents.ts';
+import { timeline, recordRunEvent } from '../../executionEvents.ts';
 
 /**
  * Runs — the screen that makes a hundred executions legible (docs/EXECUTION_MODEL.md §4.2).
@@ -35,6 +35,7 @@ interface RunRow {
   id: string;
   external_id: string;
   created_at: Date;
+  completed_at: Date | null;
   session_count: string;
   live_count: string;
   ended_count: string;
@@ -64,7 +65,7 @@ interface RunRow {
  * build for a run that touched three of them would be the same lie the schema refuses to store.
  */
 const LIST_SQL = `
-  SELECT r.id, r.external_id, r.created_at,
+  SELECT r.id, r.external_id, r.created_at, r.completed_at,
          agg.session_count, agg.live_count, agg.ended_count,
          agg.first_session_at, agg.last_activity_at, agg.build_count,
          b.id AS build_id, b.package_name, b.version_name,
@@ -113,6 +114,20 @@ function runJson(r: RunRow) {
     /** What the caller wrote in `mfarm:runId`. Their id, and the one they will search for. */
     runId: r.external_id,
     createdAt: r.created_at,
+    /**
+     * `completed` once the SUITE said so, `incomplete` until then — never `failed` (migration 031).
+     *
+     * This is about whether anything more is coming, not about whether anything passed. Whether the
+     * run passed is `tests` below, reported by the only party that can observe an assertion. The
+     * difference matters at exactly one moment: on an incomplete run `tests.failed = 0` means "none
+     * so far", and on a completed one it means "none". Same number, and only the second is safe to
+     * gate a merge on.
+     *
+     * A run that was never completed is a suite that was killed, a CI job that timed out, a laptop
+     * that slept. None of those is evidence about the product, which is why this never says failed.
+     */
+    status: r.completed_at ? 'completed' : 'incomplete',
+    completedAt: r.completed_at,
     sessions: {
       total: Number(r.session_count),
       live: Number(r.live_count),
@@ -147,6 +162,26 @@ function runJson(r: RunRow) {
 
 /** Exactly what Postgres will accept for a uuid, so a run named "nightly" is a lookup, not a 500. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A run's uuid from either handle the caller might hold.
+ *
+ * `mfarm:runId` is client-chosen, so a CI job that passed `'4471'` never saw a uuid — asking it to
+ * find one to act on its own run would defeat the point of letting it choose the name. Under RLS a
+ * run belonging to another org simply does not match, which is why every caller of this turns
+ * `null` into a 404 rather than a 403: run names are guessable by construction, and "exists but not
+ * yours" would be a disclosure on a name anyone can try.
+ */
+async function resolveRunId(orgId: string, key: string): Promise<string | null> {
+  return withTenant(orgId, async (c) => {
+    if (UUID.test(key)) {
+      const byId = await c.query<{ id: string }>('SELECT id FROM runs WHERE id = $1::uuid', [key]);
+      if (byId.rows[0]) return byId.rows[0].id;
+    }
+    const byName = await c.query<{ id: string }>('SELECT id FROM runs WHERE external_id = $1', [key]);
+    return byName.rows[0]?.id ?? null;
+  });
+}
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
   /** GET /v1/runs — the whole org's, newest first. The Runs screen's only query. */
@@ -329,14 +364,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     const { orgId } = requireTenant(req);
     const key = req.params.id;
 
-    const runId = await withTenant(orgId, async (c) => {
-      if (UUID.test(key)) {
-        const byId = await c.query<{ id: string }>('SELECT id FROM runs WHERE id = $1::uuid', [key]);
-        if (byId.rows[0]) return byId.rows[0].id;
-      }
-      const byName = await c.query<{ id: string }>('SELECT id FROM runs WHERE external_id = $1', [key]);
-      return byName.rows[0]?.id ?? null;
-    });
+    const runId = await resolveRunId(orgId, key);
     // RLS makes another org's run indistinguishable from one that never existed — which matters
     // more here than usual, because run names are guessable by construction.
     if (!runId) throw notFound('Run');
@@ -359,5 +387,53 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         occurredAt: e.occurredAt,
       })),
     };
+  });
+
+  /**
+   * The declared end of a run (migration 031, ADR-0018).
+   *
+   * Migration 020 refused a run status because a run has no DERIVABLE end — a sequential suite ends
+   * every session before starting the next, so "the last session ended" would mark a twenty-test run
+   * finished nineteen times before it was. ADR-0018 changes the input rather than that reasoning:
+   * the customer owns the test process, so the process can SAY when it is done, from an `after` hook
+   * or at `mfarm run`'s exit. A declared end is not an inference.
+   *
+   * It takes no body and declares no outcome, deliberately. Whether the run passed is already
+   * answered by `test_results`, reported by the only party that can observe an assertion (§4.3).
+   * Accepting a status here would either duplicate that — two numbers that can disagree, and
+   * eventually will — or invite a caller to assert something the farm cannot check.
+   *
+   * IDEMPOTENT, and that is not politeness. The natural caller is an `after` hook or a CI `always`
+   * step, both of which run more than once when a suite retries or a job is re-run. A second call
+   * returning 409 would turn a green pipeline red for doing the right thing twice, so the first
+   * completion stands and later calls report it unchanged.
+   */
+  app.post<{ Params: { id: string } }>('/runs/:id/complete', async (req, reply) => {
+    const { orgId } = requireTenant(req);
+    const runId = await resolveRunId(orgId, req.params.id);
+    if (!runId) throw notFound('Run');
+
+    // COALESCE keeps the ORIGINAL timestamp. A re-run `after` hook must not move the moment the
+    // suite finished, or "how long did this run take" changes every time somebody retries a job.
+    // `WHERE completed_at IS NULL` on the same statement is what tells the first call from a later
+    // one: it returns a row exactly once, so the event below is emitted exactly once without a
+    // second query deciding it.
+    const firstTime = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query(
+        'UPDATE runs SET completed_at = now() WHERE id = $1 AND completed_at IS NULL RETURNING id',
+        [runId],
+      );
+      return rows.length > 0;
+    });
+    if (firstTime) await recordRunEvent(orgId, runId, 'run-completed', {});
+
+    // The rollup comes back with it, so CI can complete the run and read its final result in one
+    // call rather than completing and then polling the thing it just closed.
+    const run = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query<RunRow>(`${LIST_SQL} WHERE r.id = $1::uuid`, [runId, LIVE_STATES]);
+      return rows[0];
+    });
+
+    return reply.code(200).send(runJson(run));
   });
 }
