@@ -969,25 +969,31 @@ describe('execution timeline', () => {
 });
 
 /**
- * The hub must not claim an allocation it did not make.
+ * The hub reports the bound-path allocation with the time it ACTUALLY happened.
  *
- * On the bound path — `mfarm run` allocated the session and handed the hub its id — the device was
- * claimed earlier, by a process this handler never saw. Reporting `device-allocated` at bind time
- * would date somebody else's allocation to the moment we happened to attach, and a timeline that is
- * wrong about WHEN is worse than one that is silent: the reader has no way to tell.
+ * `mfarm run` allocates the session and hands the hub its id, so the device was claimed minutes
+ * before this handler saw it. The first version of this recorded nothing at all rather than stamp
+ * somebody else's allocation with `now()` — a timeline that is wrong about WHEN is worse than one
+ * that is silent, because the reader cannot tell. But the objection was only about the time, and
+ * the right time is in the session row, so the event is recorded honestly instead of skipped.
  */
 describe('timeline honesty on the bound path', () => {
-  test('binding to a pre-allocated session records no device-allocated', async () => {
+  test('a pre-allocated session is recorded, dated when the device was really taken', async () => {
     await clearFleet();
     await seedDevices(1);
 
-    // Allocate the way `mfarm run` does, then bind a WebDriver session to it.
     const created = await app.inject({
       method: 'POST', url: '/v1/sessions', headers: auth(keyA),
       payload: { region: REGION, platform: 'android', requireCapabilities: ['webdriver'] },
     });
     assert.equal(created.statusCode, 201, created.body);
     const owned = created.json().session.id as string;
+    const allocatedAt = await withSystem(async (c) =>
+      (await c.query('SELECT created_at FROM sessions WHERE id = $1', [owned])).rows[0].created_at as Date);
+
+    // A gap the assertion below can actually see: without the backdating, `occurred_at` would be
+    // this moment rather than the one above.
+    await new Promise((r) => setTimeout(r, 1100));
 
     const bound = await app.inject({
       method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
@@ -997,13 +1003,34 @@ describe('timeline honesty on the bound path', () => {
 
     const r = await app.inject({ method: 'GET', url: '/v1/runs/tl-bound/timeline', headers: auth(keyA) });
     assert.equal(r.statusCode, 200);
-    const kinds = r.json().events.map((e: { kind: string }) => e.kind);
+    const events = r.json().events as Array<{ kind: string; detail: Record<string, unknown>; occurredAt: string }>;
 
-    assert.ok(!kinds.includes('device-allocated'),
-      'the hub did not allocate this device and must not say it did');
-    assert.ok(!kinds.includes('session-queued'), 'nor did it wait for it');
-    // What DID happen here is still recorded, so the run is not invisible.
-    assert.ok(kinds.includes('session-active'), 'the WebDriver session going live is ours to report');
+    const alloc = events.find((e) => e.kind === 'device-allocated');
+    assert.ok(alloc, 'the run must not mysteriously begin at session-active');
+    // WHO allocated it is a real difference and a reader will ask.
+    assert.equal(alloc!.detail.allocatedBy, 'client');
+    // `queuedMs` rides only on the hub's own allocation: the CLI's wait happened inside
+    // POST /v1/sessions and this handler has no honest number for it.
+    assert.equal(alloc!.detail.queuedMs, undefined);
+
+    // THE ASSERTION THAT MATTERS: dated to when the device was really taken, not to the bind.
+    assert.equal(new Date(alloc!.occurredAt).getTime(), allocatedAt.getTime(),
+      'the allocation must carry its real time, not the moment the hub happened to bind');
+
+    // And no queue event, because the hub did not wait for anything.
+    assert.ok(!events.some((e) => e.kind === 'session-queued'));
+  });
+
+  test('the hub-allocated path still stamps now, and says so', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'tl-hub' });
+    await quit(keyA, s);
+
+    const r = await app.inject({ method: 'GET', url: '/v1/runs/tl-hub/timeline', headers: auth(keyA) });
+    const alloc = (r.json().events as Array<{ kind: string; detail: Record<string, unknown> }>)
+      .find((e) => e.kind === 'device-allocated');
+    assert.equal(alloc?.detail.allocatedBy, 'hub');
   });
 });
 
