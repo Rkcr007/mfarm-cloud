@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { withTenant } from '../../db.ts';
 import { requireTenant } from '../server.ts';
 import { notFound } from '../errors.ts';
-import { timeline, recordRunEvent } from '../../executionEvents.ts';
+import { timeline, recordRunEvent, subscribe, type PublishedEvent } from '../../executionEvents.ts';
+import { clientGone } from '../clientGone.ts';
 
 /**
  * Runs — the screen that makes a hundred executions legible (docs/EXECUTION_MODEL.md §4.2).
@@ -435,5 +436,88 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     });
 
     return reply.code(200).send(runJson(run));
+  });
+
+  /**
+   * The live event stream — §17, as server-sent events.
+   *
+   * WHY SSE AND NOT A WEBSOCKET. This is one-way: the farm tells the viewer what happened and the
+   * viewer says nothing back. SSE is a plain HTTP response, so it inherits the bearer auth, the
+   * rate limiter, the tenant hook and Caddy's TLS unchanged, and `EventSource` reconnects on its
+   * own. The data plane already carries the one thing that genuinely needs a socket (ADR-0007), and
+   * a second socket protocol here would be another thing to keep alive for no new capability.
+   *
+   * ---------------------------------------------------------------- three things this gets right
+   *
+   * **The backlog is sent on connect, before any live event.** A viewer that fetched `/timeline`
+   * and then opened this would miss anything that happened between the two calls, and the gap is
+   * invisible — the stream looks healthy and the run merely appears to skip a step. So the stream
+   * is self-sufficient: history first, then live, with no second call to race against.
+   *
+   * **Disconnects are detected with `clientGone`, never `req.raw.destroyed`.** That flag flips true
+   * at the first `await` on a perfectly healthy request, and no test using `app.inject()` can see
+   * the difference — it cost this project a feature that worked 0% of the time in production. The
+   * tests for this route run over a REAL socket for exactly that reason.
+   *
+   * **The subscription is always released.** One idempotent teardown, reachable from the socket
+   * closing and from the server shutting down. A listener holding a dead socket is a leak that only
+   * surfaces weeks later as an OOM in a process that looks idle.
+   */
+  app.get<{ Params: { id: string } }>('/runs/:id/events', async (req, reply) => {
+    const { orgId } = requireTenant(req);
+    const runId = await resolveRunId(orgId, req.params.id);
+    if (!runId) throw notFound('Run');
+
+    const gone = clientGone(reply);
+
+    // Read BEFORE subscribing. The other order drops an event that lands between the read and the
+    // subscribe; this one can only duplicate, and a duplicate is visible and harmless where a hole
+    // is neither.
+    const backlog = await timeline(orgId, runId, 1000);
+
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      // Caddy does not buffer by default, but an intermediary that does would turn this into a
+      // response that arrives all at once when the run ends — which is precisely not the feature.
+      'x-accel-buffering': 'no',
+    });
+
+    const frame = (e: PublishedEvent) => `event: ${e.kind}\ndata: ${JSON.stringify({
+      kind: e.kind, detail: e.detail, sessionId: e.sessionId,
+      deviceId: e.deviceId, occurredAt: e.occurredAt,
+    })}\n\n`;
+    const send = (e: PublishedEvent) => { if (!gone()) reply.raw.write(frame(e)); };
+
+    for (const e of backlog) send(e);
+
+    const unsubscribe = subscribe(runId, send);
+    if (!unsubscribe) {
+      // At capacity. Said out loud and then closed, rather than left open to carry nothing — a
+      // stream that is silent because it is broken looks exactly like a run where nothing happens.
+      reply.raw.write('event: error\ndata: {"message":"too many watchers for this run"}\n\n');
+      reply.raw.end();
+      return reply;
+    }
+
+    // A comment frame, which EventSource ignores. Without it an idle run's connection is
+    // indistinguishable from a dead one to every proxy and NAT on the path.
+    const ping = setInterval(() => { if (!gone()) reply.raw.write(': ping\n\n'); }, 25_000);
+    ping.unref?.();
+
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      clearInterval(ping);
+      unsubscribe();
+    };
+    reply.raw.on('close', release);
+
+    // Never resolves to a body. Returning `reply` tells Fastify the response is handled manually;
+    // letting the handler's promise settle with a value would end the request and close the stream
+    // the instant it opened.
+    return reply;
   });
 }

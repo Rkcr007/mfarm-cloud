@@ -377,6 +377,44 @@ call instead of completing and then polling what it just closed.
 
 ---
 
+### 4.8 The live event stream — BUILT (2026-09-01)
+
+`GET /v1/runs/:id/events`, server-sent events. The §17 half of the same table §4.6 added.
+
+**Why SSE and not a WebSocket.** This is one-way — the farm tells the viewer what happened and the
+viewer says nothing back. SSE is a plain HTTP response, so it inherits the bearer auth, the rate
+limiter, the tenant hook and Caddy's TLS unchanged, and `EventSource` reconnects on its own. The data
+plane already carries the one thing that genuinely needs a socket (ADR-0007); a second socket
+protocol here would be another thing to keep alive for no new capability.
+
+Four things it gets right, three of which are only testable over a real socket:
+
+- **The backlog is sent on connect, before any live event.** A viewer that fetched `/timeline` and
+  then subscribed would lose anything that happened in between, and the hole is invisible: the
+  stream looks healthy and the run merely appears to skip a step. History first, then live, no
+  second call to race against.
+- **Disconnects use `clientGone`, never `req.raw.destroyed`.** That flag flips true at the first
+  `await` on a healthy request. It is now shared code (`src/http/clientGone.ts`) rather than copied,
+  on ADR-0011's rule that a check existing twice eventually disagrees with itself — and it matters
+  more here than that rule usually implies, because the wrong version passes every `app.inject()`
+  test ever written.
+- **The subscription is always released**, through one idempotent teardown. A listener holding a
+  dead socket is a leak that surfaces weeks later as an OOM in a process that looks idle.
+- **The registry is bounded** — 500 runs, 20 watchers each — and drops new subscriptions rather
+  than evicting existing ones, so a viewer already watching keeps working and the one who cannot
+  connect is told immediately.
+
+**Single instance only, and this is the SECOND reason rather than a new one.** ADR-0001 already
+blocks a second control-plane process because rate limiting is in memory. If that is ever lifted,
+both must move together: a viewer connected to instance B silently missing every event produced on
+instance A is a far quieter failure than a doubled rate limit.
+
+The tests run over a real listening socket, and each was **mutation-checked** — the leak assertion
+was confirmed to go red when the unsubscribe is removed, and the backlog assertion when the replay
+is removed. An injection test is only as good as its ability to fail; see HANDOFF issue 43.
+
+---
+
 ## 5. Other capabilities worth having
 
 | capability | why |

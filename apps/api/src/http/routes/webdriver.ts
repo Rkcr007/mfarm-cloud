@@ -16,6 +16,7 @@ import { parseTunnelAutomationUrl } from '@mfarm/protocol';
 import { callOverTunnel } from '../automation-tunnel.ts';
 import type { TunnelRegistry } from '../tunnel.ts';
 import { recordSessionEvent, recordRunEvent } from '../../executionEvents.ts';
+import { clientGone } from '../clientGone.ts';
 
 /**
  * The W3C WebDriver hub — v2 decision 10, and the actual adoption path.
@@ -1011,34 +1012,6 @@ export async function webdriverRoutes(app: FastifyInstance) {
     waitedMs: number;
     gaveUp?: 'deadline' | 'abandoned' | 'session_gone' | 'never_waited';
   };
-
-  /**
-   * Has the CLIENT gone away — as opposed to the request body simply having been read?
-   *
-   * `req.raw.destroyed` is the obvious-looking answer, it is what both waits used, and it is wrong
-   * in a way that NO test using `app.inject()` can see. `req.raw` is the IncomingMessage, and its
-   * readable side is destroyed once the body has been consumed — which Fastify does before the
-   * handler runs. On a perfectly healthy request it therefore flips to true at the first `await`,
-   * while the client is still sitting there waiting for its response.
-   *
-   * Measured rather than reasoned about: over a real socket `destroyed` is false on entry to the
-   * handler and true 50 ms later, with `req.raw.socket.destroyed` and `reply.raw.destroyed` both
-   * still false. Under `app.inject()` it stays false forever.
-   *
-   * What that cost: `mfarm:appId` failed on EVERY session — the install wait abandoned itself on
-   * its first poll and reported "still installing after 240s" having waited about a millisecond —
-   * and `mfarm:queueTimeoutSeconds` never queued, returning "no device became free" immediately.
-   * Both looked like infrastructure problems and neither was.
-   *
-   * The RESPONSE is what tracks the connection. `close` on a ServerResponse fires when the response
-   * completes or when the connection is torn down early; consulted only while the handler is still
-   * working — before a byte has been sent — it can only mean the second.
-   */
-  function clientGone(reply: FastifyReply): () => boolean {
-    let gone = false;
-    reply.raw.on('close', () => { gone = true; });
-    return () => gone;
-  }
 
   async function waitForCapacity(
     gone: () => boolean,
