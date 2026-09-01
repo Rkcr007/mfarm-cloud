@@ -24,6 +24,7 @@ import { buildServer } from '../src/http/server.ts';
 import { withSystem, closePools } from '../src/db.ts';
 import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { parseCapabilities } from '../src/http/webdriver/capabilities.ts';
+import { watchedRuns } from '../src/executionEvents.ts';
 
 let app: FastifyInstance;
 let orgA: string, orgB: string, hostId: string;
@@ -1092,5 +1093,113 @@ describe('run completion', () => {
     assert.equal((await complete(keyB, '9912')).statusCode, 404);
     assert.equal((await complete(keyA, '9912')).statusCode, 200);
     assert.equal((await getRun(keyA, '9912')).json().run.status, 'completed');
+  });
+});
+
+/**
+ * The live event stream (§17) — OVER A REAL SOCKET, and that is not a stylistic choice.
+ *
+ * `app.inject()` cannot see this route work or fail. It has no socket, so `clientGone` never fires,
+ * the response never streams, and a handler that closed the connection immediately would pass every
+ * injected assertion. This repo has already shipped one feature that worked 0% of the time in
+ * production behind exactly that blind spot — `mfarm:appId`, whose wait mistook "the body has been
+ * read" for "the client hung up". See `webdriver.test.ts` › `over a real socket`.
+ */
+describe('execution event stream, over a real socket', () => {
+  let base: string | null = null;
+  async function listening(): Promise<string> {
+    if (base) return base;
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const addr = app.server.address();
+    base = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+    return base;
+  }
+
+  /** Read frames until `want` events have arrived, or give up. Returns the event names seen. */
+  async function readEvents(res: Response, want: number, timeoutMs = 5000): Promise<string[]> {
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    const seen: string[] = [];
+    const deadline = Date.now() + timeoutMs;
+    let buf = '';
+    while (seen.length < want && Date.now() < deadline) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<{ done: true; value: undefined }>((r) =>
+          setTimeout(() => r({ done: true, value: undefined }), Math.max(0, deadline - Date.now()))),
+      ]);
+      if (chunk.done) break;
+      buf += decoder.decode(chunk.value, { stream: true });
+      for (const line of buf.split('\n')) {
+        const m = /^event: (.+)$/.exec(line.trim());
+        if (m) seen.push(m[1]);
+      }
+      buf = '';
+    }
+    await reader.cancel().catch(() => {});
+    return seen;
+  }
+
+  test('the backlog arrives on connect, then live events as they happen', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'sse-live' });
+    await quit(keyA, s);
+
+    const url = await listening();
+    const res = await fetch(`${url}/v1/runs/sse-live/events`, { headers: auth(keyA) });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+
+    // The backlog is what makes this stream self-sufficient. A viewer that fetched /timeline and
+    // then subscribed would lose anything in between, and the hole is invisible — the stream looks
+    // healthy and the run merely appears to skip a step.
+    const backlogThenLive = readEvents(res, 5);
+
+    // Produce a live one while the stream is open.
+    await new Promise((r) => setTimeout(r, 100));
+    await app.inject({ method: 'POST', url: '/v1/runs/sse-live/complete', headers: auth(keyA) });
+
+    const seen = await backlogThenLive;
+    assert.ok(seen.includes('run-created'), `backlog missing; saw ${seen.join(',')}`);
+    assert.ok(seen.includes('session-ended'), `backlog missing; saw ${seen.join(',')}`);
+    assert.ok(seen.includes('run-completed'),
+      `a live event produced while the stream was open must arrive; saw ${seen.join(',')}`);
+  });
+
+  test('a disconnect releases the subscription rather than leaking it', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'sse-leak' });
+    await quit(keyA, s);
+    const url = await listening();
+
+    const before = watchedRuns();
+    const ctrl = new AbortController();
+    const res = await fetch(`${url}/v1/runs/sse-leak/events`, { headers: auth(keyA), signal: ctrl.signal });
+    await readEvents(res, 1, 2000);
+    assert.equal(watchedRuns(), before + 1, 'the stream should be registered while it is open');
+
+    // THE ASSERTION THAT MATTERS. A listener holding a dead socket is a leak that only surfaces
+    // weeks later as an OOM in a process that looks idle — and `app.inject()` could never produce
+    // the disconnect that reveals it.
+    ctrl.abort();
+    const deadline = Date.now() + 3000;
+    while (watchedRuns() !== before && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(watchedRuns(), before, 'the subscription must be released when the client goes away');
+  });
+
+  test('another org cannot open a stream, and cannot tell the run exists', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'sse-private' });
+    await quit(keyA, s);
+    const url = await listening();
+
+    const res = await fetch(`${url}/v1/runs/sse-private/events`, { headers: auth(keyB) });
+    assert.equal(res.status, 404);
+    await res.body?.cancel().catch(() => {});
   });
 });
