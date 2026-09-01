@@ -93,10 +93,16 @@ The two machines are separate on purpose — [ADR-0006](adrs/0006-control-plane-
 - **`mfarm:runId` + runs** — twenty tests are one run, not twenty unrelated leases
 - **Outcome reporting** — the suite says what passed; a run that says nothing reads "Not reported"
 - **On-demand screenshots** — captured while the app is still on screen
+- **Execution timeline** — what the farm DID during a run, append-only, in order
+- **A live event stream** — server-sent events, backlog replayed on connect, so a viewer needs no
+  second call to race against
+- **A declared end** — the suite says when a run is over, so `failed = 0` stops meaning "so far"
 - Artifacts: logcat + screenshots, content-addressed, 14-day retention
 - Web console: sign-in, devices, apps, sessions, runs, queue, health, and a live device cockpit
 - Live device view over WebRTC at 49–53 fps, with touch, logcat and screenshots
 - CLI (`mfarm`), a GitHub Action, CI, and a commit-tagged deploy pipeline
+- **Failure injection** (`deploy/verify-failure.mjs`) — breaks real things on real hardware and asks
+  whether the farm comes back clean
 
 **Not built, and each for a stated reason** — this is §6.
 
@@ -205,6 +211,17 @@ touching the areas they name.**
 
 ## 8. What running it taught us that tests could not
 
+**An injection test is only as good as its ability to fail.** 2026-09-01, building
+`deploy/verify-failure.mjs`: three of the first four mistakes were in the CHECKS rather than the
+product. `pkill -f appium` matched its own SSH command line and killed the session, surfacing as a
+connectivity error. `grep -c` exits 1 on a zero count, so the count threw in exactly the case the
+scenario existed to detect. Killing Appium ONCE proved nothing, because it recovers in ~8 s inside a
+10 s heartbeat — which produced a confident "ADR-0003 is violated" against a farm behaving correctly.
+And "the farm recovered" passed in 0.125 s because killing Appium never takes a device out of the
+pool, so the assertion was true before recovery began. Write the negative assertion first and watch
+it go red before trusting the green; the SSE tests were mutation-checked for this reason.
+
+
 The full list is HANDOFF's numbered issues. These are the ones that changed how the code is written.
 
 **`req.raw.destroyed` does not mean the client hung up** (issue 31). It means the request body has
@@ -250,7 +267,11 @@ No estimates in this table.
 | Artifacts per session | logcat 2.55 MB, screenshot 0.59 MB |
 | On-demand screenshot | 79,644 bytes |
 | Control-plane disk | 29 GB, 24 GB free |
-| Test suite | 652 tests, 0 fail, real PostgreSQL 16 |
+| Appium supervised restart | ~8 s (shorter than the 10 s heartbeat, so a poller sees nothing) |
+| Farm self-heal after a sustained Appium failure | 109.9 s (give-up → systemd → cold boot) |
+| Abandoned client's device reclaimed | 649.8 s (600 s idle threshold + a reaper tick) |
+| Full execution-model verification | 33.3 s, two sessions, one run, on real Cuttlefish |
+| Test suite | 1049 tests, 0 fail, real PostgreSQL 16 |
 
 ---
 
@@ -282,8 +303,13 @@ gcloud compute instances stop mfarm-lab --zone asia-south1-c   # it bills by the
    org-pinned devices, and a data-plane tunnel the agent dials out so a phone on a NAT'd laptop is
    reachable. The gate before anything is built on top of it is that the EXISTING Cuttlefish farm
    still passes `verify-live.sh` and `verify-webdriver.mjs` through that tunnel.
-2. **Nothing in the execution model.** §4.1–§4.5 are built and hardware-verified. Video stays
-   unbuilt until it records only failures.
+2. **The execution model is done through §4.8.** §4.1–§4.5 plus the timeline, the live stream and
+   the declared end are all built and hardware-verified. Video stays unbuilt until it records only
+   failures. What is genuinely left from `AutomationExecutionPlan.md` is a console screen to render
+   the timeline (§3), bounded device retry with the metering question answered explicitly (§11/§34),
+   and **bounded escalation for a stuck reset** — today it is re-offered on every heartbeat forever,
+   which is precisely the unbounded retry that document's own §11 warns against. That last one is a
+   decision, not code.
 3. **The honest next question is still not a capability** — it is whether a two-device farm with a
    working execution model is worth putting in front of a second team.
 4. **Standing constraints:** multi-instance is blocked by in-memory rate limiting; publishing is
