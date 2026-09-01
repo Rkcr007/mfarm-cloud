@@ -6,6 +6,7 @@ import { redeemEnrollment, markRedeemed } from '../../enrollment.ts';
 import { negotiate, deviceAutomationEndpoint, classifyReason, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
 import { resetComplete, sessionAttach } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
+import { recordInfraRetry } from '../../attempts.ts';
 import { appActions, hostsRecovered, meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
 import { unauthorized, badRequest } from '../errors.ts';
@@ -454,7 +455,11 @@ export async function workerRoutes(app: FastifyInstance) {
                   WHERE s.device_id = d.id AND s.fence = d.fence
                   ORDER BY s.created_at DESC LIMIT 1) AS session_id
            FROM devices d
-          WHERE d.host_id = $1 AND d.state = 'CLEANING'`,
+          WHERE d.host_id = $1 AND d.state = 'CLEANING'
+            -- ESCALATED DEVICES ARE NOT OFFERED (migration 032). The budget exists precisely so
+            -- that this loop ends; leaving the offer in place while counting attempts against it
+            -- would be a counter that observes an infinite retry rather than a bound on one.
+            AND d.reset_escalated_at IS NULL`,
         [hostId],
       );
       /**
@@ -662,6 +667,47 @@ export async function workerRoutes(app: FastifyInstance) {
         );
         return res.rowCount === 1;
       });
+      /**
+       * AN INCIDENT DURING A LIVE SESSION IS THE FARM RETRYING, AND THE USER MUST NOT PAY FOR IT
+       * (migration 033).
+       *
+       * This is the case the accounting rule exists for, stated in the plan's own terms: adb
+       * dropped, the emulator went unhealthy, the handset fell off its cable. The agent recovers and
+       * the session carries on — one user request, still one user attempt, plus one `infra-retry`
+       * that the farm absorbs. `record_infra_retry` closes the failed attempt and opens the next,
+       * and because the new row is not `origin = 'user'` the user's count cannot move.
+       *
+       * ONLY FOR AN ACCEPTED INCIDENT, so the idempotent re-send that `ON CONFLICT DO NOTHING`
+       * absorbs above does not open a retry per redelivery. The agent buffers and flushes on
+       * reconnect by design — one pulled cable arriving thirty times is the expected case, and
+       * thirty retries recorded for it would make the farm look far worse than it is.
+       *
+       * ONLY FOR AN INCIDENT WITH A SESSION. A device that goes unhealthy while idle disrupted
+       * nobody's request, so there is no attempt to fail and nothing to retry.
+       *
+       * `device-health` maps to `device-failure` and `infrastructure` to `infrastructure-failure`:
+       * 024's split is "the device itself went bad" versus "something around it did", which is the
+       * same distinction, and reusing its vocabulary is what keeps one query able to span both
+       * tables. Neither is ever a test failure — the farm cannot see one (spec §13).
+       */
+      if (accepted && i.sessionId) {
+        try {
+          await recordInfraRetry(
+            i.sessionId,
+            cls === 'device-health' ? 'device-failure' : 'infrastructure-failure',
+            i.reason,
+          );
+        } catch (err) {
+          // Swallowed like the timeline's writes: an accounting row must not fail the heartbeat
+          // that carries a farm's whole liveness signal. Error level, because a lost retry makes a
+          // number wrong rather than a chart sparse.
+          console.error(
+            `[attempts] could not record the infra retry for session ${i.sessionId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+
       incidentResults.push({ eventId: i.eventId, accepted });
     }
 

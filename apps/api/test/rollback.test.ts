@@ -61,6 +61,21 @@ const ACCEPTED_NEW_CHECKS: string[] = [
   'test_results.test_results_failure_reason_ck',
   'test_results.test_results_failure_pair_ck',
   'test_results.test_results_failure_only_on_failed_ck',
+
+  /**
+   * Migration 032, the bounded reset budget. Same shape as the four above and safe for the same
+   * reason: it constrains ONLY `reset_attempts`, a column 032 itself adds, NOT NULL DEFAULT 0.
+   *
+   * Roll the CODE back to the previous release against a 032 schema and it writes `devices` exactly
+   * as it always did, naming that column nowhere. Every such write takes the default 0, which
+   * satisfies `>= 0`. There is no write the old release makes that this constraint rejects, which
+   * is the precise question this test asks.
+   *
+   * Note what is NOT listed: `device_reset_attempts_outcome_check`. That one lives on a table 032
+   * creates, so the guard skips it already — a table the previous release has never heard of cannot
+   * have a write of its own rejected.
+   */
+  'devices.devices_reset_attempts_check',
 ];
 
 const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');

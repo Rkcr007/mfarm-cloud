@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, release } from '../../allocator.ts';
+import { openUserAttempt } from '../../attempts.ts';
 import { mintSessionToken, DEFAULT_TTL_SECONDS } from '../../tokens.ts';
-import { isTunnelledDataPlane } from '@mfarm/protocol';
 import { mintIce, type IceBlock } from '../../turn.ts';
 import { loadConfig } from '../../config.ts';
 import { requireTenant } from '../server.ts';
@@ -66,11 +66,31 @@ interface HostRow {
  * discloses nothing: it is fleet infrastructure, it is already in every session's response, and it
  * authorises nothing on its own — the socket still refuses everything until a signed grant arrives.
  *
- * Returns null when no route is configured, and the console says so rather than hanging.
+ * ---------------------------------------------------------------- SAME ORIGIN IS THE DEFAULT
+ *
+ * This used to return null unless `DATA_PLANE_PUBLIC_BASE` named an absolute `wss://` origin, and
+ * that was a bug with an expensive shape: `setup-ingress.sh` already proxies `/dp/*` through the
+ * console's own TLS name — it has since ADR-0007, and over the agent tunnel since ADR-0011 — while
+ * `deploy/docker-compose.prod.yml` leaves the variable empty. So the ingress was routing the live
+ * view and the API was telling the browser no route existed. On a tunnelled host it went further
+ * and REFUSED THE SESSION outright (see the guard that used to sit below).
+ *
+ * A RELATIVE PATH is the fix, and it is the whole fix. `new WebSocket('/dp/<id>')` on a page served
+ * over HTTPS resolves against the document's base url and upgrades the scheme, so the browser opens
+ * `wss://<this console>/dp/<id>` — the exact url the ingress is already listening for. Nothing has
+ * to be configured, the CSP stays `connect-src 'self'` because the socket is genuinely same-origin,
+ * and there is no second externally exposed port for anyone to forget to firewall.
+ *
+ * `DATA_PLANE_PUBLIC_BASE` still wins where it is set, and it keeps its one real use: a worker
+ * reached DIRECTLY on its own host and port, which is what a developer running the API and a fake
+ * farm on one laptop has. That is the case that genuinely needs a second origin named, and naming
+ * one is now an explicit act rather than the only way to make the feature work at all.
  */
-function browserEndpoint(hostId: string): string | null {
+function browserEndpoint(hostId: string): string {
   const base = loadConfig().dataPlanePublicBase;
-  return base ? `${base}/${encodeURIComponent(hostId)}` : null;
+  return base
+    ? `${base}/${encodeURIComponent(hostId)}`
+    : `/dp/${encodeURIComponent(hostId)}`;
 }
 
 /**
@@ -162,31 +182,53 @@ export async function sessionRoutes(app: FastifyInstance) {
        * A TUNNELLED HOST HAS NO DIALABLE ADDRESS, AND THE INGRESS IS THE ONLY WAY IN.
        *
        * `endpoint` is `mfarm+tunnel:/dp` for an agent on a laptop — a marker, not a url, exactly as
-       * `automation_endpoint` is since ADR-0011. The browser was already using `browserEndpoint`
-       * for every host, so nothing downstream changes; what changes is that the fallback is gone.
-       * Without DATA_PLANE_PUBLIC_BASE there is no ingress url to hand out, and the old shape would
-       * have returned `mfarm+tunnel:/dp` as `dataPlane.endpoint` and let the client discover it
-       * cannot open a WebSocket to a scheme nothing implements.
+       * `automation_endpoint` is since ADR-0011. The browser uses `browserEndpoint` for every host,
+       * so `mfarm+tunnel:/dp` is never handed to a client as something to open.
        *
-       * Released rather than queued, and named as configuration rather than as a device fault: the
-       * device is fine, the control plane is missing the one setting that makes its own ingress
-       * reachable.
+       * THE GUARD THAT USED TO SIT HERE IS GONE, and its absence is the fix rather than a
+       * regression. It released the device and refused the session when `DATA_PLANE_PUBLIC_BASE`
+       * was unset — which is the DEFAULT in `deploy/docker-compose.prod.yml`, while
+       * `setup-ingress.sh` was already proxying `/dp/*` on the console's own name. So the one
+       * configuration the deployment scripts actually produce was the one that could not allocate a
+       * session on a tunnelled host. `browserEndpoint` now returns a same-origin path for exactly
+       * that case, so there is no longer a state in which the address is missing.
        */
       const browser = browserEndpoint(host.id);
-      if (isTunnelledDataPlane(host.endpoint) && !browser) {
-        await release(orgId, alloc.sessionId, 'no_endpoint');
-        throw badRequest(
-          'The allocated device is on a tunnelled host, which is reachable only through this ' +
-          'control plane\'s own ingress, and DATA_PLANE_PUBLIC_BASE is not set — so there is no ' +
-          'address to give the client. Set DATA_PLANE_PUBLIC_BASE to the wss:// base this console ' +
-          'is served from.',
-        );
-      }
 
       const token = mintSessionToken(
         { sid: alloc.sessionId, did: alloc.deviceId, org: orgId, fence: alloc.fence!, aud: host.id },
         app.signingKey.privateKeyPem,
       );
+
+      /**
+       * THE USER'S ONE ATTEMPT (migration 033).
+       *
+       * Opened HERE, at the moment a device is actually held, rather than at the top of this
+       * handler — a queued session has no device to attribute an attempt to, and a request that
+       * fails before allocation is not an attempt at anything.
+       *
+       * Exactly one of these exists per session, enforced by a partial unique index rather than by
+       * this being the only caller. Every retry MFARM performs afterwards to recover its own
+       * infrastructure is an `infra-retry` row and never becomes a second user attempt: the farm
+       * absorbs its own recovery, which is the whole accounting rule.
+       *
+       * Logged and swallowed, never thrown. This row is accounting and diagnosis; the session is
+       * the product, and failing a customer's allocation to protect a counter would be the wrong
+       * trade in a way that is obvious only after it has happened (the rule `executionEvents.ts`
+       * already sets for the timeline). At error level, though — a missing user attempt makes a
+       * number wrong rather than a chart sparse.
+       */
+      try {
+        await openUserAttempt(alloc.sessionId);
+      } catch (err) {
+        // `console` rather than the request logger, for the reason `executionEvents.ts` gives:
+        // this same call is made from handler, reaper and worker paths, and threading a logger
+        // through all three to report an accounting write would weigh more than the failure does.
+        console.error(
+          `[attempts] could not record the user attempt for session ${alloc.sessionId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
 
       status = 201;
       payload = {
@@ -298,7 +340,7 @@ export async function sessionRoutes(app: FastifyInstance) {
      */
     let dataPlane: {
       endpoint: string;
-      browserEndpoint: string | null;
+      browserEndpoint: string;
       token: string;
       expiresInSeconds: number;
     } | undefined;

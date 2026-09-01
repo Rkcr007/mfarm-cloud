@@ -1817,13 +1817,76 @@ four devices restart sequentially at ~30s each.
    34 was SIDESTEPPED, not fixed — an arm64-only build would still fail. Do not re-run this to
    "check arm64"; it does not test that.
 
-2. **PORT THE LIVE VIEW INTO THE NEW CONSOLE — now the top item.** `/app` currently renders real
+2. **PORT THE LIVE VIEW INTO THE NEW CONSOLE — still the top item.** `/app` currently renders real
    devices at real geometry with an honest empty screen. The next slice is the WebRTC path;
    `apps/api/public/live.js` is the working implementation to port, and it is the one part of the old
    console that holds a socket and a peer connection open rather than being a render function.
 
    Everything the session screen needs is proven on the old console: 50 fps, 42 ms round trip, a real
    customer app installing, launching and taking accurate taps. This is a port, not a discovery.
+
+   **Read "port" as a verb.** A 2026-09-02 brief read this line as a port *number* collision and
+   asked for the console and live view to be put behind one external origin. They already are, and
+   the audit that established it found a different, real bug — see item 31 below. The React port
+   itself is still not done.
+
+31. **THE LIVE VIEW WAS OFF BY DEFAULT, AND THE INGRESS DISAGREED WITH THE API.** 2026-09-02,
+    ADR-0007 amended.
+
+    `browserEndpoint()` returned null unless `DATA_PLANE_PUBLIC_BASE` named an absolute `wss://`
+    origin. Two deploy scripts disagreed with that: `setup-ingress.sh` proxies `/dp/*` on the
+    console's own TLS name and has since ADR-0007, while `docker-compose.prod.yml` passes the
+    variable through with an **empty default**. So the ingress was routing the live view while the
+    API told the browser no route existed — and on a **tunnelled** host it went further and refused
+    the session outright, releasing the device. The one configuration the deploy scripts actually
+    produce was the one that could not allocate.
+
+    The fix is a same-origin relative path: `new WebSocket('/dp/<id>')` on an HTTPS page resolves to
+    `wss://<this console>/dp/<id>`, which is the exact url the ingress already listens for. No
+    configuration, `connect-src 'self'` unchanged, no second port. `DATA_PLANE_PUBLIC_BASE` still
+    wins where set and keeps its one real use — reaching a worker **directly** on its own host and
+    port, which is what a laptop running the API and a fake farm has.
+
+    **There was never a port collision.** One external listener (Caddy :443), one origin. That was
+    audited before anything was changed; `test/single-origin.test.ts` now pins it, including that
+    `/dp/*` answers 426 rather than 404 and takes no credential.
+
+32. **A RESET THAT COULD NEVER SUCCEED RETRIED FOREVER.** 2026-09-02, ADR-0019, migration 032.
+
+    The heartbeat re-offers every `CLEANING` device on every beat — the thing that makes a missed
+    reset self-healing, and an unbounded retry loop. A device whose reset always throws was offered
+    again ten seconds later for the life of the process, silently out of the pool.
+
+    Now bounded: three counted attempts, then an **ESCALATED** condition that stops the offers and
+    needs an owner or admin to clear (`POST /v1/devices/:id/clear-reset-escalation`).
+
+    **An attempt is not a heartbeat**, and that is the whole design. Counting per offer would make
+    the budget a function of beat frequency — six beats a minute burns three attempts in thirty
+    seconds, and a slow-but-working powerwash (40–80s measured) would escalate mid-success. An
+    attempt is counted when a reset has been *outstanding too long*, on the reaper's clock.
+
+    **Escalated is NOT quarantined**, and this is the part most likely to get "fixed" wrongly later.
+    `CLEANING` already means unallocatable, which is what an escalated device must stay. Quarantining
+    would also stop the resets that are the only thing which could fix it — a state the device could
+    never leave.
+
+33. **ONE USER REQUEST IS ONE USER ATTEMPT.** 2026-09-02, ADR-0020, migration 033.
+
+    There was **no double-counting bug**: the CLI's retries are idempotency-keyed and reset recovery
+    happens after the session stopped metering, so the invariant held by absence. What was missing
+    was the ledger — `session_attempts`, one row per attempt, `origin` of `user` or `infra-retry`.
+
+    The invariant is a **partial unique index**, not a convention: a second `origin = 'user'` row on
+    one session is a constraint violation at the moment somebody writes the code that would cause
+    it. `test/attempts.test.ts` asserts the *refusal*, because a test that only checked the counter
+    would pass against an implementation that never wrote a second row for an unrelated reason.
+
+    **Not billing.** `metering_events` and `usage()` are untouched; `device_seconds` is still what a
+    tenant consumed. `GET /v1/account/usage` returns both, kept apart.
+
+    **No `test-failure` outcome exists**, deliberately. The farm cannot see an assertion fail, so it
+    may not claim one, and `record_infra_retry` raises on anything that is not an infrastructure
+    failure — §34 in code, so nobody can quietly retry a failed test into a false green.
 
 3. **Instrument latency in the product.** There is still no number for input-to-photon or for
    capture+encode on the host, and §13 and §24 of the direction document both ask for them. The
