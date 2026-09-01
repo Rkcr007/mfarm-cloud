@@ -691,7 +691,9 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     artifactDir: c.artifactDir,
     artifactMaxUploadBytes: c.artifactMaxUploadBytes,
     artifactRetentionHours: c.artifactRetentionHours,
-    dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (no live view route)',
+    // "unset (no live view route)" was true and is not any more: unset now means the live-view
+    // socket is same-origin on this console's own ingress, which is the recommended shape.
+    dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (same-origin /dp on this console)',
     turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };
 }

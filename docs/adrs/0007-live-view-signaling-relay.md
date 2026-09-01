@@ -187,3 +187,26 @@ reason, plus a second certificate and a second public port for every device host
 **A screenshot loop over the data plane.** Rejected before this ADR existed and still rejected: it
 sets a false performance baseline, burns the CPU that device density depends on, and `dataplane.ts`
 already says so where it reports `media: null`.
+
+---
+
+## Amendment, 2026-09-02 (ADR-0019/0020 batch): same origin is the DEFAULT
+
+`browserEndpoint()` returned null unless `DATA_PLANE_PUBLIC_BASE` named an absolute `wss://` origin,
+which made the live view off-by-default in exactly the deployment this ADR recommends:
+`setup-ingress.sh` proxies `/dp/*` on the console's own TLS name, while `docker-compose.prod.yml`
+leaves the variable empty. The ingress routed the socket and the API told the browser there was no
+route. On a tunnelled host (ADR-0011) it refused the session outright and released the device.
+
+The API now composes the **same-origin relative path** `/dp/<hostId>` when nothing is configured.
+`new WebSocket('/dp/<id>')` on an HTTPS page resolves against the document base and upgrades the
+scheme, so the browser opens `wss://<this console>/dp/<id>` — the url the ingress already listens
+for. `connect-src` stays `'self'`, because the socket is genuinely same-origin, and no second
+external port exists to be forgotten in a firewall rule.
+
+`DATA_PLANE_PUBLIC_BASE` still wins where set, and keeps the one use this ADR gave it: a worker
+reached **directly** on its own host and port, which is what a developer running the API and a fake
+farm on one laptop has. That case genuinely needs a second origin named and the CSP widened by
+exactly it — and naming one is now an explicit act rather than the only way to make the feature work.
+
+Pinned by `apps/api/test/single-origin.test.ts`.

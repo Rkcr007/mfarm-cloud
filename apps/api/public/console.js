@@ -1198,7 +1198,11 @@ function ensureLive(sess) {
     // Configuration, not a device fault, and worth naming exactly: `hosts.endpoint` is where a
     // program on the farm's network dials, and a browser cannot use it.
     state.liveState = 'unrouted';
-    state.liveDetail = 'This control plane publishes no browser route to the data plane (DATA_PLANE_PUBLIC_BASE is unset), so nothing can stream to a browser.';
+    // Defensive only. The API composes a same-origin `/dp/<hostId>` when nothing is configured, so
+    // there is no ordinary path to this branch any more — it fires only for a control plane older
+    // than that change, or a response that lost the field in transit. The old copy blamed an unset
+    // DATA_PLANE_PUBLIC_BASE, which is now the NORMAL configuration and no longer a fault.
+    state.liveDetail = 'This session came back without a browser route to the data plane, so nothing can stream. Check the control plane version and that the ingress proxies /dp/*.';
     return null;
   }
 

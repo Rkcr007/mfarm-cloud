@@ -153,6 +153,30 @@ function webdriverIdleMs(): number {
 }
 
 /**
+ * How long a reset may stay outstanding before it counts as a failed attempt.
+ *
+ * NOT a heartbeat interval, and the difference is the design. Counting an attempt per offer would
+ * make the budget a function of how often the host beats — six beats a minute burns a three-attempt
+ * budget in thirty seconds, and a slow-but-succeeding reset would escalate while it was still
+ * working. A powerwash measured 40–80s on real hardware, so the default leaves generous room above
+ * the slowest observed success before calling one attempt lost.
+ */
+function resetTimeoutMs(): number {
+  return Number(process.env.RESET_ATTEMPT_TIMEOUT_MS ?? 180_000);
+}
+
+/**
+ * How many counted attempts a device gets before recovery stops and a human is needed.
+ *
+ * The point of a small number is that the alternative is not "more retries", it is "retries
+ * forever": before migration 032 a device that could never reset was re-offered every ten seconds
+ * for the life of the process, silently out of the pool.
+ */
+function maxResetAttempts(): number {
+  return Number(process.env.MAX_RESET_ATTEMPTS ?? 3);
+}
+
+/**
  * Module-level: one reaper per process, and it is the only caller.
  *
  * Both knobs above are read INSIDE the sweep rather than at module scope, and that is not style.
@@ -164,7 +188,8 @@ let lastHostSweepAt = 0;
 
 export async function reap(): Promise<{
   expired: number; idleEnded: number; promoted: number; keysPurged: number; installsOrphaned: number;
-  hostsQuarantined: number; artifactsExpired: number; blobsDeleted: number;
+  hostsQuarantined: number; artifactsExpired: number; blobsDeleted: number; resetsEscalated: number;
+  attemptsClosed: number;
 }> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
@@ -232,6 +257,43 @@ export async function reap(): Promise<{
      * heartbeat clears it — the beat is the disproof of the only thing this quarantine ever
      * asserted. An operator quarantine is stamped differently and stays.
      */
+    /**
+     * Resets that are not going to finish (migration 032).
+     *
+     * The heartbeat re-offers every CLEANING device on every beat, which is what makes a missed
+     * reset self-healing — and was also an unbounded retry loop, because a reset that always throws
+     * is offered again ten seconds later forever and the device is silently out of the pool. This
+     * counts an attempt only when one has been OUTSTANDING TOO LONG, on the reaper's clock rather
+     * than the host's beat, and stops offering once the budget is spent.
+     *
+     * Logged per transition rather than per tick: an escalation is news exactly once, and a running
+     * total printed six times a minute is the shape that hid the lab box's quarantine in its own
+     * log for an hour.
+     */
+    const esc = await c.query<{ n: number }>(
+      'SELECT count_stalled_resets(make_interval(secs => $1), $2) AS n',
+      [resetTimeoutMs() / 1000, maxResetAttempts()],
+    );
+    if (Number(esc.rows[0].n) > 0) {
+      console.warn(`[reaper] ${esc.rows[0].n} device(s) escalated: no reset after `
+        + `${maxResetAttempts()} attempts. They stay unallocatable until cleared.`);
+    }
+
+    /**
+     * Attempts whose session has ended (migration 033).
+     *
+     * A SWEEP, not a call on each end path, and the difference is maintenance rather than taste. A
+     * session ends in at least four places — the tenant's DELETE, the TTL, the idle-WebDriver
+     * reclaim from 029, and a host quarantine taking the device back — and a close bolted onto each
+     * is four things to keep in step plus the fifth somebody adds later without one. The symptom
+     * would be an attempt that stays open forever, which reads as "the farm is still trying" when
+     * it stopped hours ago.
+     *
+     * Not logged per tick. This is the ordinary end of ordinary sessions, and a line every ten
+     * seconds saying so is the shape that hid a real quarantine in its own log for an hour.
+     */
+    const ca = await c.query<{ n: number }>('SELECT close_ended_session_attempts() AS n');
+
     const dueForSweep = Date.now() - lastHostSweepAt >= hostSweepMinIntervalMs();
     if (dueForSweep) lastHostSweepAt = Date.now();
     const q = dueForSweep
@@ -285,6 +347,65 @@ export async function reap(): Promise<{
       hostsQuarantined: q.rows.length,
       artifactsExpired: a.rows.length,
       blobsDeleted,
+      resetsEscalated: Number(esc.rows[0].n),
+      attemptsClosed: Number(ca.rows[0].n),
     };
+  });
+}
+
+/**
+ * The deliberate act that ends an escalation (migration 032).
+ *
+ * A FLEET operation, so it runs on the system pool: `clear_reset_escalation` is definer-owned and
+ * revoked from `mfarm_app`, exactly like `device_reset_complete` above.
+ *
+ * NOT CALLABLE BY THE WORKER, and that is the point rather than an oversight. The heartbeat is what
+ * exhausted the budget; letting the same path clear it would rebuild the unbounded loop 032 exists
+ * to end, one indirection further away where nobody would find it. The caller is a human, through
+ * the route in `routes/devices.ts`.
+ *
+ * `false` means there was nothing to clear — an operator who clicks twice is told, rather than
+ * reassured that something happened.
+ */
+export async function clearResetEscalation(deviceId: string): Promise<boolean> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query('SELECT clear_reset_escalation($1) AS ok', [deviceId]);
+    return rows[0].ok === true;
+  });
+}
+
+export interface ResetAttempt {
+  attempt: number;
+  outcome: 'timed-out' | 'succeeded' | 'escalated';
+  detail: string | null;
+  fence: number | null;
+  occurredAt: Date;
+}
+
+/**
+ * What this device's recovery actually did, most recent first.
+ *
+ * On the system pool because `device_reset_attempts` carries no `org_id` and no RLS policy — it is
+ * about HARDWARE, and a shared-pool device belongs to no tenant (migration 032's table comment).
+ * The route above it is what decides who may look.
+ */
+export async function resetAttempts(deviceId: string, limit = 50): Promise<ResetAttempt[]> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query(
+      `SELECT attempt, outcome, detail, fence, occurred_at
+         FROM device_reset_attempts
+        WHERE device_id = $1
+        ORDER BY occurred_at DESC, attempt DESC
+        LIMIT $2`,
+      [deviceId, limit],
+    );
+    return rows.map((r) => ({
+      attempt: Number(r.attempt),
+      outcome: r.outcome as ResetAttempt['outcome'],
+      detail: r.detail as string | null,
+      // bigint arrives as a string, like every other fence in this file.
+      fence: r.fence === null ? null : Number(r.fence),
+      occurredAt: r.occurred_at as Date,
+    }));
   });
 }

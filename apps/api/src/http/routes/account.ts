@@ -1,10 +1,25 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { badRequest, conflict, forbidden, notFound } from '../errors.ts';
-import { requireUser } from '../server.ts';
+import { requireTenant, requireUser } from '../server.ts';
 import { withSystem, withTenant } from '../../db.ts';
 import { createApiKey, revokeApiKey } from '../../auth.ts';
 import { createEnrollment, listEnrollments, revokeEnrollment } from '../../enrollment.ts';
 import { hashPassword } from '../../users.ts';
+import { usage } from '../../metering.ts';
+import { counts, deviceReliability } from '../../attempts.ts';
+
+/**
+ * An ISO date from a query string, or null when absent.
+ *
+ * Refuses garbage rather than silently substituting a default: a caller who asked for a window and
+ * got the last thirty days instead would read the answer as being about the window they named.
+ */
+function parseWhen(raw: string | undefined): Date | null {
+  if (raw === undefined || raw === '') return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) throw badRequest(`"${raw}" is not a date this API understands. Use an ISO 8601 timestamp.`);
+  return d;
+}
 
 /**
  * The ORGANISATION surface: who is on this farm, and what credentials they hold.
@@ -70,6 +85,50 @@ interface KeyRow {
 }
 
 export async function accountRoutes(app: FastifyInstance): Promise<void> {
+  /**
+   * What this org consumed, and what the FARM had to do to serve it (migration 033, plan §2/§35).
+   *
+   * TWO KINDS OF NUMBER, kept apart on purpose:
+   *
+   *   `usage`    — metered consumption, unchanged since Phase 1. `device_seconds` is the time this
+   *                org actually held a device. This is the number that would price a bill.
+   *   `attempts` — how many times somebody ASKED, and how many times MFARM had to try again to
+   *                serve one of those asks. Not a price and not a credit.
+   *
+   * THE INVARIANT THE SECOND BLOCK EXISTS TO MAKE VISIBLE: `userAttempts` counts one per session,
+   * always, however many `infraRetries` sat underneath it. When a device goes unhealthy mid-session
+   * and the agent recovers it, `infraRetries` moves and `userAttempts` does not — the farm absorbs
+   * its own recovery. `deviceReliability` says which hardware is causing that.
+   *
+   * `requireTenant`, not `requireUser`: a CI job reading its own consumption with an API key is the
+   * ordinary caller, and the members endpoints below need a person only because they change who has
+   * access. RLS scopes every row to this org.
+   *
+   * The window defaults to the last 30 days and is clamped rather than validated into an error —
+   * the same choice `GET /sessions` makes about `limit`, for the same reason.
+   */
+  app.get<{ Querystring: { from?: string; to?: string } }>('/account/usage', async (req) => {
+    const { orgId } = requireTenant(req);
+
+    const to = parseWhen(req.query.to) ?? new Date();
+    const from = parseWhen(req.query.from) ?? new Date(to.getTime() - 30 * 24 * 3600_000);
+    if (from >= to) throw badRequest('`from` must be earlier than `to`.');
+
+    const [consumed, counted, devices] = await Promise.all([
+      usage(orgId, from, to),
+      counts(orgId, from, to),
+      deviceReliability(orgId, from, to),
+    ]);
+
+    return {
+      window: { from, to },
+      usage: consumed,
+      attempts: counted,
+      // "How often does a particular device fail" — the §2 question, per device, over this window.
+      deviceReliability: devices,
+    };
+  });
+
   // ------------------------------------------------------------------ team
 
   /** GET /v1/account/members — who is in this org. Any member may look. */
