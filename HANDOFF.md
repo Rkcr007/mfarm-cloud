@@ -17,6 +17,38 @@ media relay; `./deploy/farm-check.sh` waits for the devices and reports what is 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
 
+**2026-09-01 — THE EXECUTION RECORD IS BUILT AND VERIFIED ON HARDWARE.** Control plane on
+`1dbbc2f`, migrations through 031. `AutomationExecutionPlan.md` §4, §17, §18 and §35 are done, and
+ADR-0018 is what made them expressible.
+
+The shape that matters: §4 (a persisted state machine), §17 (a live feed) and §18 (a timeline) look
+like three features and are **the same rows read three ways**, so they are one append-only table —
+`execution_events`, migration 030. §35's "attempt" needed nothing: a `sessions` row already IS one
+device lease.
+
+- **`GET /v1/runs/:id/timeline`** — verified against two real sessions joining one run:
+  `run-created → device-allocated → session-active → device-allocated → session-active →
+  session-ended → session-ended`, in order.
+- **`GET /v1/runs/:id/events`** — server-sent events, backlog replayed on connect then live. THE
+  FIRST SSE IN THIS CODEBASE. `clientGone` moved to `src/http/clientGone.ts` and is now shared with
+  the hub rather than copied, on ADR-0011's rule — and it matters more here, because the wrong
+  version passes every `app.inject()` test ever written.
+- **`POST /v1/runs/:id/complete`** — migration 031, the declared end that migration 020 said could
+  not exist. It could not be DERIVED; ADR-0018 settled that the customer owns the test process, so
+  the process can say it. One column, no status: whether the run PASSED is still `test_results`.
+  Verified idempotent, and it records one `run-completed` event however many times CI calls it.
+
+**Three sections of that plan turned out to be already built rather than missing** — §32's
+stuck-device detection is `mfarm_device_cleaning_age_seconds_max` plus the `MfarmDeviceResetStuck`
+alert, and most of §26 and §30 predate the document. See [[mfarm-spec-docs-overstate]].
+
+**`farm-online.sh`'s drift check is confirmed fixed in production**: the first real start since
+2026-08-20 that printed no DRIFT, with both addresses matching their names.
+
+**Still not fixed:** `farm-check.sh` reports "no agent tunnel connected" as a false negative when
+run straight after a host start — it checks the tunnel at a fixed point that can precede the agent
+connecting. Re-running says the farm is live. Recorded, not fixed.
+
 **2026-09-01 — BOTH INJECTION DEFECTS ARE FIXED AND VERIFIED ON HARDWARE.** Control plane is on
 `18367e0` (was `bcf757c`), migration 029 applied.
 
