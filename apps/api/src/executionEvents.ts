@@ -35,7 +35,8 @@ export type ExecutionEventKind =
   | 'build-install-finished'
   | 'session-ended'
   | 'device-released'
-  | 'incident';
+  | 'incident'
+  | 'run-completed';
 
 /**
  * Swallow and report. Deliberately not `void`-ing the promise: awaiting keeps the event ordered
