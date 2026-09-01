@@ -24,6 +24,9 @@ HOST_PUBLIC="${HOST_PUBLIC:-https://${MFARM_PUBLIC_HOST:-34-100-138-213.sslip.io
 API="${API:-http://127.0.0.1:3000}"
 TURN_HOST="${TURN_HOST:-${MFARM_TURN_HOST:-34.100.159.34}}"
 DEVICE_WAIT_SECONDS="${DEVICE_WAIT_SECONDS:-600}"
+# How long to keep re-reading the tunnel gauge once devices are up. Configurable so the
+# test can exercise the "never connects" branch without waiting a real minute for it.
+TUNNEL_WAIT_SECONDS="${TUNNEL_WAIT_SECONDS:-60}"
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
@@ -138,7 +141,7 @@ else
   # `AVAIL = 0` together with no agent. Waiting a minute for a tunnel that nobody is bringing up
   # would add a minute to the most common invocation of this script to learn nothing.
   if [ "$AVAIL" -ge 1 ] && [ -f "$METRICS_TOKEN_FILE" ]; then
-    TUNNEL_DEADLINE=$(( $(date +%s) + 60 ))
+    TUNNEL_DEADLINE=$(( $(date +%s) + TUNNEL_WAIT_SECONDS ))
     while [ "$(date +%s)" -lt "$TUNNEL_DEADLINE" ]; do
       TUNNELS="$(read_tunnels)"
       [ -n "$TUNNELS" ] && [ "$TUNNELS" -ge 1 ] && break

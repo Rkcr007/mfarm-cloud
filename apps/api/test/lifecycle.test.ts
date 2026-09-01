@@ -434,7 +434,6 @@ describe('service lifecycle', () => {
     // calling anything.
     await waitUntil(async () => (await sessionState(stale)) === 'ENDED', 4000, 'the reaper to expire a session');
 
-    const afterShutdown = await insertExpiredSession();
     const clean = await svc.close('test');
     assert.equal(clean, true, 'the drain should finish well inside the grace period');
 
@@ -446,10 +445,28 @@ describe('service lifecycle', () => {
     // the memoised promise a SIGTERM followed by a SIGINT turns a clean shutdown into a crash.
     assert.equal(await svc.close('again'), true);
 
-    // Nothing carries on after the pools are gone. Weaker than the reaper test above — an ended
-    // pool would stop it either way — but it does catch a shutdown that leaves work running long
-    // enough to log a stream of failures during every deploy.
-    await sleep(600);
-    assert.equal(await sessionState(afterShutdown), 'ACTIVE');
+    /**
+     * Nothing carries on after the pools are gone.
+     *
+     * THE ROW IS CREATED AFTER THE CLOSE, and that is the fix for a flake this test had from the
+     * start. It used to be inserted BEFORE the shutdown — it had to be, because
+     * `insertExpiredSession()` goes through the system pool that the close is about to end — while
+     * the reaper was still ticking every 100 ms through the drain. A tick landing in that window
+     * ended the row legitimately, and the assertion then failed on a shutdown that had behaved
+     * perfectly. Seen in CI on 2026-09-01: `'ENDED' !== 'ACTIVE'`.
+     *
+     * Inserting through `verifier` — the independent pool `sessionState` already reads from — makes
+     * the claim sound instead of merely luckier: a row that did not exist during the drain cannot
+     * have been reaped by it, so ACTIVE here can only mean nothing is still running.
+     */
+    const { rows } = await verifier.query(
+      `INSERT INTO sessions (org_id, state, region, expires_at)
+       VALUES ($1, 'ACTIVE', $2, now() - interval '1 minute') RETURNING id`,
+      [orgId, REGION],
+    );
+    const afterShutdown = rows[0].id as string;
+    await sleep(600); // six reaper intervals, had one still been running
+    assert.equal(await sessionState(afterShutdown), 'ACTIVE',
+      'a reaper still running after the pools closed would have expired this');
   });
 });
