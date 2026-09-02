@@ -126,6 +126,37 @@ that disagrees with itself is worse than one that is merely duplicated.
   22 and 24. It also asserts the emitted shebang is plain `#!/usr/bin/env node` and that no `.ts`
   specifier survived into `dist/`. This closes the gap that let PR #72 pass CI and fail Release:
   **the thing shipped was not the thing tested.**
+### Confirmed on the live registry, 2026-09-03
+
+`@mfarm/cli@0.1.0` is published. Verified against npm rather than a local tarball, because the two
+can differ — npm normalised `bin` from `./dist/bin.js` to `dist/bin.js` on the way out and said so:
+
+- `npm install @mfarm/cli` into an empty project, then `mfarm --version` → `0.1.0`.
+- `npx --yes --package "@mfarm/cli@0.1.0" mfarm --version` → `0.1.0`. **This is the exact command
+  `action.yml` runs**, so the adoption path now works for someone who is not us.
+- The published build on Node 16.17.0 → `mfarm needs Node 20.3.0 or newer; this is 16.17.0.`, exit 1.
+  The guard survived compilation and packaging.
+- `license: MIT`, `engines: {"node":">=20.3.0"}` as served by the registry.
+
+**And that job got it wrong on its first attempt, in a way worth keeping.** It ran the npx command
+from the repo root — where `apps/cli` IS `@mfarm/cli` at exactly the pinned version. npm considered
+the request already satisfied by the local workspace, contacted no registry at all, and failed in
+under a second with `sh: 1: mfarm: not found` and no npm output whatsoever. That reads precisely
+like "the published package is broken", and the package was fine.
+
+Two local checks had already passed for the same reason and proved nothing: both ran in directories
+that happened to have a `mfarm` in `node_modules/.bin`, so npx used the local binary instead of
+fetching. **A check for "does npm resolution work" cannot run anywhere that already has the answer
+lying around** — which is this repo's existing rule (*an assertion that holds on the fallback path
+cannot detect that you are on the fallback path*) wearing new clothes. The job now `cd`s to
+`RUNNER_TEMP` first, because a stranger is not standing inside our monorepo. Reproduced in a
+container both ways before the fix was written.
+
+The `published-cli` CI job reads the pin out of `action.yml` and resolves it from npm on every
+run. Pinning is deliberate (`action.yml` explains why a floating dist-tag would be worse), and its
+cost is that the pin can name a version nobody published — which nothing else here would catch,
+since every other CLI test points `MFARM_CLI_BIN` at the checkout and never touches the registry.
+
 - Measured locally on the real tarball before any of the above was written: a clean `npm install` of
   `mfarm-cli-0.1.0.tgz` into an empty project, then `mfarm --version` → `0.1.0` on Node 23.11.0, and
   on Node 16.17.0 → `mfarm: mfarm needs Node 20.3.0 or newer; this is 16.17.0.` with exit 1.
