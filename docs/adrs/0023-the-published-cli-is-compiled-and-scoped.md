@@ -81,10 +81,12 @@ customer reports comes from a file whose line numbers depend on their Node's str
 **A bundler.** The package has zero dependencies — nothing to bundle. `tsc` is already a
 devDependency and already the thing that typechecks the repo.
 
-**Ship `src/` alongside `dist/` so sourcemaps resolve.** Deferred to the licence decision. Sourcemaps
-are currently emitted with external sources that are not in the tarball, so they degrade to
-line numbers. If the licence is permissive, `inlineSources` is the better answer; if it is
-proprietary, the maps should be dropped entirely. Publishing sources by accident is a one-way door.
+**Ship `src/` alongside `dist/` so sourcemaps resolve.** Rejected once the licence was settled as
+MIT: `inlineSources` puts the sources inside the maps instead, which is the same information without
+a second copy of the tree in the tarball. A map whose `sources` point at files that are not shipped
+degrades to bare line numbers, which is the same as having no map at all. Under a proprietary licence
+the answer would have been the opposite — drop the maps, because publishing source by accident is a
+one-way door.
 
 ## Consequences
 
@@ -104,9 +106,15 @@ config overrides emit settings and nothing else.
 both sit exactly one level below the package root. Nesting the output deeper would silently read the
 CONSUMER's package.json and report their version. Commented at the call site.
 
-**Open.** The package has no `license` field, because the repo has no LICENSE file. npm publishes it
-as unlicensed, which legally means nobody may use it. That is a decision for the owner, not a
-default to pick, and it is the last thing standing between this and a publish.
+**Resolved 2026-09-03 — MIT.** The repo had no LICENSE file and no `license` field, which would have
+published the package as unlicensed: legally, nobody may use it. The owner chose MIT, on the
+reasoning that the CLI is a wrapper whose entire purpose is to talk to the MFARM service — the value
+being protected is the farm, not the 1,400 lines, and a permissive licence removes a question every
+prospective user's legal team would otherwise have to answer.
+
+`apps/cli/LICENSE` is a copy of the repo-root file, because npm only includes files from the package
+directory. `build.mjs` compares the two and refuses to build if they have drifted, since a licence
+that disagrees with itself is worse than one that is merely duplicated.
 
 ## Verification
 
@@ -121,6 +129,24 @@ default to pick, and it is the last thing standing between this and a publish.
 - Measured locally on the real tarball before any of the above was written: a clean `npm install` of
   `mfarm-cli-0.1.0.tgz` into an empty project, then `mfarm --version` → `0.1.0` on Node 23.11.0, and
   on Node 16.17.0 → `mfarm: mfarm needs Node 20.3.0 or newer; this is 16.17.0.` with exit 1.
+
+## The unscoped name
+
+`mfarm` on npm was unregistered, and `packages/mfarm-name` now claims it with an inert package: it
+prints where the real CLI is and exits 1.
+
+This is not tidiness. `mfarm run` executes in a process holding `MFARM_API_KEY` and derives
+`MFARM_WEBDRIVER_URL`, which embeds it — so `npx mfarm …`, the command this project's own README
+suggested until today, would have handed a customer's credential to whoever registered the name
+first. Publishing twenty lines that do nothing is the cheapest permanent close.
+
+It is deliberately plain JavaScript with no build, no dependencies and no engine floor, so that it
+runs on any Node a stranger might have and fails with its own message rather than a parser error.
+It exits **1**, not 0: someone who reaches it in CI has a broken pipeline and should find out
+immediately, rather than watch a green step that allocated no device and ran no tests.
+
+The repo's private root package was renamed `mfarm` → `mfarm-cloud` at the same time, because a
+workspace and its root sharing a name makes `npm -w mfarm` ambiguous.
 
 ## Related
 

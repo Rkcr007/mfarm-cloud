@@ -1,7 +1,11 @@
 {
-  "name": "mfarm",
+  "name": "mfarm-cloud",
   "private": true,
-  "workspaces": ["packages/*", "apps/*", "workers/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "workers/*"
+  ],
   "scripts": {
     "test": "npm run test --workspaces --if-present && npm run test:deploy",
     "test:deploy": "node --test deploy/*.test.mjs",

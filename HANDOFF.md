@@ -553,12 +553,17 @@ without one rather than advertise `127.0.0.1` to the fleet.
   deliberately, and `action.yml` carries the reasoning. And `npx mfarm` is not the story to unblock:
   the unscoped name is not ours, so the fix was to stop telling people to type it.
 
-  `@mfarm/cli` is now publishable — compiled to JavaScript for the tarball, scoped, refusing to
-  start below Node 20.3, verified by a clean install of the real tarball. **The only thing left is
-  the publish itself, and it is blocked on two owner decisions: the npm account/org, and a
-  LICENCE.** There is no LICENSE file in this repo and no `license` field, so npm would publish it
-  as unlicensed — which legally means nobody may use it. The other three packages stay private;
-  nobody installs the API, the worker or the console.
+  `@mfarm/cli` is now publishable — compiled to JavaScript for the tarball, scoped, MIT, refusing to
+  start below Node 20.3, verified by a clean install of the real tarball. **The licence is settled
+  (MIT, 2026-09-03) and the npm account exists (`rkcr007`). The one thing still missing is the
+  `@mfarm` ORG on npm — the registry answers "Scope not found", and org creation is web-only.**
+
+  `packages/mfarm-name` claims the unscoped `mfarm` with an inert package that prints where the real
+  CLI is and exits 1. That name was unregistered, and `npx mfarm …` — which this repo's own README
+  suggested until 2026-09-03 — runs in a process holding `MFARM_API_KEY`. The private root package
+  was renamed `mfarm` → `mfarm-cloud` so a workspace and its root no longer share a name.
+
+  The other three packages stay private; nobody installs the API, the worker or the console.
 - Observability gaps, all of which look covered from the dashboard and are not: **no
   backup-freshness alert** (the sidecar logs failures and nothing scrapes it — backups can stop for
   six weeks without a page), **no host metrics** (a full disk takes the database and the backups
@@ -568,6 +573,22 @@ without one rather than advertise `127.0.0.1` to the fleet.
   (api, postgres and the backup sidecar), which `deploy/farm-up.sh` brings up in one command. Still
   never run anywhere: the observability stack (`docker-compose.obs.yml`), `tailscale serve`, and any
   alert delivered to an actual person.
+
+**2026-09-03 — A TEST THAT PASSES IN THE SUITE AND FAILS ALONE.** Found while verifying the CLI
+packaging change, and it is NOT caused by it: `apps/api/test/attempts.test.ts` →
+*"the usage endpoint reports both numbers, kept apart"* fails **3 runs out of 3 in isolation on
+clean `main`** (`body.attempts.userAttempts` is 0, expected 1), while the full `apps/api` suite
+passes 651/651.
+
+So it depends on state some earlier test leaves behind, despite calling `reset()` first. It also
+surfaces intermittently in a full run — two different tests failed across three full-suite runs, and
+one run failed on `EADDRINUSE` instead, which is a separate port-collision flake in the same suite.
+
+**This is the shape issue 43 keeps recording**: an assertion whose outcome depends on when you
+happened to look. Nothing is known to be wrong in the PRODUCT here — the failure is a test reading
+state it did not establish — but until that is confirmed rather than assumed, a green suite is not
+evidence that attempt accounting works, which is the one thing this file exists to prove. To
+reproduce: `cd apps/api && node --test --experimental-strip-types test/attempts.test.ts`.
 
 ## BLOCKERS — decide these before the hardware session
 

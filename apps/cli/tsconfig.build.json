@@ -19,6 +19,12 @@
     "rewriteRelativeImportExtensions": true,
     "declaration": false,
     "sourceMap": true,
+    // The sources go INSIDE the maps. The alternative is shipping `src/` alongside `dist/`, and a
+    // map whose `sources` point at files that are not in the tarball degrades to bare line numbers —
+    // which is the same as having no map. Safe here only because the package is MIT (ADR-0023): under
+    // a proprietary licence this would publish the source by accident, and the maps should be dropped
+    // instead.
+    "inlineSources": true,
     // The CLI is the one thing a customer runs, so a stack trace should name a line they can read.
     "removeComments": false
   },

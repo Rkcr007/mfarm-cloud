@@ -27,6 +27,24 @@ import { execFileSync } from 'node:child_process';
 const BIN = new URL('dist/bin.js', import.meta.url);
 const WANTED = '#!/usr/bin/env node';
 
+/**
+ * npm only includes files from the PACKAGE directory, so the repo-root LICENSE does not reach the
+ * tarball and `apps/cli/LICENSE` is a copy. A copy can drift, and a licence that disagrees with
+ * itself is worse than one that is merely duplicated — so the two are compared here rather than
+ * trusted.
+ */
+async function checkLicence() {
+  const [root, mine] = await Promise.all([
+    readFile(new URL('../../LICENSE', import.meta.url), 'utf8'),
+    readFile(new URL('LICENSE', import.meta.url), 'utf8'),
+  ]);
+  if (root !== mine) {
+    throw new Error('apps/cli/LICENSE has drifted from the repo-root LICENSE; copy the root one over it.');
+  }
+}
+
+await checkLicence();
+
 await rm(new URL('dist', import.meta.url), { recursive: true, force: true });
 execFileSync('npx', ['tsc', '-p', 'tsconfig.build.json'], { stdio: 'inherit', cwd: new URL('.', import.meta.url) });
 
