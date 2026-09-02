@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { ControlPlaneClient, describe, sleep } from './client.ts';
 import { run, EXIT_FAILURE } from './run.ts';
+import { nodeTooOld } from './engine.ts';
 import type { AppSummary, DataPlaneCoordinates, DeviceSummary, SessionSummary } from './client.ts';
 
 /**
@@ -15,6 +16,10 @@ import type { AppSummary, DataPlaneCoordinates, DeviceSummary, SessionSummary } 
  * The shebang silences one warning class and no others: type stripping prints an ExperimentalWarning
  * to stderr on every single invocation, and a wrapper that prepends two lines of Node noise to every
  * CI job's log is a wrapper people find a way to stop using.
+ *
+ * THAT SHEBANG IS FOR THIS REPO, NOT FOR THE PUBLISHED PACKAGE. `build.mjs` rewrites it to a plain
+ * `#!/usr/bin/env node` in `dist/`, because a customer's Node is chosen by their CI image and an
+ * unrecognised flag is a startup failure rather than a warning. See `tsconfig.build.json`.
  */
 
 const DEFAULT_API_URL = 'https://api.mfarm.dev';
@@ -28,6 +33,7 @@ const INSTALL_POLL_MS = 2_000;
 
 /** A mistake the user can fix by re-reading `--help`; never a reason to print a stack trace. */
 class UsageError extends Error {}
+
 
 const HELP = `mfarm — run your existing mobile test suite on a cloud device.
 
@@ -429,14 +435,28 @@ function integer(flag: string, raw: string | undefined, fallback: number, min: n
 
 async function version(): Promise<string> {
   // One source of truth. Read lazily so the common path never touches the filesystem.
+  //
+  // `../package.json` resolves correctly from BOTH `src/bin.ts` and the published `dist/bin.js`
+  // because both sit exactly one directory below the package root. Nesting the build output any
+  // deeper would silently start reading the CONSUMER's package.json and report their version.
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   return String(pkg.version);
 }
 
-try {
-  process.exitCode = await main();
-} catch (err) {
-  process.stderr.write(`mfarm: ${describe(err)}\n`);
-  if (err instanceof UsageError) process.stderr.write('mfarm: run "mfarm --help" for usage.\n');
+/**
+ * The runtime check runs before `main`, not inside it, so an unsupported Node cannot get as far as
+ * allocating a device it will then fail to release.
+ */
+const tooOld = nodeTooOld(process.versions.node);
+if (tooOld) {
+  process.stderr.write(`mfarm: ${tooOld}\n`);
   process.exitCode = EXIT_FAILURE;
+} else {
+  try {
+    process.exitCode = await main();
+  } catch (err) {
+    process.stderr.write(`mfarm: ${describe(err)}\n`);
+    if (err instanceof UsageError) process.stderr.write('mfarm: run "mfarm --help" for usage.\n');
+    process.exitCode = EXIT_FAILURE;
+  }
 }

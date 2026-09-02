@@ -546,8 +546,19 @@ without one rather than advertise `127.0.0.1` to the fleet.
   apps, health, and since issue 28 a **Launch** flow and an interactive cockpit — live video, a
   control rail, logcat and screenshots. The code path is complete and the WebRTC half has never met
   a real cvd operator; see issue 28 for exactly what is verified and what is not.
-- Publishing. Every package is `"private": true`, so `npx mfarm` does not work yet and the Action's
-  `npx --yes mfarm@latest` has nothing to resolve.
+- ~~Publishing. Every package is `"private": true`, so `npx mfarm` does not work yet and the
+  Action's `npx --yes mfarm@latest` has nothing to resolve.~~ **PREPARED 2026-09-03 — ADR-0023, and
+  this bullet was wrong twice over.** The Action does not run `npx --yes mfarm@latest`; it runs
+  `npx --yes --package "@mfarm/cli@${MFARM_CLI_VERSION:-0.1.0}" mfarm` — scoped and pinned,
+  deliberately, and `action.yml` carries the reasoning. And `npx mfarm` is not the story to unblock:
+  the unscoped name is not ours, so the fix was to stop telling people to type it.
+
+  `@mfarm/cli` is now publishable — compiled to JavaScript for the tarball, scoped, refusing to
+  start below Node 20.3, verified by a clean install of the real tarball. **The only thing left is
+  the publish itself, and it is blocked on two owner decisions: the npm account/org, and a
+  LICENCE.** There is no LICENSE file in this repo and no `license` field, so npm would publish it
+  as unlicensed — which legally means nobody may use it. The other three packages stay private;
+  nobody installs the API, the worker or the console.
 - Observability gaps, all of which look covered from the dashboard and are not: **no
   backup-freshness alert** (the sidecar logs failures and nothing scrapes it — backups can stop for
   six weeks without a page), **no host metrics** (a full disk takes the database and the backups
