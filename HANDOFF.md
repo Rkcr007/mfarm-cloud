@@ -1938,19 +1938,53 @@ when the feature is broken. See issues 37 and 38.
 ### Still open
 
 - **Issue 34** — arm64 advertised with no translation layer. Item 1 above.
-- **Issue 33** — `AppStore.put` leaves a `.part` file on an oversized upload. Pre-existing.
+- ~~**Issue 33** — `AppStore.put` leaves a `.part` file on an oversized upload.~~ **CLOSED** —
+  `appstore.ts` unlinks the temp file in the `catch` around the pipeline, which is the path a
+  `BlobTooLargeError` takes, and again on the empty-upload and already-stored branches.
+  `test/apps.test.ts` → *“an oversized stream is refused without writing it out”* asserts the `tmp`
+  directory is **empty** afterwards rather than asserting the rejection alone — the rejection was
+  always there; the leak was the bug. Worth keeping that assertion: this path is reachable by
+  anyone holding a key, so a leak here is a disk-fill primitive.
 - **Touch accuracy has no test coverage.** Coordinate scaling uses `getBoundingClientRect`, which
   the DOM shim returns as zeroes. It is a P0 requirement in the direction document.
-- **A crashed client holds its device for the full 30-minute lease** — reproduced on hardware
-  2026-09-01 by `deploy/verify-failure.mjs --only=abandon`, and the cause is now named:
-  `webdriver_sessions.last_command_at` is written on EVERY proxied command and migration 006
-  builds `webdriver_sessions_idle_idx` over it, but **nothing in the codebase reads either**.
-  The signal for an idle sweep is already being recorded, and paid for on every command, for a
-  query that was never written. Fix is a sweep in `reap()` using the index that already exists.
-  Originally filed as having no recovery path because
-  the UI is the thing that crashed. Direction document §14.
-- **`recording` is a capability string nothing implements.** The largest genuinely-new build in the
-  direction document, and §27 means the button cannot exist until the recorder does.
+- ~~**A crashed client holds its device for the full 30-minute lease.**~~ **CLOSED 2026-09-01 by
+  migration 029** (`63bed33`), and verified on hardware the same day — see *“An abandoned client no
+  longer holds its device for thirty minutes”* near the top of this file for the measurement
+  (device reclaimed **649.8s** after the client vanished, against the real 600s production
+  default). The fix was the sweep this bullet asked for: `reap()` now calls
+  `expire_idle_webdriver_sessions()` every tick, keyed on the `last_command_at` that migration 006
+  had been indexing for a query nobody had written.
+
+  Three properties to preserve if this is ever touched, all pinned by `test/allocator.test.ts`
+  → *“idle WebDriver sweep”*:
+
+  * **It runs BEFORE `promote_queued`.** Ending the session is what lets the org's concurrency cap
+    fall, and the cap is what gates promotion — sweeping afterwards leaves the queue blocked for an
+    extra tick.
+  * **The device goes to CLEANING, never straight to READY.** This path exists for sessions that
+    ended badly, which are the ones most likely to have left data behind.
+  * **A session with no `webdriver_sessions` row is left alone.** `mfarm run --no-webdriver`
+    produces no commands at all, so every such lease looks permanently idle and would be swept
+    instantly; its lifecycle belongs to the CLI (ADR-0002 decision 4).
+
+  `WEBDRIVER_IDLE_TIMEOUT_MS` defaults to 600s and must stay above the longest single COMMAND — not
+  the gap between commands — and above the client's own `appium:newCommandTimeout`. Direction
+  document §14.
+
+  **This bullet outlived its fix and sat here contradicting the entry above it.** If an item in this
+  list names the migration that would fix it, check whether that migration shipped before believing
+  the item.
+- **Video recording is not built** — still the largest genuinely-new build in the direction
+  document, and §27 means the button cannot exist until the recorder does. **Reworded 2026-09-02:
+  this used to read “`recording` is a capability string nothing implements”, which is no longer the
+  defect.** The string is gone — `cuttlefish.ts` advertises `screen-stream`, `input-datachannel`,
+  `app-install`, `logcat`, `screenshot`, `ui-hierarchy` and nothing else, with a comment saying it
+  “comes back when `startRecording` does”. That was ADR-0003 being applied correctly: a capability
+  is observed state, so an unimplemented one is removed rather than left as a claim. The gap is the
+  recorder itself. `docs/EXECUTION_MODEL.md` §4.4 has it costed — record on the HOST reusing cvd's
+  existing WebRTC encode, keep only sessions that reported a failure, 10–15 fps at ~500 kbps — and
+  names the one thing still unmeasured: what `screenrecord` costs against the Flutter canvas
+  workload. Recording everything fills `mfarm-cp`'s disk in **~1.3 days** at two devices saturated.
 - **Exploratory testing pays better than building right now.** One hour of using the console as a
   user found five real defects (issue 42) — more than the preceding week of building it. Do a pass
   before starting the next feature, and force `document.hidden = false` first (issue 41).
