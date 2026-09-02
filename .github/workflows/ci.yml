@@ -472,7 +472,13 @@ jobs:
 
           # A surviving `.ts` specifier means javascript importing typescript that was never shipped
           # — an install that fails on first run with ERR_MODULE_NOT_FOUND.
-          if grep -rn "from ['\"]\..*\.ts['\"]" dist/; then
+          #
+          # `--include='*.js'` is load-bearing, and it is here because the obvious version of this
+          # check was WRONG. `inlineSources` embeds the original TypeScript inside the .map files, so
+          # a recursive grep over dist/ matches `from './client.ts'` in the SOURCEMAP — source that is
+          # supposed to say that — and fails a package with nothing whatsoever wrong with it. Only the
+          # emitted JavaScript is being asserted about here.
+          if grep -rn --include='*.js' "from ['\"]\..*\.ts['\"]" dist/; then
             echo "::error title=Unrewritten import::dist/ still imports .ts files; check rewriteRelativeImportExtensions in tsconfig.build.json."
             exit 1
           fi

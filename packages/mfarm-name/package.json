@@ -1,0 +1,26 @@
+{
+  "name": "mfarm",
+  "version": "0.0.1",
+  "license": "MIT",
+  "type": "module",
+  "description": "Placeholder. The MFARM CLI is @mfarm/cli \u2014 this package holds the unscoped name and does nothing.",
+  "homepage": "https://www.npmjs.com/package/@mfarm/cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rkcr007/mfarm-cloud.git",
+    "directory": "packages/mfarm-name"
+  },
+  "bin": {
+    "mfarm": "./src/bin.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

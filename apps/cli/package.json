@@ -3,7 +3,16 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Allocate a device, run your existing test suite against it, always give the device back.",
-  "keywords": ["appium", "webdriver", "android", "ios", "device-farm", "mobile-testing", "ci"],
+  "license": "MIT",
+  "keywords": [
+    "appium",
+    "webdriver",
+    "android",
+    "ios",
+    "device-farm",
+    "mobile-testing",
+    "ci"
+  ],
   "homepage": "https://github.com/Rkcr007/mfarm-cloud/tree/main/apps/cli#readme",
   "repository": {
     "type": "git",
