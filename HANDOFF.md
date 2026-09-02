@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-08-29. **New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:
+Last updated 2026-09-02. **New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:
 what is built, every decision and what it rejected, the roads not taken, and every measured number.
 For the hands-on path instead, `docs/START_HERE.md` goes from a closed laptop to a device you can
 tap in seven steps.** This file is the state of play and every known issue.
@@ -8,7 +8,7 @@ tap in seven steps.** This file is the state of play and every known issue.
 **Two machines (ADR-0006): `mfarm-cp` holds the control plane and console at
 https://farm.mfarm.dev; `mfarm-lab` holds the devices.**
 
-**As of 2026-08-29 `mfarm-lab` is STOPPED and `mfarm-cp` is RUNNING.** That is deliberate rather
+**As of 2026-09-02 `mfarm-lab` is STOPPED and `mfarm-cp` is RUNNING.** That is deliberate rather
 than half-finished: the lab is the ~₹65/hour half and there is no reason to pay it between
 sessions, while the control plane is a few rupees an hour and keeping it up means the console, the
 API and every link into them still resolve. `./deploy/farm-online.sh` starts both and re-points the
@@ -16,6 +16,20 @@ media relay; `./deploy/farm-check.sh` waits for the devices and reports what is 
 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
+
+**2026-09-02 — THIS FILE WAS AUDITED FOR STALE CLAIMS, AND SEVENTEEN WERE FOUND.** Not typos: claims
+that were true when written, were fixed later, and were never unwritten — so the top of the file
+contradicted the bottom. Three of them ("nothing reads `last_command_at`", the `.part` leak, the
+`recording` capability) had a numbered entry recording the fix **elsewhere in this same document**.
+The record-holder said the hub had never spoken to a real Appium; that had been false for two weeks.
+The counts said 652 tests at migration 022; it is 1100 at 033.
+
+**The pattern, so it can be caught earlier next time:** this file appends a numbered entry when
+something is fixed, but the summary sections at the top — *What is built*, *What is NOT built*,
+*BLOCKERS*, *Known issues* — are written in the present tense and nothing forces a re-read. **A
+present-tense claim decays; a dated entry does not.** When you close something, grep this file for
+the sentence you are making false. Every correction below is dated and says what it replaced, rather
+than being silently overwritten, so the decay itself stays visible.
 
 **2026-09-01 — two checks that lied, and a flake that turned CI red.** All three were the same
 shape: an answer that depends on when you happened to look.
@@ -266,13 +280,27 @@ Three numbers do not exist yet, and the whole plan is a hypothesis until they do
 | Interactive density | spike 2a | the actual $/device-hour floor |
 | automated ÷ interactive ratio | spike 2a pass 2 | one price tier or two |
 
-**Blocked on hardware.** Spikes 1 and 2a need a Linux box with `/dev/kvm` (bare metal — a VPS
-without nested virt cannot run Cuttlefish). Spike 2b needs full Xcode. Cost to unblock: roughly a day
-and $20–50 on hourly bare metal (Vultr Bare Metal, Latitude.sh, Equinix Metal). A phone shooting
-240fps slo-mo is enough for the camera measurement.
+**The hardware is no longer the blocker — the spikes simply never ran.** Updated 2026-09-02; the
+paragraph this replaces still said "blocked on hardware… $20–50 on hourly bare metal (Vultr,
+Latitude.sh, Equinix Metal)", which has been wrong since the lab box existed. `mfarm-lab` is an
+`n2-standard-16` on GCP with nested virt, it runs Cuttlefish, and it has been running real devices
+since 2026-08-18. Nothing needs renting.
 
-Harnesses are written and ready in `spikes/`. Run `spikes/bootstrap_cuttlefish.sh` on a fresh Ubuntu
-box first — it preflights, builds, installs, and smoke-tests, resuming across the required reboot.
+**What actually happened is that the numbers got answered by a different route, and one still is
+not.** `spikes/` has no results directory and `spike1_latency.sh` / `spike2_android_density.sh` have
+never been run. Instead:
+
+* **Interactive density and the $/device-hour floor** — answered in practice by running the farm.
+  `docs/RENDER_BASELINE.md` measures the real workload on the real box (2026-08-23, cvd 1.55.1).
+* **Glass-to-glass p50 is STILL MISSING**, and it is the one that decides whether "sub-100ms" is a
+  real claim. The receive half is measured — 50 fps, 30–35 ms RTT, direct (srflx) — but nothing
+  measures input-to-photon. That is item 3 of "Do these first" at the bottom of this file, and a
+  phone shooting 240fps slo-mo is still the cheapest way to get it.
+
+So read this table as **one open number, not three**, and do not re-provision hardware to close it.
+
+`spikes/bootstrap_cuttlefish.sh` is still the fresh-Ubuntu path and still carries the pinned build id
+(see known issue 10) — but the lab box is already past that step.
 
 **Do not let more control-plane work accumulate against an unverified latency assumption.** The
 failure mode that kills projects like this is shipping six weeks of code and then discovering the
@@ -283,18 +311,20 @@ validates the premise, and none of it is wasted if the premise changes.
 
 ## What is built and verified
 
-**652 tests pass, 0 fail** (2026-08-24, at migration 022), against a real PostgreSQL 16. No mocks for
-anything that matters.
+**1100 tests pass, 0 fail** (2026-09-02, at migration 033), against a real PostgreSQL 16. No mocks
+for anything that matters.
 
 ```
-apps/api/         control plane, app library, console,  424 tests
+apps/api/         control plane, app library, console,  651 tests
                   entrypoint, metrics
 apps/cli/         mfarm CLI                              63 tests
-workers/agent/    worker agent, Appium supervisor,      144 tests
-                  automation gateway, Cuttlefish backend
-deploy/           deploy scripts and their checks         21 tests
+workers/agent/    worker agent, Appium supervisor,      345 tests
+                  automation gateway, Cuttlefish backend,
+                  physical devices, tunnel
+deploy/           deploy scripts and their checks         41 tests
 apps/api/public/  the web console (served by the API at /)
-apps/api/migrations/  022 of them; 022 is the newest
+apps/console/     the React console at /app — NO TESTS, no `test` script at all
+apps/api/migrations/  033 of them; 033 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
@@ -367,15 +397,22 @@ silent failure:
 **Reset failure is alerted as a device stuck in CLEANING**, because that is the only signal there
 is: a restore that throws never reports completion, and the device stays in CLEANING by design.
 
-15 rules, `promtool`-checked. **Alertmanager ships with no receiver**, so alerts reach its UI and no
+20 rules, `promtool`-checked. **Alertmanager ships with no receiver**, so alerts reach its UI and no
 human until someone configures one and tests it by stopping the API for three minutes.
 
 ### WebDriver hub — `apps/api/src/http/routes/webdriver.ts`
 
 The adoption path (v2 decision 10). An existing Appium suite migrates by changing one URL —
-`https://mfk_key@hub.mfarm.dev/wd/hub` — and adding `mfarm:region`. W3C and legacy JSONWP dialects
+`https://mfk_key@farm.mfarm.dev/wd/hub` — and adding `mfarm:region`. W3C and legacy JSONWP dialects
 both work, served at `/wd/hub` and at `/` because clients disagree about the base path. Credentials
 travel as HTTP Basic (tenant keys only) since a URL is the only thing a WebDriver client is given.
+
+**That URL used to read `hub.mfarm.dev`, which DOES NOT RESOLVE — corrected 2026-09-02.** It is the
+illustrative SaaS hostname and is spelled that way deliberately in ADR-0002, `apps/api/README.md`
+and `src/auth.ts`, which is fine for those. It was not fine *here*, in the state-of-play document,
+where it read as the address of a farm that exists — anyone following it got a DNS failure. This
+deployment serves everything from one origin (ADR-0007 as amended, `test/single-origin.test.ts`),
+and `farm.mfarm.dev/wd/hub/status` was verified answering 200.
 
 Commands are proxied to an Appium server on the worker. That is a deliberate exception to "never
 proxy the data plane": a WebDriver client pins one base URL for the session's life, so one-hub-URL
@@ -418,8 +455,10 @@ grants EXECUTE to PUBLIC by default, so "we never granted it" is not a control.
 ### Worker agent — `workers/agent`
 
 Registration with credential persistence, heartbeat, deterministic-id metering, snapshot reset, and
-the WebSocket data plane the browser connects to. Two device tiers: Cuttlefish (target, Linux+KVM)
-and AVD (fallback, runs on macOS, cannot meet the latency target and says so).
+the WebSocket data plane the browser connects to. **Three** device backends, not two: Cuttlefish
+(target, Linux+KVM), AVD (fallback, runs on macOS, cannot meet the latency target and says so), and
+**physical handsets** (`devices/physical.ts`, ADR-0008) — added after this line was written and
+missing from it until 2026-09-02. `devices/discovery.ts` picks between them.
 
 `CuttlefishDevice.start()` picks the cheapest correct route — adopt a running group (0s), restore a
 stopped one from its snapshot (8s), cold boot (38s) — takes the golden snapshot itself on first
@@ -446,11 +485,23 @@ sessions.
 
 ### Automation gateway — `workers/agent/src/gateway.ts` (ADR-0004)
 
-The worker half of the automation transport, and **the one internet-facing listener whose
-correctness is a security boundary**. Appium stays on `127.0.0.1`; this is the only thing that can
-reach it. Every request must carry an Ed25519 grant from the hub, verified offline, and the checks
-run in a fixed order with no path to the proxy that skips one: signature → audience is this host →
-`claims.did` matches the device named in the path → fence is not stale.
+The worker half of the automation transport. Appium stays on `127.0.0.1`; this is the only thing
+that can reach it. Every request must carry an Ed25519 grant from the hub, verified offline, and the
+checks run in a fixed order with no path to the proxy that skips one: signature → audience is this
+host → `claims.did` matches the device named in the path → fence is not stale.
+
+**This used to read "the one internet-facing listener whose correctness is a security boundary",
+and ADR-0011 made that conditional — corrected 2026-09-02.** On a **tunnelled** host the gateway is
+NOT internet-facing at all: automation rides the socket the agent already dialled out, and the agent
+replays each request against its own gateway on loopback, so the four checks above still run in full
+but nothing outside the box can reach the listener. `automationIsTunnelled()` decides, and it is read in
+two places that must not disagree — what gets advertised and which interface is bound — because a
+host advertising `mfarm+tunnel:` while binding `0.0.0.0` publishes the private answer and exposes
+the public one.
+
+The existing farm sets `PUBLIC_ENDPOINT` / `APPIUM_ADVERTISE_HOST` and stays on the direct path it
+was verified on, so **for that deployment the original sentence is still true**. Know which one you
+are looking at before hardening or exposing anything.
 
 Deliberate properties, each of which a plausible implementation gets wrong:
 
@@ -475,12 +526,22 @@ without one rather than advertise `127.0.0.1` to the fleet.
 - ~~App install / launch outside Appium~~ — **built 2026-08-19** (issues 21 and 22): upload, install,
   launch, uninstall, over the heartbeat, from the CLI or the console. Never yet run against adb.
 - ~~Logcat streaming~~ — **built 2026-08-19 (issue 28, ADR-0007)**, live over the data plane, with a
-  filter and level chips in the cockpit. NOT persisted: closing the tab loses it, because there is
-  still no artifact store. Screenshots the same — on demand, downloadable, held in the tab only.
-- Video recording, and artifacts generally (an `artifacts` table, retention, a blob route). Issue 23
-  is now half closed: `logcat` and `screenshot` are implemented and honestly declared, and
-  `recording` was REMOVED from the Cuttlefish capability list rather than left as a claim with
-  nothing behind it.
+  filter and level chips in the cockpit. ~~NOT persisted: closing the tab loses it, because there
+  is still no artifact store. Screenshots the same — on demand, downloadable, held in the tab
+  only.~~ **Both persist now — corrected 2026-09-02.** Migration 019's `kind` CHECK is exactly
+  `('logcat', 'screenshot')`, workers upload them per session, and 28 sessions of real production
+  artifacts have been measured at 2.55 MB of logcat and 0.59 MB of screenshot each. A release is
+  never blocked on an upload: a device that cannot ship its logcat is still a device to hand back.
+- ~~Video recording, and artifacts generally (an `artifacts` table, retention, a blob route).~~
+  **Artifacts are BUILT — corrected 2026-09-02.** Migration 019 adds the table, content-addressed
+  blobs are served from `GET /v1/artifacts/:id/blob`, and `reap()` expires them on
+  `ARTIFACT_RETENTION_HOURS` (default 14 days) in two steps, deleting rows before blobs so a crash
+  between them orphans a file rather than stranding a row pointing at nothing.
+
+  **Only VIDEO is still missing**, and deliberately — see the "Still open" entry near the bottom and
+  `docs/EXECUTION_MODEL.md` §4.4 for the cost model. Issue 23 is fully closed: `logcat` and
+  `screenshot` are implemented and honestly declared, and `recording` was REMOVED from the
+  Cuttlefish capability list rather than left as a claim with nothing behind it.
 - ~~Web UI~~ — **built 2026-08-19** (issue 20 and the v2 design): sign-in, devices, sessions, queue,
   apps, health, and since issue 28 a **Launch** flow and an interactive cockpit — live video, a
   control rail, logcat and screenshots. The code path is complete and the WebRTC half has never met
@@ -519,7 +580,9 @@ registration. A VPN was rejected because it authenticates the network rather tha
 peer on it could drive every device, which is the exposure loopback binding exists to prevent, just
 moved inside the perimeter. **BOTH HALVES ARE NOW BUILT (2026-08-17)** —
 `workers/agent/src/gateway.ts`, 17 tests, all four spec points. `APPIUM_ENABLED=1` no longer needs an
-operator-supplied tunnel. Still never tested against a real Appium.
+operator-supplied tunnel. ~~Still never tested against a real Appium.~~ **Superseded 2026-08-18 by
+issue 15** — the full path ran end to end: hub → Ed25519 grant → gateway → real Appium 2 →
+UiAutomator2 → adb → Android 17, in 9.0s. This sentence stayed wrong here for two weeks.
 
 **~~3. `automationEndpoint` is host-level, so per-device Appium is inexpressible.~~ FIXED 2026-08-17.**
 (ADR-0003, B2) Protocol v2 adds `devices[].automationEndpoint`; migration 010 adds
@@ -553,7 +616,13 @@ scheduler).
 **~~6. The media path has no reachability story, and it is not the one ADR-0004 settled.~~ DECIDED
 2026-08-19 — ADR-0005: media reaches the browser through a coturn TURN relay with per-session
 credentials, and the data plane moves off the docker bridge. No client software, no overlay; the
-signed grant stays the authorisation. Nothing is built yet.**
+signed grant stays the authorisation. ~~Nothing is built yet.~~**
+
+**BUILT AND VERIFIED ON HARDWARE the same day (issue 28); the "nothing is built yet" clause was
+corrected 2026-09-02.** `deploy/setup-turn.sh` deploys the relay, `setup-ingress.sh` gained the
+signalling route, and a browser has driven a real Android 17 device at ~50 fps. Measured since:
+30–35 ms RTT on a **direct (srflx)** path — so coturn is the fallback it was designed to be rather
+than the hot path, and the numbers below describe a decision that has already been executed.
 
 Raised 2026-08-18 after the failure in known issue 13. `dataplane.ts` carries control and input;
 **media is not proxied** — the browser negotiates WebRTC straight to Cuttlefish's own server. That
@@ -580,10 +649,16 @@ before building any viewer**, because it determines whether a browser needs clie
    real fake `cvd`/`adb` binaries on a temporary PATH and asserts the exact argv — including that
    selectors come *before* the verb. That test cannot tell you cvd agrees; it can only stop the
    verified invocations drifting.
-2. The WebDriver hub has never spoken to a real Appium server, and the Appium supervisor has never
-   supervised one. Both are tested against fakes that answer correctly; a real driver will disagree
-   about something. The supervisor also detects **process death only** — a wedged-but-alive Appium
-   answers `/status` 200 forever and stays advertised.
+2. ~~The WebDriver hub has never spoken to a real Appium server, and the Appium supervisor has never
+   supervised one.~~ **Both false since 2026-08-18 (issue 15); corrected 2026-09-02.** A real
+   WebDriver session drove a real Cuttlefish device through a real Appium 2 / UiAutomator2 end to
+   end, and the supervisor has since restarted a real Appium under failure injection — six
+   consecutive failed starts → `appium-failure` incident → systemd restart → **farm fully back in
+   ~110s**, measured, not assumed.
+
+   **The half of this that is still true, and is the live issue:** the supervisor detects **process
+   death only**. A wedged-but-alive Appium answers `/status` 200 forever and stays advertised. That
+   has not been fixed and no test covers it.
 3. `apps/api/docker-compose.yml` mounts Postgres data on tmpfs — fast, non-durable, **and that is
    correct for what it is**: the test stack. The farm's durable database is
    `deploy/docker-compose.prod.yml` (named volume, `--data-checksums`, restart policy, verified
