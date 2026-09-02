@@ -47,6 +47,23 @@ RUN npm ci
 
 COPY apps/console ./apps/console
 
+# THE SHARED LIVE VIEW (ADR-0022). The React console does not reimplement Cuttlefish's signalling —
+# it imports `live.js`, the same file the old console loads unbuilt, so the two cannot drift. That
+# import crosses a package boundary, so both files have to be in THIS stage's context or the build
+# fails here and nowhere else.
+#
+# Named explicitly rather than copying all of `apps/api/public`, for two reasons: that directory
+# also holds the 200 KB old console, which this stage has no use for; and a narrow copy makes the
+# dependency visible, so anyone who adds a second cross-package import gets a build error naming the
+# file instead of a bundle that silently lost its types.
+#
+# THIS LINE IS WHY RELEASE FAILED ON 2026-09-02 WHILE CI WAS GREEN. CI runs the same
+# `npm run build --workspace apps/console` against a FULL checkout, where the import resolves; only
+# the image build has a narrowed context. `live.d.ts` is not optional — without it the module still
+# resolves through `live.js` and every callback parameter becomes an implicit `any`, which `strict`
+# rejects (TS7006).
+COPY apps/api/public/live.js apps/api/public/live.d.ts ./apps/api/public/
+
 # Emits `apps/api/public/app/` — fixed filenames, no hashing, so the API's allowlist can name them.
 RUN npm run build --workspace apps/console
 
