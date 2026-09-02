@@ -1,0 +1,177 @@
+# Unit tests for the alert rules — `promtool test rules`.
+#
+# WHY THIS FILE EXISTS. CI already runs `promtool check rules`, and that checks SYNTAX: the YAML
+# parses and the expressions are valid PromQL. It does not evaluate anything. A rule that watches
+# `mfarm_backup_age_second` — singular, a typo — passes that check and then never fires, for ever,
+# and a farm whose backups stopped six weeks ago looks exactly like a farm whose backups are fine.
+#
+# That is this repo's own rule about assertions that cannot come out both ways, applied to alerting:
+# a rule nobody has seen fire is not an alert, it is a hope. Every test below therefore asserts BOTH
+# directions — the condition that must page, and the neighbouring condition that must stay quiet.
+#
+# Run locally:
+#   docker run --rm -v "$PWD:/work" -w /work --entrypoint promtool prom/prometheus:v2.55.1 \
+#     test rules deploy/observability/alerts.test.yml
+
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # -------------------------------------------------------------------------------------------
+  # THE HEALTHY FARM. Pinned to numbers measured on the live control plane on 2026-09-03:
+  #
+  #   mfarm_backup_age_seconds          3620
+  #   mfarm_backup_offsite_age_seconds    13
+  #
+  # This is the most important test in the file and the easiest one to leave out. Without it, every
+  # threshold below could be off by an order of magnitude and the tests would still pass — they
+  # would just be asserting that a rule fires for a farm that is fine.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a healthy farm pages nobody
+    input_series:
+      - series: 'mfarm_backup_age_seconds'
+        values: '3620+60x120'
+      # A SAWTOOTH, not a ramp. The uploader confirms every 15m and rewrites the receipt, so on a
+        # healthy farm this climbs to ~900s and drops back — it never grows without bound. Modelling
+        # it as a ramp (the first version of this test) made it cross 3600 after an hour and fail a
+        # rule that was behaving correctly.
+      - series: 'mfarm_backup_offsite_age_seconds'
+        values: '13+60x14 13+60x14 13+60x14 13+60x14 13+60x14 13+60x14 13+60x14 13+60x14'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: MfarmBackupStale
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: MfarmBackupUnreadable
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: MfarmBackupNotOffsite
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: MfarmBackupOffsiteUnconfirmed
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # BACKUPS HAVE STOPPED. The threshold is 46800s (13h) — two missed 6-hourly runs.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: 'a backup that stopped pages, and only after the for: window'
+    input_series:
+      - series: 'mfarm_backup_age_seconds'
+        values: '46900x120'
+    alert_rule_test:
+      # `for: 15m`. At 10m the condition holds but the alert is pending, not firing — which is the
+      # half that stops a slow dump from paging anyone.
+      - eval_time: 10m
+        alertname: MfarmBackupStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: MfarmBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'No database backup has been written for 13h 1m 40s'
+              description: >-
+                Measured from the newest `mfarm-*.dump` on disk, not from the sidecar claiming success — a crashed sidecar reports nothing at all, which is indistinguishable from one that was never asked. Check `docker compose -f deploy/docker-compose.prod.yml logs backup`. Losing pgdata loses the fleet; the app store and artifacts are reproducible, this is not.
+
+  - interval: 1m
+    name: one slow dump is not an incident
+    input_series:
+      # 12h — inside the 13h budget. A single 6-hourly run that ran long, or a restart.
+      - series: 'mfarm_backup_age_seconds'
+        values: '43200x120'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: MfarmBackupStale
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # THE MOUNT IS GONE. -1 means the API cannot read BACKUP_DIR at all.
+  #
+  # The rules deliberately separate this from staleness, and this test is what holds them apart: a
+  # -1 reported as "very old backups" sends whoever is paged to inspect a sidecar that is working
+  # perfectly, while the actual fault is a `:ro` bind mount on the api service.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: an unreadable backup directory is its own alert, not a stale one
+    input_series:
+      - series: 'mfarm_backup_age_seconds'
+        values: '-1x120'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MfarmBackupUnreadable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The control plane cannot see the backup directory
+              description: >-
+                BACKUP_DIR is unset, unmounted or unreadable from the API container, so backup freshness is UNMEASURED — not proven bad, but not proven good either, which is the same thing when it comes to backups. Check the `:ro` bind mount on the api service.
+      # THE POINT OF THE SEPARATION: -1 must not also read as "the backups are ancient".
+      - eval_time: 20m
+        alertname: MfarmBackupStale
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # FRESH LOCAL BACKUPS, NONE OF THEM OFF THE BOX.
+  #
+  # The dangerous state, and the one that looks healthiest on a dashboard: dumps are being written,
+  # verified and retained, every one of them on the same disk as the database they protect.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: healthy local backups still page when nothing has left the machine
+    input_series:
+      - series: 'mfarm_backup_age_seconds'
+        values: '600x120'
+      - series: 'mfarm_backup_offsite_age_seconds'
+        values: '4000x120'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MfarmBackupNotOffsite
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'The newest backup has not been confirmed off this machine for 1h 6m 40s'
+              description: >-
+                Local backups may be perfectly healthy — check MfarmBackupStale for that. This says the newest dump has not been seen in the bucket, so a lost VM or a lost disk is a lost farm. Usually the service account has lost storage.objects.create on the bucket, or the bucket name changed. Check `docker compose -f deploy/docker-compose.prod.yml logs backup-offsite`.
+      # The local backups are fine, and must not be reported as a problem alongside it.
+      - eval_time: 20m
+        alertname: MfarmBackupStale
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # NOTHING HAS EVER LEFT THE BOX. -1 is "no receipt was ever written".
+  #
+  # This is also what BACKUP_BUCKET=none produces, on purpose: accepting single-disk backups should
+  # require silencing an alert that is telling the truth.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a farm that has never uploaded a backup says so, distinctly
+    input_series:
+      - series: 'mfarm_backup_offsite_age_seconds'
+        values: '-1x120'
+    alert_rule_test:
+      # `for: 30m` here, longer than the others — an uploader that has not run yet on a fresh farm
+      # should not page during setup.
+      - eval_time: 20m
+        alertname: MfarmBackupOffsiteUnconfirmed
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: MfarmBackupOffsiteUnconfirmed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: No backup has ever been confirmed off this machine
+              description: >-
+                There is no `.offsite-receipt` in BACKUP_DIR, so nothing has ever been proven to leave this disk. Either backup-offsite has never succeeded — see its logs, and deploy/README.md for the two IAM commands it needs — or BACKUP_BUCKET is deliberately `none`, in which case silence this alert explicitly so the choice is visible to whoever inherits it.
+      # -1 is not a large number: "never uploaded" must not also fire "the upload is overdue", or
+      # one misconfigured farm produces two pages saying different things about one fact.
+      - eval_time: 40m
+        alertname: MfarmBackupNotOffsite
+        exp_alerts: []
