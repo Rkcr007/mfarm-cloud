@@ -1916,6 +1916,23 @@ four devices restart sequentially at ~30s each.
      deliberately left browser channels unpinged; the old console got away with it because a page
      navigation tears its socket down. A single-page app has no such backstop.
 
+   **A THIRD THING, found only by measuring on hardware:** the stage was letterboxing the video
+   inside its own element, so taps were off by the crop. `stage.css` put the aspect ratio on the
+   device BODY and then inset a uniform bezel — 360×640 minus 10px is 340×620, which is ratio 0.5484
+   against the panel's 0.5625. Its comment claimed the opposite ("the bezel is a padding so the
+   screen box inside it stays exactly the panel's aspect ratio — a border would eat into it"), and
+   padding does precisely what that sentence says a border would. Fixed by moving the ratio onto the
+   SCREEN; re-measured on the live stream at 349×620, ratio 0.562903 vs 0.5625.
+
+   **The check that catches it, because no unit test can:** on a live stream, compare
+   `videoWidth/videoHeight` against `offsetWidth/offsetHeight`. A delta over ~0.001 means every tap
+   is wrong by the crop. `aspectRatio()` was correct throughout — the distortion is in the CSS box
+   model, downstream of every number a Node test can reach.
+
+   **Measured 2026-09-02 on `farm.mfarm.dev/app`:** 49–50 fps, 2520 kbit/s, 35 ms, direct `host`
+   path, **zero console messages** across load, negotiation, streaming, taps and release. Gallery
+   opened from a tap on its icon; the navigation bar went back.
+
    **Still on the old console:** logcat, the inspector, screenshots, the app workflow. A cutover is
    still one line in `ui.ts`'s allowlist, and it should not happen until those land.
 

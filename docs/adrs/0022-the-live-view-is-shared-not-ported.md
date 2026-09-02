@@ -119,6 +119,40 @@ the only thing that typechecks the console. Until this change the console was `.
 - `apps/console/test/geometry.test.ts` pins the panel-priority rule above, including that its two
   fixtures genuinely differ in aspect ratio — otherwise the test proves nothing.
 
+### What the hardware pass found that none of those could
+
+Verified 2026-09-02 on the real farm at `farm.mfarm.dev/app`: **49–50 fps, 2520 kbit/s, 35 ms round
+trip, direct `host` path, zero console messages** across load, negotiation, streaming, taps and
+release. A tap on the Gallery icon opened Gallery; a tap on the navigation bar went back. The stage
+switched from the registered 1080×2340 to the worker's 720×1280 and the detail pane read
+`Panel from: live session`, which is the rule in decision 3 working where it matters.
+
+**And it found a real distortion that every test above passed straight through.** Measured in the
+browser: a 720×1280 stream (ratio 0.5625) rendered into a 340×620 box (ratio 0.5484). The video was
+letterboxing inside its own element, so `offsetWidth` was the box rather than the picture.
+
+The cause was in `stage.css`, and it had a comment asserting the opposite:
+
+> The bezel is a padding so the screen box inside it stays exactly the panel's aspect ratio — a
+> border would eat into it and quietly distort every coordinate we map.
+
+Padding does exactly what that sentence says a border would. The ratio was on the device BODY, and
+a uniform inset changes the ratio of what is inside it: 360×640 minus a 10px bezel is 340×620. The
+fix moves the ratio onto the SCREEN (`box-sizing: content-box` + `aspect-ratio` on `.dev-body`, so
+the ratio applies to the content box) and grows the body outward. Re-measured on the same live
+stream: **349×620, ratio 0.562903 against 0.5625 — sub-pixel, `letterboxing: false`.**
+
+Three things worth keeping from this:
+
+* **A comment is not evidence.** This is the third defect in this repo traced to a persuasive comment
+  that was simply wrong, and the only reason it was caught is that a number was measured rather than
+  a sentence read.
+* **The unit tests were not wrong, they were aimed elsewhere.** `aspectRatio()` was correct and is
+  still correct; the distortion happened in the CSS box model between that number and the pixels.
+  Nothing in a Node test runner can see it.
+* **So this check belongs in the hardware pass, not in CI.** Compare `videoWidth/videoHeight` against
+  `offsetWidth/offsetHeight` on a live stream; a delta above ~0.001 means taps are off by the crop.
+
 ## Related
 
 - `ADR-0007` — the live-view signalling relay, and its 2026-09-02 amendment putting `/dp` on the
