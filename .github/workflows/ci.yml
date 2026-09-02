@@ -549,8 +549,19 @@ jobs:
           )"
           echo "action.yml pins @mfarm/cli@${version}"
 
+          # RUN IT FROM OUTSIDE THE WORKSPACE, and this is the entire subtlety of the job.
+          #
+          # `apps/cli` in this checkout IS `@mfarm/cli` at this very version. Run npx from the repo
+          # root and npm considers the request already satisfied by the local workspace, contacts no
+          # registry at all, and then fails with `sh: 1: mfarm: not found` because nothing is linked
+          # — in under a second, with no npm output. That looks exactly like "the published package
+          # is broken" and is nothing of the kind. Reproduced in a container both ways before this
+          # comment was written.
+          #
+          # A stranger is not standing inside our monorepo, so neither is this check.
+          cd "${RUNNER_TEMP}"
           got="$(npx --yes --package "@mfarm/cli@${version}" mfarm --version)"
-          echo "npm resolved it and it reports ${got}"
+          echo "npm resolved it from ${PWD} and it reports ${got}"
           [ "${got}" = "${version}" ] || {
             echo "::error title=Pin mismatch::action.yml pins ${version}, but that package reports ${got}"
             exit 1

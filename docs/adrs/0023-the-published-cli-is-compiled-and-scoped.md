@@ -138,7 +138,21 @@ can differ — npm normalised `bin` from `./dist/bin.js` to `dist/bin.js` on the
   The guard survived compilation and packaging.
 - `license: MIT`, `engines: {"node":">=20.3.0"}` as served by the registry.
 
-The `published-cli` CI job now reads the pin out of `action.yml` and resolves it from npm on every
+**And that job got it wrong on its first attempt, in a way worth keeping.** It ran the npx command
+from the repo root — where `apps/cli` IS `@mfarm/cli` at exactly the pinned version. npm considered
+the request already satisfied by the local workspace, contacted no registry at all, and failed in
+under a second with `sh: 1: mfarm: not found` and no npm output whatsoever. That reads precisely
+like "the published package is broken", and the package was fine.
+
+Two local checks had already passed for the same reason and proved nothing: both ran in directories
+that happened to have a `mfarm` in `node_modules/.bin`, so npx used the local binary instead of
+fetching. **A check for "does npm resolution work" cannot run anywhere that already has the answer
+lying around** — which is this repo's existing rule (*an assertion that holds on the fallback path
+cannot detect that you are on the fallback path*) wearing new clothes. The job now `cd`s to
+`RUNNER_TEMP` first, because a stranger is not standing inside our monorepo. Reproduced in a
+container both ways before the fix was written.
+
+The `published-cli` CI job reads the pin out of `action.yml` and resolves it from npm on every
 run. Pinning is deliberate (`action.yml` explains why a floating dist-tag would be worse), and its
 cost is that the pin can name a version nobody published — which nothing else here would catch,
 since every other CLI test points `MFARM_CLI_BIN` at the checkout and never touches the registry.
