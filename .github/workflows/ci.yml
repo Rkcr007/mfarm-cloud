@@ -413,3 +413,90 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/check-workflow-hygiene.py
+
+  package:
+    name: The npm tarball installs and runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # `@mfarm/cli` is the only published artifact in this repo, and everything that can break about
+    # it breaks BETWEEN the source and the tarball: a `files` list that omits the entry point, a
+    # `bin` path pointing at the pre-build layout, an import specifier that still says `.ts`, a
+    # shebang asking for a flag the customer's Node does not have. None of that is visible to `npm
+    # test`, which runs the TypeScript in place.
+    #
+    # This is the same class of gap that let PR #72 pass CI and fail Release: the thing shipped is
+    # not the thing tested. Here the fix is cheap — no image build, just pack and install.
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20.3.0 is not a round number, it is the EXACT floor `apps/cli/src/engine.ts` claims
+        # (`AbortSignal.any`). Testing on 20.x-latest would prove nothing about the boundary; if the
+        # floor is wrong, this is the job that says so.
+        node: ['20.3.0', '22', '24']
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The BUILD is ours and uses our toolchain, exactly as a real publish would — `prepack` needs
+      # the repo's pinned typescript. What has to happen the way a stranger does it is the step
+      # after this one: installing the tarball somewhere with no workspace, no lockfile and none of
+      # our devDependencies.
+      #
+      # `--ignore-scripts` because nothing here needs a dependency's postinstall, and skipping them
+      # keeps this job from executing third-party install hooks it has no reason to run.
+      - name: Install the build toolchain
+        run: npm ci --ignore-scripts
+
+      - name: Build and pack
+        working-directory: apps/cli
+        run: npm pack --pack-destination "${RUNNER_TEMP}"
+
+      - name: The tarball contains a runnable program
+        working-directory: apps/cli
+        run: |
+          set -euo pipefail
+
+          # The shebang must not ask for type stripping: `dist/` is JavaScript, and an unknown flag
+          # is a startup failure rather than a warning on the Nodes that do not accept it.
+          head -1 dist/bin.js | grep -qx '#!/usr/bin/env node' || {
+            echo "::error title=Wrong shebang::dist/bin.js must start with '#!/usr/bin/env node', got: $(head -1 dist/bin.js)"
+            exit 1
+          }
+
+          # A surviving `.ts` specifier means javascript importing typescript that was never shipped
+          # — an install that fails on first run with ERR_MODULE_NOT_FOUND.
+          if grep -rn "from ['\"]\..*\.ts['\"]" dist/; then
+            echo "::error title=Unrewritten import::dist/ still imports .ts files; check rewriteRelativeImportExtensions in tsconfig.build.json."
+            exit 1
+          fi
+
+      - name: Install it as a stranger would, and run it
+        run: |
+          set -euo pipefail
+          expected="$(node -p "require('${GITHUB_WORKSPACE}/apps/cli/package.json').version")"
+          tarball="$(ls "${RUNNER_TEMP}"/mfarm-cli-*.tgz)"
+
+          mkdir -p "${RUNNER_TEMP}/consumer"
+          cd "${RUNNER_TEMP}/consumer"
+          npm init -y > /dev/null
+          npm install "${tarball}"
+
+          # `--version` is the whole chain in one call: the bin path resolves, the shebang runs, the
+          # rewritten specifiers load, and `../package.json` resolves to OURS rather than the
+          # consumer's — the failure that would otherwise report the stranger's version as mfarm's.
+          got="$(./node_modules/.bin/mfarm --version)"
+          echo "mfarm --version -> ${got} (expected ${expected}) on node $(node --version)"
+          [ "${got}" = "${expected}" ] || {
+            echo "::error title=Wrong version::the installed CLI reports '${got}', package.json says '${expected}'"
+            exit 1
+          }
+
+          # Help must work without an API key. It is the first thing anyone runs.
+          ./node_modules/.bin/mfarm --help > /dev/null

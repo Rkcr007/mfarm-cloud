@@ -1,6 +1,24 @@
-# `mfarm`
+# `@mfarm/cli`
 
 Run the mobile test suite you already have on a cloud device.
+
+Requires Node 20.3 or newer. The CLI refuses to start on anything older rather than failing later
+with a missing global.
+
+## Installing it
+
+```sh
+npm install --save-dev @mfarm/cli
+```
+
+**The package is `@mfarm/cli`; the command it installs is `mfarm`.** Install it rather than reaching
+for `npx mfarm` — that unscoped name is not this project, and whatever is published under it would
+run in a process holding your `MFARM_API_KEY`. If you must run it without installing, name the
+package explicitly and pin it:
+
+```sh
+npx --package @mfarm/cli@0.1.0 mfarm run --region us-east -- npx appium-test
+```
 
 ## Adopting it
 

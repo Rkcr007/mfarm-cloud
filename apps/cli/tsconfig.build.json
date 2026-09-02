@@ -1,0 +1,26 @@
+{
+  // THE PUBLISH BUILD, and the only build in this repo.
+  //
+  // Everything else here runs TypeScript directly on Node's type stripping, which is why the root
+  // `tsconfig.json` is `noEmit` and says no build step should be added. That rule is about OUR
+  // machines. A published package is different: it lands on a stranger's Node, chosen by their CI
+  // image rather than by us, and `--experimental-strip-types` is not a promise we can make on their
+  // behalf. So the tarball carries plain JavaScript and the repo carries TypeScript.
+  //
+  // `npm run build` — run automatically by `prepack`, so `npm publish` cannot ship a stale `dist/`.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    // The source imports `./client.ts` because that is what type stripping resolves. This rewrites
+    // those specifiers to `./client.js` in the OUTPUT, which is what the emitted files actually are.
+    // Without it the tarball is javascript importing typescript that was never shipped.
+    "rewriteRelativeImportExtensions": true,
+    "declaration": false,
+    "sourceMap": true,
+    // The CLI is the one thing a customer runs, so a stack trace should name a line they can read.
+    "removeComments": false
+  },
+  "include": ["src/**/*.ts"]
+}

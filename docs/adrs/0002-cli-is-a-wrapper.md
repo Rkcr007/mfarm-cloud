@@ -156,8 +156,11 @@ deadline.
 **D5 — `session rm` on an already-released session exits 0, not 1.** Not specified by this ADR. A CI
 cleanup step that fails because the reaper won the race is a cleanup step people delete.
 
-**Packaging note.** `apps/cli/package.json` is `"private": true`, matching every other package in
-the repo. That blocks the `npx mfarm` story in decision 6 until publishing is set up.
+**~~Packaging note.~~ SUPERSEDED 2026-09-03 by ADR-0023.** This said `apps/cli/package.json` is
+`"private": true` and that it blocked the `npx mfarm` story in decision 6. It is now publishable:
+compiled to JavaScript for the tarball, scoped, and refusing to start below Node 20.3. Decision 6's
+story is `npm install --save-dev @mfarm/cli`, and **not** `npx mfarm` — that unscoped name is not
+this project's, and ADR-0023 explains why running it would be worse than merely not working.
 
 ## Verification
 
