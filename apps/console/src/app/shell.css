@@ -116,7 +116,18 @@
 .dot-warn { background: var(--warn); }
 .dot-bad  { background: var(--ink-4); }
 
-.main { min-width: 0; min-height: 0; display: grid; }
+/* The stage takes what is left; the controls under it take only what they need.
+   Explicit rows because this grid gained siblings when the live view landed — with the implicit
+   `grid-auto-rows` every child got an equal share, which stretched a button to 350px tall and
+   pushed the device below the fold. */
+.main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  justify-items: center;
+  align-content: stretch;
+}
 
 /* The honest empty screen. Centred, quiet, and clearly not a device screenshot. */
 .screen-empty {

@@ -34,15 +34,34 @@
   position: relative;
   z-index: 1;
   height: min(var(--dev-max-h), 100%);
-  aspect-ratio: var(--dev-ratio);
+  /* The width follows from the body below. The ratio is NOT set here — see .dev-body. */
+  width: fit-content;
 }
 
-/* The physical body. The bezel is a padding so the screen box inside it stays exactly the panel's
-   aspect ratio — a border would eat into it and quietly distort every coordinate we map. */
+/**
+ * The physical body, sized OUTWARDS from the screen.
+ *
+ * THE PREVIOUS VERSION OF THIS BLOCK WAS WRONG, and its comment asserted the opposite: "the bezel is
+ * a padding so the screen box inside it stays exactly the panel's aspect ratio — a border would eat
+ * into it and quietly distort every coordinate we map". Padding does exactly what that sentence says
+ * a border would. It insets all four sides equally, so a body at the panel's ratio yields a SCREEN
+ * at a different one: 360×640 with a 10px bezel gives 340×620, which is 0.5484 against the panel's
+ * 0.5625.
+ *
+ * The consequence was not cosmetic. `object-fit: contain` then letterboxes the video inside its own
+ * element, and `live.js` scales every touch by `videoWidth / offsetWidth` — a width that is now the
+ * box rather than the picture. Measured on hardware 2026-09-02: a 720×1280 stream in a 340×620 box,
+ * letterboxed by 16px vertically.
+ *
+ * So the SCREEN carries the ratio and the bezel is added around it. `box-sizing: content-box` is
+ * what makes `aspect-ratio` apply to the content box — the screen — rather than to the padded box.
+ * Change either of those two lines and the distortion comes back silently.
+ */
 .dev-body {
   position: relative;
-  width: 100%;
-  height: 100%;
+  box-sizing: content-box;
+  height: calc(100% - 2 * var(--dev-bezel));
+  aspect-ratio: var(--dev-ratio);
   padding: var(--dev-bezel);
   border-radius: calc(var(--dev-radius) + var(--dev-bezel));
   background: linear-gradient(160deg, #26223A 0%, #14121F 46%, #1B1830 100%);
