@@ -576,11 +576,23 @@ without one rather than advertise `127.0.0.1` to the fleet.
   workspace existed, and kept because it matches the GitHub repository).
 
   The other three packages stay private; nobody installs the API, the worker or the console.
-- Observability gaps, all of which look covered from the dashboard and are not: **no
-  backup-freshness alert** (the sidecar logs failures and nothing scrapes it — backups can stop for
-  six weeks without a page), **no host metrics** (a full disk takes the database and the backups
-  down and nothing here says so first), and **no worker-side metrics** (cvd health, adb
-  responsiveness and a wedged-but-alive Appium are invisible except through device state).
+- Observability gaps. **The backup-freshness half of this bullet was STALE and is corrected
+  2026-09-03 — the eighteenth such claim found in this file.** There IS a backup-freshness alert,
+  and there has been for some time: `mfarm_backup_age_seconds` and
+  `mfarm_backup_offsite_age_seconds` are exported by `apps/api/src/metrics.ts` from a `:ro` mount of
+  `BACKUP_DIR`, and `alerts.yml` carries four rules over them. **Measured on the live control plane
+  on 2026-09-03: age 3620s against a 46800s threshold, offsite 13s against 3600s, 26 files
+  retained.** Backups are running, verified and leaving the box.
+
+  **What is actually missing is an EVALUATOR and a RECEIVER, and that is a much shorter list than
+  this bullet used to describe.** `docker-compose.obs.yml` has never been run anywhere, so nothing
+  evaluates those rules; and `alertmanager.yml` ships with no integrations, which its own header
+  says plainly — alerts would group in a UI nobody looks at. So the six-week claim is still TRUE, but
+  for a different reason, and the fix is deployment plus one webhook rather than building an alert.
+
+  Still genuinely absent: **no host metrics** (a full disk takes the database and the backups down
+  and nothing here says so first), and **no worker-side metrics** (cvd health, adb responsiveness
+  and a wedged-but-alive Appium are invisible except through device state).
 - Phase 2 is **partly** proven on hardware now. `deploy/docker-compose.prod.yml` runs on the lab box
   (api, postgres and the backup sidecar), which `deploy/farm-up.sh` brings up in one command. Still
   never run anywhere: the observability stack (`docker-compose.obs.yml`), `tailscale serve`, and any

@@ -363,6 +363,24 @@ jobs:
             -w /work --entrypoint promtool \
             prom/prometheus:v2.55.1 check config deploy/observability/prometheus.yml
 
+      # `check rules` above proves the file PARSES. It evaluates nothing, so a rule watching
+      # `mfarm_backup_age_second` — singular, a typo — passes it and then never fires, and a farm
+      # whose backups stopped six weeks ago looks exactly like a farm whose backups are fine.
+      #
+      # `test rules` actually evaluates them against synthetic series. Every case asserts BOTH
+      # directions: the condition that must page, and the neighbouring condition that must stay
+      # quiet. Mutation-checked before this step was added — typoing the metric name and merging
+      # the -1 case into the staleness rule each fail it.
+      #
+      # `-w` at the rules directory because the test file refers to `alerts.yml` beside it.
+      - name: Evaluate the alert rules against synthetic series
+        run: |
+          set -eu
+          docker run --rm \
+            -v "$PWD/deploy/observability:/work" \
+            -w /work --entrypoint promtool \
+            prom/prometheus:v2.55.1 test rules alerts.test.yml
+
   yaml-lint:
     name: Workflow hygiene (YAML, pins, shell syntax)
     runs-on: ubuntu-latest
