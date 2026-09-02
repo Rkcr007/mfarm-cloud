@@ -553,10 +553,20 @@ without one rather than advertise `127.0.0.1` to the fleet.
   deliberately, and `action.yml` carries the reasoning. And `npx mfarm` is not the story to unblock:
   the unscoped name is not ours, so the fix was to stop telling people to type it.
 
-  `@mfarm/cli` is now publishable — compiled to JavaScript for the tarball, scoped, MIT, refusing to
-  start below Node 20.3, verified by a clean install of the real tarball. **The licence is settled
-  (MIT, 2026-09-03) and the npm account exists (`rkcr007`). The one thing still missing is the
-  `@mfarm` ORG on npm — the registry answers "Scope not found", and org creation is web-only.**
+  **`@mfarm/cli@0.1.0` IS PUBLISHED — 2026-09-03, MIT, owner `rkcr007`.** Verified against the live
+  registry, not the local tarball: a clean `npm install @mfarm/cli` into an empty project runs, and
+  **the exact command `action.yml` executes** — `npx --yes --package "@mfarm/cli@0.1.0" mfarm` —
+  resolves and reports `0.1.0`. The engine guard survived the round trip: the published build on
+  Node 16.17 prints `mfarm needs Node 20.3.0 or newer` and exits 1. **The adoption path works for
+  someone who is not us, which had never been true before.**
+
+  **The unscoped `mfarm` placeholder is NOT yet published** — still 404. It is built and tested in
+  `packages/mfarm-name`; it needs one `npm publish --access public` from that directory.
+
+  **Publishing needs a 2FA code, so it is the owner's command to run, never an agent's.** The first
+  attempt failed `EOTP` and a later one failed at a browser-auth step, both leaving nothing on the
+  registry — so verify from the registry (`npm view @mfarm/cli version`) rather than from a
+  "published" report.
 
   `packages/mfarm-name` claims the unscoped `mfarm` with an inert package that prints where the real
   CLI is and exits 1. That name was unregistered, and `npx mfarm …` — which this repo's own README

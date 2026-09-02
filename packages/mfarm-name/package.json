@@ -11,7 +11,7 @@
     "directory": "packages/mfarm-name"
   },
   "bin": {
-    "mfarm": "./src/bin.js"
+    "mfarm": "src/bin.js"
   },
   "files": [
     "src",
