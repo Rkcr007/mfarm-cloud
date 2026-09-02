@@ -21,7 +21,8 @@
     "types": [
       "vite/client"
     ],
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true
   },
   "include": [
     "src",

@@ -27,5 +27,18 @@
     "types": ["node"]
   },
   "include": ["apps/**/*.ts", "workers/**/*.ts", "packages/**/*.ts"],
-  "exclude": ["**/node_modules"]
+
+  // `apps/console` is EXCLUDED, and it has to be: it is the only browser target in the repo, so it
+  // needs `lib: ["DOM"]` and this file deliberately has `lib: ["es2023"]` for Node. Compiled here
+  // it fails on `window`, `RTCIceServer` and `HTMLVideoElement.srcObject` — all of which are real
+  // and correct in a browser.
+  //
+  // It is not unchecked. `apps/console/tsconfig.json` has the right options and its own `build`
+  // script runs `tsc --noEmit` before Vite; CI runs that build, and its step comment already says
+  // it is the only thing that typechecks the console.
+  //
+  // This became load-bearing on 2026-09-02. Until then the console was `.tsx` plus a
+  // `vite.config.ts` that happens to touch no DOM API, so the glob above matched almost nothing and
+  // the gap was invisible. The live-view port added plain `.ts` modules and it stopped being.
+  "exclude": ["**/node_modules", "apps/console"]
 }
