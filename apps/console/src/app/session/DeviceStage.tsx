@@ -15,6 +15,7 @@
  * the device is right — drawing a shape the device is not is the one thing a mirror must never do.
  */
 import type { CSSProperties, ReactNode } from 'react';
+import { aspectRatio } from './geometry.ts';
 
 export interface DeviceChrome {
   /** Screen corner radius, as a % of the frame's width, so it survives any zoom. */
@@ -40,7 +41,9 @@ export interface DeviceStageProps {
 export function DeviceStage({
   screen, chrome, maxHeight = 560, lit = true, children,
 }: DeviceStageProps) {
-  const ratio = screen.width > 0 && screen.height > 0 ? screen.width / screen.height : 9 / 16;
+  // Shared with `App`, and unit-tested: a degenerate panel must fall back rather than reach CSS
+  // as `NaN`, which collapses the element to zero height and reads as the farm being down.
+  const ratio = aspectRatio(screen);
 
   /**
    * Custom properties rather than inline geometry on each node.

@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test --test-concurrency=1 --experimental-strip-types test/*.test.ts"
   },
   "dependencies": {
     "react": "^19.2.0",

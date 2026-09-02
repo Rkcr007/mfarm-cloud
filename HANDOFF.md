@@ -1892,18 +1892,36 @@ four devices restart sequentially at ~30s each.
    34 was SIDESTEPPED, not fixed — an arm64-only build would still fail. Do not re-run this to
    "check arm64"; it does not test that.
 
-2. **PORT THE LIVE VIEW INTO THE NEW CONSOLE — still the top item.** `/app` currently renders real
-   devices at real geometry with an honest empty screen. The next slice is the WebRTC path;
-   `apps/api/public/live.js` is the working implementation to port, and it is the one part of the old
-   console that holds a socket and a peer connection open rather than being a render function.
+2. ~~**PORT THE LIVE VIEW INTO THE NEW CONSOLE.**~~ **DONE 2026-09-02 — ADR-0022.** `/app` now
+   streams. Start a session on a device and the screen inside the chassis is the real device, with
+   working taps, drags and keyboard.
 
-   Everything the session screen needs is proven on the old console: 50 fps, 42 ms round trip, a real
-   customer app installing, launching and taking accurate taps. This is a port, not a discovery.
+   **It was not ported. It is SHARED.** `live.js` says of itself that it is the only place in the
+   repo that knows Cuttlefish's signalling vocabulary, so the React console imports that exact file
+   rather than reimplementing it — Vite bundles it, the old console keeps loading it unbuilt, and
+   the two cannot drift apart. `live.d.ts` became a real declaration to make that possible; it used
+   to type every method as `unknown` via an index signature.
+
+   What React owns is only WHEN the connection exists, in `liveController.ts`, because effects run
+   twice in development, re-run on any dependency change, and do not run when a tab closes. That is
+   a leak per device opened, against `MAX_CHANNELS_PER_HOST` = 32.
+
+   **Two things this found that were not in the plan:**
+
+   * A refused grant reported "Disconnected." instead of the worker's actual reason. Closing the
+     dying session on the retry path delivered `live.js`'s synchronous `onState('closed')` back into
+     the live callback and overwrote the `failed` detail. Found by the real-socket test, invisible
+     to a fake, mutation-checked.
+   * `pagehide` now closes the channel. ADR-0021 pinged both ends of the AGENT tunnel and
+     deliberately left browser channels unpinged; the old console got away with it because a page
+     navigation tears its socket down. A single-page app has no such backstop.
+
+   **Still on the old console:** logcat, the inspector, screenshots, the app workflow. A cutover is
+   still one line in `ui.ts`'s allowlist, and it should not happen until those land.
 
    **Read "port" as a verb.** A 2026-09-02 brief read this line as a port *number* collision and
    asked for the console and live view to be put behind one external origin. They already are, and
-   the audit that established it found a different, real bug — see item 31 below. The React port
-   itself is still not done.
+   the audit that established it found a different, real bug — see item 31 below.
 
 31. **THE LIVE VIEW WAS OFF BY DEFAULT, AND THE INGRESS DISAGREED WITH THE API.** 2026-09-02,
     ADR-0007 amended.
@@ -2020,8 +2038,16 @@ when the feature is broken. See issues 37 and 38.
   directory is **empty** afterwards rather than asserting the rejection alone — the rejection was
   always there; the leak was the bug. Worth keeping that assertion: this path is reachable by
   anyone holding a key, so a leak here is a disk-fill primitive.
-- **Touch accuracy has no test coverage.** Coordinate scaling uses `getBoundingClientRect`, which
-  the DOM shim returns as zeroes. It is a P0 requirement in the direction document.
+- ~~**Touch accuracy has no test coverage.**~~ **COVERED 2026-09-02** by
+  `apps/console/test/tap-mapping.test.ts`, which drives `live.js`'s real `attachInput` with a fake
+  element whose geometry the test sets, so the zeroed `getBoundingClientRect` in the old DOM shim is
+  no longer in the way. 18 tests: scaling up and down, truncation, the far corner, a tap before the
+  first frame (sent at the origin, deliberately, rather than dropped), multi-touch, drag capture and
+  inspect mode. Mutation-checked — making `scale()` consult `offsetHeight` fails 8 of them.
+
+  **What is still uncovered:** the mapping is verified, the LAYOUT feeding it is not. The scale is
+  only right while the element does not letterbox, which is why the stage draws the panel the worker
+  reports (ADR-0022); nothing tests that in a real browser. Hardware verification is what covers it.
 - ~~**A crashed client holds its device for the full 30-minute lease.**~~ **CLOSED 2026-09-01 by
   migration 029** (`63bed33`), and verified on hardware the same day — see *“An abandoned client no
   longer holds its device for thirty minutes”* near the top of this file for the measurement
