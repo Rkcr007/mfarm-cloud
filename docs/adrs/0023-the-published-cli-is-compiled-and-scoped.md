@@ -66,9 +66,9 @@ So `src/engine.ts` compares `process.versions.node` against `20.3.0` before `mai
 not a round number: it is where `AbortSignal.any` landed, which `client.ts` uses to combine the
 caller's abort signal with the request timeout, and it is the newest API this package touches.
 
-**3. Scoped, and the README says so.** `@mfarm/cli` with `publishConfig.access: public`. The README
-now leads with `npm install --save-dev @mfarm/cli` and states that the command is `mfarm` while the
-package is not — with the `npx --package @mfarm/cli@0.1.0 mfarm` form for people who will not
+**3. Scoped, and the README says so.** `@mfarm/cli` with `publishConfig.access: public`. This is the
+load-bearing half of the unscoped-name problem below: the README now leads with
+`npm install --save-dev @mfarm/cli` and states that the command is `mfarm` while the package is not — with the `npx --package @mfarm/cli@0.1.0 mfarm` form for people who will not
 install, pinned, for the reason `action.yml` already gives about floating dist-tags.
 
 ## Alternatives rejected
@@ -161,23 +161,38 @@ since every other CLI test points `MFARM_CLI_BIN` at the checkout and never touc
   `mfarm-cli-0.1.0.tgz` into an empty project, then `mfarm --version` → `0.1.0` on Node 23.11.0, and
   on Node 16.17.0 → `mfarm: mfarm needs Node 20.3.0 or newer; this is 16.17.0.` with exit 1.
 
-## The unscoped name
+## The unscoped name — npm already defends it, and will not let us
 
-`mfarm` on npm was unregistered, and `packages/mfarm-name` now claims it with an inert package: it
-prints where the real CLI is and exits 1.
+`mfarm` on npm was unregistered, and the plan was to claim it with an inert package that prints
+where the real CLI is and exits 1. The reasoning was sound: `mfarm run` executes in a process holding
+`MFARM_API_KEY` and derives `MFARM_WEBDRIVER_URL`, which embeds it — so `npx mfarm …`, the command
+this project's own README suggested until 2026-09-03, would have handed a customer's credential to
+whoever registered the name first.
 
-This is not tidiness. `mfarm run` executes in a process holding `MFARM_API_KEY` and derives
-`MFARM_WEBDRIVER_URL`, which embeds it — so `npx mfarm …`, the command this project's own README
-suggested until today, would have handed a customer's credential to whoever registered the name
-first. Publishing twenty lines that do nothing is the cheapest permanent close.
+**npm refused the publish**, 2026-09-03:
 
-It is deliberately plain JavaScript with no build, no dependencies and no engine floor, so that it
-runs on any Node a stranger might have and fails with its own message rather than a parser error.
-It exits **1**, not 0: someone who reaches it in CI has a broken pipeline and should find out
-immediately, rather than watch a green step that allocated no device and ran no tests.
+> 403 Forbidden — PUT https://registry.npmjs.org/mfarm — Package name too similar to existing
+> package charm
 
-The repo's private root package was renamed `mfarm` → `mfarm-cloud` at the same time, because a
-workspace and its root sharing a name makes `npm -w mfarm` ambiguous.
+`charm@1.0.2` is a real package (ANSI terminal control sequences). npm's typosquatting protection
+considers `mfarm` too close to it.
+
+**And that is the answer to the whole concern, because the block is not about us.** Anyone attempting
+to register `mfarm` hits the identical 403. The protection we were about to implement by hand is
+already enforced by the registry, against everyone, including an attacker. So the placeholder was
+both impossible to publish and unnecessary, and `packages/mfarm-name` was deleted rather than kept as
+a package that can never ship.
+
+Two honest limits on that comfort. It is npm **policy**, not a guarantee — the similarity heuristic
+can change, and it applies to new registrations rather than to a name someone already holds. And it
+says nothing about near misses that are not similar to an existing package: `mfarm-cli`, `mfarmcli`
+and friends remain registrable by anyone. **The durable fix was never the placeholder — it was
+removing `npx mfarm` from the README**, which is done, and pointing every document at the scoped
+name, which `action.yml` and `docs/ci.md` already did.
+
+The repo's private root package keeps the name `mfarm-cloud` (renamed from `mfarm` while the
+placeholder workspace existed). Reverting would be churn for its own sake, and the new name matches
+the GitHub repository.
 
 ## Related
 

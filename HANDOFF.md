@@ -560,18 +560,20 @@ without one rather than advertise `127.0.0.1` to the fleet.
   Node 16.17 prints `mfarm needs Node 20.3.0 or newer` and exits 1. **The adoption path works for
   someone who is not us, which had never been true before.**
 
-  **The unscoped `mfarm` placeholder is NOT yet published** — still 404. It is built and tested in
-  `packages/mfarm-name`; it needs one `npm publish --access public` from that directory.
+  **The unscoped `mfarm` CANNOT be published, and does not need to be.** npm refuses it: *"Package
+  name too similar to existing package charm"* (`charm@1.0.2` is real). **The same 403 blocks
+  everyone**, so the registry already enforces what the placeholder was going to — `packages/mfarm-name`
+  was deleted rather than kept as a package that can never ship. The durable fix was always removing
+  `npx mfarm` from the README, which is done. Near misses like `mfarm-cli` are still registrable by
+  anyone; nothing points at them.
 
   **Publishing needs a 2FA code, so it is the owner's command to run, never an agent's.** The first
   attempt failed `EOTP` and a later one failed at a browser-auth step, both leaving nothing on the
   registry — so verify from the registry (`npm view @mfarm/cli version`) rather than from a
   "published" report.
 
-  `packages/mfarm-name` claims the unscoped `mfarm` with an inert package that prints where the real
-  CLI is and exits 1. That name was unregistered, and `npx mfarm …` — which this repo's own README
-  suggested until 2026-09-03 — runs in a process holding `MFARM_API_KEY`. The private root package
-  was renamed `mfarm` → `mfarm-cloud` so a workspace and its root no longer share a name.
+  The private root package is named `mfarm-cloud` (renamed from `mfarm` while the placeholder
+  workspace existed, and kept because it matches the GitHub repository).
 
   The other three packages stay private; nobody installs the API, the worker or the console.
 - Observability gaps, all of which look covered from the dashboard and are not: **no
