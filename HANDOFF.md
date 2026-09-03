@@ -2546,3 +2546,67 @@ when the feature is broken. See issues 37 and 38.
     owns the phone. It now HAS a way back, which it did not before.
 
     `mfarm-lab` was stopped afterwards.
+
+47. **THE FIRST REAL SUITE RAN ON THE FARM, PASSED 8/8, AND FOUND TWO DEFECTS THAT FOUR MONTHS OF
+    `verify-*` RUNS COULD NOT.** 2026-09-04, control plane `1782257`.
+
+    `examples/medishop-suite` — an ordinary WebdriverIO suite, from a laptop, against
+    `farm.mfarm.dev` — **8 tests, 8 passed, 59.9s**, two device leases (`cf-1`, `cf-4`), run
+    `medishop-first-real-1788478376`. Everything downstream recorded it: 8 result rows with real
+    per-test durations, two `install DONE` app-actions for `com.way2automation.medishop@1.0`, and
+    **2 screenshots (2.0 MB) + 2 logcats (4.5 MB)** captured at release.
+
+    **Why this was worth doing even though the path was already "hardware-verified".** Every run
+    that had ever reached this farm was named `verify-*` — `deploy/verify-runs.mjs`, which drives
+    the real hub, gateway, Appium and device but is OUR code asserting OUR contract. The distinct
+    test names in `test_results` before today were `a pending case`, `flaky thing`,
+    `checkout applies a promo`. A customer-shaped suite had never touched it, and the two defects
+    below are both invisible to the synthetic driver because it never calls `driver.quit()` the way
+    a suite does.
+
+    ---------------------------------------------------------------- **1. A RUN FORGETS WHICH BUILD
+    IT TESTED, AND ONLY FOR SUITES THAT BEHAVE CORRECTLY.**
+
+    `GET /v1/runs` reported `"build": null, "buildCount": 0` for a run whose every session installed
+    `com.way2automation.medishop@1.0`.
+
+    `webdriver_sessions.app_build_id` (migration 020) is the ONLY place a run's build identity
+    lives, and the rollup in `routes/runs.ts` reads it through
+    `LEFT JOIN webdriver_sessions w ON w.session_id = s.id` — while `routes/webdriver.ts` runs
+    `DELETE FROM webdriver_sessions WHERE session_id = $1` on `driver.quit()`. **So the row carrying
+    the answer is deleted by the correct client behaviour**, and *"what failed on build 4471?"* —
+    the exact question migration 020 and `EXECUTION_MODEL.md` §4.2/§4.3 exist to answer — is
+    unanswerable for every suite that quits properly. It survives only for sessions that LEAKED;
+    the two stale `webdriver_sessions` rows in this database are the only ones that ever reported a
+    build.
+
+    **The data is not lost, only unread.** `app_actions` keeps `session_id` + `app_id` + `DONE` for
+    every install, which is how the build was recovered above. The fix is a read change.
+
+    ---------------------------------------------------------------- **2. FOUR OF THE TIMELINE'S
+    NINE EVENT KINDS ARE DECLARED AND NEVER EMITTED.**
+
+    Migration 030's CHECK admits `run-created`, `session-queued`, `device-allocated`,
+    `session-active`, `build-install-started`, `build-install-finished`, `session-ended`,
+    `device-released`, `incident`. Only the first four plus `session-ended` are ever written;
+    `build-install-started`, `build-install-finished`, `device-released` and `incident` exist solely
+    as union members in `executionEvents.ts`.
+
+    The timeline for this run is therefore `device-allocated → session-active → session-ended` —
+    **the install, which is most of the session-open latency and the thing `mfarm:appId` exists to
+    do, is invisible**, and so is any incident. This is ADR-0003's own rule inverted: a schema
+    claiming a vocabulary the system does not speak.
+
+    ---------------------------------------------------------------- **3. The example suite does not
+    demonstrate run completion.**
+
+    `POST /v1/runs/:id/complete` exists (§4.7) and `examples/medishop-suite` never calls it, so the
+    run reads `"status": "incomplete"` forever. Not a defect in the product — but the example IS the
+    adoption template, so the feature is effectively undiscoverable.
+
+    ---------------------------------------------------------------- **what this cost to find**
+
+    One suite run, sixty seconds, on a farm that was already green. **Run the customer-shaped thing,
+    not only the verifier** — a driver written from the same contract as the server only proves one
+    reading of that contract agrees with itself, which is the same argument `action-test.yml`
+    already makes for the CLI seam and did not have for the hub.
