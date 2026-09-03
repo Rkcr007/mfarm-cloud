@@ -175,3 +175,48 @@ tests:
       - eval_time: 40m
         alertname: MfarmBackupNotOffsite
         exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # A SILENT HOST — and the severity is the assertion that matters here.
+  #
+  # `mfarm-lab` is stopped between sessions on purpose, so this rule fires for long stretches during
+  # normal operation. At `critical` the Alertmanager route repeats hourly, which would page for ever
+  # about a deliberate choice. The severity was lowered to `warning` on 2026-09-03 and this test is
+  # what stops it drifting back without someone deciding to.
+  #
+  # The gauge is a TIMESTAMP, not an age, which is what makes the test series read oddly: a healthy
+  # host's heartbeat advances in step with the clock, so `time() - heartbeat` stays flat near zero.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a host that stops heartbeating is a warning, not a page
+    input_series:
+      # Frozen at 0 while the clock advances — the shape of a host that went away and said nothing.
+      - series: 'mfarm_host_last_heartbeat_timestamp_seconds{hostname="mfarm-lab", region="asia-south1"}'
+        values: '0x10'
+    alert_rule_test:
+      # 60s threshold plus `for: 1m`, so nothing at one minute.
+      - eval_time: 1m
+        alertname: MfarmHostSilent
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: MfarmHostSilent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              hostname: mfarm-lab
+              region: asia-south1
+            exp_annotations:
+              summary: 'Worker host mfarm-lab has stopped heartbeating'
+              description: >-
+                No heartbeat for over a minute from mfarm-lab (asia-south1). Its devices are still in whatever state they were last reported in, which means the control plane's view of them is now fiction.
+
+  - interval: 1m
+    name: a host heartbeating normally is silent in the alerting sense
+    input_series:
+      # Advancing 60s per minute — the heartbeat keeps pace with the clock, so the difference stays 0.
+      - series: 'mfarm_host_last_heartbeat_timestamp_seconds{hostname="mfarm-lab", region="asia-south1"}'
+        values: '0+60x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: MfarmHostSilent
+        exp_alerts: []

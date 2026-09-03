@@ -45,6 +45,9 @@ WITH_WORKER=1
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 die()  { printf '\n\033[31mFAILED: %s\033[0m\n' "$*" >&2; exit 1; }
+# Yellow, and on stderr. Used for states that are not failures but are also not what anyone wants —
+# a farm that comes up perfectly and notifies nobody being the one this was added for.
+warn() { printf '\033[33m    WARNING: %s\033[0m\n' "$*" >&2; }
 
 # ---------------------------------------------------------------- 1. preflight
 #
@@ -181,8 +184,9 @@ note "secrets owned by uid $api_uid, group $(id -gn), mode 640"
 #   docker run --rm --entrypoint id prom/prometheus:v2.55.1
 #   docker run --rm --entrypoint id grafana/grafana:11.3.1
 # and change these if either image is upgraded.
-PROMETHEUS_GID=65534   # nobody
-GRAFANA_UID=472        # grafana
+PROMETHEUS_GID=65534    # nobody
+ALERTMANAGER_UID=65534  # nobody, same base image as prometheus
+GRAFANA_UID=472         # grafana
 
 # metrics_token is read by TWO containers: the api as owner, prometheus as group. Hence a group
 # that is neither's default, rather than making the file world-readable — the signing key's private
@@ -199,6 +203,25 @@ if [ -f "$SECRETS_DIR/grafana_admin_password" ]; then
   sudo chmod 640 "$SECRETS_DIR/grafana_admin_password"
   note "grafana_admin_password owned by uid $GRAFANA_UID"
 fi
+
+# The Slack webhook. CREATED EMPTY IF ABSENT, because docker compose refuses to start a service
+# whose secret file does not exist, and the obs stack should not be undeployable just because
+# nobody has chosen a Slack channel yet. Alertmanager is uid 65534, the same as Prometheus.
+#
+# An empty file is a working stack that notifies nobody: Alertmanager starts, accepts and groups
+# alerts, and logs `Notify attempt failed ... unsupported protocol scheme ""` at warn level on every
+# attempt — verified against prom/alertmanager:v0.27.0. That is only visible in the log, so the
+# warning below is the thing standing between "alerting is set up" and "alerting appears set up".
+if [ ! -f "$SECRETS_DIR/slack_webhook_url" ]; then
+  : > "$SECRETS_DIR/slack_webhook_url"
+  warn "no Slack webhook configured — alerts will fire, group, and reach NOBODY."
+  warn "  put the incoming-webhook URL in $SECRETS_DIR/slack_webhook_url, then:"
+  warn "  docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml --env-file deploy/.env restart alertmanager"
+elif [ ! -s "$SECRETS_DIR/slack_webhook_url" ]; then
+  warn "$SECRETS_DIR/slack_webhook_url is EMPTY — alerts will reach nobody."
+fi
+sudo chown "$ALERTMANAGER_UID:$(id -g)" "$SECRETS_DIR/slack_webhook_url"
+sudo chmod 640 "$SECRETS_DIR/slack_webhook_url"
 
 say "Control plane"
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d

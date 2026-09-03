@@ -636,6 +636,16 @@ be world-readable), and **the obs stack runs as different users** — Prometheus
 `farm-up.sh` and `deploy/README.md` so a fresh farm cannot reproduce it; the README's own runbook
 told you to start the obs stack immediately after the chmod that breaks it.
 
+**BOTH CALLS MADE 2026-09-03: `MfarmHostSilent` is now `warning`, and the receiver is Slack.** The
+severity change is recorded in the rule itself and pinned by a test that fails if it drifts back —
+raise it to `critical` again the day the farm runs continuously, and add the real fix at that point,
+which is a maintenance silence created when the lab is stopped on purpose. The Slack webhook is read
+from `/run/secrets/slack_webhook_url`; `farm-up.sh` creates that file empty if absent so the stack
+still starts, and warns in yellow that alerts will reach nobody.
+
+**The original reasoning, kept because it is the thing to re-read before changing the severity
+back:**
+
 **BEFORE A RECEIVER IS ADDED, DEAL WITH `MfarmHostSilent`.** Two rules are firing on the live farm
 right now — `MfarmDeviceQuarantined` (the pre-existing physical SM-S918B) and `MfarmHostSilent`,
 because **`mfarm-lab` is deliberately stopped between sessions**, which is the documented cost

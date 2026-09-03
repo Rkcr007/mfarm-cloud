@@ -118,6 +118,22 @@ sudo chown "$(docker run --rm --entrypoint id mfarm-api:latest -u)":65534 deploy
 sudo chown 472:"$(id -g)" deploy/secrets/grafana_admin_password
 sudo chmod 640 deploy/secrets/metrics_token deploy/secrets/grafana_admin_password
 
+# THE SLACK WEBHOOK. Alertmanager's only route to a person; without it the whole stack is a
+# dashboard. Create the incoming webhook in Slack (it is bound to one channel when created — the
+# `channel:` in alertmanager.yml cannot override that), then:
+printf '%s' 'https://hooks.slack.com/services/XXX/YYY/ZZZ' > deploy/secrets/slack_webhook_url
+sudo chown 65534:"$(id -g)" deploy/secrets/slack_webhook_url   # alertmanager is uid 65534
+sudo chmod 640 deploy/secrets/slack_webhook_url
+
+# An EMPTY or missing file is not an error you will see. Alertmanager starts, accepts alerts, groups
+# them, shows them in its UI, and logs `Notify attempt failed ... unsupported protocol scheme ""` on
+# every attempt. Nothing else says anything is wrong. After setting it, prove it works:
+#   curl -XPOST http://127.0.0.1:9093/api/v2/alerts -H 'Content-Type: application/json' \
+#     -d '[{"labels":{"alertname":"MfarmSmokeTest","severity":"warning","farm":"mfarm"},
+#           "annotations":{"summary":"testing the Slack route"}}]'
+# and watch for it in the channel. If nothing arrives:
+#   docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml logs alertmanager
+
 # Both files declare `name: mfarm`, so the second one joins the same project and network. Drop the
 # obs file to run the farm without Prometheus and Grafana.
 docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml \
