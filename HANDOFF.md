@@ -2467,3 +2467,31 @@ when the feature is broken. See issues 37 and 38.
     unified behind one "authorise an attempt" action later.
 
     25 new tests (22 control plane, 3 agent). Suite is 1206 green at migration 035.
+
+45. **`GET /account/usage` CAN OMIT AN EVENT THAT JUST HAPPENED, AND THE TEST FOR IT FLAKES ON
+    macOS.** 2026-09-04. **Found while shipping ADR-0024; NOT caused by it and NOT fixed here.**
+
+    `attempts.test.ts` → *the usage endpoint reports both numbers, kept apart* failed once in a full
+    local run with `infraRetries` 0 instead of 1, and passed on its own and in three runs before it.
+    The cause is not a race in the product's own logic:
+
+    - `session_attempts.started_at` defaults to `now()` — **the database's clock** (migration 033);
+    - the route defaults its window to `to = new Date()` — **the API process's clock** — and
+      `attempts.counts()` filters `started_at < to`.
+
+    Measured on this laptop: the Postgres container's clock is **4–5 ms ahead** of the Node process.
+    So a row written less than ~5 ms before the read is dated *after* the window's own upper bound
+    and is filtered out. The test creates the infra-retry immediately before the GET, which is why
+    that number goes missing and `userAttempts` — written at session creation, tens of ms earlier —
+    does not.
+
+    **CI is not exposed to it.** There Postgres is a service container on the same kernel as the
+    Node process, so the two clocks are the same one; the skew is a Docker-Desktop-on-macOS artifact.
+    That also means this will keep flaking locally and never in CI, which is the shape most likely to
+    be dismissed as "just re-run it".
+
+    The product bug is real but tiny: refresh usage in the same instant an incident lands and the
+    number is briefly absent. The fix is NOT a fudge factor on the window — it is for an unsupplied
+    `to` to mean *no upper bound*, or to come from the same clock the rows do. Left alone
+    deliberately: it is unrelated to the change that found it, and it touches `usage()`,
+    `counts()` and `deviceReliability()` together.
