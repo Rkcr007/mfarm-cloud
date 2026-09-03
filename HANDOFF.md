@@ -17,7 +17,8 @@ media relay; `./deploy/farm-check.sh` waits for the devices and reports what is 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
 
-**2026-09-04 — A QUARANTINED HANDSET NOW HAS A WAY BACK, AND IT IS GATED (ADR-0024).** Migrations
+**2026-09-04 — A QUARANTINED HANDSET NOW HAS A WAY BACK, AND IT IS GATED (ADR-0024). DEPLOYED AND
+HARDWARE-VERIFIED** on `1782257`, migrations through 035, PR #81.** Migrations
 034 and 035. `QUARANTINED` had been a state devices could enter and, at the device level, never
 deliberately leave: nothing recorded WHY one was quarantined, there was no way to quarantine a
 single handset, and §30's `[Recover Device]` had nowhere to land. The one-line version of that
@@ -2495,3 +2496,53 @@ when the feature is broken. See issues 37 and 38.
     `to` to mean *no upper bound*, or to come from the same clock the rows do. Left alone
     deliberately: it is unrelated to the change that found it, and it touches `usage()`,
     `counts()` and `deviceReliability()` together.
+
+46. **HARDWARE VERIFICATION OF ADR-0024, INCLUDING A PATH NOBODY PLANNED TO TEST.** 2026-09-04,
+    control plane and worker both on `1782257`.
+
+    **The happy path, on a real Cuttlefish device**, from the worker's own journal:
+
+    ```
+    22:56:36  [agent] recovering cf-1 (fence 59): reset, then health check
+    22:56:50  crosvm: vcpu requested reset          <- the actual snapshot restore
+    22:56:51  crosvm: exiting with reset
+    22:57:14  [agent] recovery of 523581b7… passed
+    22:57:15  [agent] recovery for 523581b7… finished: device is READY
+    ```
+
+    39 seconds, offer to READY. The audit row carries what the device actually reported:
+    `{"health":{"status":"healthy","inputLatencyMs":55.67},"probes":5,
+    "automation":"http://10.160.0.2:8090/automation/cf-1","hadAutomation":true}` — so the
+    automation-came-back check fired against a real Appium rather than being theory.
+
+    **THE INTERRUPTED RECOVERY WAS VERIFIED BY ACCIDENT, AND IT IS THE MORE INTERESTING RESULT.**
+    The verification ran too early: the wait loop before it polled `count(*) WHERE state='READY'`,
+    which was still true of the PRE-RESTART rows, so it returned immediately while the worker was
+    still bringing devices up. The host was therefore silent past 90s mid-recovery, and:
+
+    1. `quarantine_host` collapsed the recovering device with `quarantined_from = 'PREPARING'`;
+    2. the host beat again and `clear_silence_quarantine` restored it **to PREPARING**, with
+       `recovery_from_reason` intact and a fresh clock — not to READY, and not lost;
+    3. the agent then picked the offer up and completed the recovery normally.
+
+    That is exactly the path migration 035's `CASE WHEN quarantined_from = 'PREPARING'` exists for,
+    exercised on hardware under a real interruption rather than a backdated timestamp. **The wait
+    condition was the bug**: "N devices READY" is not evidence that a restarted worker has
+    re-registered, because the rows survive the restart. Assert on the host's `last_heartbeat_at`.
+
+    **The HTTP layer, on the deployed build.** `available` 4 → 3 on quarantine; the device carries
+    `quarantine: {at, reason, source}`; release returns `state: PREPARING`; and the pre-035
+    `SM-S918B` correctly carries **no** quarantine object at all rather than an invented reason.
+
+    **Metrics, scraped from the box:** `mfarm_devices{state="PREPARING",…} 0` for both tiers (the
+    explicit zero, so the series exists before it is ever non-zero),
+    `mfarm_device_preparing_age_seconds_max 0`, `mfarm_device_recoveries_total{outcome="recovered"} 2`.
+
+    **What was NOT checked.** The console was verified by asserting its shipped asset contains the
+    new code (`Release quarantine` in `console.js`, `Recovering from quarantine` in the React
+    bundle) and by the render tests — **not by opening it in a browser on the farm**. And the
+    physical `SM-S918B` was deliberately left quarantined: `resetToSnapshot` on a handset is
+    `pm clear` across the owner's third-party packages, so releasing one is a decision for whoever
+    owns the phone. It now HAS a way back, which it did not before.
+
+    `mfarm-lab` was stopped afterwards.
