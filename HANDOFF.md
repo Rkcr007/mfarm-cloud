@@ -594,9 +594,11 @@ without one rather than advertise `127.0.0.1` to the fleet.
   and nothing here says so first), and **no worker-side metrics** (cvd health, adb responsiveness
   and a wedged-but-alive Appium are invisible except through device state).
 - Phase 2 is **partly** proven on hardware now. `deploy/docker-compose.prod.yml` runs on the lab box
-  (api, postgres and the backup sidecar), which `deploy/farm-up.sh` brings up in one command. Still
-  never run anywhere: the observability stack (`docker-compose.obs.yml`), `tailscale serve`, and any
-  alert delivered to an actual person.
+  (api, postgres and the backup sidecar), which `deploy/farm-up.sh` brings up in one command.
+  **The observability stack is no longer in this list — corrected 2026-09-03, it runs on `mfarm-cp`;
+  see the dated entry above.** Still never run anywhere: `tailscale serve`, and **any alert
+  delivered to an actual person** — `alertmanager.yml` still ships with no integrations, which its
+  own header states plainly.
 
 **2026-09-03 — A TEST THAT PASSES IN THE SUITE AND FAILS ALONE.** Found while verifying the CLI
 packaging change, and it is NOT caused by it: `apps/api/test/attempts.test.ts` →
@@ -613,6 +615,35 @@ happened to look. Nothing is known to be wrong in the PRODUCT here — the failu
 state it did not establish — but until that is confirmed rather than assumed, a green suite is not
 evidence that attempt accounting works, which is the one thing this file exists to prove. To
 reproduce: `cd apps/api && node --test --experimental-strip-types test/attempts.test.ts`.
+
+**2026-09-03 — THE OBSERVABILITY STACK IS RUNNING ON `mfarm-cp` FOR THE FIRST TIME.** Prometheus,
+Alertmanager and Grafana, started alongside the production stack. `docker-compose.obs.yml` had never
+run anywhere; the line in "What is NOT built" saying so is now false and is corrected there.
+
+**It works: 20 rules evaluated (`health: ok`), both scrape targets up, real data.** Measured
+immediately after: `mfarm_backup_age_seconds` 960, `mfarm_backup_offsite_age_seconds` 866,
+`mfarm_backup_files` 27. Prometheus reaches Alertmanager at `http://alertmanager:9093/api/v2/alerts`,
+and a synthetic alert pushed at Alertmanager was accepted, grouped and routed to the `default`
+receiver — so every hop except the last one is proven end to end.
+
+**IT CAME UP BROKEN IN A WAY THAT LOOKED FINE, AND THIS IS THE PART TO REMEMBER.** The first start
+had Prometheus healthy, its UI serving, all 20 rules loaded and every one of them `inactive` — while
+the control-plane target was DOWN with `unable to read file /run/secrets/metrics_token: permission
+denied`, and Grafana restart-looped on the same error. `farm-up.sh` chowns every secret to the API
+container's uid at mode 640 (deliberately: the signing key's private half is in there and must never
+be world-readable), and **the obs stack runs as different users** — Prometheus 65534, Grafana 472.
+**A farm with no data is indistinguishable at a glance from a farm with no problems.** Fixed in
+`farm-up.sh` and `deploy/README.md` so a fresh farm cannot reproduce it; the README's own runbook
+told you to start the obs stack immediately after the chmod that breaks it.
+
+**BEFORE A RECEIVER IS ADDED, DEAL WITH `MfarmHostSilent`.** Two rules are firing on the live farm
+right now — `MfarmDeviceQuarantined` (the pre-existing physical SM-S918B) and `MfarmHostSilent`,
+because **`mfarm-lab` is deliberately stopped between sessions**, which is the documented cost
+posture. `MfarmHostSilent` is `severity: critical`, and critical repeats hourly. Attaching a webhook
+today would page critically, every hour, for ever, about a state that was chosen on purpose — and
+train whoever receives it to ignore the channel the backup alert depends on. **Alerting that cries
+wolf is worse than no alerting**, because the second one does not give false confidence. Decide the
+silence story first.
 
 ## BLOCKERS — decide these before the hardware session
 

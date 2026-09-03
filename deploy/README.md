@@ -109,6 +109,15 @@ printf '%s' "$(openssl rand -base64 24 | tr -d '/+=')" > deploy/secrets/grafana_
 sudo chown "$(docker run --rm --entrypoint id mfarm-api:latest -u)":"$(id -g)" deploy/secrets/*
 sudo chmod 640 deploy/secrets/*
 
+# THE OBSERVABILITY STACK RUNS AS DIFFERENT USERS, so the line above locks it out of two files.
+# Prometheus is uid/gid 65534 and Grafana is uid 472; neither can read a file owned by the api's
+# uid at mode 640. Skipping this is not loud — Prometheus comes up healthy, serves its UI, loads
+# every alert rule and evaluates them all to "inactive", because it is scraping nothing. A farm with
+# no data looks exactly like a farm with no problems.
+sudo chown "$(docker run --rm --entrypoint id mfarm-api:latest -u)":65534 deploy/secrets/metrics_token
+sudo chown 472:"$(id -g)" deploy/secrets/grafana_admin_password
+sudo chmod 640 deploy/secrets/metrics_token deploy/secrets/grafana_admin_password
+
 # Both files declare `name: mfarm`, so the second one joins the same project and network. Drop the
 # obs file to run the farm without Prometheus and Grafana.
 docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.obs.yml \
