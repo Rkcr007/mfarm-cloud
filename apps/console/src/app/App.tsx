@@ -76,6 +76,39 @@ type Held =
   | { status: 'held'; detail: SessionDetail }
   | { status: 'error'; message: string };
 
+/**
+ * Three tones, not two, and the middle one is the whole point.
+ *
+ * This picker used to draw everything that was not READY or OFFLINE as `warn`, which put a device
+ * being restored and a device that failed its health checks on the same amber dot. That is the
+ * defect the old console was caught making in words — the Launch screen called a QUARANTINED
+ * handset "1 busy" while the Health screen, reading the same API, called it "Quarantined" — and it
+ * tells a tester to wait for a device nobody is coming to fix.
+ *
+ * So: `warn` is reserved for the states that RESOLVE ON THEIR OWN, and `bad` covers the ones that
+ * need somebody to do something. PREPARING is a resolving state — an operator has already acted on
+ * it, and the farm ends the attempt either way within RECOVERY_TIMEOUT_MS (ADR-0024).
+ */
+const NEEDS_A_PERSON = new Set(['OFFLINE', 'QUARANTINED', 'EVICTED']);
+
+function dotFor(state: string): 'ok' | 'warn' | 'bad' {
+  if (state === 'READY') return 'ok';
+  return NEEDS_A_PERSON.has(state) ? 'bad' : 'warn';
+}
+
+/** Hover text, because a dot alone never carries a state — the old console's rule, kept. */
+const STATE_NOTE: Record<string, string> = {
+  READY: 'Available now',
+  RESERVED: 'Allocated, session not live yet',
+  SESSION_ACTIVE: 'A session is holding it',
+  BOOTING: 'Coming up from snapshot',
+  CLEANING: 'Restoring its snapshot',
+  PREPARING: 'Recovering from quarantine — not available until it passes a health check',
+  QUARANTINED: 'Quarantined: out of the pool until an operator releases it',
+  OFFLINE: 'Its host has not reported it',
+  EVICTED: 'Removed from the fleet',
+};
+
 export function App() {
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [selected, setSelected] = useState<string | null>(null);
@@ -208,7 +241,7 @@ export function App() {
               onClick={() => setSelected(d.id)}
             >
               <span className="devrow-name">{d.model}</span>
-              <span className={`dot dot-${d.state === 'READY' ? 'ok' : d.state === 'OFFLINE' ? 'bad' : 'warn'}`} />
+              <span className={`dot dot-${dotFor(d.state)}`} title={STATE_NOTE[d.state] ?? d.state} />
               <span className="devrow-meta">
                 {d.screen ? `${d.screen.width}×${d.screen.height} · ${d.screen.density}dpi` : 'no panel reported'}
               </span>

@@ -652,6 +652,19 @@ describe('the launch picker distinguishes busy from unavailable', () => {
     assert.match(withState('CLEANING'), /\bbusy\b/i);
   });
 
+  /**
+   * PREPARING resolves without anybody doing anything — to READY if the health check passes, back
+   * to QUARANTINED if it does not, and the reaper ends it either way inside RECOVERY_TIMEOUT_MS. So
+   * it belongs with the states "busy" honestly describes, and NOT with the ones that need somebody
+   * to act. Calling it unavailable would tell a tester to give up on a device that is minutes from
+   * being free; the failure this whole set of tests exists for is the opposite mistake.
+   */
+  test('a device recovering from quarantine is busy — an operator already acted on it', () => {
+    const t = withState('PREPARING');
+    assert.match(t, /\bbusy\b/i);
+    assert.doesNotMatch(t, /unavailable/i);
+  });
+
   test('a ready device is free, and says so', () => {
     const t = withState('READY');
     assert.match(t, /\bfree\b/i);
