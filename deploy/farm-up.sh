@@ -169,6 +169,37 @@ sudo chown "$api_uid:$(id -g)" "$SECRETS_DIR"/*
 sudo chmod 640 "$SECRETS_DIR"/*
 note "secrets owned by uid $api_uid, group $(id -gn), mode 640"
 
+# THE OBSERVABILITY STACK RUNS AS DIFFERENT USERS, and the loop above locks it out of two files.
+#
+# Found on 2026-09-03 by deploying it: Prometheus reported the control plane target DOWN with
+# `unable to read file /run/secrets/metrics_token: permission denied`, and Grafana restart-looped on
+# the same error for its admin password. Neither is loud. Prometheus serves a perfectly healthy UI
+# with every alert rule loaded and evaluating to "inactive" — which is what a farm with no data
+# looks like, and is indistinguishable at a glance from a farm that is fine.
+#
+# The uids are properties of the images pinned in docker-compose.obs.yml. Re-derive them with
+#   docker run --rm --entrypoint id prom/prometheus:v2.55.1
+#   docker run --rm --entrypoint id grafana/grafana:11.3.1
+# and change these if either image is upgraded.
+PROMETHEUS_GID=65534   # nobody
+GRAFANA_UID=472        # grafana
+
+# metrics_token is read by TWO containers: the api as owner, prometheus as group. Hence a group
+# that is neither's default, rather than making the file world-readable — the signing key's private
+# half lives in this directory and none of it should ever be world-anything.
+if [ -f "$SECRETS_DIR/metrics_token" ]; then
+  sudo chown "$api_uid:$PROMETHEUS_GID" "$SECRETS_DIR/metrics_token"
+  sudo chmod 640 "$SECRETS_DIR/metrics_token"
+  note "metrics_token group set to $PROMETHEUS_GID so prometheus can read it"
+fi
+
+# grafana_admin_password is read by grafana alone, so it can simply own it.
+if [ -f "$SECRETS_DIR/grafana_admin_password" ]; then
+  sudo chown "$GRAFANA_UID:$(id -g)" "$SECRETS_DIR/grafana_admin_password"
+  sudo chmod 640 "$SECRETS_DIR/grafana_admin_password"
+  note "grafana_admin_password owned by uid $GRAFANA_UID"
+fi
+
 say "Control plane"
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d
 
