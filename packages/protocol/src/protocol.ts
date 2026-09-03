@@ -231,7 +231,7 @@ export interface RegistrationResponse {
 export interface WorkerHeartbeatResponse {
   ok: boolean;
   hostState: string;
-  /** Devices of THIS host sitting in CLEANING, with the fence to confirm against. */
+  /** Devices of THIS host sitting in CLEANING or PREPARING, with the fence to confirm against. */
   resets?: Array<{
     deviceId: string;
     fence: number;
@@ -243,6 +243,22 @@ export interface WorkerHeartbeatResponse {
      * invent one. A worker with no session id skips artifact capture and resets exactly as before.
      */
     sessionId?: string;
+    /**
+     * This reset is a QUARANTINE RECOVERY, and finishing it takes more than finishing the reset
+     * (migration 035, ADR-0024).
+     *
+     * An operator released this device from quarantine, which authorises an attempt and nothing
+     * more. The worker performs the same restore it performs for a released session, and then
+     * probes the device's health and reports BOTH — through `recoveries` on `POST /v1/workers/events`
+     * rather than through `resets`. A device that restores cleanly and still cannot be driven must
+     * not reach READY, and a bare "the reset finished" cannot say which of the two happened.
+     *
+     * Absent rather than `false` on the ordinary path, so an agent that predates this reads exactly
+     * the payload it always read. Such an agent confirms the reset the only way it knows, and the
+     * control plane fails the recovery closed with a reason naming the agent version — see
+     * `routes/workers.ts`. It never promotes an unverified device.
+     */
+    recovery?: boolean;
   }>;
   /**
    * App actions requested for THIS host's devices and not yet performed.

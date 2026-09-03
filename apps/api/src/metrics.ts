@@ -263,7 +263,8 @@ const c = (name: string, help: string, labels: readonly string[] = []) =>
  *
  *  Kept in sync with `001_init.sql` by `metrics.test.ts`, which reads the enum out of the database. */
 export const DEVICE_STATES = [
-  'OFFLINE', 'BOOTING', 'READY', 'RESERVED', 'SESSION_ACTIVE', 'CLEANING', 'QUARANTINED', 'EVICTED',
+  'OFFLINE', 'BOOTING', 'READY', 'RESERVED', 'SESSION_ACTIVE', 'CLEANING', 'PREPARING',
+  'QUARANTINED', 'EVICTED',
 ] as const;
 export const SESSION_STATES = ['QUEUED', 'ALLOCATING', 'ACTIVE', 'ENDING', 'ENDED', 'FAILED'] as const;
 export const HOST_STATES = ['UP', 'DRAINING', 'QUARANTINED', 'DOWN'] as const;
@@ -277,6 +278,21 @@ const cleaningAge = g(
   'Age of the longest-running snapshot restore. A reset that fails leaves its device in CLEANING ' +
     'forever — by design, because a device must never return to READY unconfirmed — so this rising ' +
     'without bound IS the reset-failure signal.',
+);
+
+/**
+ * The recovery equivalent of `cleaningAge`, and it needs its own series (migration 035).
+ *
+ * A device released from quarantine sits in PREPARING while its host resets it and reports a health
+ * result. Folding that into `cleaning_age` would make one number mean two things — "a tenant's
+ * device is not back in the pool" and "an operator's recovery is not finishing" — and the second is
+ * the one with a person waiting on it. The reaper bounds this at `RECOVERY_TIMEOUT_MS`, so a value
+ * climbing past that means the sweep itself has stopped, not that a device is slow.
+ */
+const preparingAge = g(
+  'mfarm_device_preparing_age_seconds_max',
+  'Age of the longest-running quarantine recovery. Bounded by RECOVERY_TIMEOUT_MS, so a value ' +
+    'above it means the reaper is not sweeping rather than that a device is slow.',
 );
 
 const sessions = g('mfarm_sessions', 'Sessions by state.', ['state']);
@@ -381,6 +397,24 @@ export const reaperDuration = registry.register(
 export const hostsRecovered = c(
   'mfarm_hosts_recovered_total',
   'Hosts whose silence quarantine was cleared by a heartbeat.',
+);
+
+/**
+ * How quarantine recoveries end (migration 035, ADR-0024).
+ *
+ * The rate of `failed` against `recovered` is the question a fleet operator actually has: a device
+ * that fails every release is one somebody has to physically go and look at, and it is otherwise
+ * indistinguishable — from a dashboard — from one nobody has released yet.
+ *
+ * `unverified` is its own outcome rather than folded into `failed`, because it is not about the
+ * device at all: it means a worker confirmed a reset with no health result, which only an agent
+ * older than the gate does. Counting it as a device failure would send somebody to the lab.
+ * `ignored` is a stale fence or another host's device.
+ */
+export const deviceRecoveries = c(
+  'mfarm_device_recoveries_total',
+  'Quarantine recovery attempts by outcome: recovered, failed, unverified, ignored.',
+  ['outcome'],
 );
 
 export const workerResets = c(
@@ -544,7 +578,7 @@ export async function collectBackups(): Promise<void> {
 interface DeviceRow { state: string; region: string; platform: string; tier: string; n: string }
 interface SessionRow { state: string; n: string }
 interface HostRow { hostname: string; region: string; state: string; beat: string | null }
-interface AgeRow { cleaning_age: string; queue_age: string }
+interface AgeRow { cleaning_age: string; preparing_age: string; queue_age: string }
 
 /**
  * One transaction, four queries, on the owner pool.
@@ -572,6 +606,11 @@ export async function collectFleet(): Promise<void> {
       `SELECT
          COALESCE((SELECT max(EXTRACT(EPOCH FROM now() - updated_at))
                      FROM devices WHERE state = 'CLEANING'), 0)::text AS cleaning_age,
+         -- From recovery_started_at, not updated_at: a recovering device's row is touched by the
+         -- heartbeat's automation reconciliation, which would keep resetting a clock that is meant
+         -- to measure how long the operator has been waiting.
+         COALESCE((SELECT max(EXTRACT(EPOCH FROM now() - recovery_started_at))
+                     FROM devices WHERE state = 'PREPARING'), 0)::text AS preparing_age,
          COALESCE((SELECT max(EXTRACT(EPOCH FROM now() - created_at))
                      FROM sessions WHERE state = 'QUEUED'), 0)::text AS queue_age`,
     );
@@ -612,6 +651,7 @@ export async function collectFleet(): Promise<void> {
   for (const [state, n] of hostCounts) hosts.set({ state }, n);
 
   cleaningAge.set({}, Number(ages.cleaning_age));
+  preparingAge.set({}, Number(ages.preparing_age));
   queueOldest.set({}, Number(ages.queue_age));
 }
 

@@ -30,6 +30,7 @@ Run the suite for the count.
 | `http.test.ts` | the auth boundary, principal separation, session creation, idempotency, tenant isolation over HTTP, rate limiting, worker events and heartbeat |
 | `lifecycle.test.ts` | probes, reaper scheduling, graceful shutdown, the RLS boundary against a live server |
 | `metrics.test.ts` | exposition format, fleet collectors, the second listener |
+| `quarantine-release.test.ts` | that releasing a quarantine authorises an attempt rather than availability: the gate, the audit, and the paths that would silently undo an operator's judgement |
 | `webdriver.test.ts` | the hub end to end, session binding, credentials, the automation grant |
 
 `npm run typecheck` runs `tsc --noEmit` over the workspace. Node strips types at runtime and never
@@ -130,7 +131,12 @@ had done nothing, during exactly the fleet churn that makes expiry interesting
 |---|---|---|
 | `GET /health` | none | liveness. No I/O, cannot fail while the process lives |
 | `GET /ready` | none | readiness. Queries both pools, 503 when either is down |
-| `GET /v1/devices`, `/v1/devices/:id` | tenant | RLS-filtered catalogue |
+| `GET /v1/devices`, `/v1/devices/:id` | tenant | RLS-filtered catalogue. Carries the quarantine reason and source, and a recovery in flight |
+| `POST /v1/devices/:id/quarantine` | owner/admin | takes it out of the pool and ends any session on it. A reason is required |
+| `POST /v1/devices/:id/release-quarantine` | owner/admin | authorises **one recovery attempt** — the device goes to `PREPARING`, not `READY` (ADR-0024) |
+| `GET /v1/devices/:id/quarantine-log` | tenant | the audit: who released it, from what, and what the health check said |
+| `POST /v1/devices/:id/clear-reset-escalation` | owner/admin | resumes reset offers on an escalated device (ADR-0019) |
+| `GET /v1/devices/:id/reset-attempts` | tenant | every counted reset attempt, with its outcome |
 | `POST /v1/sessions` | tenant | 201 allocated, 202 queued. Honours `Idempotency-Key` |
 | `GET /v1/sessions/:id` | tenant | |
 | `DELETE /v1/sessions/:id` | tenant | |
@@ -140,8 +146,8 @@ had done nothing, during exactly the fleet churn that makes expiry interesting
 | `POST /v1/sessions/:id/app-actions` | tenant | 202 — queues an install, launch or uninstall |
 | `GET /v1/sessions/:id/app-actions`, `/v1/app-actions`, `/v1/app-actions/:id` | tenant | outcome, with the worker's own error text |
 | `POST /v1/workers/register` | registration token | issues the worker credential |
-| `POST /v1/workers/heartbeat` | worker | also carries down pending resets and app actions |
-| `POST /v1/workers/events` | worker | batched metering + reset + app-action reports |
+| `POST /v1/workers/heartbeat` | worker | also carries down pending resets and app actions. A reset for a `PREPARING` device is flagged `recovery` |
+| `POST /v1/workers/events` | worker | batched metering + reset + recovery + app-action reports |
 | `GET /wd/hub/status` | none | WebDriver readiness probe |
 | `POST /wd/hub/session` | tenant | W3C or JSONWP new session |
 | `GET /wd/hub/sessions` | tenant | this org's live WebDriver sessions |

@@ -2,7 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { withTenant } from '../../db.ts';
 import { requireTenant, requireUser } from '../server.ts';
 import { forbidden, notFound } from '../errors.ts';
-import { clearResetEscalation, resetAttempts } from '../../allocator.ts';
+import {
+  clearResetEscalation, quarantineDevice, quarantineLog, releaseDeviceQuarantine, resetAttempts,
+} from '../../allocator.ts';
 
 export async function deviceRoutes(app: FastifyInstance) {
   /**
@@ -34,6 +36,8 @@ export async function deviceRoutes(app: FastifyInstance) {
           `SELECT id, region, platform, tier, model, os_version, state, capabilities,
                   profile, screen, abis,
                   reset_attempts, reset_escalated_at, reset_escalation_reason,
+                  quarantined_at, quarantine_reason, quarantine_source,
+                  recovery_started_at, recovery_from_reason,
                   (org_id IS NOT NULL) AS dedicated
              FROM devices
             WHERE ($1::text IS NULL OR region = $1)
@@ -75,6 +79,35 @@ export async function deviceRoutes(app: FastifyInstance) {
               },
             }
             : {}),
+          /**
+           * WHY a device is quarantined, and — while one is running — the recovery an operator
+           * authorised (migration 035).
+           *
+           * Both absent when they do not apply, like every optional field above. A quarantined
+           * device without this object is one quarantined before 035 shipped: honest, and visibly
+           * different from one whose reason is the empty string.
+           *
+           * `state` alone was all a console could ever show here, which is how the fleet arrived at
+           * a screen that said "Quarantined — Failed health checks" about a handset whose host had
+           * simply stopped beating.
+           */
+          ...(r.quarantined_at
+            ? {
+              quarantine: {
+                at: r.quarantined_at,
+                reason: r.quarantine_reason,
+                source: r.quarantine_source,
+              },
+            }
+            : {}),
+          ...(r.recovery_started_at
+            ? {
+              recovery: {
+                startedAt: r.recovery_started_at,
+                fromReason: r.recovery_from_reason,
+              },
+            }
+            : {}),
         })),
         // Availability is what callers actually decide on, so it is computed here rather than
         // leaving every client to derive it from the state enum.
@@ -87,10 +120,19 @@ export async function deviceRoutes(app: FastifyInstance) {
     const { orgId } = requireTenant(req);
     const row = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
-        `SELECT id, region, platform, tier, model, os_version, state, capabilities, last_reset_at,
-                profile, screen, abis,
-                reset_attempts, last_reset_attempt_at, reset_escalated_at, reset_escalation_reason
-           FROM devices WHERE id = $1`,
+        `SELECT d.id, d.region, d.platform, d.tier, d.model, d.os_version, d.state, d.capabilities,
+                d.last_reset_at, d.profile, d.screen, d.abis,
+                d.reset_attempts, d.last_reset_attempt_at, d.reset_escalated_at,
+                d.reset_escalation_reason,
+                d.quarantined_at, d.quarantine_reason, d.quarantine_source,
+                d.recovery_started_at, d.recovery_from_reason, d.recovery_released_by,
+                -- Joined here rather than exposed as a bare uuid the console would have to resolve
+                -- against an endpoint it cannot reach: the users table is RLS-scoped to the
+                -- caller's org, and an operator releasing a SHARED device need not be in it. It
+                -- resolves to NULL when the account has since been deleted — the audit log keeps a
+                -- copy of the address for exactly that case, and this read is the live one.
+                (SELECT u.email FROM users u WHERE u.id = d.recovery_released_by) AS released_by_email
+           FROM devices d WHERE d.id = $1`,
         [req.params.id],
       );
       return rows[0];
@@ -115,6 +157,24 @@ export async function deviceRoutes(app: FastifyInstance) {
               at: row.reset_escalated_at,
               reason: row.reset_escalation_reason,
               attempts: Number(row.reset_attempts),
+            },
+          }
+          : {}),
+        ...(row.quarantined_at
+          ? {
+            quarantine: {
+              at: row.quarantined_at,
+              reason: row.quarantine_reason,
+              source: row.quarantine_source,
+            },
+          }
+          : {}),
+        ...(row.recovery_started_at
+          ? {
+            recovery: {
+              startedAt: row.recovery_started_at,
+              fromReason: row.recovery_from_reason,
+              releasedBy: row.released_by_email ?? null,
             },
           }
           : {}),
@@ -189,6 +249,127 @@ export async function deviceRoutes(app: FastifyInstance) {
       detail: cleared
         ? 'Recovery resumed. The next heartbeat will offer this device a reset again.'
         : 'This device was not escalated, so nothing changed.',
+    };
+  });
+  /* -------------------------------------------------------- quarantine, and the gated way back */
+
+  /**
+   * Who may act on one device's quarantine.
+   *
+   * The same rule and the same three reasons as `clear-reset-escalation` above: a signed-in owner
+   * or admin, never a worker and never a bare API key. Taking a handset out of service and
+   * authorising it back in are both judgements, and a CI key making either on every run would turn
+   * the gate into a formality.
+   *
+   * SHARED DEVICES BELONG TO NO ORG, so any org's admin can act on one. Honest for a self-hosted
+   * farm where the tenant IS the operator; RLS on the read still stops an admin touching another
+   * tenant's DEDICATED handset. A hosted fleet would need a fleet-operator role, and that does not
+   * exist yet — do not infer one from this (ADR-0019 said the same, and it is still true).
+   */
+  async function operatorOn(req: Parameters<typeof requireUser>[0], deviceId: string) {
+    const { orgId, role, userId } = requireUser(req);
+    if (role !== 'owner' && role !== 'admin') {
+      throw forbidden('Only an owner or admin can change a device’s quarantine.');
+    }
+    // RLS decides what this person can see, and the definer functions below run on the system pool
+    // where nothing would. Same order, and the same reason, as every other route in this file.
+    const visible = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query('SELECT id FROM devices WHERE id = $1', [deviceId]);
+      return rows[0];
+    });
+    if (!visible) throw notFound('Device');
+    return userId;
+  }
+
+  /**
+   * Take a device out of service.
+   *
+   * The reason is REQUIRED. A quarantine with no reason is a device nobody can triage: the operator
+   * who finds it a week later has the same information they would have had from an unexplained
+   * `available: 0`, which is the failure the whole of migration 035 is about.
+   *
+   * Any live session on the device ends — see `quarantine_device`. "Remove it from allocation
+   * immediately" is not satisfied by refusing future allocations while somebody is still driving a
+   * handset that just failed its health checks.
+   */
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>(
+    '/devices/:id/quarantine',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['reason'],
+          properties: { reason: { type: 'string', minLength: 1, maxLength: 500 } },
+        },
+      },
+    },
+    async (req) => {
+      const userId = await operatorOn(req, req.params.id);
+      const quarantined = await quarantineDevice(
+        req.params.id, req.body.reason!.trim(), 'operator', userId,
+      );
+      return {
+        quarantined,
+        detail: quarantined
+          ? 'The device is out of the allocation pool. Any session on it has ended.'
+          : 'This device is already quarantined, or it has been evicted. Nothing changed.',
+      };
+    },
+  );
+
+  /**
+   * Release a quarantine — which authorises a RECOVERY ATTEMPT and nothing more (ADR-0024).
+   *
+   * The response says so in as many words, and that wording is load-bearing rather than decorative.
+   * The obvious implementation of §30's "[Recover Device]" is `UPDATE devices SET state = 'READY'`,
+   * and an endpoint that returned "device available" here would leave every caller — the console,
+   * a script, the next person to read this file — believing that is what happened. What actually
+   * happens is that the device moves to `PREPARING`, the heartbeat starts offering it a reset
+   * again, and only a completed reset plus a passing health check reported by its own host reaches
+   * `READY`. Anything else puts it back in quarantine carrying the new failure.
+   */
+  app.post<{ Params: { id: string } }>('/devices/:id/release-quarantine', async (req) => {
+    const userId = await operatorOn(req, req.params.id);
+    const released = await releaseDeviceQuarantine(req.params.id, userId);
+    return {
+      released,
+      // The state is named explicitly, because "released" on its own is the word that invites the
+      // wrong assumption. A caller that reads nothing else reads this.
+      state: released ? 'PREPARING' : null,
+      detail: released
+        ? 'Recovery authorised. The device is PREPARING — its host will reset it and report a '
+          + 'health check, and only a passing one makes it available. A failure puts it back in '
+          + 'quarantine with the new reason.'
+        : 'This device is not quarantined, so nothing changed.',
+    };
+  });
+
+  /**
+   * Every quarantine, release and recovery outcome for this device — the audit trail.
+   *
+   * The device is fetched through `withTenant` FIRST and the log only afterwards, for exactly the
+   * reason `reset-attempts` does it: `device_quarantine_log` is fleet-level with no `org_id` and no
+   * RLS policy, so reading it on the system pool without that check would hand any tenant the
+   * recovery history — and the operator email — of any device in the fleet.
+   */
+  app.get<{ Params: { id: string } }>('/devices/:id/quarantine-log', async (req) => {
+    const { orgId } = requireTenant(req);
+    const visible = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query('SELECT id FROM devices WHERE id = $1', [req.params.id]);
+      return rows[0];
+    });
+    if (!visible) throw notFound('Device');
+
+    const events = await quarantineLog(req.params.id);
+    return {
+      events: events.map((e) => ({
+        event: e.event, source: e.source, reason: e.reason,
+        // The copied address, not a join. An audit row that outlives the account it names still has
+        // to say who — see migration 035.
+        actor: e.actorEmail, fromReason: e.fromReason,
+        detail: e.detail, fence: e.fence, occurredAt: e.occurredAt,
+      })),
     };
   });
 }

@@ -193,6 +193,20 @@ export class Agent {
   private readonly active = new Map<string, ActiveSession>();
   private readonly buffer = new Map<string, MeterEvent>();
   private readonly pendingResets: Array<{ deviceId: string; fence: number }> = [];
+
+  /**
+   * Recovery outcomes waiting to be reported (ADR-0024).
+   *
+   * A separate buffer from `pendingResets`, mirroring the split on the wire, because the two say
+   * different things and earn different things. A reset report moves a device from CLEANING to
+   * READY; a recovery report carries a health verdict and is the only thing that can take a device
+   * out of quarantine. One buffer with an optional verdict would make "we did not check" and "the
+   * check passed" the same payload, which is the shape that promotes a broken handset.
+   */
+  private readonly pendingRecoveries: Array<{
+    deviceId: string; fence: number; ok: boolean; reason?: string;
+    health?: Record<string, unknown>;
+  }> = [];
   /** Per-device high-water mark. See acceptFence. */
   private readonly fenceHighWater = new Map<string, number>();
   /** Devices currently being restored, so a re-sent heartbeat request cannot start a second one. */
@@ -871,7 +885,8 @@ export class Agent {
   async flush(): Promise<{ recorded: number; ok: boolean }> {
     for (const s of this.active.values()) this.emitTick(s, Date.now());
     if (this.buffer.size === 0 && this.pendingResets.length === 0 && this.pendingActions.length === 0
-        && this.pendingAttaches.length === 0 && this.pendingIncidents.length === 0) {
+        && this.pendingAttaches.length === 0 && this.pendingIncidents.length === 0
+        && this.pendingRecoveries.length === 0) {
       return { recorded: 0, ok: true };
     }
     if (!this.state) return { recorded: 0, ok: false };
@@ -881,18 +896,20 @@ export class Agent {
     const actions = [...this.pendingActions];
     const attaches = [...this.pendingAttaches];
     const incidents = [...this.pendingIncidents];
+    const recoveries = [...this.pendingRecoveries];
 
     try {
       const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/events`, {
         method: 'POST',
         headers: { authorization: `Bearer ${this.state.workerToken}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ metering, resets, actions, attaches, incidents }),
+        body: JSON.stringify({ metering, resets, actions, attaches, incidents, recoveries }),
       });
       if (!res.ok) return { recorded: 0, ok: false };
       const body = await res.json() as {
         meteringRecorded: number; meteringRejected?: number;
         resets: Array<{ deviceId: string; accepted: boolean }>;
         actions?: Array<{ actionId: string; accepted: boolean }>;
+        recoveries?: Array<{ deviceId: string; accepted: boolean; state?: string }>;
       };
 
       // Only clear what we actually sent — anything added while the request was in flight stays.
@@ -921,6 +938,25 @@ export class Agent {
       for (const i of incidents) {
         const at = this.pendingIncidents.findIndex((p) => p.eventId === i.eventId);
         if (at >= 0) this.pendingIncidents.splice(at, 1);
+      }
+      // Dropped whether or not accepted, for the reason the three buffers above are: `false` here
+      // means a stale fence or a recovery the reaper already expired, and re-sending gets the same
+      // answer forever. The control plane's own timeout is what keeps such a device from being
+      // stranded, so nothing is lost by letting go of the report.
+      for (const r of recoveries) {
+        const at = this.pendingRecoveries.findIndex(
+          (p) => p.deviceId === r.deviceId && p.fence === r.fence);
+        if (at >= 0) this.pendingRecoveries.splice(at, 1);
+      }
+      for (const r of body.recoveries ?? []) {
+        if (!r.accepted) {
+          // Expected after a partition: the control plane gave up on this recovery while we were
+          // away, and the device is back in quarantine waiting for a person.
+          console.warn(`[agent] recovery report for ${r.deviceId} was not accepted — `
+            + 'stale fence, or the control plane already expired it');
+        } else if (r.state) {
+          console.log(`[agent] recovery for ${r.deviceId} finished: device is ${r.state}`);
+        }
       }
       for (const r of body.resets ?? []) {
         if (!r.accepted) {
@@ -1068,9 +1104,9 @@ export class Agent {
   }
 
   private async runRequestedResets(
-    requests: Array<{ deviceId: string; fence: number; sessionId?: string }>,
+    requests: Array<{ deviceId: string; fence: number; sessionId?: string; recovery?: boolean }>,
   ): Promise<void> {
-    for (const { deviceId, fence, sessionId } of requests) {
+    for (const { deviceId, fence, sessionId, recovery } of requests) {
       if (this.resetsInFlight.has(deviceId)) continue;
       const backend = this.backendForDeviceId(deviceId);
       if (!backend) {
@@ -1079,6 +1115,16 @@ export class Agent {
       }
       this.resetsInFlight.add(deviceId);
       try {
+        // A QUARANTINE RECOVERY IS THE SAME RESET WITH A VERDICT ATTACHED (ADR-0024). It takes the
+        // in-flight guard and the same backend as any other reset — that reuse is the point, and a
+        // recovery down a path of its own would be a second, less-exercised way to prepare a device
+        // — but it reports through `recoveries` rather than `resets`, and it never captures
+        // artifacts: `release_device_quarantine` bumps the fence, so there is no session behind
+        // this and nothing of a tenant's to collect.
+        if (recovery) {
+          await this.recoverDevice(backend, deviceId, fence);
+          continue;
+        }
         // BEFORE the reset, because the reset destroys exactly what is being captured — and inside
         // the in-flight guard, so a capture that outlasts a beat cannot start a second one.
         if (sessionId) await this.captureArtifacts(backend, deviceId, sessionId);
@@ -1093,6 +1139,123 @@ export class Agent {
         this.resetsInFlight.delete(deviceId);
       }
     }
+  }
+
+  /**
+   * Prepare a device an operator released from quarantine, and report what it actually proved.
+   *
+   * THE RESET IS NOT THE ANSWER. `resetToSnapshot()` resolving means the restore ran; it says
+   * nothing about whether the device can be driven afterwards, and a handset whose USB has gone
+   * will happily fail a restore in a way that throws, or succeed at one nobody can use. The control
+   * plane will not take a device out of quarantine on a bare "done" (ADR-0024), so this is where
+   * the evidence has to come from.
+   *
+   * Three things are checked, in the order they can fail:
+   *
+   *   1. **the reset itself** — a throw here ends the recovery immediately, with the message;
+   *   2. **`control.health()`** — the readiness check every backend already implements and the
+   *      health monitor already trusts (spec §18). Not a new predicate invented for this path: a
+   *      device that would file an incident thirty seconds from now must not be handed to a tenant
+   *      thirty seconds before it;
+   *   3. **the automation server, IF THIS DEVICE HAD ONE**. `webdriver` is a claim about the
+   *      present (ADR-0003), so a device that was fronted by an Appium before the reset and is not
+   *      after it is a device whose next WebDriver session fails at connect time — after a lease is
+   *      spent. Captured before the reset rather than assumed, because a fleet that serves no
+   *      automation at all must not fail every recovery on a server it never had.
+   *
+   * POLLED, not sampled once. A device that has just been restored is legitimately unresponsive for
+   * a moment, and an Appium the supervisor is restarting takes longer than that. A single probe
+   * would fail recoveries for the one reason that is not a fault.
+   */
+  private async recoverDevice(
+    backend: DeviceBackend, deviceId: string, fence: number,
+  ): Promise<void> {
+    const { control } = backend;
+    const name = control.info.localId;
+    // Before the reset, deliberately — see 3 above.
+    const hadAutomation = this.automation.has(name);
+
+    console.log(`[agent] recovering ${name} (fence ${fence}): reset, then health check`);
+    try {
+      await control.resetToSnapshot();
+    } catch (e) {
+      await this.reportRecovery(deviceId, fence, false,
+        `the reset failed: ${(e as Error).message}`, { stage: 'reset' });
+      return;
+    }
+
+    // Read inside the method, not at module scope: ES imports are hoisted, so a module-scope read
+    // has already happened before a test's first statement can set the variable (allocator.ts's
+    // note, and the same trap).
+    const attempts = Math.max(1, Number(process.env.RECOVERY_PROBE_ATTEMPTS ?? 5));
+    const gapMs = Number(process.env.RECOVERY_PROBE_GAP_MS ?? 3_000);
+
+    let health: DeviceHealth = {
+      status: 'offline', reasonCode: 'agent-failure', reason: 'no health probe ran',
+    };
+    let automationBack = false;
+    for (let i = 0; i < attempts; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, gapMs));
+      try {
+        health = await control.health();
+      } catch (e) {
+        // A health check that THROWS is itself a health signal — the backend could not even ask.
+        health = { status: 'offline', reasonCode: 'agent-failure', reason: (e as Error).message };
+      }
+      automationBack = !hadAutomation || this.automation.has(name);
+      if (health.status === 'healthy' && automationBack) break;
+    }
+
+    /**
+     * The monitor's last-known status is updated here, and it matters.
+     *
+     * `probeHealth` reports only TRANSITIONS, and it skips devices with a reset in flight — so
+     * without this line a device that went `offline`, was quarantined, recovered and came back
+     * `healthy` would leave `lastHealth` still saying `offline`, and the next real fault would be a
+     * transition the monitor could not see. That is the same class of bug as an incident filed for
+     * a device mid-`pm clear`, in the other direction.
+     */
+    this.lastHealth.set(name, health.status);
+
+    const detail: Record<string, unknown> = {
+      health, automation: this.automation.get(name) ?? null, hadAutomation, probes: attempts,
+    };
+
+    if (health.status !== 'healthy') {
+      await this.reportRecovery(deviceId, fence, false,
+        `the device reset but its health check reports ${health.status}: `
+        + `${'reason' in health && health.reason ? health.reason : 'no detail given'}`,
+        detail);
+      return;
+    }
+    if (!automationBack) {
+      await this.reportRecovery(deviceId, fence, false,
+        'the device is healthy but the automation server that was fronting it did not come back — '
+        + 'a WebDriver session would fail at connect time, after a lease was spent',
+        detail);
+      return;
+    }
+    await this.reportRecovery(deviceId, fence, true, null, detail);
+  }
+
+  /**
+   * Queue a recovery verdict and push it now.
+   *
+   * Flushed immediately rather than left to the metering timer, unlike an incident: a person is
+   * standing in front of the console waiting to learn whether the device they released came back,
+   * and fifteen seconds of "PREPARING" with the answer already known on the host is the shape that
+   * makes an operator click the button a second time.
+   */
+  private async reportRecovery(
+    deviceId: string, fence: number, ok: boolean,
+    reason: string | null, health: Record<string, unknown>,
+  ): Promise<void> {
+    console[ok ? 'log' : 'warn'](
+      `[agent] recovery of ${deviceId} ${ok ? 'passed' : `failed: ${reason}`}`);
+    this.pendingRecoveries.push({
+      deviceId, fence, ok, ...(reason ? { reason } : {}), health,
+    });
+    await this.flush();
   }
 
   // ---------------------------------------------------------------- app install

@@ -223,6 +223,10 @@ jobs:
               'quarantine_host(uuid,text,text)',
               'clear_silence_quarantine(uuid)',
               'device_reset_complete(uuid,uuid,bigint)',
+              'quarantine_device(uuid,text,text,uuid,jsonb)',
+              'release_device_quarantine(uuid,uuid)',
+              'finish_device_recovery(uuid,uuid,bigint,boolean,text,jsonb)',
+              'expire_stalled_recoveries(interval)',
               'session_attach(uuid,uuid,bigint)',
               'record_metering(uuid,uuid[],uuid[],uuid[],text[],numeric[],timestamptz[])'
             ]

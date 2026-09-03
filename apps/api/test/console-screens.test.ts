@@ -420,6 +420,61 @@ describe('real and virtual devices are told apart', () => {
 });
 
 /**
+ * ADR-0024 on the screen an operator actually acts from.
+ *
+ * The claim this change exists to make is a SENTENCE — "releasing does not make this device
+ * available" — and a sentence is exactly the kind of thing that survives a refactor in the code and
+ * quietly disappears from the page. These render the device detail in each of the three states and
+ * assert on what a person reads.
+ */
+describe('the device detail carries the quarantine gate', () => {
+  const withDevice = (extra: Record<string, unknown>) => {
+    seed({ name: 'device', id: 'dev-1' });
+    Object.assign(mod.state.devices[0], extra);
+    mod.state.quarantineLog = { id: 'dev-1', loaded: true, events: [] };
+    return textOf(mod.SCREENS.device());
+  };
+
+  test('a quarantined device says WHY, not what the state generally means', () => {
+    const t = withDevice({
+      state: 'QUARANTINED',
+      quarantine: { at: new Date().toISOString(), reason: 'adb keeps dropping mid-session', source: 'health' },
+    });
+    assert.match(t, /adb keeps dropping mid-session/);
+    assert.match(t, /failed a health check/i, 'the source is what says where to look');
+    assert.match(t, /Release quarantine/);
+  });
+
+  test('and the screen refuses to imply that releasing makes it available', () => {
+    const t = withDevice({
+      state: 'QUARANTINED',
+      quarantine: { at: new Date().toISOString(), reason: 'frozen', source: 'operator' },
+    });
+    // The one sentence this whole change is about. If it ever disappears from the page, the button
+    // reads exactly like the `UPDATE devices SET state = 'READY'` that ADR-0024 refused to build.
+    assert.match(t, /does not (mark|make) this device available/i);
+    assert.match(t, /health check/i);
+  });
+
+  test('a device already recovering offers no second release, and says what it is waiting on', () => {
+    const t = withDevice({
+      state: 'PREPARING',
+      recovery: { startedAt: new Date().toISOString(), fromReason: 'usb dropped' },
+    });
+    assert.match(t, /usb dropped/, 'what it is recovering FROM is the context for the wait');
+    assert.match(t, /health check/i);
+    assert.doesNotMatch(t, /Release quarantine/,
+      'there is nothing left to release — a second click must not be offered');
+  });
+
+  test('a healthy device offers the way IN, since §30 needs one', () => {
+    const t = withDevice({ state: 'READY' });
+    assert.match(t, /Quarantine device/);
+    assert.doesNotMatch(t, /Release quarantine/);
+  });
+});
+
+/**
  * §18 in the console: a farm fault must be visibly NOT a test failure.
  *
  * The taxonomy is worth nothing if the screen renders both identically — the whole point is that a
@@ -650,6 +705,19 @@ describe('the launch picker distinguishes busy from unavailable', () => {
 
   test('a device restoring its snapshot is busy — that finishes by itself too', () => {
     assert.match(withState('CLEANING'), /\bbusy\b/i);
+  });
+
+  /**
+   * PREPARING resolves without anybody doing anything — to READY if the health check passes, back
+   * to QUARANTINED if it does not, and the reaper ends it either way inside RECOVERY_TIMEOUT_MS. So
+   * it belongs with the states "busy" honestly describes, and NOT with the ones that need somebody
+   * to act. Calling it unavailable would tell a tester to give up on a device that is minutes from
+   * being free; the failure this whole set of tests exists for is the opposite mistake.
+   */
+  test('a device recovering from quarantine is busy — an operator already acted on it', () => {
+    const t = withState('PREPARING');
+    assert.match(t, /\bbusy\b/i);
+    assert.doesNotMatch(t, /unavailable/i);
   });
 
   test('a ready device is free, and says so', () => {

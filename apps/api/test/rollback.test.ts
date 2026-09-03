@@ -76,6 +76,27 @@ const ACCEPTED_NEW_CHECKS: string[] = [
    * have a write of its own rejected.
    */
   'devices.devices_reset_attempts_check',
+
+  /**
+   * Migration 035, the gated quarantine release. Same shape again, and safe for the same reason: it
+   * constrains ONLY `quarantine_source`, a nullable column 035 itself adds to `devices`.
+   *
+   * Roll the CODE back to the previous release against an 035 schema and it writes `devices` the
+   * way it always did — the registration upsert, the heartbeat's automation reconciliation,
+   * `quarantine_host` as 016 defined it — naming this column nowhere. Every such write leaves it
+   * NULL, which the `IS NULL` branch admits. There is no write the old release makes that this
+   * constraint rejects.
+   *
+   * Worth stating what a rollback DOES cost here, because it is not a constraint violation and the
+   * guard cannot see it: a device quarantined by an operator carries `quarantine_source =
+   * 'operator'`, and the previous release's registration path does not know to leave it alone. A
+   * rolled-back farm would return such a handset to the pool on its host's next registration. That
+   * is a lost judgement rather than a failed write, and the fix for it is to roll forward.
+   *
+   * Not listed, and not needed: `device_quarantine_log_event_check`, which lives on a table 035
+   * creates — the guard already skips a table the previous release has never heard of.
+   */
+  'devices.devices_quarantine_source_check',
 ];
 
 const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
