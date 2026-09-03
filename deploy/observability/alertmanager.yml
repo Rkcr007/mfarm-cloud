@@ -2,15 +2,16 @@
 #
 # READ THIS BEFORE ASSUMING YOU ARE ALERTED.
 #
-# As shipped, the default receiver has NO integrations. Alerts fire, group, and appear in the
-# Alertmanager UI — and nothing reaches a human. That is not alerting; it is a dashboard with a
-# louder name. Fill in a receiver below before you rely on any of this, and then TEST it by causing
-# a real alert (stop the api container for three minutes).
+# The receiver is Slack, and the webhook is read from `/run/secrets/slack_webhook_url` — never
+# written here. Alertmanager does not expand environment variables in this file, so a URL typed into
+# it would sit in the repository in plaintext; `api_url_file` and `deploy/secrets/` exist precisely
+# so that cannot happen by accident.
 #
-# Alertmanager does not expand environment variables in this file, so a webhook URL written here is
-# written in plaintext. Keep this file out of the repo if you put a real one in it, or use
-# `*_file` variants (`slack_api_url_file`, `bot_token_file`) with the compose secrets mechanism —
-# which is why `deploy/secrets/` exists.
+# **AN EMPTY OR MISSING WEBHOOK FILE IS A SILENT NON-ALERT.** Alertmanager starts, accepts alerts,
+# groups them and shows them in its UI, and every notification attempt fails in the log. That looks
+# identical to a quiet farm from anywhere except the log, which is the same trap as a Prometheus
+# scraping nothing. After putting the webhook in place, TEST IT — the honest test is causing a real
+# alert, not trusting this comment.
 
 route:
   # Group by the alert and the thing it is about, so two devices failing produce two notifications
@@ -48,22 +49,30 @@ inhibit_rules:
 
 receivers:
   - name: default
-    # ---------------------------------------------------------------------------------------------
-    # NOTHING HERE MEANS NOTHING IS SENT. Uncomment one and restart alertmanager.
-    #
-    # slack_configs:
-    #   - api_url_file: /run/secrets/slack_webhook_url
-    #     channel: '#mfarm'
-    #     title: '{{ .CommonLabels.severity | toUpper }}: {{ .CommonAnnotations.summary }}'
-    #     text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
-    #
-    # webhook_configs:            # ntfy, Discord via a bridge, a script of your own
-    #   - url: http://ntfy:80/mfarm
-    #
-    # email_configs:
-    #   - to: you@example.com
-    #     from: mfarm@example.com
-    #     smarthost: smtp.example.com:587
-    #     auth_username: mfarm@example.com
-    #     auth_password_file: /run/secrets/smtp_password
-    # ---------------------------------------------------------------------------------------------
+    slack_configs:
+      # The channel comes from the webhook itself — an incoming-webhook URL is bound to one channel
+      # when it is created, and `channel:` here cannot override that. It is set anyway because
+      # Alertmanager shows it in its own UI, and a blank one reads as "nobody knows where this goes".
+      - api_url_file: /run/secrets/slack_webhook_url
+        channel: '#mfarm'
+        send_resolved: true
+
+        # `.Status` first, so a recovery does not read like a fresh incident at a glance. The count
+        # matters because `group_by` means one message can carry several alerts — a title naming one
+        # of them while the body lists four is how people learn to distrust the channel.
+        title: >-
+          [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}]
+          {{ .CommonLabels.severity | toUpper }} — {{ .CommonLabels.farm }}
+
+        # Every alert in the group, each with the summary AND the description, because the
+        # description is where every rule in alerts.yml puts the thing to actually go and do. A
+        # notification that says what broke but not what to check is a notification that becomes a
+        # second research task at 3am.
+        # `|-` and not `>-`. A folded scalar turns every newline into a space, so the whole message
+        # would arrive as one unbroken paragraph — correct YAML, unreadable Slack. The literal block
+        # keeps the line breaks the template writes.
+        text: |-
+          {{ range .Alerts }}*{{ .Labels.alertname }}*{{ if .Labels.hostname }} ({{ .Labels.hostname }}){{ end }}
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}

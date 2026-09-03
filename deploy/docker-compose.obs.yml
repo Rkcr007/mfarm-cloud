@@ -61,6 +61,12 @@ services:
       # Named volume, not tmpfs: silences and notification state live here, and losing them on a
       # restart means every silenced alert comes back shouting.
       - alertmanagerdata:/alertmanager
+    secrets:
+      # The Slack incoming-webhook URL, read by `api_url_file` in alertmanager.yml. A URL written
+      # into that file would be a credential committed to the repository; this one never leaves the
+      # box. `farm-up.sh` creates it empty if absent so the stack still starts — an empty file means
+      # notifications fail in the log rather than the container refusing to run.
+      - slack_webhook_url
     ports:
       - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
     logging:
@@ -111,6 +117,8 @@ secrets:
     file: ./secrets/metrics_token
   grafana_admin_password:
     file: ./secrets/grafana_admin_password
+  slack_webhook_url:
+    file: ./secrets/slack_webhook_url
 
 volumes:
   promdata:

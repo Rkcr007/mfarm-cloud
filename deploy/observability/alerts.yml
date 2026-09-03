@@ -102,10 +102,22 @@ groups:
       # expressible: it reports 0, `time() - 0` is enormous, and this fires. An age gauge would have
       # had to invent a number for that case, and every invented number is either a false alert or a
       # silent one.
+      # SEVERITY IS `warning`, NOT `critical`, AND THAT IS A STATEMENT ABOUT THIS FARM RATHER THAN
+      # ABOUT THE RULE. `mfarm-lab` is deliberately stopped between sessions — it is the ~₹65/hour
+      # half and there is no reason to pay it while nobody is testing — so a silent host is this
+      # farm's NORMAL state, not an incident. At `critical` the Alertmanager route repeats hourly,
+      # so attaching a receiver would have paged for ever about a choice somebody made on purpose,
+      # and trained whoever received it to ignore the channel the backup alerts depend on.
+      #
+      # It stays an alert because a host that is silent when it should be running is still worth
+      # seeing; it is the PRIORITY that was wrong, not the detection. Raise it back to `critical`
+      # the day the farm runs continuously — and at that point add the real fix, which is a
+      # maintenance silence created when the lab is stopped deliberately, so that intent is
+      # expressed once rather than inferred from severity for ever.
       - alert: MfarmHostSilent
         expr: time() - mfarm_host_last_heartbeat_timestamp_seconds > 60
         for: 1m
-        labels: { severity: critical }
+        labels: { severity: warning }
         annotations:
           summary: 'Worker host {{ $labels.hostname }} has stopped heartbeating'
           description: >-
