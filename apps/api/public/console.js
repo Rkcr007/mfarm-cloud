@@ -85,6 +85,8 @@ export const state = {
   runs: [],
   /** `GET /runs/:id` for the run detail screen: the rollup plus every session in it. */
   runDetail: null,
+  /** `GET /devices/:id/quarantine-log` for the device detail screen. One device at a time. */
+  quarantineLog: null,
   /** GET /sessions/:id for the session we hold — the only source of expiresAt and dataPlane. */
   held: null,
   heldFetchedAt: 0,
@@ -192,7 +194,10 @@ const DEVICE_STATE = {
   SESSION_ACTIVE: { label: 'In use',    tone: 'accent', note: 'A session is holding it' },
   BOOTING:        { label: 'Booting',   tone: 'warn',   note: 'Coming up from snapshot' },
   CLEANING:       { label: 'Restoring', tone: 'warn',   note: 'Snapshot restore in progress' },
-  QUARANTINED:    { label: 'Quarantined', tone: 'bad',  note: 'Failed health checks; never scheduled' },
+  // Not "Recovering", which reads as something happening TO the device by itself. An operator
+  // authorised this and is waiting on the answer; "Preparing" is what the device is doing for them.
+  PREPARING:      { label: 'Preparing', tone: 'warn',   note: 'Recovering from quarantine — it is not available until it passes a health check' },
+  QUARANTINED:    { label: 'Quarantined', tone: 'bad',  note: 'Out of the pool; needs somebody to look at it' },
   OFFLINE:        { label: 'Offline',   tone: '',       note: 'The host has not reported it' },
   EVICTED:        { label: 'Evicted',   tone: '',       note: 'Removed from the fleet' },
 };
@@ -206,7 +211,7 @@ const DEVICE_STATE = {
  * testing on 2026-08-31: the Launch screen said `1 busy` for a handset the Health screen — reading
  * the same API — correctly called `Quarantined`.
  */
-const BUSY_STATES = new Set(['RESERVED', 'SESSION_ACTIVE', 'CLEANING', 'BOOTING']);
+const BUSY_STATES = new Set(['RESERVED', 'SESSION_ACTIVE', 'CLEANING', 'BOOTING', 'PREPARING']);
 
 const SESSION_STATE = {
   QUEUED:     { label: 'Queued',     tone: 'warn' },
@@ -693,6 +698,28 @@ async function refreshRuns() {
  * the poll without bound. The stale check guards the case a person clicks through three runs
  * quickly — a slower request for the first must not land on top of the third.
  */
+/**
+ * One device's quarantine history.
+ *
+ * Fetched on navigation rather than folded into the 5s poll, exactly like `loadRunDetail`: this is
+ * an append-only log that changes when a person does something, and re-fetching it for every device
+ * anyone has ever opened would grow the poll for no new information. The stale check guards a
+ * person clicking through several devices quickly.
+ */
+async function loadQuarantineLog(id) {
+  if (state.quarantineLog?.id !== id) state.quarantineLog = { id, events: [], loaded: false };
+  try {
+    const out = await api(`/v1/devices/${encodeURIComponent(id)}/quarantine-log`);
+    if (state.quarantineLog?.id !== id) return;
+    state.quarantineLog = { id, events: out.events || [], loaded: true };
+  } catch {
+    // Loaded with nothing rather than left spinning. The card says "no history" and the device's
+    // own state — which the poll already has — is still on screen; a failed audit read must not
+    // hide the quarantine reason next to it.
+    if (state.quarantineLog?.id === id) state.quarantineLog = { id, events: [], loaded: true };
+  }
+}
+
 async function loadRunDetail(id) {
   if (state.runDetail?.id !== id) state.runDetail = { id, run: null, sessions: [], loaded: false };
   try {
@@ -769,6 +796,7 @@ window.addEventListener('hashchange', () => {
   render();
   if (state.route.name === 'cockpit') loadSessionDetail(state.route.id).then(render);
   if (state.route.name === 'run') loadRunDetail(state.route.id).then(render);
+  if (state.route.name === 'device') loadQuarantineLog(state.route.id).then(render);
   if (state.route.name === 'launching') watchBringup(state.route.id);
 });
 
@@ -1002,7 +1030,14 @@ function deviceCard(d) {
     ),
 
     // Dot + word + context. Never the dot alone.
-    h('p', { class: 'help row tight' }, h('span', { class: `dot ${st.tone}` }), st.note),
+    //
+    // A QUARANTINED device says why IT is quarantined, not what the state generally means. The
+    // generic line was "Failed health checks; never scheduled" for every one of them, including the
+    // handset whose host had simply stopped beating — a sentence that sends somebody to the lab to
+    // look at a phone that is fine. Same rule as the Launch screen's "busy" fix: two screens must
+    // not describe one device differently, and neither may describe it wrongly.
+    h('p', { class: 'help row tight' }, h('span', { class: `dot ${st.tone}` }),
+      d.quarantine?.reason || d.recovery?.fromReason || st.note),
 
     h('div', { class: 'device-meta' },
       // Screen joins the four facts that were always here, and it is the one a tester reads first:
@@ -1119,6 +1154,176 @@ function screenDevices() {
   ];
 }
 
+/* --------------------------------------------------------- quarantine: the gated way back */
+
+/**
+ * Why this device is out of the pool, in words rather than in an enum.
+ *
+ * The API sends a source and the reason the farm recorded; this pairs them, because the source is
+ * what tells an operator WHERE TO LOOK and the reason alone does not. A handset whose host stopped
+ * beating and a handset that failed its own health check both read "Quarantined" on every screen
+ * this console has ever had, and they need completely different people to do completely different
+ * things.
+ */
+const QUARANTINE_SOURCE = {
+  host:     'Its host was quarantined. It comes back on its own when the host beats again.',
+  operator: 'An operator took it out of service.',
+  health:   'It failed a health check.',
+};
+
+/**
+ * Release, spelled out.
+ *
+ * The dialog is deliberately not a yes/no about "recovering the device". The one thing an operator
+ * must not believe when they click this is that the device is now available — that is precisely the
+ * button ADR-0024 exists to refuse to build — so the copy states what actually happens, in the
+ * order it happens, before the confirm.
+ */
+function askReleaseQuarantine(d) {
+  confirmDialog({
+    title: 'Release this quarantine?',
+    lead: 'This authorises a recovery attempt. It does not make the device available.',
+    removes: [
+      'the host is asked to reset the device',
+      'the device reports a health check when the reset finishes',
+      'only a passing check puts it back in the pool',
+      'a failure returns it to quarantine, with the new reason',
+    ],
+    keeps: 'Nothing is handed to a tenant until the check passes.',
+    confirm: 'Authorise recovery',
+    onConfirm: () => releaseQuarantine(d.id),
+  });
+}
+
+async function releaseQuarantine(id) {
+  try {
+    const out = await api(`/v1/devices/${encodeURIComponent(id)}/release-quarantine`, { method: 'POST' });
+    // The API's own sentence, not one written here. Two places wording the same guarantee is how a
+    // console ends up promising something the control plane does not do.
+    toast(out.released ? 'Recovery authorised' : 'Nothing changed', out.detail, out.released ? '' : 'warn');
+    await refreshDevices();
+    await loadQuarantineLog(id);
+    render();
+  } catch (e) {
+    toast('Could not release the quarantine', e.message, 'bad');
+  }
+}
+
+function askQuarantine(d) {
+  const reason = h('input', {
+    class: 'input', id: 'q-reason', placeholder: 'e.g. adb keeps dropping mid-session',
+    maxlength: '500',
+  });
+  formDialog({
+    title: `Take ${d.model || 'this device'} out of service?`,
+    lead: 'It leaves the allocation pool immediately, and any session on it ends. Getting it back '
+      + 'needs a release and a passing health check.',
+    fields: [
+      h('label', { class: 'stack tight' },
+        h('span', { class: 'micro', text: 'Reason' }),
+        reason,
+        // Required by the API, and the reason it is required is worth saying at the point of entry:
+        // the person who finds this device next week has only this sentence to go on.
+        h('span', { class: 'caption', text: 'Whoever triages this device next sees only this.' })),
+    ],
+    submit: 'Quarantine',
+    onSubmit: () => quarantineDevice(d.id, reason.value.trim()),
+  });
+}
+
+async function quarantineDevice(id, reason) {
+  if (!reason) { toast('A reason is required', 'A quarantine with no reason cannot be triaged.', 'warn'); return; }
+  try {
+    const out = await api(`/v1/devices/${encodeURIComponent(id)}/quarantine`,
+      { method: 'POST', body: { reason } });
+    toast(out.quarantined ? 'Device quarantined' : 'Nothing changed', out.detail,
+      out.quarantined ? '' : 'warn');
+    await refreshDevices();
+    await loadQuarantineLog(id);
+    render();
+  } catch (e) {
+    toast('Could not quarantine the device', e.message, 'bad');
+  }
+}
+
+/** The card that carries the whole gate: why it is out, and the one action that is offered. */
+function quarantineCard(d) {
+  const admin = isOrgAdmin();
+
+  if (d.state === 'PREPARING') {
+    return card('Recovering', { aside: pill('Preparing', 'warn') },
+      kv([
+        ['Recovering from', d.recovery?.fromReason || 'a quarantine recorded before this was kept'],
+        ['Started', d.recovery?.startedAt ? `${when(d.recovery.startedAt)} (${ago(d.recovery.startedAt)})` : '—'],
+      ]),
+      h('p', { class: 'help mt-md', text:
+        'Its host has been asked to reset it and report a health check. It becomes available only '
+        + 'if the check passes; a failure puts it straight back into quarantine with the new '
+        + 'reason. If the host never answers, the farm gives up and quarantines it again.' }),
+    );
+  }
+
+  if (d.state === 'QUARANTINED') {
+    return card('Quarantined', { aside: pill('Out of the pool', 'bad') },
+      kv([
+        ['Reason', d.quarantine?.reason || 'not recorded — this quarantine predates the audit log'],
+        ['Since', d.quarantine?.at ? `${when(d.quarantine.at)} (${ago(d.quarantine.at)})` : 'not recorded'],
+      ]),
+      h('p', { class: 'help mt-md row tight' },
+        h('span', { class: 'dot bad' }),
+        QUARANTINE_SOURCE[d.quarantine?.source] || 'The farm did not record why.'),
+      h('p', { class: 'caption mt-md', text:
+        'Releasing a quarantine does not mark this device available. It authorises one recovery '
+        + 'attempt — a reset, then a health check — and only a passing check puts it back in the '
+        + 'pool.' }),
+      admin
+        ? h('div', { class: 'row tight mt-lg' },
+            btn('Release quarantine', 'primary', () => askReleaseQuarantine(d)))
+        // Said rather than silently absent: a member who cannot find the button should learn why
+        // instead of concluding the console has none.
+        : h('p', { class: 'caption mt-lg', text: 'Only an owner or an admin can release a quarantine.' }),
+    );
+  }
+
+  if (!admin) return null;
+  return card('Take out of service', {},
+    h('p', { class: 'help', text:
+      'Quarantining removes this device from allocation immediately and ends any session on it. '
+      + 'Use it when the device itself is the problem — a test that fails is not.' }),
+    h('div', { class: 'row tight mt-lg' },
+      btn('Quarantine device', 'danger', () => askQuarantine(d))),
+  );
+}
+
+/** Who did what to this device, and what it proved. Section 30's audit, read back. */
+const QUARANTINE_EVENT = {
+  quarantined:       { tone: 'bad',  verb: 'Quarantined' },
+  released:          { tone: 'warn', verb: 'Quarantine released — recovery authorised' },
+  recovered:         { tone: 'ok',   verb: 'Recovered — health check passed, back in the pool' },
+  'recovery-failed': { tone: 'bad',  verb: 'Recovery failed — quarantined again' },
+};
+
+function quarantineHistoryCard(id) {
+  const log = state.quarantineLog?.id === id ? state.quarantineLog : null;
+  const events = log?.events || [];
+  return card('Quarantine history', {},
+    events.length
+      ? timeline(events.map((e) => {
+          const meta = QUARANTINE_EVENT[e.event] || { tone: '', verb: e.event };
+          // The actor on a release, the reason on everything else. A release has no reason of its
+          // own — the reason it names is the one it is recovering FROM, and showing that here would
+          // read as a second quarantine.
+          const note = e.event === 'released'
+            ? `${e.actor ? `by ${e.actor}` : 'by an operator'}${e.fromReason ? ` · from: ${e.fromReason}` : ''}`
+            : (e.reason || '');
+          return { tone: meta.tone, title: meta.verb, note: `${ago(e.occurredAt)}${note ? ` · ${note}` : ''}` };
+        }))
+      : (log?.loaded
+          ? empty('Nothing has happened to this device.', 'Quarantines, releases and recovery outcomes appear here.')
+          : h('p', { class: 'help', text: 'Loading…' })),
+  );
+}
+
 /* ------------------------------------------------------------------ screen: device detail */
 
 function screenDevice(id) {
@@ -1136,7 +1341,7 @@ function screenDevice(id) {
     pageHead(
       [{ label: 'Farm' }, { label: 'Devices', to: '#/devices' }],
       d.model || 'Device',
-      st.note,
+      d.quarantine?.reason || st.note,
       h('div', { class: 'row tight' },
         pill(st.label, st.tone, { live: d.state === 'READY' }),
         d.state === 'READY' ? btn('Start session', 'primary', () => startSession(d)) : null,
@@ -1144,6 +1349,9 @@ function screenDevice(id) {
     ),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
+        // FIRST, above the metadata. A device that is out of the pool has exactly one thing a
+        // person opened this screen to find out, and it is not its OS version.
+        quarantineCard(d),
         card('Metadata', {},
           kv([
             ['Device id', d.id, true],
@@ -1170,7 +1378,9 @@ function screenDevice(id) {
           h('p', { class: 'caption mt-md', text: 'A capability the device does not declare is shown struck out rather than hidden — it is why a control that needs it is missing.' }),
         ),
       ),
-      h('div', { class: 'rail' }, activityCard((a) => a.deviceId === d.id)),
+      h('div', { class: 'rail' },
+        quarantineHistoryCard(d.id),
+        activityCard((a) => a.deviceId === d.id)),
     ),
   ];
 }

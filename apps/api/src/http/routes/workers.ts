@@ -4,10 +4,10 @@ import { withSystem } from '../../db.ts';
 import { generateWorkerToken, sha256, safeEqualHex } from '../../auth.ts';
 import { redeemEnrollment, markRedeemed } from '../../enrollment.ts';
 import { negotiate, deviceAutomationEndpoint, classifyReason, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
-import { resetComplete, sessionAttach } from '../../allocator.ts';
+import { finishRecovery, resetComplete, sessionAttach } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
 import { recordInfraRetry } from '../../attempts.ts';
-import { appActions, hostsRecovered, meteringEvents, workerResets } from '../../metrics.ts';
+import { appActions, deviceRecoveries, hostsRecovered, meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
 import { unauthorized, badRequest } from '../errors.ts';
 
@@ -227,7 +227,18 @@ export async function workerRoutes(app: FastifyInstance) {
              -- those back, because only it restores quarantined_from instead of guessing.
              -- Rows predating migration 016 have a NULL there and keep registration as their
              -- recovery, exactly as 016 said they would.
+             --
+             -- AND A DEVICE-LEVEL QUARANTINE THAT A PERSON OR A HEALTH CHECK PUT THERE IS NOT
+             -- REGISTRATION'S TO LIFT (migration 035). This is 016's rule about hosts, one level
+             -- down: a re-registration is evidence the agent can SEE the device, which falsifies
+             -- "its host stopped beating" and falsifies nothing at all about "this handset failed
+             -- its health checks". Without this line, unplugging a quarantined phone and plugging
+             -- it back in would silently return it to the allocation pool — the button ADR-0024
+             -- exists to refuse, reachable by accident.
              state = CASE
+               WHEN devices.state = 'QUARANTINED'
+                    AND devices.quarantine_source IN ('operator', 'health')
+                 THEN devices.state
                WHEN devices.state = 'QUARANTINED' AND devices.quarantined_from IS NOT NULL
                  THEN devices.state
                WHEN devices.state IN ('READY', 'OFFLINE', 'QUARANTINED') THEN EXCLUDED.state
@@ -291,6 +302,14 @@ export async function workerRoutes(app: FastifyInstance) {
             SET state = 'OFFLINE', updated_at = now()
           WHERE host_id = $1
             AND state IN ('READY', 'QUARANTINED')
+            -- The same exception the upsert makes, and for the same reason (migration 035). OFFLINE
+            -- is the honest word for a phone that is not plugged in, but it is also allocatable-
+            -- adjacent: the next good registration promotes OFFLINE straight back to READY. A
+            -- quarantine a person or a health check put there would be laundered into availability
+            -- by a cable being pulled and pushed back in. It stays QUARANTINED, which is also not
+            -- allocatable, and which still says why.
+            AND (state <> 'QUARANTINED' OR quarantine_source IS DISTINCT FROM 'operator')
+            AND (state <> 'QUARANTINED' OR quarantine_source IS DISTINCT FROM 'health')
             AND NOT (local_id = ANY($2::text[]))`,
         [hostId, present],
       );
@@ -449,16 +468,23 @@ export async function workerRoutes(app: FastifyInstance) {
       // and `sessions.fence` is a copy of it taken at allocation, so this names the session that
       // held this device at this reset — not whichever session happens to have ended most recently,
       // which on a busy device is a different run.
+      //
+      // PREPARING IS OFFERED TOO, AND FLAGGED (migration 035). A device an operator released from
+      // quarantine recovers down THIS path rather than a parallel one: the reset a recovery needs
+      // is the same reset a released session needs, and a second way to prepare a device would be a
+      // second thing to keep correct. The flag is what changes on the way back — a recovery is
+      // confirmed with a health result, not with the bare "done" an ordinary reset reports.
       const { rows: cleaning } = await c.query(
-        `SELECT d.id, d.fence,
+        `SELECT d.id, d.fence, d.state,
                 (SELECT s.id FROM sessions s
                   WHERE s.device_id = d.id AND s.fence = d.fence
                   ORDER BY s.created_at DESC LIMIT 1) AS session_id
            FROM devices d
-          WHERE d.host_id = $1 AND d.state = 'CLEANING'
+          WHERE d.host_id = $1 AND d.state IN ('CLEANING', 'PREPARING')
             -- ESCALATED DEVICES ARE NOT OFFERED (migration 032). The budget exists precisely so
             -- that this loop ends; leaving the offer in place while counting attempts against it
             -- would be a counter that observes an infinite retry rather than a bound on one.
+            -- A PREPARING device always has this NULL: release zeroes the budget.
             AND d.reset_escalated_at IS NULL`,
         [hostId],
       );
@@ -501,12 +527,18 @@ export async function workerRoutes(app: FastifyInstance) {
 
       return {
         row: { ...rows[0], state },
-        resets: cleaning.map((d: { id: string; fence: string | number; session_id: string | null }) => ({
+        resets: cleaning.map((d: { id: string; fence: string | number; state: string;
+                                   session_id: string | null }) => ({
           deviceId: d.id,
           fence: Number(d.fence),
           // Absent when no session matches the fence — a device reset by an operator, or one whose
-          // session row was deleted. The worker skips capture rather than inventing a target.
+          // session row was deleted. The worker skips capture rather than inventing a target. A
+          // recovery is always in this case: `release_device_quarantine` bumps the fence, so no
+          // session row matches and there is nothing of a tenant's left to collect.
           ...(d.session_id ? { sessionId: d.session_id } : {}),
+          // Absent rather than `false` on the ordinary path, so an older agent's payload is byte
+          // for byte what it was and a newer one reads a flag that only ever means one thing.
+          ...(d.state === 'PREPARING' ? { recovery: true } : {}),
         })),
         actions: pending.map((i: Record<string, unknown>) => ({
           actionId: i.id as string,
@@ -548,6 +580,18 @@ export async function workerRoutes(app: FastifyInstance) {
       metering?: Array<{ eventId: string; sessionId?: string | null; deviceId?: string | null;
                          kind: MeterKind; quantity: number; occurredAt: string; orgId?: string }>;
       resets?: Array<{ deviceId: string; fence: number }>;
+      /**
+       * The outcome of a RECOVERY the control plane asked for (migration 035, ADR-0024).
+       *
+       * Separate from `resets` rather than an extra field on one, because the two carry different
+       * evidence and earn different things. A `resets` entry says "the restore finished" and moves
+       * a device from CLEANING to READY. A `recoveries` entry says "the restore finished AND here
+       * is what the device then reported about itself", and only a healthy answer leaves
+       * quarantine. Folding them together would make `ok` optional on the path where its absence
+       * has to mean failure, which is the shape that produces an accidental promotion.
+       */
+      recoveries?: Array<{ deviceId: string; fence: number; ok: boolean; reason?: string;
+                           health?: Record<string, unknown> }>;
       actions?: Array<{ actionId: string; ok: boolean; error?: string }>;
       // A data-plane client attached to this session. The worker is the only party that observes
       // it — the grant is verified offline, so nothing else on the network knows a viewer arrived.
@@ -564,7 +608,8 @@ export async function workerRoutes(app: FastifyInstance) {
     };
   }>('/workers/events', async (req) => {
     const { hostId } = requireWorker(req);
-    const { metering = [], resets = [], actions = [], attaches = [], incidents = [] } = req.body ?? {};
+    const { metering = [], resets = [], actions = [], attaches = [], incidents = [],
+            recoveries = [] } = req.body ?? {};
 
     const meter = await ingest(
       hostId,
@@ -597,8 +642,68 @@ export async function workerRoutes(app: FastifyInstance) {
     const resetResults = [];
     for (const r of resets) {
       const accepted = await resetComplete(hostId, r.deviceId, r.fence);
+      /**
+       * A BARE RESET CONFIRMATION FOR A DEVICE THAT IS RECOVERING FAILS THE RECOVERY.
+       *
+       * `device_reset_complete` matches on `state = 'CLEANING'`, so this call already returns false
+       * for a PREPARING device — and without what follows, that device would sit in PREPARING until
+       * the reaper expired it and reported "the host did not confirm a recovery", which is untrue
+       * and would send somebody looking at the network.
+       *
+       * It happens for exactly one reason: an agent older than the recovery gate, which performs
+       * the reset it was offered and has no health result to send. Failing closed is the only
+       * honest answer — the gate's whole claim is that a completed reset is not evidence a device
+       * is fit — and the reason says what to do about it.
+       *
+       * Only on the rejected path, so the ordinary confirmation costs nothing extra.
+       */
+      if (!accepted) {
+        const ended = await finishRecovery(
+          hostId, r.deviceId, r.fence, false,
+          'the host confirmed the reset but sent no health result — this agent predates the '
+          + 'recovery gate and cannot complete a release',
+        );
+        if (ended) {
+          deviceRecoveries.inc({ outcome: 'unverified' });
+          req.log.warn({ hostId, deviceId: r.deviceId },
+            'recovery rejected: the worker confirmed a reset with no health result');
+        }
+      }
       workerResets.inc({ accepted: String(accepted) });
       resetResults.push({ deviceId: r.deviceId, accepted });
+    }
+
+    /**
+     * Recovery outcomes (migration 035).
+     *
+     * Host-scoped and fenced inside `finish_device_recovery`, exactly like the reset above and for
+     * migration 008's reason: a worker names a device id, and without the host clause it could
+     * promote another host's handset out of quarantine.
+     *
+     * `null` back means nothing matched — a stale fence, another host's device, or a recovery that
+     * the reaper already expired. Reported as `accepted: false` rather than as an error, which is
+     * the same contract every other outcome in this batch follows.
+     */
+    const recoveryResults = [];
+    for (const r of recoveries) {
+      const ended = await finishRecovery(
+        hostId, r.deviceId, r.fence, r.ok === true, r.reason ?? null, r.health ?? null,
+      );
+      deviceRecoveries.inc({
+        outcome: ended === 'READY' ? 'recovered' : ended === 'QUARANTINED' ? 'failed' : 'ignored',
+      });
+      if (ended === 'READY') {
+        req.log.info({ hostId, deviceId: r.deviceId },
+          'device recovered: reset completed and the health check passed — back in the pool');
+      } else if (ended === 'QUARANTINED') {
+        // Warn, not info. A device that was released by a person and could not come back is the
+        // one outcome here somebody has to act on.
+        req.log.warn({ hostId, deviceId: r.deviceId, reason: r.reason },
+          'recovery failed: the device is quarantined again, carrying the new reason');
+      }
+      recoveryResults.push({
+        deviceId: r.deviceId, accepted: ended !== null, ...(ended ? { state: ended } : {}),
+      });
     }
 
     /**
@@ -737,6 +842,7 @@ export async function workerRoutes(app: FastifyInstance) {
       meteringDuplicates: meter.duplicates,
       meteringRejected: meter.rejected,
       resets: resetResults,
+      recoveries: recoveryResults,
       actions: actionResults,
       attaches: attachResults,
       // Reported back so the agent can drop them from its buffer. `accepted: false` on a re-send is

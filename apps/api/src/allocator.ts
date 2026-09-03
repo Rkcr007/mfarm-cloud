@@ -177,6 +177,23 @@ function maxResetAttempts(): number {
 }
 
 /**
+ * How long an authorised recovery may run before the farm gives up on it (migration 035).
+ *
+ * NOT the reset budget above, and the difference is what it is measuring. That one bounds a device
+ * the farm is trying to fix on its own, attempt by attempt. This one bounds ONE attempt with a
+ * person behind it: an operator released the quarantine, the heartbeat re-offers the reset every
+ * beat inside this window, and when it closes the honest report is "nobody confirmed this".
+ *
+ * Ten minutes clears the slowest observed preparation with room to spare — a powerwash is 40-80s on
+ * real hardware, a cold boot 35s, and an Appium that has to come back after it adds tens of seconds
+ * more — while still being short enough that an operator who released a device and walked away
+ * finds a decided answer rather than a spinner.
+ */
+function recoveryTimeoutMs(): number {
+  return Number(process.env.RECOVERY_TIMEOUT_MS ?? 600_000);
+}
+
+/**
  * Module-level: one reaper per process, and it is the only caller.
  *
  * Both knobs above are read INSIDE the sweep rather than at module scope, and that is not style.
@@ -189,7 +206,7 @@ let lastHostSweepAt = 0;
 export async function reap(): Promise<{
   expired: number; idleEnded: number; promoted: number; keysPurged: number; installsOrphaned: number;
   hostsQuarantined: number; artifactsExpired: number; blobsDeleted: number; resetsEscalated: number;
-  attemptsClosed: number;
+  attemptsClosed: number; recoveriesExpired: number;
 }> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
@@ -280,6 +297,28 @@ export async function reap(): Promise<{
     }
 
     /**
+     * Recoveries nobody finished (migration 035).
+     *
+     * A device released from quarantine sits in PREPARING while its host resets it and reports a
+     * health result. A host that is asked and then goes silent — powered off, unplugged,
+     * partitioned — would leave that device in PREPARING for the life of the database, which is
+     * exactly the "state a device could never leave" ADR-0019 refused to build. This is the
+     * terminal state §11 asks for, reached without anybody reporting anything.
+     *
+     * Per tick rather than on the host sweep's slower clock: the window is minutes, the check is
+     * one indexed read against a partial index, and a recovery that has expired should not wait on
+     * a sweep that exists to bound a FLEET-WIDE write.
+     */
+    const rec = await c.query<{ n: number }>(
+      'SELECT expire_stalled_recoveries(make_interval(secs => $1)) AS n',
+      [recoveryTimeoutMs() / 1000],
+    );
+    if (Number(rec.rows[0].n) > 0) {
+      console.warn(`[reaper] ${rec.rows[0].n} recovery attempt(s) expired after `
+        + `${Math.round(recoveryTimeoutMs() / 1000)}s with no host confirmation — back to quarantine.`);
+    }
+
+    /**
      * Attempts whose session has ended (migration 033).
      *
      * A SWEEP, not a call on each end path, and the difference is maintenance rather than taste. A
@@ -349,6 +388,7 @@ export async function reap(): Promise<{
       blobsDeleted,
       resetsEscalated: Number(esc.rows[0].n),
       attemptsClosed: Number(ca.rows[0].n),
+      recoveriesExpired: Number(rec.rows[0].n),
     };
   });
 }
@@ -403,6 +443,125 @@ export async function resetAttempts(deviceId: string, limit = 50): Promise<Reset
       attempt: Number(r.attempt),
       outcome: r.outcome as ResetAttempt['outcome'],
       detail: r.detail as string | null,
+      // bigint arrives as a string, like every other fence in this file.
+      fence: r.fence === null ? null : Number(r.fence),
+      occurredAt: r.occurred_at as Date,
+    }));
+  });
+}
+
+/* ------------------------------------------------------------------ quarantine, and the way back */
+
+/**
+ * Take one device out of service (migration 035).
+ *
+ * A FLEET operation on the system pool, like everything else in this section: `quarantine_device` is
+ * definer-owned and revoked from `mfarm_app`.
+ *
+ * `false` means nothing moved — the device is already quarantined, or it has been evicted. Said
+ * plainly rather than folded into a throw, because both are ordinary answers to a second click.
+ */
+export async function quarantineDevice(
+  deviceId: string,
+  reason: string,
+  source: 'host' | 'operator' | 'health' = 'operator',
+  actorId: string | null = null,
+  detail: Record<string, unknown> | null = null,
+): Promise<boolean> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query(
+      'SELECT quarantine_device($1, $2, $3, $4, $5) AS ok',
+      [deviceId, reason, source, actorId, detail ? JSON.stringify(detail) : null],
+    );
+    return rows[0].ok === true;
+  });
+}
+
+/**
+ * Authorise a quarantined device to ATTEMPT recovery (migration 035, ADR-0024).
+ *
+ * This does not make a device available and it must never be described as if it does. It moves the
+ * device to `PREPARING`, where the heartbeat starts offering it a reset again; only a completed
+ * reset plus a passing health check, reported by the host that owns it, reaches `READY`.
+ *
+ * NOT CALLABLE BY THE WORKER, for `clearResetEscalation`'s reason and one more: the whole value of
+ * the gate is that a person looked. A worker that could release its own devices would turn the
+ * quarantine into a pause.
+ */
+export async function releaseDeviceQuarantine(
+  deviceId: string, actorId: string | null,
+): Promise<boolean> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query(
+      'SELECT release_device_quarantine($1, $2) AS ok', [deviceId, actorId],
+    );
+    return rows[0].ok === true;
+  });
+}
+
+/**
+ * The outcome of a recovery, as reported by the host that was asked to perform it.
+ *
+ * Host-scoped and fenced inside the function (migration 008's rule), so a worker naming another
+ * host's device changes nothing. Returns the state the device ended in, or `null` when nothing
+ * matched — a stale fence, another host's device, or a device that is no longer recovering.
+ *
+ * `ok` IS THE HEALTH RESULT, not "the reset returned". A restore that completes on a handset whose
+ * USB has gone is a successful reset of a device nobody can drive.
+ */
+export async function finishRecovery(
+  hostId: string, deviceId: string, fence: number, ok: boolean,
+  reason: string | null = null, detail: Record<string, unknown> | null = null,
+): Promise<'READY' | 'QUARANTINED' | null> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query(
+      'SELECT finish_device_recovery($1, $2, $3, $4, $5, $6) AS state',
+      [hostId, deviceId, fence, ok, reason, detail ? JSON.stringify(detail) : null],
+    );
+    return (rows[0].state ?? null) as 'READY' | 'QUARANTINED' | null;
+  });
+}
+
+export interface QuarantineEvent {
+  event: 'quarantined' | 'released' | 'recovered' | 'recovery-failed';
+  source: string | null;
+  reason: string | null;
+  actorId: string | null;
+  actorEmail: string | null;
+  fromReason: string | null;
+  detail: Record<string, unknown> | null;
+  fence: number | null;
+  occurredAt: Date;
+}
+
+/**
+ * Every quarantine, release and recovery outcome for this device, most recent first.
+ *
+ * On the system pool because `device_quarantine_log` carries no `org_id` and no RLS policy — it is
+ * about HARDWARE (migration 035's table comment, and 032's before it). The route above it is what
+ * decides who may look, by reading the device through `withTenant` first.
+ */
+export async function quarantineLog(deviceId: string, limit = 50): Promise<QuarantineEvent[]> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query(
+      `SELECT event, source, reason, actor_id, actor_email, from_reason, detail, fence, occurred_at
+         FROM device_quarantine_log
+        WHERE device_id = $1
+        -- By append order, not by timestamp: rows written in one transaction share occurred_at
+        -- to the microsecond, and a uuid tiebreaker would render the timeline differently on
+        -- different reads (migration 035).
+        ORDER BY seq DESC
+        LIMIT $2`,
+      [deviceId, limit],
+    );
+    return rows.map((r) => ({
+      event: r.event as QuarantineEvent['event'],
+      source: r.source as string | null,
+      reason: r.reason as string | null,
+      actorId: r.actor_id as string | null,
+      actorEmail: r.actor_email as string | null,
+      fromReason: r.from_reason as string | null,
+      detail: r.detail as Record<string, unknown> | null,
       // bigint arrives as a string, like every other fence in this file.
       fence: r.fence === null ? null : Number(r.fence),
       occurredAt: r.occurred_at as Date,

@@ -17,6 +17,17 @@ media relay; `./deploy/farm-check.sh` waits for the devices and reports what is 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
 
+**2026-09-04 — A QUARANTINED HANDSET NOW HAS A WAY BACK, AND IT IS GATED (ADR-0024).** Migrations
+034 and 035. `QUARANTINED` had been a state devices could enter and, at the device level, never
+deliberately leave: nothing recorded WHY one was quarantined, there was no way to quarantine a
+single handset, and §30's `[Recover Device]` had nowhere to land. The one-line version of that
+button — `UPDATE devices SET state = 'READY'` — puts a broken phone back in the pool on an
+operator's optimism, so releasing a quarantine now moves the device to a new `PREPARING` state and
+**only a completed reset plus a passing health check, reported by the host that owns it, reaches
+`READY`.** A failure returns it to `QUARANTINED` carrying the NEW reason. Everything is in
+`device_quarantine_log`: who released it, when, what it was recovering from, and what the health
+check said. Details in issue 44.
+
 **2026-09-02 — THIS FILE WAS AUDITED FOR STALE CLAIMS, AND SEVENTEEN WERE FOUND.** Not typos: claims
 that were true when written, were fixed later, and were never unwritten — so the top of the file
 contradicted the bottom. Three of them ("nothing reads `last_command_at`", the `.part` leak, the
@@ -2396,3 +2407,63 @@ when the feature is broken. See issues 37 and 38.
     is classified disruptive and is not in the default set. That is correct behaviour under test,
     not a defect, but it is not something to run against a farm somebody is using.
 
+44. **A QUARANTINE A PERSON MAKES IS NOT THE FARM'S TO UNDO — AND RELEASING ONE IS NOT MARKING IT
+    AVAILABLE.** 2026-09-04. ADR-0024, migrations 034 + 035.
+
+    `AutomationExecutionPlan.md` §30 asks for a `[Recover Device]` action. The implementation that
+    writes itself is one statement, and it is the whole reason this entry exists:
+
+    ```sql
+    UPDATE devices SET state = 'READY' WHERE id = $1;
+    ```
+
+    That hands a device that failed its health checks to the next tenant on the strength of somebody
+    having clicked a button. **Release now means "I am authorising this device to attempt
+    recovery".** It moves the device to `PREPARING`; the heartbeat starts offering it a reset again;
+    the agent restores it and then probes `control.health()`; and only a passing result reaches
+    `READY`. Anything else — a reset that throws, a health probe that says the handset is still
+    offline, a host that never answers inside `RECOVERY_TIMEOUT_MS` — puts it back in `QUARANTINED`
+    with the new failure recorded.
+
+    **Five things worth keeping, in the order they were found:**
+
+    - **`PREPARING` had to be a state, which is where ADR-0019 is amended rather than contradicted.**
+      019 chose a *condition* over a state because `CLEANING` already meant everything an escalated
+      device needed to mean, and because quarantining stops the reset offers that are the only thing
+      that could fix the device. Both still hold — and neither `QUARANTINED` (not offered resets)
+      nor `CLEANING` (means "a tenant's session ended") can carry a recovery. What makes a
+      device-level `QUARANTINED` safe to enter *at all* is that there is now a way out of it.
+
+    - **Registration and the withdrawal sweep would each have laundered a quarantine.** The upsert
+      promotes `QUARANTINED` → `READY` for a re-registering host (correct, for the host cascade), and
+      the withdrawal demotes a missing device to `OFFLINE`, from which the next good registration
+      promotes it anyway. So **unplugging a quarantined phone and plugging it back in returned it to
+      the pool.** Both paths now check `quarantine_source`: `host` still self-clears, `operator` and
+      `health` do not. This is migration 016's rule about hosts, one level down, and it is the part
+      most likely to be "fixed" wrongly later.
+
+    - **A completed reset is not evidence a device is fit,** which is what makes an older agent
+      interesting rather than merely unsupported. Such an agent performs the reset it was offered
+      and confirms it through `resets`; `device_reset_complete` matches on `CLEANING` and rejects it.
+      Without a branch for that, the device sat in `PREPARING` until the reaper reported "the host
+      did not confirm a recovery" — untrue, and it would send somebody to look at the network. It now
+      fails the recovery closed with a reason naming the agent version.
+
+    - **The audit log needed an append order, and `occurred_at` is not one.** Two rows written in one
+      transaction share it to the microsecond, so `ORDER BY (occurred_at, id)` fell back to a random
+      uuid and rendered a device as released *before* it was quarantined — intermittently. Found by a
+      flaking test at the end of a full-suite run, not by review. `device_quarantine_log.seq`.
+
+    - **`mfarm_definer` cannot read `users`,** and both write paths copy the actor's email into the
+      audit row so the record outlives the account. `GRANT SELECT (id, email)` — column-level, because
+      `users` is the table a password hash lives beside and a blanket grant would hand every definer
+      function in the schema a read of everything on that row.
+
+    **What is deliberately NOT in this change.** §30's automatic trigger — quarantine after N
+    device-health incidents — needs a threshold and a window and is its own decision; this gives that
+    policy somewhere to land (`quarantine_device(..., 'health')`) when it is made. Reset escalation
+    (019) is untouched: an ordinary post-session reset that exhausts its budget still stays `CLEANING`
+    with the escalated condition, and only a *recovery* returns to quarantine. The two could be
+    unified behind one "authorise an attempt" action later.
+
+    25 new tests (22 control plane, 3 agent). Suite is 1206 green at migration 035.

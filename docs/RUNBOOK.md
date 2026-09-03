@@ -248,6 +248,14 @@ console that answers on loopback and times out from the internet.
 migration 016 this self-heals on the next heartbeat; if it does not, the host is quarantined by an
 operator rather than by the reaper, and only a human lifts that.
 
+**One handset is quarantined and the rest of the farm is fine** — open it in the console. Since
+migration 035 the device carries the reason and the source, and the source is what says where to
+look: `host` clears itself when the host beats again, `operator` and `health` do not. **Release
+quarantine** authorises ONE recovery attempt — the host resets the device and reports a health
+check, and only a passing check puts it back in the pool. A failure returns it to quarantine with
+the new reason, which is the sentence to act on. If it sits in `PREPARING` past ten minutes the
+reaper has stopped; check the API container's log for `[reaper]` lines (ADR-0024).
+
 **A deploy fell back to building locally** — the box lost its registry credential. On that host:
 `docker login ghcr.io -u rkcr007` with a `read:packages` token.
 

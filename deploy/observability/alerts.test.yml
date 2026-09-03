@@ -220,3 +220,44 @@ tests:
       - eval_time: 8m
         alertname: MfarmHostSilent
         exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # A RECOVERY THE REAPER SHOULD HAVE ENDED (ADR-0024).
+  #
+  # The threshold is 900s against a RECOVERY_TIMEOUT_MS of 600s, and the gap is the whole design:
+  # the reaper expires a recovery at 600s, so this gauge cannot legitimately reach 900 — reaching it
+  # means the sweep has stopped. The second test is the one that keeps that honest, because a
+  # threshold below the timeout would fire on every ordinary slow recovery and teach people to
+  # ignore it.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a recovery the reaper never ended pages
+    input_series:
+      - series: 'mfarm_device_preparing_age_seconds_max'
+        values: '901x30'
+    alert_rule_test:
+      # `for: 5m`, so nothing at four minutes.
+      - eval_time: 4m
+        alertname: MfarmDeviceRecoveryStuck
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: MfarmDeviceRecoveryStuck
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: A quarantine recovery has outlived the timeout that should have ended it
+              description: >-
+                A device released from quarantine has been PREPARING for longer than RECOVERY_TIMEOUT_MS plus a wide margin. The reaper should have expired it and put it back in quarantine, so this means the reaper is not running rather than that the device is slow. Check the API container's log for [reaper] lines.
+
+  - interval: 1m
+    name: an ordinary recovery, and one the reaper ends on time, page nobody
+    input_series:
+      # Climbs the way a real recovery does — a powerwash is 40-80s, an Appium restart adds more —
+      # and then the reaper expires it at the 600s timeout and the gauge drops to zero.
+      - series: 'mfarm_device_preparing_age_seconds_max'
+        values: '0+60x10 0x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MfarmDeviceRecoveryStuck
+        exp_alerts: []

@@ -43,6 +43,8 @@ class FakeDevice implements DeviceControl {
   readonly calls: string[] = [];
   resetDurationMs = 0;
   failNextReset = false;
+  /** Steerable so a recovery can be told to fail its health check. Healthy is the honest default. */
+  health_: DeviceHealth = { status: 'healthy', inputLatencyMs: 1 };
 
   constructor(localId = 'fake-1') {
     this.info = {
@@ -64,7 +66,7 @@ class FakeDevice implements DeviceControl {
   async swipe(x1: number, y1: number, x2: number, y2: number, d: number) { this.calls.push(`swipe:${x1},${y1},${x2},${y2},${d}`); }
   async key(name: string) { this.calls.push(`key:${name}`); }
   async text(v: string) { this.calls.push(`text:${v}`); }
-  async health(): Promise<DeviceHealth> { return { status: 'healthy', inputLatencyMs: 1 }; }
+  async health(): Promise<DeviceHealth> { this.calls.push('health'); return this.health_; }
 }
 
 /**
@@ -1573,4 +1575,114 @@ describe('re-registration presents the host\'s own credential', () => {
     assert.notEqual(s2.hostId, s1.hostId, 'a new host row, reached via the fleet secret');
     await revived.shutdown();
   });
+});
+
+/**
+ * A quarantine recovery is the same reset with a verdict attached (ADR-0024).
+ *
+ * WHAT THESE TESTS ARE FOR. The control plane will not take a device out of quarantine on a bare
+ * "the reset finished", so the agent has to produce the evidence — and the interesting failure is
+ * the one where it produces the WRONG evidence: a restore that completes on a handset nobody can
+ * drive. So the second test is the important one, and it asserts on the DEVICE ROW rather than on
+ * anything the agent said about itself.
+ *
+ * The probe budget is turned down to one attempt with no gap. The default is five probes three
+ * seconds apart, which is right on hardware — a device that has just been restored is legitimately
+ * unresponsive for a moment — and would make this file wait twelve seconds to observe a failure it
+ * already knows about.
+ */
+describe('quarantine recovery', () => {
+  const fast = <T>(fn: () => Promise<T>) => async (): Promise<T> => {
+    process.env.RECOVERY_PROBE_ATTEMPTS = '1';
+    process.env.RECOVERY_PROBE_GAP_MS = '1';
+    try { return await fn(); } finally {
+      delete process.env.RECOVERY_PROBE_ATTEMPTS;
+      delete process.env.RECOVERY_PROBE_GAP_MS;
+    }
+  };
+
+  /** Poll the row, because the beat deliberately does not await the reset it triggers. */
+  async function settle(deviceId: string, want: string) {
+    let state = '';
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && state !== want) {
+      state = await withSystem(async (c) =>
+        (await c.query('SELECT state::text AS s FROM devices WHERE id = $1', [deviceId])).rows[0].s);
+      if (state !== want) await new Promise((r) => setTimeout(r, 25));
+    }
+    return state;
+  }
+
+  test('a healthy device released from quarantine comes back to the pool', fast(async () => {
+    const b = fakeBackend(`rec-ok-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b], `rec-ok-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    // Exactly what an operator's release does — through the real function, not a hand-written
+    // UPDATE, so the fence bump and the audit row are the ones production writes.
+    await withSystem((c) => c.query(
+      `SELECT quarantine_device($1, 'adb kept dropping', 'health'),
+              release_device_quarantine($1, NULL)`, [deviceId]));
+
+    assert.equal((await agent.heartbeat()).ok, true);
+    assert.equal(await settle(deviceId, 'READY'), 'READY',
+      'a completed reset AND a passing health check is what earns the pool back');
+    assert.ok(b.control.calls.includes('reset'), 'the reset has to actually run');
+    assert.ok(b.control.calls.includes('health'), 'and the health check is the half that gates it');
+
+    const events = await withSystem(async (c) => (await c.query(
+      // By seq, the append order: the two calls below run in ONE transaction and therefore share
+      // occurred_at exactly, so a uuid tiebreaker would order them at random.
+      `SELECT event FROM device_quarantine_log WHERE device_id = $1 ORDER BY seq`,
+      [deviceId])).rows.map((r) => r.event));
+    assert.deepEqual(events, ['quarantined', 'released', 'recovered']);
+    await agent.shutdown();
+  }));
+
+  test('a device that resets but is still unhealthy goes back into quarantine', fast(async () => {
+    const b = fakeBackend(`rec-bad-${randomUUID().slice(0, 8)}`);
+    // The failure this whole gate exists for: the restore succeeds, and the device is still gone.
+    b.control.health_ = { status: 'offline', reasonCode: 'device-disconnected', reason: 'no adb' };
+    const agent = makeAgent([b], `rec-bad-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    await withSystem((c) => c.query(
+      `SELECT quarantine_device($1, 'adb kept dropping', 'health'),
+              release_device_quarantine($1, NULL)`, [deviceId]));
+
+    assert.equal((await agent.heartbeat()).ok, true);
+    assert.equal(await settle(deviceId, 'QUARANTINED'), 'QUARANTINED');
+    assert.ok(b.control.calls.includes('reset'), 'the reset ran — that is precisely the point');
+
+    const row = await withSystem(async (c) => (await c.query(
+      `SELECT quarantine_reason, quarantine_source FROM devices WHERE id = $1`, [deviceId])).rows[0]);
+    assert.equal(row.quarantine_source, 'health');
+    assert.match(String(row.quarantine_reason), /no adb/,
+      'the NEW failure, so the person who released it learns something they did not already know');
+    await agent.shutdown();
+  }));
+
+  test('a reset that throws fails the recovery with the reset’s own message', fast(async () => {
+    const b = fakeBackend(`rec-throw-${randomUUID().slice(0, 8)}`);
+    b.control.failNextReset = true;
+    const agent = makeAgent([b], `rec-throw-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    await withSystem((c) => c.query(
+      `SELECT quarantine_device($1, 'frozen', 'health'),
+              release_device_quarantine($1, NULL)`, [deviceId]));
+
+    assert.equal((await agent.heartbeat()).ok, true);
+    assert.equal(await settle(deviceId, 'QUARANTINED'), 'QUARANTINED');
+    assert.ok(!b.control.calls.includes('health'),
+      'a reset that threw is already the answer — probing afterwards would measure a device nobody prepared');
+
+    const reason = await withSystem(async (c) => (await c.query(
+      `SELECT quarantine_reason FROM devices WHERE id = $1`, [deviceId])).rows[0].quarantine_reason);
+    assert.match(String(reason), /snapshot restore failed/);
+    await agent.shutdown();
+  }));
 });

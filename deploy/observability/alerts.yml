@@ -65,7 +65,26 @@ groups:
           summary: A device is quarantined
           description: >-
             A quarantined device is drained and never scheduled. At two devices this is half the
-            farm, and it does not recover by itself.
+            farm, and it does not recover by itself. Open the device in the console: it now carries
+            the reason and the source, and "Release quarantine" authorises ONE recovery attempt —
+            a reset plus a health check — rather than putting it back in the pool (ADR-0024).
+
+      # A recovery that will not finish. RECOVERY_TIMEOUT_MS is 600s and the reaper quarantines the
+      # device again when it elapses, so this gauge cannot legitimately climb past that — which is
+      # what makes the threshold meaningful rather than a guess. It is NOT "a recovery is slow": it
+      # is "the sweep that bounds recoveries has stopped", which is a control-plane fault and would
+      # otherwise be invisible, because a device stuck in PREPARING looks like one being worked on.
+      - alert: MfarmDeviceRecoveryStuck
+        expr: mfarm_device_preparing_age_seconds_max > 900
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: A quarantine recovery has outlived the timeout that should have ended it
+          description: >-
+            A device released from quarantine has been PREPARING for longer than
+            RECOVERY_TIMEOUT_MS plus a wide margin. The reaper should have expired it and put it
+            back in quarantine, so this means the reaper is not running rather than that the device
+            is slow. Check the API container's log for [reaper] lines.
 
       - alert: MfarmDeviceOffline
         expr: sum(mfarm_devices{state="OFFLINE"}) > 0
