@@ -188,7 +188,36 @@
   --bad-solid-hover:  #C93343;
   --bad-outline:      #4A2436;
 
-  --info: #7FA0D8;   /* physical device badge, neutral informational */
+  --info:      #7FA0D8;   /* physical device badge, neutral informational */
+  --info-bg:   rgba(127, 160, 216, .07);
+  --info-line: rgba(127, 160, 216, .26);
+
+  /* ================================================================= added for stage 8 ===
+   *
+   * EVERY ONE OF THESE WAS A LITERAL IN `console.css`. They are not new decisions — they are the
+   * values the console was already painting, given names so the light theme can re-derive them.
+   * Until now `[data-theme='light']` could redefine forty tokens and the console would still draw
+   * `#fff` text on a hover, `rgba(255,255,255,.035)` on a nav item and a near-black stage ground,
+   * because those never went through a variable at all.
+   *
+   * The test for whether something belongs here is simple: does it describe the ROOM or the
+   * DEVICE. The room changes when the lights come on; the phone does not (see the frame section
+   * of `console.css`, which is deliberately absent from this list).
+   */
+  --on-accent:     #FFFFFF;              /* text and glyphs on a filled accent surface */
+  --accent-hover:  #8570C9;              /* primary button, hover */
+  --accent-text:   #C9BCF0;              /* accent used as TEXT on a quiet ground */
+  --hover-row:     rgba(255, 255, 255, .015);  /* table row */
+  --hover-soft:    rgba(255, 255, 255, .035);  /* nav item, ghost button */
+  --hover-strong:  rgba(255, 255, 255, .10);   /* a selected lens's count */
+  --s-stage:       #060607;              /* the ground a device sits on */
+  /* Log levels. Deliberately NOT the semantic tokens: `--bad-text` is a state of the farm, and an
+     ERROR line is a state of the app under test. They are the same hue today and must be free to
+     stop being. */
+  --log-e: #EE7C88;
+  --log-w: #E8A30E;
+  --log-i: #7FA0D8;
+  --log-d: #6D7089;
 
   /* =============================================================================== shape ===
    *
@@ -362,7 +391,29 @@
   --bad-solid-hover: #C93343;
   --bad-outline:     #E8C2C7;
 
-  --info: #3E6BAE;
+  --info:      #3E6BAE;
+  --info-bg:   rgba(62, 107, 174, .08);
+  --info-line: rgba(62, 107, 174, .26);
+
+  /*
+   * The stage-8 additions, re-derived rather than tinted. Two of them invert outright: a hover on
+   * a bright surface is a DARKENING, and accent-as-text has to earn 4.5:1 on white — `#C9BCF0` is
+   * a pale lilac that is legible on #08080A and invisible on #FBFBFA, so light uses the accent
+   * itself rather than a lightened version of it.
+   *
+   * `--on-accent` stays white in both, because the accent is dark in both.
+   */
+  --on-accent:     #FFFFFF;
+  --accent-hover:  #4A3888;
+  --accent-text:   #5A45A0;
+  --hover-row:     rgba(20, 20, 18, .022);
+  --hover-soft:    rgba(20, 20, 18, .045);
+  --hover-strong:  rgba(20, 20, 18, .09);
+  --s-stage:       #F2F2F1;
+  --log-e: #B02231;
+  --log-w: #A8730A;
+  --log-i: #3E6BAE;
+  --log-d: #6E6E6E;
 
   /* A phone on a bright desk has a SHORTER SHADOW. The warm inset highlight stays; the cast layers
      lose roughly half their opacity. */

@@ -242,8 +242,8 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 .pill.ok     { color: var(--ok-text, #7FD873);  background: var(--ok-bg);  border-color: var(--ok-line); }
 .pill.warn   { color: var(--warn, #E8A30E);     background: var(--warn-bg); border-color: var(--warn-line); }
 .pill.bad    { color: var(--bad-text, #EE7C88); background: var(--bad-bg); border-color: var(--bad-line); }
-.pill.info   { color: var(--info, #7FA0D8);     background: rgba(127,160,216,.07); border-color: rgba(127,160,216,.26); }
-.pill.accent { color: #C9BCF0; background: var(--mf-accent-soft); border-color: var(--mf-accent-line); }
+.pill.info   { color: var(--info, #7FA0D8);     background: var(--info-bg); border-color: var(--info-line); }
+.pill.accent { color: var(--accent-text, #C9BCF0); background: var(--mf-accent-soft); border-color: var(--mf-accent-line); }
 
 /**
  * Capability chip.
@@ -295,8 +295,8 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 .badge {
   padding: 3px 8px;
   border-radius: var(--r-pill, 999px);
-  background: rgba(127, 160, 216, .10);
-  border: 1px solid rgba(127, 160, 216, .32);
+  background: var(--info-bg);
+  border: 1px solid var(--info-line);
   font-family: var(--f-mono);
   font-size: 9px;
   letter-spacing: .05em;
@@ -499,9 +499,9 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 .btn.primary {
   background: var(--mf-accent, #755EB8);
   border-color: var(--mf-accent, #755EB8);
-  color: #fff;
+  color: var(--on-accent, #fff);
 }
-.btn.primary:hover:not([disabled]) { background: #8570C9; border-color: #8570C9; }
+.btn.primary:hover:not([disabled]) { background: var(--accent-hover, #8570C9); border-color: var(--accent-hover, #8570C9); }
 
 .btn.danger {
   background: transparent;
@@ -520,14 +520,14 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 kbd {
   display: inline-block;
   padding: 1px 5px;
-  background: rgba(255, 255, 255, .05);
+  background: var(--hover-soft);
   border: 1px solid var(--b-btn, #2B2B2E);
   border-radius: 2px;
   font-family: var(--f-mono);
   font-size: 10px;
   color: var(--t-label, #8A8A8A);
 }
-.btn.primary kbd { background: rgba(0, 0, 0, .22); border-color: rgba(255, 255, 255, .22); color: rgba(255, 255, 255, .82); }
+.btn.primary kbd { background: rgba(0, 0, 0, .22); border-color: rgba(255, 255, 255, .22); color: rgba(255, 255, 255, .82); } /* on a filled accent in BOTH themes — the surface under this is dark either way */
 
 /* Fields. */
 .field {
@@ -683,11 +683,11 @@ kbd {
 }
 .signin-pitch::before {
   width: 460px; height: 460px; top: -140px; left: -120px;
-  background: radial-gradient(circle, rgba(255,255,255,.055), transparent 70%);
+  background: radial-gradient(circle, var(--hover-soft), transparent 70%);
 }
 .signin-pitch::after {
   width: 380px; height: 380px; bottom: -130px; right: -60px;
-  background: radial-gradient(circle, rgba(255,255,255,.035), transparent 70%);
+  background: radial-gradient(circle, var(--hover-row), transparent 70%);
 }
 .signin-pitch > * { position: relative; }
 
@@ -714,8 +714,10 @@ kbd {
 .signin-card {
   width: 100%;
   max-width: 400px;
-  background: rgba(16, 16, 18, .92);
-  border: 1px solid #292929;
+  /* Slightly lifted off the sign-in ground rather than flush with it — `--s-overlay` is the token
+     for a surface that sits ON the page, which is what this is. */
+  background: var(--s-overlay, #101013);
+  border: 1px solid var(--b-overlay, #2E2E31);
   border-radius: 4px;
   padding: 28px;
 }
@@ -742,7 +744,7 @@ kbd {
   width: 19px; height: 19px;
   background: var(--mf-accent, #755EB8);
   border-radius: 2px;
-  color: #fff;
+  color: var(--on-accent, #fff);
   font-size: 11px;
   font-weight: 600;
 }
@@ -807,7 +809,7 @@ kbd {
   border-radius: 50%;
   background: var(--mf-accent-soft, rgba(117,94,184,.16));
   border: 1px solid var(--mf-accent-line, rgba(117,94,184,.42));
-  color: #EDEDED;
+  color: var(--t-primary, #F1F1F1);
   font-size: 10px;
   flex: 0 0 auto;
 }
@@ -846,7 +848,7 @@ kbd {
   color: var(--t-nav, #ADADAD);
   font-size: 12px;
 }
-.navitem:hover { background: rgba(255, 255, 255, .035); color: var(--t-primary, #F1F1F1); }
+.navitem:hover { background: var(--hover-soft); color: var(--t-primary, #F1F1F1); }
 .navitem .glyph,
 .navtoggle .glyph {
   display: inline-grid; place-items: center;
@@ -856,9 +858,12 @@ kbd {
 }
 .navitem .txt { display: var(--mf-navlabel, block); white-space: nowrap; overflow: hidden; }
 .navitem .sc  { display: var(--mf-navlabel, block); margin-left: auto; font-size: 10px; color: var(--t-navhead, #484848); }
+/* `--t-primary`, NOT white. The ground here is `--mf-accent-soft`, a 10% tint of the accent over
+   the nav surface — near-black in dark, near-white in light. White text on it is correct in one
+   theme and invisible in the other, which is exactly the bug stage 8 exists to find. */
 .navitem.is-active {
   background: var(--mf-accent-soft, rgba(117,94,184,.16));
-  color: #fff;
+  color: var(--t-primary, #F1F1F1);
 }
 .navitem.is-active .glyph { color: var(--mf-accent, #755EB8); }
 
@@ -950,7 +955,7 @@ kbd {
   vertical-align: middle;
 }
 .table tr:last-child td { border-bottom: none; }
-.table tbody tr:hover { background: rgba(255, 255, 255, .015); }
+.table tbody tr:hover { background: var(--hover-row); }
 .table .right { text-align: right; }
 .rowactions { display: inline-flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 
@@ -990,7 +995,7 @@ kbd {
 /* -------------------------------------------------------------------- cockpit */
 
 .stage {
-  background: #060607;
+  background: var(--s-stage);
   border: 1px solid var(--b-card, #1F1F22);
   border-radius: 3px;
   padding: 22px;
@@ -1011,7 +1016,7 @@ kbd {
 
 .scrim {
   position: fixed; inset: 0;
-  background: rgba(0, 0, 0, .58);
+  background: var(--s-scrim);
   z-index: 40;
 }
 
@@ -1024,7 +1029,7 @@ kbd {
   background: var(--s-overlay, #101012);
   border: 1px solid var(--b-overlay, #2E2E31);
   border-radius: 5px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+  box-shadow: var(--e-3);
   z-index: 50;
   overflow: hidden;
 }
@@ -1061,7 +1066,7 @@ kbd {
 /* The free count or the geometry, on the row you are about to press. */
 .cmd-note { color: var(--t-caption, #6A6A6A); font-size: 10.5px; flex: 0 0 auto; }
 .cmd .grp { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--t-navhead, #484848); }
-.cmd.is-sel { background: var(--mf-accent-soft, rgba(117,94,184,.16)); color: #fff; }
+.cmd.is-sel { background: var(--mf-accent-soft, rgba(117,94,184,.16)); color: var(--t-primary); }
 .palette footer {
   padding: 8px 14px;
   border-top: 1px solid var(--b-chrome, #191919);
@@ -1076,7 +1081,7 @@ kbd {
   background: var(--s-overlay, #101012);
   border: 1px solid var(--b-overlay, #2E2E31);
   border-radius: 5px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+  box-shadow: var(--e-3);
   padding: 20px;
   z-index: 50;
 }
@@ -1096,7 +1101,7 @@ kbd {
   border: 1px solid var(--b-overlay, #2E2E31);
   border-left: 2px solid var(--t-label, #8A8A8A);
   border-radius: 2px;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, .5);
+  box-shadow: var(--e-2);
 }
 .toast.ok   { border-left-color: var(--ok-dot, #6FCB63); }
 .toast.warn { border-left-color: var(--warn, #E8A30E); }
@@ -1151,7 +1156,7 @@ kbd {
   grid-template-areas: "bar stage" "bar caption";
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 0 14px;
-  background: #08080A;
+  background: var(--s-app);
   border: 1px solid var(--b-card, #1F1F22);
   border-radius: 3px;
   padding: 14px;
@@ -1254,8 +1259,8 @@ kbd {
   min-width: 0;
   /* A subtle grid, so an all-black device screen is still distinguishable from an empty panel. */
   background:
-    radial-gradient(circle at 50% 40%, rgba(117, 94, 184, .05), transparent 60%),
-    #060607;
+    radial-gradient(circle at 50% 40%, var(--mf-accent-soft), transparent 60%),
+    var(--s-stage);
   border-radius: 2px;
   overflow: auto;
   padding: 12px;
@@ -1379,8 +1384,26 @@ kbd {
   gap: 8px;
   padding: 24px;
   text-align: center;
-  background: var(--s-inset, #050506);
+  /*
+   * A LITERAL, AND DELIBERATELY NOT `--s-inset`.
+   *
+   * This element is INSIDE `.mf-glass` — it is the device's screen showing a message rather than a
+   * framebuffer. A powered-off panel is near-black in a bright room and in a dark one, so it does
+   * not follow the theme; using the chrome token turned the phone's screen white in light theme,
+   * which is the exact boundary error stage 8 exists to find. Document 01's rule: the console is a
+   * neutral desk, the DEVICE is the warm object sitting on it, and only the desk changes.
+   *
+   * Everything from `.mf-device` down in this file follows the same rule and for the same reason.
+   */
+  background: #050506;
+  color: #C4C4C4;
 }
+/* Text on the device's screen, for the same reason: it sits on #050506 in both themes. */
+.dev-overlay .micro   { color: #8A8A8A; }
+.dev-overlay .help    { color: #A8A8A8; }
+.dev-overlay .caption { color: #8A8A8A; }
+.dev-overlay .meta,
+.dev-overlay .mono    { color: #787878; }
 
 .dev-caption {
   grid-area: caption;
@@ -1517,7 +1540,7 @@ kbd {
 .bringup-stage {
   flex: 0 0 auto;
   display: grid; justify-items: center; gap: 10px;
-  background: #060607;
+  background: var(--s-stage);
   border: 1px solid var(--b-card, #1F1F22);
   border-radius: 3px;
   padding: 26px 34px;
@@ -1629,11 +1652,11 @@ kbd {
 .log-m { color: var(--t-body, #D4D4D4); white-space: pre-wrap; word-break: break-word; min-width: 0; }
 /* Level colours from the design handoff. They repeat the letter in the `.log-l` column beside them,
    so colour is never the only carrier. */
-.logline.lE .log-l, .logline.lF .log-l { color: #EE7C88; }
-.logline.lW .log-l { color: #E8A30E; }
-.logline.lI .log-l { color: #7FA0D8; }
-.logline.lD .log-l, .logline.lV .log-l { color: #6D7089; }
-.logline.lE .log-m { color: #EE7C88; }
+.logline.lE .log-l, .logline.lF .log-l { color: var(--log-e); }
+.logline.lW .log-l { color: var(--log-w); }
+.logline.lI .log-l { color: var(--log-i); }
+.logline.lD .log-l, .logline.lV .log-l { color: var(--log-d); }
+.logline.lE .log-m { color: var(--log-e); }
 
 /* -------------------------------------------------------------------- vitals + captures */
 
@@ -1664,7 +1687,7 @@ kbd {
   word-break: break-all; font-size: 13px; line-height: 1.5;
   padding: 10px 12px; border-radius: 8px;
   background: var(--s-inset, rgba(255,255,255,.04));
-  border: 1px solid var(--s-line, rgba(255,255,255,.10));
+  border: 1px solid var(--b-inset, #1A1A1C);
 }
 
 /* ---------------------------------------------------------------- element inspector */
@@ -1673,7 +1696,7 @@ kbd {
 .insp-box {
   position: absolute;
   border: 2px solid var(--mf-accent, #755EB8);
-  background: rgba(117, 94, 184, .16);
+  background: var(--mf-accent-soft);
   border-radius: 2px;
   pointer-events: none;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, .55);
@@ -1682,7 +1705,7 @@ kbd {
   position: absolute; top: -19px; left: -2px;
   padding: 1px 6px; border-radius: 4px 4px 0 0;
   font-size: 10px; line-height: 16px; white-space: nowrap;
-  color: #fff; background: var(--mf-accent, #755EB8);
+  color: var(--on-accent, #fff); background: var(--mf-accent, #755EB8);
 }
 
 /* While inspecting, the screen is something you are reading rather than pressing. */
@@ -1700,7 +1723,7 @@ kbd {
   display: grid; gap: 5px;
   padding: 8px 9px; border-radius: 8px;
   background: var(--s-inset, rgba(255,255,255,.035));
-  border: 1px solid var(--s-line, rgba(255,255,255,.08));
+  border: 1px solid var(--b-inset, #1A1A1C);
 }
 .insp-copy { display: flex; align-items: center; gap: 8px; }
 /* `all` so one click takes the whole selector — half an xpath fails somewhere far from here. */
@@ -1751,7 +1774,7 @@ kbd {
   background: transparent;
 }
 .kindtag.real {
-  color: #C9BCF0;
+  color: var(--accent-text, #C9BCF0);
   border-color: var(--mf-accent-line, rgba(117, 94, 184, .42));
   background: var(--mf-accent-soft, rgba(117, 94, 184, .16));
 }
@@ -2046,9 +2069,10 @@ kbd {
  * WebDriver all still work, and the caller writes that sentence into the panel — the frame only
  * makes room for it.
  */
+/* Literals, like everything else inside the glass — see `.dev-overlay`. */
 .mf-device[data-state="nosignal"] .mf-glass {
-  background: var(--s-inset, #050506);
-  border: 1px dashed var(--b-dash, #303033);
+  background: #050506;
+  border: 1px dashed #303033;
 }
 .mf-device[data-state="nosignal"] .mf-sheen,
 .mf-device[data-state="nosignal"] .mf-cutout { display: none; }
@@ -2062,11 +2086,11 @@ kbd {
   gap: 6px;
   padding: 8%;
   text-align: center;
-  color: var(--t-help, #787878);
+  color: #787878;   /* on the device's screen — see `.dev-overlay` */
   font-size: 11.5px;
   text-wrap: pretty;
 }
-.mf-nosignal strong { display: block; color: var(--t-secondary, #C4C4C4); font-size: 12.5px; }
+.mf-nosignal strong { display: block; color: #C4C4C4; font-size: 12.5px; }
 
 /**
  * SMALL SIZES drop the depth entirely.
@@ -2172,7 +2196,7 @@ kbd {
   font-size: 10px;
   color: var(--t-body, #D4D4D4);
 }
-.lens.on .lens-n { background: rgba(255, 255, 255, .10); }
+.lens.on .lens-n { background: var(--hover-strong); }
 
 /**
  * The capacity table.
@@ -2191,5 +2215,5 @@ kbd {
 
 /* The catalogue's cards. Wider than the fleet's, because a card here carries a sentence. */
 .catgrid { display: grid; gap: var(--mf-gap, 16px); grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
-.cat-card { gap: var(--s-4, 16px); }
+.cat-card { gap: var(--mf-gap, 16px); }
 .cat-blurb { max-width: 46ch; text-wrap: pretty; }

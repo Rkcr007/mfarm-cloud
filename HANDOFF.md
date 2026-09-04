@@ -3049,3 +3049,60 @@ when the feature is broken. See issues 37 and 38.
     `screenLaunching` accepted it as a session because the id matched, rendering "Session d946ed62 ·
     undefined". The bring-up screen is the one people are SENT a link to, so that is the screen a
     stale link lands on. It now names the session and says it is not visible.
+
+57. **STAGE 8 — THE LIGHT THEME, AND THE BOUNDARY IT KEPT CROSSING.** 2026-09-05. The design
+    package's last stage, and the one whose work is described as "mechanical". It was, and
+    mechanical is exactly where the silent mistakes were.
+
+    **THE PALETTE WAS NEVER THE PROBLEM.** `[data-theme='light']` has redefined every colour since
+    stage 1. What the console did was **bypass it**: 73 colour literals painted outside any token —
+    `#fff` on hovers, `rgba(255,255,255,.035)` on nav items, near-black grounds, the four log-level
+    colours. The light block could redefine forty tokens and the page would still paint white text
+    on a white card, because those values never went through a variable at all.
+
+    **THE RULE THAT SPLITS THEM IS DOCUMENT 01'S ONE IDEA:** *"The console is a neutral desk. The
+    device is the warm object sitting on it."* The desk changes when the lights come on; the phone
+    does not. Thirty-odd chrome literals became tokens; every literal from `.mf-device` down stayed,
+    because a powered-off panel is near-black in any room.
+
+    **AND THE BOUNDARY BROKE WHILE I WAS DRAWING IT.** `.dev-overlay` is a sibling of the video
+    INSIDE `.mf-glass` — the device's screen showing a message — and it read `--s-inset`. In light
+    theme the phone's screen turned white. Only a screenshot could find that: the source line is
+    identical to the correct one on a card.
+
+    **THREE MORE FROM THE SAME PASS, all mine, all caught by looking:**
+    - A blanket replacement of `color: #EDEDED` landed on `.avatar` instead of the rule I meant, so
+      the user's initial vanished in light theme.
+    - A substitution keyed on `rgba(16,16,18,.92)` assumed a floating tooltip and hit `.signin-card`
+      — which would have put a permanently dark card on a bright page. There is no tooltip in this
+      console; every "tooltip" is a native `title`.
+    - `.empty` took a literal meant for `.mf-nosignal`, because `replace(old, new, 1)` takes the
+      first match in the FILE, not the first in the section.
+
+    **TWO TOKENS THAT WERE NEVER DEFINED AT ALL.** `--s-line` and `--s-4` are read by four rules and
+    declared in neither theme, so their fallbacks have always won — and `rgba(255,255,255,.10)` as a
+    hairline is invisible on a white card. Found by the guard rather than by eye.
+
+    **`data-density` AND `data-liveness` HAD NO CONTROLS EITHER.** Both have driven the token scales
+    since stage 1 and nothing in the console could set them. Settings now carries an Appearance card
+    with all three. Theme is a THREE-way choice — system, dark, light — because a two-way toggle
+    converts "I have not decided" into a decision on first click with no way back, and because only
+    "system" can keep following an OS that changes at sunset (it does, live, via `matchMedia`).
+    The stored value is the CHOICE, never the resolved theme.
+
+    And I offered a **Dense** density, which does not exist — the three are comfortable, compact and
+    **airy**. A button setting an attribute no rule matches, written by the person who has spent two
+    days deleting exactly that. Caught before it shipped, by reading `design-tokens.css` rather than
+    trusting the name.
+
+    **`theme.test.ts` GUARDS THE RULE, not the colours.** Five assertions: no token is dark-only, no
+    rule in the frame's namespace reads a chrome token, the overlay is painted with literals,
+    `--bad-solid` is identical in both themes, and the chrome carries at most 16 hand-painted
+    colours. It cannot judge contrast — that stays a screenshot's job — but it keeps the screenshots
+    comparable. Its own first two versions were wrong in instructive ways: it sliced the file at
+    `.mf-glass` and swept up every chrome rule below, and it matched `[data-theme='light']` inside a
+    COMMENT and reported all 48 colour tokens as missing. A guard that fails loudly against correct
+    code gets deleted, so both now parse instead of slicing.
+
+    Verified in light on seven screens: fleet, device detail with the gate, cockpit, bring-up,
+    settings, health and sign-in.

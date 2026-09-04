@@ -2071,3 +2071,47 @@ describe('bring-up', () => {
     assert.match(text, /state: negotiating/, 'the machine word, verbatim, for whoever needs it');
   });
 });
+
+/* ================================================= appearance (document 01, stage 8) ============
+ *
+ * The one setting in this console that is purely the reader's — and three controls that had
+ * nothing behind them until now: `data-theme`, `data-density` and `data-liveness` have driven the
+ * token scales since stage 1 and no control in the console could set any of them.
+ */
+describe('appearance', () => {
+  test('it offers three themes, because "system" is not a third colour', () => {
+    seed({ name: 'settings' });
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /System/);
+    assert.match(text, /Dark/);
+    assert.match(text, /Light/);
+    /**
+     * A two-way toggle silently converts "I have not decided" into a decision on first click, and
+     * there is then no way back to following the OS.
+     */
+    assert.match(text, /Following this device|Always/,
+      'the difference between a choice and the absence of one is stated, not implied');
+  });
+
+  /**
+   * THE DENSITY NAMES HAVE TO BE THE ONES THAT EXIST. `design-tokens.css` defines comfortable,
+   * compact and airy; a button setting `data-density="dense"` would match no rule and do nothing,
+   * which is the failure this console keeps finding in other people's work and had just written
+   * into its own.
+   */
+  test('every density it offers is one the tokens define', () => {
+    seed({ name: 'settings' });
+    const text = textOf(mod.SCREENS.settings());
+    for (const real of ['Comfortable', 'Compact', 'Airy']) assert.match(text, new RegExp(real));
+    assert.doesNotMatch(text, /Dense/, 'there is no `dense` density — the third one is `airy`');
+  });
+
+  test('motion says what turning it off costs, which is nothing', () => {
+    seed({ name: 'settings' });
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /Calm/);
+    assert.match(text, /Still/);
+    assert.match(text, /loses no\s+information/,
+      'nothing in this product is conveyed by motion alone, and that is why it is safe to offer');
+  });
+});

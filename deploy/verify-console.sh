@@ -276,6 +276,45 @@ for cls in "dev-tile" "devpanel\[data-beat" "devpanel\[data-mode"; do
     || bad "css: $cls is missing — a beat has no styling behind it"
 done
 
+# ---------------------------------------------------------------- 3f. the light theme
+#
+# Document 01, stage 8. Light is a TRUE PEER, not a filter — and the boundary that keeps breaking is
+# not the palette, it is which things are allowed to follow it.
+say "Light theme (document 01, stage 8)"
+TOK="$(fetch "$BASE/design-tokens.css")"
+
+grep -q "data-theme='light'" <<<"$TOK" \
+  && ok "the light block is served" \
+  || bad "no light theme in the deployed tokens"
+
+# A token defined in one theme and not the other silently keeps its dark value — usually near-black
+# text on a near-white card, on whichever screen nobody opened.
+for t in "--s-app" "--t-primary" "--b-card" "--hover-soft" "--accent-text" "--log-e" "--s-stage"; do
+  if [ "$(grep -c -- "$t:" <<<"$TOK")" -ge 2 ]; then
+    ok "  $t is re-derived"
+  else
+    bad "  $t is defined once — the light theme inherits the dark value"
+  fi
+done
+
+# THE DESK / DEVICE BOUNDARY. `.dev-overlay` sits INSIDE the device's glass: it is the phone's
+# screen showing a message, not a panel on the page. Reading a chrome token there turned the
+# device white in light theme, which is the one thing a device-mirroring panel must never do.
+if grep -q "dev-overlay" <<<"$DD_CSS"; then
+  if awk '/\.dev-overlay \{/,/\}/' <<<"$DD_CSS" | grep -qE 'var\(--(s|b|t)-'; then
+    bad "the device panel overlay reads a chrome token — the phone follows the room again"
+  else
+    ok "the device does not follow the room"
+  fi
+else
+  bad "no .dev-overlay in the deployed stylesheet"
+fi
+
+# The three controls that had nothing behind them until stage 8.
+grep -q "mf-theme" <<<"$FLEET_JS" \
+  && ok "the theme is a setting, not a hardcoded attribute" \
+  || bad "no theme control — data-theme is stuck at whatever index.html ships"
+
 # ---------------------------------------------------------------- 4. the CSP is still the CSP
 #
 # A CSP mistake is invisible from the outside: a blocked socket surfaces in the browser as a bare
