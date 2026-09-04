@@ -439,7 +439,17 @@ jobs:
   package:
     name: The npm tarball installs and runs
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20, not 10, and the reason is measured rather than defensive. `npm install <tarball>` here runs
+    # UNCACHED on purpose — the point is a cold install the way a stranger gets one — and that step
+    # alone takes 5-9 minutes depending on what the registry is doing. Against a 10-minute job limit
+    # that left no headroom, and the job started failing for TIME rather than for TRUTH: on PR #82
+    # the identical job at the identical commit passed in 5m42s on one run and hit the wall at
+    # 10m14s on the other. A red check that means "the registry was slow" teaches nothing and
+    # trains people to merge past this job, which is the one job that catches what `npm test` cannot.
+    #
+    # Caching npm here would be faster and is deliberately NOT done: it would make the install stop
+    # being the cold one this job exists to perform.
+    timeout-minutes: 20
     # `@mfarm/cli` is the only published artifact in this repo, and everything that can break about
     # it breaks BETWEEN the source and the tarball: a `files` list that omits the entry point, a
     # `bin` path pointing at the pre-build layout, an import specifier that still says `.ts`, a
