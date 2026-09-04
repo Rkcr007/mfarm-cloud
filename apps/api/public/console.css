@@ -1516,8 +1516,19 @@ kbd {
  *     applied to the chassis instead.
  */
 
+/**
+ * SIZED BY HEIGHT rather than width — every frame outside the cockpit.
+ *
+ * Given one width, a 720×1280 body and a 1080×2340 body come out at very different heights, so a
+ * row of them reads as "one of these is bigger" rather than as "these are different shapes". Fixing
+ * the height instead makes them share a baseline and differ in WIDTH, which is the comparison that
+ * carries the information: same height, visibly narrower, is a stubbier panel.
+ */
+.mf-device[data-sized="height"] { --f-w: calc(var(--f-h) * var(--f-aspect)); }
+
 .mf-device {
   --f-w: 300px;
+  --f-h: 74px;
   --f-zoom: 1;
   --f-aspect: .4615;
   --f-bezel: .02;
@@ -1528,7 +1539,16 @@ kbd {
 
   /* Resolved once, so nothing below multiplies `--f-w` a second time. */
   --f-pw: calc(var(--f-w) * var(--f-zoom));
-  --f-bezel-px: calc(var(--f-pw) * var(--f-bezel));
+  /**
+   * THE BEZEL HAS A FLOOR, and without it the small frames are wrong rather than merely subtle.
+   *
+   * At 34px wide an X1 Pro's `.020w` bezel computes to 0.68px, which most browsers round away —
+   * so the chassis disappears, the gradient has nowhere to render, and a device thumbnail becomes
+   * an unexplained black rectangle sitting on a dark card. The ratio is right at every size a
+   * person actually inspects the device at; the floor is what keeps it a DEVICE at the sizes where
+   * it is only an identifier.
+   */
+  --f-bezel-px: max(2px, calc(var(--f-pw) * var(--f-bezel)));
 
   position: relative;
   display: inline-flex;
@@ -1773,7 +1793,29 @@ kbd {
  * shape and the aspect still carry every bit of the information: a stubby 720×1280 frame is
  * recognisably not a 1080×2340 one at 24px.
  */
-.mf-device[data-scale="tiny"] .mf-chassis { box-shadow: none; }
+/**
+ * A SMALL FRAME NEEDS CONTRAST BETWEEN BODY AND SCREEN, or it is not a device — it is a rectangle.
+ *
+ * At full size the chassis and the screen separate on material: a gradient, a cast shadow, a warm
+ * edge highlight, a sheen. Every one of those is either invisible or actively harmful at 24px, so
+ * what is left to say "this is a phone" is the SILHOUETTE — a lighter body with a darker screen
+ * inside it. Drawn in the same near-black as the panel, the two merge and the thumbnail reads as an
+ * unexplained dark slab sitting on a dark card.
+ *
+ * So the small chassis is lifted well clear of both the card and the screen. It is the same
+ * decision the full-size frame makes with a gradient, taken with the one tool that survives at this
+ * scale.
+ */
+.mf-device[data-scale="tiny"] .mf-chassis {
+  box-shadow: none;
+  background: #34323C;
+}
+.mf-device[data-scale="tiny"][data-kind="physical"] .mf-chassis { background: #3A3630; }
+.mf-device[data-scale="tiny"][data-kind="unprofiled"] .mf-chassis { background: #2C2C30; }
+
+/* And the screen stays the darkest thing in the row, so the silhouette reads at a glance. */
+.mf-device[data-scale="tiny"] .mf-glass,
+.mf-device[data-scale="tiny"] .mf-panel { background: #08080B; }
 .mf-device[data-scale="tiny"] .mf-contact,
 .mf-device[data-scale="tiny"] .mf-sheen,
 .mf-device[data-scale="tiny"] .mf-rails { display: none; }

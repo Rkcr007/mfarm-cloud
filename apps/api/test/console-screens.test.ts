@@ -1003,6 +1003,59 @@ describe('the copy rules hold', () => {
   });
 
   /**
+   * IDLE IS NOT PROGRESS.
+   *
+   * `ensureLive` returns without starting anything when a session carries no browser route to the
+   * data plane, leaving `liveState` at its initial `idle`. The overlay's `default:` arm used to
+   * catch that alongside the three real negotiation states, so the panel drew a ring at 80% and
+   * "Negotiating the media connection" for a connection nobody had attempted — a bar filling for
+   * something that is not happening, which is the exact motion this console refuses to ship. It
+   * also contradicted the panel beside it, which was already saying there were no data-plane
+   * coordinates.
+   *
+   * Found by opening the page and reading it, not by a test — 80 of these were green while it was
+   * on screen. That is the argument for looking at the thing.
+   */
+  test('a session with no data-plane route does not pretend to be connecting', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.liveState = 'idle';
+    mod.state.stage = null;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.doesNotMatch(text, /Negotiating the media connection/,
+      'nothing is being negotiated — there is no route to negotiate over');
+    assert.doesNotMatch(text, /\d+\s*%/, 'a percentage nobody reported is an invented number');
+    assert.match(text, /no route to the data plane/i);
+    assert.match(text, /WebDriver still works/, 'what does work is the half that keeps somebody moving');
+  });
+
+  /**
+   * DEPTH IS A STATE VARIABLE, and the frame has to be told which one.
+   *
+   * `stageState` first tested for the LiveSession OBJECT, which exists from the moment a socket
+   * opens and says nothing about whether anything is on screen — so a cockpit mid-negotiation
+   * reported `off`, the shadow never landed, and the whole mechanic silently did nothing while
+   * looking implemented. It reads the state machine now, which is what the overlay beside it reads.
+   */
+  test('the frame reports the panel state the live view is actually in', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+
+    for (const [liveState, expected] of [
+      ['idle', 'off'],
+      ['connecting', 'waking'],
+      ['negotiating', 'waking'],
+      ['streaming', 'live'],
+      ['nostream', 'nosignal'],
+      ['failed', 'off'],
+    ] as const) {
+      mod.state.liveState = liveState;
+      mod.state.stage = null;
+      const tree = mod.SCREENS.cockpit();
+      const frame = findByClass(tree, 'mf-device');
+      assert.equal(frame?.dataset.state, expected, `liveState "${liveState}" should draw "${expected}"`);
+    }
+  });
+
+  /**
    * A SESSION THAT ENDED SAYS WHO ENDED IT AND WHEN.
    *
    * "Session ended" is the state, and the state is the least useful thing to tell somebody looking

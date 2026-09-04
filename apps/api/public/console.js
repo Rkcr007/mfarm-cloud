@@ -544,9 +544,9 @@ function btn(label, cls, onclick, opts = {}) {
  * pixels of grey that make a row look dirty rather than deep — the aspect and the corner radius
  * still carry every bit of the information.
  */
-function deviceThumb(device, size = 44) {
-  const el = staticFrame(device, size);
-  if (size <= 56) el.dataset.scale = 'tiny';
+function deviceThumb(device, height = 44) {
+  const el = staticFrame(device, height);
+  if (height <= 64) el.dataset.scale = 'tiny';
   return el;
 }
 
@@ -1154,7 +1154,7 @@ function deviceCard(d) {
     h('div', { class: 'row between' },
       h('span', { class: 'row tight' },
         // The device, at 34px. Its shape is the fastest thing on this card to read.
-        deviceThumb(d, 34),
+        deviceThumb(d, 46),
         h('span', { class: 'stack none' },
           h('span', { class: 'card-title', text: deviceName(d) }),
           h('code', { class: 'caption', text: short(d.id) }),
@@ -1738,7 +1738,7 @@ function profileRow(p) {
     // A frame at 40px, drawn from a representative device in the class. Every device in a profile
     // row shares a panel and a profile, which is exactly what the frame is derived from — so any of
     // them draws the same shape, and the row shows you what you are choosing.
-    deviceThumb(p.devices[0], 40),
+    deviceThumb(p.devices[0], 44),
     h('span', { class: 'pick-main' },
       h('span', { class: 'pick-title', text: deviceName(p.devices[0]) }),
       h('span', { class: 'pick-sub mono', text: `${p.platform} ${p.osVersion} · ${p.tier} · ${p.region}` }),
@@ -1850,7 +1850,16 @@ function screenLaunch() {
         profiles.length
           ? h('div', { class: 'picklist' }, profiles.map(profileRow))
           : empty('No devices are registered.', 'A worker has to register a host before anything can be launched. Check Health.'),
-        h('p', { class: 'caption mt-sm', text: 'The allocator picks a free device matching this profile — there is no way to reserve a particular one, so nothing here pretends otherwise.' }),
+        /**
+         * The same fact as the device card's note, in the place a person is choosing.
+         *
+         * It said "the allocator picks a free device matching this profile", which names a
+         * component and a grouping the reader never asked about. The constraint it is really
+         * stating — you are choosing a KIND of device, not a particular one — is worth keeping,
+         * because it is what makes the substitution notice at handover unsurprising rather than a
+         * broken promise.
+         */
+        h('p', { class: 'caption mt-sm', text: 'You are choosing a kind of device, not a particular one — the farm hands over whichever of them is free.' }),
         !canInstall
           ? h('p', { class: 'help mt-sm', text: `This profile does not declare app-install, so the API would refuse to install ${app?.packageName ?? 'a build'} on it. Choose “No build”, or another profile.` })
           : null,
@@ -2436,16 +2445,30 @@ function paintFrame(device) {
  *
  * DEPTH IS A STATE VARIABLE, so this is not cosmetic: the shadow is shallow until the data plane
  * attaches and lands when it does, which is what makes the device visibly become physical at the
- * moment it becomes real.
+ * moment it becomes real. Get this wrong and the frame is merely a picture of a phone.
+ *
+ * IT READS `state.liveState`, NOT `state.live`. The first version tested for the LiveSession
+ * OBJECT, which exists from the moment a socket is opened and says nothing about whether anything
+ * is on the screen — so a cockpit mid-negotiation reported `off`, the shadow never landed, and the
+ * whole mechanic silently did nothing while looking implemented. `liveState` is the actual state
+ * machine and it is what the overlay beside this already reads.
  *
  * `nosignal` is decided by the DEVICE'S DECLARATION, never by a failure to connect. A device
  * without `screen-stream` is not broken and must not be drawn as though it were — input, logcat,
- * install and WebDriver all still work on it, and the panel says so in words.
+ * install and WebDriver all still work on it, and the panel says so in words. A negotiation that
+ * FAILED is a different thing again, and it falls back to `off`: the overlay explains it, and
+ * dressing a transient failure as a permanent property of the device would be the same lie in the
+ * other direction.
  */
 function stageState(device) {
   if (device && !(device.capabilities || []).includes('screen-stream')) return 'nosignal';
-  if (state.live?.state === ATTACHED) return 'live';
-  if (state.live) return 'waking';
+  if (state.liveState === 'streaming') return 'live';
+  // The device declared a stream and the negotiation settled on there being no video after all.
+  if (state.liveState === 'nostream' || state.liveState === 'nodisplay') return 'nosignal';
+  // Opening the socket, authenticating, negotiating: alive, and nothing to show yet. The only
+  // state in the system with a pulse, because it is the only one with no observable interior.
+  if (state.liveState && state.liveState !== 'idle' && state.liveState !== 'failed'
+      && state.liveState !== 'unrouted') return 'waking';
   return 'off';
 }
 
@@ -2659,13 +2682,45 @@ function paintOverlay(sess, live, caps) {
         h('p', { class: 'help', text: state.liveDetail || 'No reason was reported.' }),
         h('div', { class: 'row tight mt-sm' }, btn('Try again', 'primary', () => reconnectLive())),
       );
-    default:
+    /**
+     * IDLE IS NOT PROGRESS, and this branch used to draw it as 80% of some.
+     *
+     * `ensureLive` returns without starting anything when the session carries no browser route to
+     * the data plane, leaving `liveState` at its initial `idle` — and this switch's default arm
+     * caught that alongside the three real negotiation states, so the panel showed a ring at 80%
+     * and "Negotiating the media connection" for a connection that had not been attempted and
+     * never would be. A bar that fills for something nobody is doing is precisely the motion this
+     * console refuses to ship, and it contradicted the panel beside it, which was already saying
+     * there were no data-plane coordinates.
+     *
+     * Named explicitly rather than left to the default, so the next state added to the machine
+     * fails loudly here instead of being quietly reported as 80% done.
+     */
+    case 'idle':
+      return show(
+        h('p', { class: 'micro', text: 'No live view yet' }),
+        h('p', { class: 'help', text: 'This session has no route to the data plane, so nothing is being negotiated. The device itself is held and WebDriver still works.' }),
+      );
+
+    case 'connecting':
+    case 'authenticated':
+    case 'negotiating':
       return show(
         progressRing(state.liveState === 'connecting' ? 25 : state.liveState === 'authenticated' ? 55 : 80),
         h('p', { class: 'caption', text:
           state.liveState === 'connecting' ? 'Opening the data plane'
             : state.liveState === 'authenticated' ? 'Asking the device to stream'
             : 'Negotiating the media connection' }),
+      );
+
+    /**
+     * An unrecognised state. It cannot be drawn as progress, because the one thing known about it
+     * is that this file does not know what it means.
+     */
+    default:
+      return show(
+        h('p', { class: 'micro', text: 'Connecting' }),
+        h('p', { class: 'help', text: state.liveDetail || `The live view reported "${state.liveState}", which this console does not have words for yet.` }),
       );
   }
 }
@@ -4173,7 +4228,7 @@ function renderPalette() {
           type: 'button',
           onclick: () => { closeOverlays(); c.run(); },
         },
-          h('span', { class: 'glyph' }, c.frame ? deviceThumb(c.frame, 12) : icon(c.icon, 14)),
+          h('span', { class: 'glyph' }, c.frame ? deviceThumb(c.frame, 22) : icon(c.icon, 14)),
           h('span', { class: 'cmd-label', text: c.label }),
           // The free count, or the geometry, inline on the result itself. 06's reason: the top
           // result is an ACTION, so Enter has to be a safe keystroke — and it is only safe if what

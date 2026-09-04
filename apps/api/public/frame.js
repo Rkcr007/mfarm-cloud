@@ -190,6 +190,7 @@ export function applyFrame(dom, frame, opts = {}) {
   // Ratios go on as unitless numbers multiplied by the panel width in CSS, so ONE property changes
   // when the stage resizes and every derived dimension follows.
   if (size) root.style.setProperty('--f-w', `${size}px`);
+
   if (opts.zoom) root.style.setProperty('--f-zoom', String(opts.zoom));
   root.style.setProperty('--f-aspect', String(frame.aspect));
   root.style.setProperty('--f-bezel', String(frame.bezel));
@@ -241,11 +242,25 @@ export function applyFrame(dom, frame, opts = {}) {
  * and a placeholder app is a lie. The empty panel says "this device is not showing you anything
  * right now", which is true.
  */
-export function staticFrame(device, size, state = 'off') {
+export function staticFrame(device, height, state = 'off') {
   const panel = document.createElement('div');
   panel.className = 'mf-panel';
   const dom = buildFrame(panel);
-  applyFrame(dom, frameFor(device), { size, state });
+  applyFrame(dom, frameFor(device), { state });
+  /**
+   * SIZED BY HEIGHT HERE, unlike the cockpit's `size`, and the difference is what makes a row of
+   * devices readable.
+   *
+   * Given a width, a 720×1280 device and a 1080×2340 one come out at wildly different HEIGHTS — so
+   * in a table or a card header the tall one blows the row open and the eye reads "one of these is
+   * bigger" rather than "these are different shapes". Fixing the height instead makes them occupy
+   * the same vertical space and differ in WIDTH, which is the comparison that actually means
+   * something: same height, visibly narrower, is a stubbier panel.
+   *
+   * The width is derived in CSS from `--f-aspect`, so it stays one property and no layout read.
+   */
+  dom.root.style.setProperty('--f-h', `${height}px`);
+  dom.root.dataset.sized = 'height';
   dom.root.setAttribute('aria-hidden', 'true');
   return dom.root;
 }
