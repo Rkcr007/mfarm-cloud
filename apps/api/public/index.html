@@ -115,7 +115,7 @@
     <span class="spacer"></span>
 
     <button class="palette-btn" id="palette-btn">
-      <span>Search or run command</span><span class="spacer"></span><kbd id="palette-kbd">&#8984;K</kbd>
+      <span>Search or run a command</span><span class="spacer"></span><kbd id="palette-kbd">&#8984;K</kbd>
     </button>
 
     <!--
@@ -131,22 +131,28 @@
     </div>
   </header>
 
+  <!--
+    The nav's icons are NAMED HERE and DRAWN BY `console.js`, which is the only shape that works
+    under this CSP: an inline <svg> per item would be ten copies of Lucide geometry in the document,
+    and an external sprite referenced by <use> is a fetch `default-src 'none'` forbids. Each glyph
+    span is deliberately empty until `paintNavIcons()` fills it — see console.js.
+  -->
   <nav class="sidebar" id="sidebar">
     <p class="navgroup">Farm</p>
-    <button class="navitem" data-route="launch"><span class="glyph">&#9654;</span><span class="txt">Launch</span><span class="sc">G L</span></button>
-    <button class="navitem" data-route="devices"><span class="glyph">&#9632;</span><span class="txt">Devices</span><span class="sc">G D</span></button>
-    <button class="navitem" data-route="apps"><span class="glyph">&#10010;</span><span class="txt">Apps</span><span class="sc">G A</span></button>
-    <button class="navitem" data-route="sessions"><span class="glyph">&#9776;</span><span class="txt">Sessions</span><span class="sc">G R</span></button>
-    <button class="navitem" data-route="runs"><span class="glyph">&#9636;</span><span class="txt">Runs</span><span class="sc">G U</span></button>
+    <button class="navitem" data-route="launch"><span class="glyph" data-icon="launch"></span><span class="txt">Launch</span><span class="sc">G L</span></button>
+    <button class="navitem" data-route="devices"><span class="glyph" data-icon="devices"></span><span class="txt">Devices</span><span class="sc">G D</span></button>
+    <button class="navitem" data-route="apps"><span class="glyph" data-icon="apps"></span><span class="txt">Apps</span><span class="sc">G A</span></button>
+    <button class="navitem" data-route="sessions"><span class="glyph" data-icon="sessions"></span><span class="txt">Sessions</span><span class="sc">G R</span></button>
+    <button class="navitem" data-route="runs"><span class="glyph" data-icon="runs"></span><span class="txt">Runs</span><span class="sc">G U</span></button>
 
     <p class="navgroup">Operations</p>
-    <button class="navitem" data-route="queue"><span class="glyph">&#8942;</span><span class="txt">Queue</span><span class="sc">G Q</span></button>
-    <button class="navitem" data-route="health"><span class="glyph">&#9678;</span><span class="txt">Health</span><span class="sc">G H</span></button>
+    <button class="navitem" data-route="queue"><span class="glyph" data-icon="queue"></span><span class="txt">Queue</span><span class="sc">G Q</span></button>
+    <button class="navitem" data-route="health"><span class="glyph" data-icon="health"></span><span class="txt">Health</span><span class="sc">G H</span></button>
 
     <p class="navgroup">Organisation</p>
-    <button class="navitem" data-route="agents"><span class="glyph">&#9741;</span><span class="txt">Agents</span><span class="sc">G G</span></button>
-    <button class="navitem" data-route="team"><span class="glyph">&#9679;</span><span class="txt">Team</span><span class="sc">G T</span></button>
-    <button class="navitem" data-route="settings"><span class="glyph">&#9881;</span><span class="txt">Settings</span><span class="sc">G S</span></button>
+    <button class="navitem" data-route="agents"><span class="glyph" data-icon="agents"></span><span class="txt">Agents</span><span class="sc">G G</span></button>
+    <button class="navitem" data-route="team"><span class="glyph" data-icon="team"></span><span class="txt">Team</span><span class="sc">G T</span></button>
+    <button class="navitem" data-route="settings"><span class="glyph" data-icon="settings"></span><span class="txt">Settings</span><span class="sc">G S</span></button>
 
     <!--
       Still no Activity item. The design has one; the API has no fleet-wide feed behind it, only the
@@ -156,7 +162,7 @@
 
     <span class="spacer"></span>
 
-    <button class="navtoggle" id="navtoggle"><span aria-hidden="true">&laquo;</span> <span class="txt">Collapse</span></button>
+    <button class="navtoggle" id="navtoggle"><span class="glyph" data-icon="collapse"></span><span class="txt">Collapse</span></button>
 
     <div class="sessioncard" id="sessioncard" hidden>
       <p class="micro">Your session</p>
@@ -176,7 +182,7 @@
 <div class="scrim" id="scrim" hidden></div>
 
 <div class="palette" id="palette" hidden role="dialog" aria-label="Command palette">
-  <input id="palette-input" type="text" placeholder="Search or run command" autocomplete="off" spellcheck="false">
+  <input id="palette-input" type="text" placeholder="Search devices, sessions, builds, or run a command" autocomplete="off" spellcheck="false">
   <ul id="palette-list"></ul>
   <footer>&uarr;&darr; navigate &middot; &crarr; run &middot; esc close</footer>
 </div>

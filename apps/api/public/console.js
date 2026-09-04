@@ -22,7 +22,11 @@
  */
 
 import { ATTACHED, LiveSession, parseLogLine, parseHierarchy, nodeAt, selectorsFor } from '/live.js';
-import { chromeFor, geometryText, hasChrome } from '/profiles.js';
+import {
+  chromeFor, geometryText, hasChrome,
+  deviceName, deviceClass, capacityText, freeText as classFreeText, UNPROFILED,
+} from '/profiles.js';
+import { iconSvg } from '/icons.js';
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -443,13 +447,39 @@ function paintBar(i) {
 
 /* ---------------------------------------------------------------------------- primitives */
 
+/**
+ * Status pill: a dot, a label, and — where we genuinely know it — WHEN.
+ *
+ * THE RULE THE WHOLE PALETTE RESTS ON is that colour never carries meaning alone. Delete every hue
+ * from this console and each state still reads as a word and a time. That is what lets the light
+ * theme re-derive every hex without a state becoming ambiguous, and it is why the dot is not
+ * optional on a state pill.
+ *
+ * `at` RENDERS ADJACENT, NEVER INSIDE, and both halves of that matter. A pill that grows to hold
+ * "2 minutes ago" stops being the fixed-width token you can scan down a column of; and the pill
+ * states a CONDITION while the timestamp states WHEN IT WAS OBSERVED — two facts that age
+ * differently, because a stale poll invalidates the second without touching the first.
+ *
+ * WHY `at` IS NOT REQUIRED HERE, which the handover asks for and this deliberately does not do.
+ * Requiring it would only be honest if every state had a truthful timestamp to give, and this
+ * control plane does not have one for a device's state: `devices.updated_at` moves on capability
+ * and automation-endpoint changes too, so rendering it as "READY since" would put a precise wrong
+ * number under a status — the exact failure the rule exists to prevent. Where a real timestamp
+ * exists — quarantine, recovery, lease, session start — it is passed and shown. Closing the gap
+ * properly needs a `state_changed_at` column, which is a migration and not a stylesheet.
+ *
+ * So: passed where it is true, absent where it would be invented. A missing timestamp is a gap
+ * somebody can see; a fabricated one is not.
+ */
 function pill(label, tone, opts = {}) {
-  return h('span', { class: `pill ${tone || ''}`.trim(), title: opts.title || null },
+  const el = h('span', { class: `pill ${tone || ''}`.trim(), title: opts.title || null },
     opts.dot === false ? null : h('span', { class: `dot ${tone || ''} ${opts.live ? 'live' : ''}`.trim() }),
     // `labelId` makes the text paintable. Anything that changes every second belongs in a painter,
     // not in a render — see `renderIfChanged`.
     opts.labelId ? h('span', { id: opts.labelId, text: label }) : label,
   );
+  if (!opts.at) return el;
+  return h('span', { class: 'pill-row' }, el, h('span', { class: 'pill-at', text: ago(opts.at) }));
 }
 
 function chip(label, present) {
@@ -806,6 +836,23 @@ for (const item of document.querySelectorAll('.navitem')) {
 
 /* ---------------------------------------------------------------------------- chrome render */
 
+/**
+ * Fill every `data-icon` slot in the static markup with its Lucide glyph.
+ *
+ * ONCE, AT BOOT, not on every render. These nodes are in `index.html` rather than built by `h()`,
+ * so they survive every re-render — which means painting them repeatedly would be pure allocation
+ * for a tree that never changes. `renderChrome` runs on every poll; this does not.
+ *
+ * The markup names the icon and this draws it, rather than the HTML carrying ten inline `<svg>`
+ * blocks. That is not a style preference: an external sprite referenced by `<use>` is a fetch, and
+ * this console's CSP is `default-src 'none'`.
+ */
+function paintNavIcons() {
+  for (const slot of document.querySelectorAll('[data-icon]')) {
+    slot.replaceChildren(icon(slot.dataset.icon, Number(slot.dataset.iconSize) || 16));
+  }
+}
+
 function renderChrome() {
   const held = heldSession();
 
@@ -843,8 +890,23 @@ $('navtoggle').addEventListener('click', () => {
   const icons = root.dataset.nav === 'icons';
   root.dataset.nav = icons ? 'labels' : 'icons';
   try { localStorage.setItem('mf-nav', root.dataset.nav); } catch { /* private mode; not important */ }
-  $('navtoggle').firstElementChild.textContent = icons ? '«' : '»';
+  setNavToggleIcon(root.dataset.nav === 'icons');
 });
+
+/**
+ * The collapse chevron, which points the way the rail will go.
+ *
+ * A helper rather than two call sites, because the OTHER call site runs before first paint from a
+ * restored preference — and the two used to disagree: the boot path wrote a raw `»` character into
+ * the span while the click path wrote `«`, so a console restored into the collapsed state showed
+ * the toggle for expanding it drawn as the toggle for collapsing it.
+ */
+function setNavToggleIcon(collapsed) {
+  const slot = $('navtoggle').querySelector('[data-icon]');
+  if (!slot) return;
+  slot.dataset.icon = collapsed ? 'expand' : 'collapse';
+  slot.replaceChildren(icon(slot.dataset.icon, 16));
+}
 
 /* ---------------------------------------------------------------------------- page header */
 
@@ -1251,7 +1313,7 @@ function quarantineCard(d) {
   const admin = isOrgAdmin();
 
   if (d.state === 'PREPARING') {
-    return card('Recovering', { aside: pill('Preparing', 'warn') },
+    return card('Recovering', { aside: pill('Preparing', 'warn', { at: d.recovery?.startedAt }) },
       kv([
         ['Recovering from', d.recovery?.fromReason || 'a quarantine recorded before this was kept'],
         ['Started', d.recovery?.startedAt ? `${when(d.recovery.startedAt)} (${ago(d.recovery.startedAt)})` : '—'],
@@ -1264,7 +1326,7 @@ function quarantineCard(d) {
   }
 
   if (d.state === 'QUARANTINED') {
-    return card('Quarantined', { aside: pill('Out of the pool', 'bad') },
+    return card('Quarantined', { aside: pill('Out of the pool', 'bad', { at: d.quarantine?.at }) },
       kv([
         ['Reason', d.quarantine?.reason || 'not recorded — this quarantine predates the audit log'],
         ['Since', d.quarantine?.at ? `${when(d.quarantine.at)} (${ago(d.quarantine.at)})` : 'not recorded'],
@@ -1961,8 +2023,19 @@ function screenLaunching(id) {
       h('div', { class: 'bringup-steps' },
         h('p', { class: 'micro', text: `Launching ${device ? device.model : 'a device'}` }),
         h('ul', { class: 'steplist' }, steps.map((s) => h('li', { class: `step ${s.state}` },
+          /**
+           * The outcome mark. 01 maps these three to `check`, `x` and `minus`.
+           *
+           * `pending` AND `waiting` DRAW NOTHING, which is the honest part. There is no glyph for
+           * "we have not heard yet", and a spinner here would be a depiction of progress the
+           * console cannot observe — the step's own pulse says it is waiting, and the words beside
+           * it say what for.
+           */
           h('span', { class: 'step-mark' },
-            s.state === 'done' ? '✓' : s.state === 'failed' ? '!' : s.state === 'skipped' ? '–' : '',
+            s.state === 'done' ? icon('check', 14)
+              : s.state === 'failed' ? icon('x', 14)
+                : s.state === 'skipped' ? icon('minus', 14)
+                  : null,
           ),
           h('span', { class: 'stack tight' },
             h('span', { class: 'step-label', text: s.label }),
@@ -2073,42 +2146,20 @@ function svgEl(tag, attrs) {
 }
 
 /**
- * The toolbar icon set, drawn to read at 20px.
+ * One icon, at a size.
  *
- * Back, home and overview are deliberately Android's own shapes — triangle, circle, square — rather
- * than invented glyphs, because a person coming from a device toolbar already knows them and any
- * cleverness here costs recognition for nothing.
+ * THE GEOMETRY MOVED OUT. This used to be nineteen hand-drawn path strings in this file, and the
+ * sidebar and the palette used Unicode characters instead — ▶ ■ ✚ ☰ ▤ ⋮ ◎ ☍ ● ⚙ — which is most of
+ * why the chrome read as unfinished: those glyphs come from whatever font the platform picked, at
+ * whatever weight and baseline it felt like, so the same nav looked different on every machine and
+ * matched nothing else on the screen. `icons.js` is Lucide, generated and committed, on one 24px
+ * grid at one stroke weight (ADR note in `build-icon-sprite.mjs`).
+ *
+ * 16px in nav and rails, 14px inline with label text, 20px in empty states. The default is the nav
+ * size because that is where most of the calls are.
  */
-const ICONS = {
-  power: (g) => { g.appendChild(svgEl('path', { d: 'M12 3v9', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M6.6 6.6a7.5 7.5 0 1 0 10.8 0', 'stroke-linecap': 'round' })); },
-  volup: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M18.5 6.5a8 8 0 0 1 0 11', 'stroke-linecap': 'round' })); },
-  voldown: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); },
-  rotl: (g) => { g.appendChild(svgEl('path', { d: 'M4 12a8 8 0 1 1 2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M4 6.5V12h5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  rotr: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 0-2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 6.5V12h-5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  back: (g) => { const p = svgEl('path', { d: 'M15 5 7 12l8 7z', 'stroke-linejoin': 'round' }); p.setAttribute('fill', 'currentColor'); g.appendChild(p); },
-  home: (g) => { const c = svgEl('circle', { cx: 12, cy: 12, r: 7 }); c.setAttribute('fill', 'currentColor'); g.appendChild(c); },
-  overview: (g) => { const r = svgEl('rect', { x: 5.5, y: 5.5, width: 13, height: 13, rx: 1.5 }); r.setAttribute('fill', 'currentColor'); g.appendChild(r); },
-  camera: (g) => { g.appendChild(svgEl('path', { d: 'M3 8.5h3.5L8 6h8l1.5 2.5H21v11H3z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('circle', { cx: 12, cy: 13.5, r: 3.5 })); },
-  refresh: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 1-2.4-5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 4v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  zoomin: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5M11 8.5v5', 'stroke-linecap': 'round' })); },
-  zoomout: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5', 'stroke-linecap': 'round' })); },
-  fit: (g) => { g.appendChild(svgEl('path', { d: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  // The chrome toggle: a phone body with its camera dot — the two things the button adds or removes.
-  phone: (g) => { g.appendChild(svgEl('rect', { x: 7, y: 2.5, width: 10, height: 19, rx: 2.4 })); g.appendChild(svgEl('circle', { cx: 12, cy: 5.4, r: 0.7, fill: 'currentColor', stroke: 'none' })); },
-  // A cursor over a box: pick a thing on the screen. Reads as "inspect" the way a magnifier reads
-  // as "zoom", and the bar already has two magnifiers doing that job.
-  inspect: (g) => {
-    g.appendChild(svgEl('rect', { x: 3.5, y: 3.5, width: 11, height: 11, rx: 1.5, 'stroke-dasharray': '3 2.2' }));
-    const p = svgEl('path', { d: 'M12.5 12.5 21 16l-3.4 1.4L16 21z', 'stroke-linejoin': 'round' });
-    p.setAttribute('fill', 'currentColor');
-    g.appendChild(p);
-  },
-};
-
-function icon(name) {
-  const s = svgEl('svg', { viewBox: '0 0 24 24', width: 20, height: 20, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'aria-hidden': 'true' });
-  (ICONS[name] || ICONS.fit)(s);
-  return s;
+function icon(name, size = 16) {
+  return iconSvg(name, size);
 }
 
 /**
@@ -2122,7 +2173,7 @@ function toolBtn(name, label, enabled, onclick, opts = {}) {
     title: label + (opts.kbd ? ` (${opts.kbd})` : ''),
     disabled: !enabled,
     onclick,
-  }, icon(name), h('span', { class: 'sr', text: label }));
+  }, icon(name, 20), h('span', { class: 'sr', text: label }));
 }
 
 /**
@@ -3016,7 +3067,7 @@ function dropZone() {
   });
 
   const zone = h('label', { class: 'drop', for: 'apk-input' },
-    h('span', { class: 'drop-icon', text: '↑' }),
+    h('span', { class: 'drop-icon' }, icon('upload', 20)),
     h('div', { class: 'stack tight' },
       h('p', { class: 'buildname', text: 'Drop an APK here' }),
       h('p', { class: 'help', text: 'Package, version and size are read on the farm before the build becomes installable. Re-uploading the same file is free — builds are keyed on their checksum.' }),
@@ -3756,68 +3807,126 @@ function screenHealth() {
 
 /* ---------------------------------------------------------------------------- palette */
 
+/**
+ * Everything the palette can do, in two groups and never interleaved.
+ *
+ * GO TO is a destination and DO is a verb, and 06 is firm that they do not mix: a list where
+ * "Open Devices" sits between "Start a device" and "Release your device" makes Enter a keystroke
+ * you have to read before pressing. `group` is what `renderPalette` sorts on.
+ */
 function commands() {
   const held = heldSession();
   const list = [
-    { glyph: '▶', label: 'Launch a device', group: 'Go', run: () => go('#/launch') },
-    { glyph: '■', label: 'Open Devices', group: 'Go', run: () => go('#/devices') },
-    { glyph: '✚', label: 'Open Apps', group: 'Go', run: () => go('#/apps') },
-    { glyph: '☰', label: 'Open Sessions', group: 'Go', run: () => go('#/sessions') },
-    { glyph: '▤', label: 'Open Runs', group: 'Go', run: () => go('#/runs') },
-    { glyph: '⋮', label: 'Open Queue', group: 'Go', run: () => go('#/queue') },
-    { glyph: '◎', label: 'Open Farm health', group: 'Go', run: () => go('#/health') },
+    { icon: 'launch',   label: 'Launch a device', group: 'Go to', run: () => go('#/launch') },
+    { icon: 'devices',  label: 'Open Devices', group: 'Go to', run: () => go('#/devices') },
+    { icon: 'apps',     label: 'Open Apps', group: 'Go to', run: () => go('#/apps') },
+    { icon: 'sessions', label: 'Open Sessions', group: 'Go to', run: () => go('#/sessions') },
+    { icon: 'runs',     label: 'Open Runs', group: 'Go to', run: () => go('#/runs') },
+    { icon: 'queue',    label: 'Open Queue', group: 'Go to', run: () => go('#/queue') },
+    { icon: 'health',   label: 'Open Farm health', group: 'Go to', run: () => go('#/health') },
   ];
   if (held) {
-    list.unshift({ glyph: '▶', label: 'Open your session cockpit', group: 'Session', run: () => go(`#/sessions/${held.id}`) });
-    list.push({ glyph: '⏻', label: 'Release your device', group: 'Session', run: () => askRelease(held) });
+    list.unshift({ icon: 'sessions', label: 'Open your session cockpit', group: 'Go to', run: () => go(`#/sessions/${held.id}`) });
+    list.push({ icon: 'power', label: 'Release your device', group: 'Do', run: () => askRelease(held) });
   }
   // Offered only where they would work. A palette entry for a capability the device lacks is the
   // same lie as a button for one.
   if (state.route.name === 'cockpit' && state.live) {
     const dev = deviceById(state.detail?.deviceId);
     const caps = dev?.capabilities || [];
-    if (caps.includes('screenshot')) list.push({ glyph: '⧉', label: 'Take a screenshot', group: 'Session', run: () => void takeScreenshot() });
-    if (caps.includes('logcat')) list.push({ glyph: '≡', label: state.log.streaming ? 'Pause logcat' : 'Resume logcat', group: 'Session', run: () => toggleLogcat() });
+    if (caps.includes('screenshot')) list.push({ icon: 'camera', label: 'Take a screenshot', group: 'Do', run: () => void takeScreenshot() });
+    if (caps.includes('logcat')) list.push({ icon: 'logcat', label: state.log.streaming ? 'Pause logcat' : 'Resume logcat', group: 'Do', run: () => toggleLogcat() });
   }
   for (const d of state.devices) {
     if (d.state === 'READY') {
-      list.push({ glyph: '＋', label: `Start a session on ${d.model || short(d.id)} (tier ${d.tier})`, group: 'Device', run: () => startSession(d) });
+      list.push({ icon: 'launch', label: `Start ${deviceName(d)}`, note: classFreeText(state.devices, d), group: 'Do', run: () => startSession(d) });
     }
-    list.push({ glyph: '□', label: `Open ${d.model || short(d.id)}`, group: 'Device', run: () => go(`#/devices/${d.id}`) });
+    list.push({ icon: 'devices', label: `Open ${deviceName(d)}`, note: geometryText(d), group: 'Go to', run: () => go(`#/devices/${d.id}`) });
   }
-  list.push({ glyph: '⇧', label: 'Upload an APK', group: 'Apps', run: () => { go('#/apps'); setTimeout(() => $('apk-input')?.click(), 60); } });
+  list.push({ icon: 'upload', label: 'Upload an APK', group: 'Do', run: () => { go('#/apps'); setTimeout(() => $('apk-input')?.click(), 60); } });
   list.push({
-    glyph: '⧉', label: 'Copy the WebDriver URL', group: 'Apps',
+    icon: 'copy', label: 'Copy the WebDriver URL', group: 'Do',
     run: async () => {
-      try { await navigator.clipboard.writeText(webdriverUrl()); toast('Copied', webdriverUrl(), 'ok'); }
-      catch { toast('Could not copy', 'The clipboard was refused.', 'bad'); }
+      try { await navigator.clipboard.writeText(webdriverUrl()); toast('Copied the WebDriver URL', webdriverUrl(), 'ok'); }
+      catch { toast('Could not copy', 'The clipboard was refused. Select the text instead.', 'bad'); }
     },
   });
-  list.push({ glyph: '«', label: 'Toggle the sidebar', group: 'View', run: () => $('navtoggle').click() });
+  list.push({ icon: 'collapse', label: 'Toggle the sidebar', group: 'Do', run: () => $('navtoggle').click() });
   return list;
 }
 
+/**
+ * The matching commands, IN THE ORDER THEY ARE DRAWN.
+ *
+ * The grouping happens here rather than in `renderPalette`, and that is the whole point: the arrow
+ * keys walk this array by index, so a palette that sorted only for display would highlight one row
+ * and run another. One order, produced once, read by both.
+ *
+ * `.sort` is stable in every engine this console runs in, so within a group the commands keep the
+ * order `commands()` built them in — which is the order they were reasoned about.
+ */
 function paletteMatches() {
   const q = $('palette-input').value.trim().toLowerCase();
   const all = commands();
-  return q ? all.filter((c) => c.label.toLowerCase().includes(q) || c.group.toLowerCase().includes(q)) : all;
+  const hits = q
+    ? all.filter((c) => c.label.toLowerCase().includes(q) || c.group.toLowerCase().includes(q))
+    : all;
+  return hits.sort((a, b) => PALETTE_GROUPS.indexOf(a.group) - PALETTE_GROUPS.indexOf(b.group));
 }
+
+/**
+ * TWO GROUPS, AND THEY DO NOT INTERLEAVE.
+ *
+ * `GO TO` is a destination, `DO` is a verb, and 06 is firm about keeping them apart: in a flat list,
+ * "Open Devices" sits between "Start a device" and "Release your device", so Enter becomes a
+ * keystroke you have to READ before pressing. Separated, the shape of the list tells you which kind
+ * of thing you are about to do before you have read a word of it.
+ *
+ * Destinations first, because they are the safe half — an accidental Enter navigates rather than
+ * allocating hardware.
+ */
+const PALETTE_GROUPS = ['Go to', 'Do'];
 
 function renderPalette() {
   const items = paletteMatches();
   if (state.palIndex >= items.length) state.palIndex = Math.max(0, items.length - 1);
   const ul = $('palette-list');
-  ul.replaceChildren(...items.map((c, i) => h('li', null,
-    h('button', {
-      class: `cmd ${i === state.palIndex ? 'is-sel' : ''}`.trim(),
-      type: 'button',
-      onclick: () => { closeOverlays(); c.run(); },
-    },
-      h('span', { class: 'glyph', text: c.glyph }),
-      h('span', { text: c.label }),
-      h('span', { class: 'grp', text: c.group }),
-    ))));
-  if (!items.length) ul.replaceChildren(h('li', null, h('p', { class: 'empty', text: 'Nothing matches.' })));
+
+  if (!items.length) {
+    ul.replaceChildren(h('li', null, empty('Nothing matches that.', 'Try a device name, a session id, or a verb like "start".')));
+    return;
+  }
+
+  // `items` is ALREADY in this order — see `paletteMatches`. Walking the groups here only decides
+  // where the headings go; it never reorders anything, so `indexOf` below is the same index the
+  // arrow keys move through.
+  const rows = [];
+  for (const group of PALETTE_GROUPS) {
+    const inGroup = items.filter((c) => c.group === group);
+    if (!inGroup.length) continue;
+    rows.push(h('li', { class: 'cmd-group' }, h('p', { class: 'micro', text: group.toUpperCase() })));
+    for (const c of inGroup) {
+      const i = items.indexOf(c);
+      rows.push(h('li', null,
+        h('button', {
+          class: `cmd ${i === state.palIndex ? 'is-sel' : ''}`.trim(),
+          type: 'button',
+          onclick: () => { closeOverlays(); c.run(); },
+        },
+          h('span', { class: 'glyph' }, icon(c.icon, 14)),
+          h('span', { class: 'cmd-label', text: c.label }),
+          // The free count, or the geometry, inline on the result itself. 06's reason: the top
+          // result is an ACTION, so Enter has to be a safe keystroke — and it is only safe if what
+          // you get is on the row you are about to press.
+          c.note ? h('span', { class: 'cmd-note mono', text: c.note }) : null,
+        )));
+    }
+  }
+  ul.replaceChildren(...rows);
+  // Group headings make the list taller than it was, so the selection can now walk off the bottom
+  // of a scrolling palette. `nearest` rather than `center`, which would jump the list on every
+  // keystroke.
+  ul.querySelector('.cmd.is-sel')?.scrollIntoView({ block: 'nearest' });
 }
 
 function openPalette() {
@@ -4625,11 +4734,16 @@ async function boot() {
   if (state.route.name === 'launching') void watchBringup(state.route.id);
 }
 
+// The chrome's icons, before anything else draws — the nav is in the static markup, so its glyph
+// slots are empty until this runs.
+paintNavIcons();
+
 // Restore the sidebar width before first paint so it does not flash open then collapse.
 try {
   const nav = localStorage.getItem('mf-nav');
-  if (nav === 'icons') { root.dataset.nav = 'icons'; $('navtoggle').firstElementChild.textContent = '»'; }
+  if (nav === 'icons') root.dataset.nav = 'icons';
 } catch { /* private mode */ }
+setNavToggleIcon(root.dataset.nav === 'icons');
 
 $('hub-preview').textContent = `https://<api-key>@${location.host}/wd/hub`;
 checkReach();

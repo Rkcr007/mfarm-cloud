@@ -67,6 +67,15 @@ const FILES: Record<string, { file: string; type: string }> = {
   // not a render function — it holds a socket and a peer connection open (ADR-0007) — and because
   // a page that never opens a cockpit never parses it.
   '/live.js': { file: 'live.js', type: 'text/javascript; charset=utf-8' },
+  /**
+   * The icon set, imported as a module by console.js.
+   *
+   * GENERATED AND COMMITTED — `scripts/build-icon-sprite.mjs` extracts the geometry from
+   * `lucide-static` and `icons.test.ts` fails when the two drift. It has to be a checked-in file
+   * for the same reason the fonts do: this table names literal paths, so a file that only exists
+   * after a build step could not be served from a fresh checkout.
+   */
+  '/icons.js': { file: 'icons.js', type: 'text/javascript; charset=utf-8' },
   // Device chrome (ADR-0016), also imported as a module by console.js.
   //
   // ITS ABSENCE HERE TOOK THE WHOLE CONSOLE DOWN IN PRODUCTION. This table is an allowlist, and a

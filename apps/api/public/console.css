@@ -134,6 +134,22 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 .caption { font-size: 11px; color: var(--t-caption, #6A6A6A); }
 .secondary { color: var(--t-secondary, #C4C4C4); }
 
+/**
+ * The icon element itself.
+ *
+ * `flex: 0 0 auto` so an icon never shrinks when the label beside it is long — a squashed 16px
+ * glyph is the tell that an icon set was retrofitted. `vertical-align` because an inline icon sits
+ * on the text baseline and Lucide's 24px box has its optical centre slightly above it.
+ *
+ * NO COLOUR OF ITS OWN. `stroke: currentColor` is set on the element in `icons.js`, so an icon
+ * takes the colour of the text it sits with and can never disagree with its label — which is also
+ * why an icon in this console never carries meaning on its own.
+ */
+.icon {
+  flex: 0 0 auto;
+  vertical-align: -.15em;
+}
+
 /* Status dot. Never alone — the markup always pairs it with a word. */
 .dot {
   width: 6px; height: 6px;
@@ -150,37 +166,79 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 .dot.live  { animation: mf-pulse var(--mf-pulse, 2.2s) ease-in-out infinite; }
 
 /* Status pill. */
+/**
+ * Status pill. Dot + label, always, and a timestamp ADJACENT rather than inside.
+ *
+ * The timestamp sits beside the pill rather than within it for a layout reason and a meaning one.
+ * A pill that grows to hold `2 minutes ago` stops being a fixed-width token you can scan down a
+ * column of; and the pill states a CONDITION while the timestamp states WHEN IT WAS OBSERVED,
+ * which are two facts that age differently — a stale poll invalidates the second without touching
+ * the first.
+ *
+ * `--r-pill` now, not the old 2px. 06 gives pills and chips the pill radius and everything else the
+ * ordinary scale, which is what makes a status token read as a token rather than as a small button.
+ */
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 8px;
+  padding: 4px 9px;
   border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 2px;
-  font-size: 10px;
+  border-radius: var(--r-pill, 999px);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: .1em;
+  letter-spacing: .05em;
   color: var(--t-label, #8A8A8A);
   white-space: nowrap;
 }
+/**
+ * Pill + timestamp, laid out as one unit.
+ *
+ * The timestamp is a SIBLING of the pill rather than a child, so the pill keeps the fixed width
+ * that makes a column of them scannable — and so the two can age independently, which they do: the
+ * pill says what the condition is, the timestamp says when we last saw it be that.
+ */
+.pill-row { display: inline-flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+.pill-at  { font-family: var(--f-mono); font-size: 10.5px; color: var(--t-caption, #6A6A6A); }
+
 .pill.ok     { color: var(--ok-text, #7FD873);  background: var(--ok-bg);  border-color: var(--ok-line); }
 .pill.warn   { color: var(--warn, #E8A30E);     background: var(--warn-bg); border-color: var(--warn-line); }
 .pill.bad    { color: var(--bad-text, #EE7C88); background: var(--bad-bg); border-color: var(--bad-line); }
 .pill.info   { color: var(--info, #7FA0D8);     background: rgba(127,160,216,.07); border-color: rgba(127,160,216,.26); }
 .pill.accent { color: #C9BCF0; background: var(--mf-accent-soft); border-color: var(--mf-accent-line); }
 
-/* Capability chip. A capability the device does NOT have renders as a struck-through x chip
-   rather than being hidden, so the absence is legible instead of merely missing. */
+/**
+ * Capability chip.
+ *
+ * A capability the device does NOT declare renders struck through, present and dimmed — never
+ * removed. Filtering an absence out of the list is how a console starts lying by omission: the
+ * reader cannot tell "this device cannot do it" from "nobody thought to show it", and the second
+ * reading is the one that sends somebody to debug a feature that was never there.
+ *
+ * THE ✓ AND × GLYPHS ARE GONE, and their absence is the design decision. FILL AND STRIKE ALREADY
+ * CARRY IT: a filled chip is present, a transparent struck one is not, and adding a tick to the
+ * first said the same thing twice while adding a cross to the second competed with the strike for
+ * the same meaning. It also makes the chip a capability NAME rather than a name plus punctuation,
+ * which matters because the name is a machine string somebody may need to copy.
+ */
 .chip {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 8px;
+  padding: 4px 9px;
   background: var(--s-chip, #191919);
   border: 1px solid var(--b-inset, #1A1A1C);
-  border-radius: 2px;
-  font-size: 11px;
+  border-radius: var(--r-pill, 999px);
+  font-family: var(--f-mono);
+  font-size: 10.5px;
   color: var(--t-secondary, #C4C4C4);
 }
-.chip.yes::before { content: "\2713"; color: var(--ok-text, #7FD873); }
-.chip.no  { color: var(--t-micro, #5A5A5A); background: transparent; }
-.chip.no::before  { content: "\00D7"; }
+.chip.no {
+  color: var(--t-strike, #4A4A4A);
+  background: transparent;
+  border-color: var(--b-row, #151517);
+  text-decoration: line-through;
+  /* The strike must read as deliberate rather than as a rendering artefact at 10.5px. */
+  text-decoration-thickness: 1px;
+}
 
 /* Key/value row. */
 .kv { display: grid; grid-template-columns: minmax(96px, 34%) 1fr; }
@@ -194,11 +252,18 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 .kv dt:first-of-type, .kv dt:first-of-type + dd { border-top: none; }
 
 /* Mono value with a copy button. */
+/**
+ * Copy field. Machine text is ALWAYS in one of these.
+ *
+ * Truncation is by ellipsis and never by shortening the data: `3b97a8de…` that scrolls is a value
+ * you can still select and paste, while `3b97a8de` rendered as the whole id is a value that looks
+ * complete and is not. That distinction is the reason this primitive exists rather than a `<code>`.
+ */
 .copyrow {
   display: flex; align-items: center; gap: 8px;
   background: var(--s-inset, #050506);
-  border: 1px solid var(--b-inset, #1A1A1C);
-  border-radius: 2px;
+  border: 1px solid var(--b-field, #242427);
+  border-radius: var(--r-md, 9px);
   padding: 8px 8px 8px 10px;
   min-width: 0;
 }
@@ -213,17 +278,29 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 }
 .copyrow code::-webkit-scrollbar { display: none; }
 
-/* Buttons. 2px radius, hairline border, no fills except the two that mean something. */
+/**
+ * Buttons. Three variants and no more: primary, secondary, destructive.
+ *
+ * h32 / pad 8-12 / r9 at comfortable density, per 06. ONE PRIMARY PER SCREEN — that is a rule the
+ * stylesheet cannot enforce and the screens have to keep, and it is what makes the accent mean
+ * "this is the thing to do" rather than "this is a button".
+ *
+ * The destructive variant is only ever reached INSIDE A CONFIRM DIALOG. A bare red row action is
+ * the pattern where somebody destroys a device from a table they were scrolling.
+ */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  padding: 7px 13px;
+  min-height: 32px;
+  padding: 8px 12px;
   background: var(--s-btn, #131315);
   border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 2px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-body, #D4D4D4);
-  font-size: 12px;
+  font: var(--ty-strong);
   white-space: nowrap;
+  transition: border-color var(--m-fast, 160ms) var(--ease-out), background var(--m-fast, 160ms) var(--ease-out);
 }
+.btn:active:not([disabled]) { transform: translateY(.5px); transition-duration: var(--m-instant, 90ms); }
 .btn:hover:not([disabled]) { border-color: var(--b-hover-strong, #454548); color: var(--t-primary, #F1F1F1); }
 
 .btn.primary {
@@ -244,7 +321,7 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 .btn.danger-solid:hover:not([disabled]) { background: var(--bad-solid-hover, #C93343); border-color: var(--bad-solid-hover, #C93343); }
 
 .btn.ghost { background: transparent; }
-.btn.tiny { padding: 4px 8px; font-size: 11px; }
+.btn.tiny { min-height: 24px; padding: 4px 8px; font-size: 11px; border-radius: var(--r-sm, 6px); }
 .btn.wide { width: 100%; }
 
 kbd {
@@ -352,13 +429,28 @@ kbd {
 .tl-title { color: var(--t-body, #D4D4D4); }
 .tl-note  { font-size: 11px; color: var(--t-caption, #6A6A6A); }
 
+/**
+ * Empty state: a sentence saying WHAT IS ABSENT, then the one thing to do about it.
+ *
+ * Never a spinner and never a skeleton where an explanation belongs. A skeleton says "this is
+ * loading" whether or not it is, so it is the one loading affordance that can be a lie — and in a
+ * console whose whole claim is that it does not lie about the machine, the empty state is where
+ * that claim is cheapest to keep and most often broken.
+ */
 .empty {
   padding: 26px 16px;
   text-align: center;
   color: var(--t-help, #787878);
-  font-size: 11.5px;
+  font-size: 12px;
+  text-wrap: pretty;
 }
-.empty strong { display: block; color: var(--t-secondary, #C4C4C4); font-weight: 600; margin-bottom: 4px; }
+.empty strong {
+  display: block;
+  color: var(--t-secondary, #C4C4C4);
+  font: var(--ty-display-md);
+  letter-spacing: var(--tr-display-md);
+  margin-bottom: 6px;
+}
 
 .error-text { color: var(--bad-text, #EE7C88); font-size: 11.5px; }
 .ok-text    { color: var(--ok-text, #7FD873); }
@@ -562,7 +654,13 @@ kbd {
   font-size: 12px;
 }
 .navitem:hover { background: rgba(255, 255, 255, .035); color: var(--t-primary, #F1F1F1); }
-.navitem .glyph { width: 13px; text-align: center; flex: 0 0 auto; color: var(--t-label, #8A8A8A); }
+.navitem .glyph,
+.navtoggle .glyph {
+  display: inline-grid; place-items: center;
+  width: 16px; height: 16px;
+  flex: 0 0 auto;
+  color: var(--t-label, #8A8A8A);
+}
 .navitem .txt { display: var(--mf-navlabel, block); white-space: nowrap; overflow: hidden; }
 .navitem .sc  { display: var(--mf-navlabel, block); margin-left: auto; font-size: 10px; color: var(--t-navhead, #484848); }
 .navitem.is-active {
@@ -676,7 +774,7 @@ kbd {
   display: grid; place-items: center;
   width: 34px; height: 34px;
   border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 2px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-label, #8A8A8A);
   flex: 0 0 auto;
 }
@@ -770,7 +868,19 @@ kbd {
   font-size: 12px;
   text-align: left;
 }
-.cmd .glyph { width: 14px; text-align: center; color: var(--t-label, #8A8A8A); flex: 0 0 auto; }
+.cmd .glyph {
+  display: inline-grid; place-items: center;
+  width: 14px; height: 14px;
+  color: var(--t-label, #8A8A8A);
+  flex: 0 0 auto;
+}
+
+/* The two group headings. `GO TO` and `DO`, never interleaved — see `renderPalette`. */
+.cmd-group { padding: 12px 14px 5px; }
+.cmd-group:first-child { padding-top: 6px; }
+.cmd-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The free count or the geometry, on the row you are about to press. */
+.cmd-note { color: var(--t-caption, #6A6A6A); font-size: 10.5px; flex: 0 0 auto; }
 .cmd .grp { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--t-navhead, #484848); }
 .cmd.is-sel { background: var(--mf-accent-soft, rgba(117,94,184,.16)); color: #fff; }
 .palette footer {
@@ -889,15 +999,24 @@ kbd {
   border-radius: 3px;
   align-self: start;
 }
+/**
+ * Rail control. 34px square, r9.
+ *
+ * NEVER HIDDEN AND NEVER REMOVED when unavailable — it renders dashed, dimmed and inert, with a
+ * tooltip naming the missing capability. A control that disappears when the device cannot do the
+ * thing leaves the reader with no way to learn that the device cannot do the thing; a control that
+ * is visibly unavailable teaches them the shape of what they have.
+ */
 .devbtn {
   width: 34px; height: 34px;
   display: grid; place-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-secondary, #C4C4C4);
   cursor: pointer;
   padding: 0;
+  transition: background var(--m-fast, 160ms) var(--ease-out), border-color var(--m-fast, 160ms) var(--ease-out);
 }
 .devbtn:hover:not(:disabled) {
   background: var(--s-btn, #131315);
@@ -905,9 +1024,23 @@ kbd {
   color: var(--t-primary, #F1F1F1);
 }
 .devbtn:active:not(:disabled) { background: var(--mf-accent-soft, rgba(117, 94, 184, .16)); }
-/* Disabled is genuinely unavailable here, never "you lack permission": the control is wired to a
-   channel that is not open. It reads as inert rather than as forbidden. */
-.devbtn:disabled { opacity: .28; cursor: default; }
+/**
+ * Disabled is genuinely UNAVAILABLE here, never "you lack permission": the control is wired to a
+ * channel that is not open, or to a capability this device does not declare. It reads as inert
+ * rather than as forbidden.
+ *
+ * The dashed border is what separates the two readings at a glance. A dimmed solid control looks
+ * like something that will work in a moment; a dashed one looks like an outline of something that
+ * is not there — which is exactly right, because the tooltip says which capability is missing and
+ * no amount of waiting will supply it.
+ */
+.devbtn:disabled {
+  opacity: .45;
+  cursor: default;
+  border-style: dashed;
+  border-color: var(--b-dash, #303033);
+  color: var(--t-strike, #4A4A4A);
+}
 .devbar-sep { height: 1px; margin: 5px 4px; background: var(--b-row, #151517); }
 
 /* -------------------------------------------------------------------- the screen */
@@ -1213,7 +1346,7 @@ kbd {
 .pick-side { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .checkline { cursor: pointer; }
 .field.narrow { width: auto; min-width: 140px; }
-.btn.lg { padding: 9px 18px; font-size: 13px; }
+.btn.lg { min-height: 38px; padding: 9px 18px; font-size: 13px; }
 
 /* -------------------------------------------------------------------- logcat dock */
 
