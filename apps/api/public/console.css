@@ -1892,3 +1892,61 @@ kbd {
 }
 .toast-x:hover { background: var(--s-btn, #131315); color: var(--t-primary, #F1F1F1); }
 .toast .t-title, .toast .t-body { padding-right: 18px; }
+
+/* ================================================================ the fleet ==================
+ *
+ * One surface, four lenses. The lens row is a VIEW SWITCH, not a filter — same data, four
+ * questions — so it reads as a segmented control rather than as the chips that narrow a list.
+ */
+.lensrow { gap: 4px; }
+
+.lens {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 30px;
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-md, 9px);
+  color: var(--t-label, #8A8A8A);
+  font: var(--ty-strong);
+  transition: color var(--m-fast, 160ms) var(--ease-out), background var(--m-fast, 160ms) var(--ease-out);
+}
+.lens:hover { color: var(--t-primary, #F1F1F1); background: var(--s-btn, #131315); }
+.lens.on {
+  color: var(--t-primary, #F1F1F1);
+  background: var(--mf-accent-soft, rgba(117, 94, 184, .16));
+  border-color: var(--mf-accent-line, rgba(117, 94, 184, .42));
+}
+
+/* A count only where the count IS the answer. "Waiting 2" is what somebody came for; "Capacity 5"
+   would be a second, worse copy of the headline above it. */
+.lens-n {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--s-chip, #191919);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--t-body, #D4D4D4);
+}
+.lens.on .lens-n { background: rgba(255, 255, 255, .10); }
+
+/**
+ * The capacity table.
+ *
+ * Ordered free → in use → out of the pool, and there is deliberately NO SORT CONTROL: that order is
+ * the answer to the page's question, and a table you have to sort before it tells you anything has
+ * not told you anything.
+ */
+.fleet-table td { vertical-align: middle; }
+.fleet-table .stack.none { gap: 2px; }
+.fleet-name { font: var(--ty-display-md); font-family: var(--f-display); letter-spacing: var(--tr-display-md); color: var(--t-primary, #F1F1F1); }
+.fleet-table .rowactions { white-space: nowrap; }
+/* The device thumbnail sets the row height; without this the frame stretches to fill the cell and
+   its aspect ratio — the one thing it exists to show — becomes whatever the row is. */
+.fleet-table .mf-device { align-self: center; }
+
+/* The catalogue's cards. Wider than the fleet's, because a card here carries a sentence. */
+.catgrid { display: grid; gap: var(--mf-gap, 16px); grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.cat-card { gap: var(--s-4, 16px); }
+.cat-blurb { max-width: 46ch; text-wrap: pretty; }

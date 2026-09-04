@@ -143,15 +143,25 @@
     span is deliberately empty until `paintNavIcons()` fills it — see console.js.
   -->
   <nav class="sidebar" id="sidebar">
+    <!--
+      DEVICES, SESSIONS AND QUEUE ARE GONE FROM HERE, and they are not gone from the product: each is
+      a LENS on Fleet now, and `#/devices`, `#/sessions` and `#/queue` still resolve — onto the lens
+      that used to be that page. `G D`, `G R` and `G Q` still work for the same reason. Nothing a
+      current user knows stops working; there are simply three fewer places to look for one answer.
+
+      LAUNCH KEEPS ITS NAV ITEM, and direction B says it should not — launching is something you do,
+      not somewhere you go, and Start is now on every Fleet row. It stays because the Launch screen
+      is also the only place that can preinstall a BUILD before handing the device over, and no
+      Fleet row offers that yet. Removing the item first would delete a capability rather than
+      relocate one. It goes when the Fleet can install.
+    -->
     <p class="navgroup">Farm</p>
+    <button class="navitem" data-route="fleet"><span class="glyph" data-icon="devices"></span><span class="txt">Fleet</span><span class="sc">G F</span></button>
     <button class="navitem" data-route="launch"><span class="glyph" data-icon="launch"></span><span class="txt">Launch</span><span class="sc">G L</span></button>
-    <button class="navitem" data-route="devices"><span class="glyph" data-icon="devices"></span><span class="txt">Devices</span><span class="sc">G D</span></button>
     <button class="navitem" data-route="apps"><span class="glyph" data-icon="apps"></span><span class="txt">Apps</span><span class="sc">G A</span></button>
-    <button class="navitem" data-route="sessions"><span class="glyph" data-icon="sessions"></span><span class="txt">Sessions</span><span class="sc">G R</span></button>
     <button class="navitem" data-route="runs"><span class="glyph" data-icon="runs"></span><span class="txt">Runs</span><span class="sc">G U</span></button>
 
     <p class="navgroup">Operations</p>
-    <button class="navitem" data-route="queue"><span class="glyph" data-icon="queue"></span><span class="txt">Queue</span><span class="sc">G Q</span></button>
     <button class="navitem" data-route="health"><span class="glyph" data-icon="health"></span><span class="txt">Health</span><span class="sc">G H</span></button>
 
     <p class="navgroup">Organisation</p>
