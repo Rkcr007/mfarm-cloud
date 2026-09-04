@@ -2610,3 +2610,48 @@ when the feature is broken. See issues 37 and 38.
     not only the verifier** — a driver written from the same contract as the server only proves one
     reading of that contract agrees with itself, which is the same argument `action-test.yml`
     already makes for the CLI seam and did not have for the hub.
+
+48. **BOTH DEFECTS FROM ENTRY 47 ARE FIXED, AND THE REASON THE TESTS MISSED THEM IS THE MORE USEFUL
+    HALF.** 2026-09-04. Migration 036.
+
+    **1. A run remembers what it tested.** `sessions.app_build_id` is the durable home for the fact;
+    `webdriver_sessions.app_build_id` is kept and still written, because dropping a column the
+    previous release's INSERT names would break a rollback. `routes/runs.ts` reads the session's
+    column in both the rollup and the detail. Historical rows are backfilled from `app_actions` —
+    the earliest successful install per session, which is what the hub queues before the session
+    opens — so the runs already on the farm recover their build rather than staying blank.
+
+    **WHY 634 GREEN TESTS COULD NOT SEE IT.** `runs.test.ts` had two tests that open a session with
+    a build and read the run back. Neither of them called `quit`. The bug was *in the quit path*, so
+    every assertion ran before the row was deleted and passed against an implementation that lost
+    the answer a second later. The new test asserts the same fact **twice** — once before the quit,
+    which is what the old ones did, and once after — and reverting 036 fails only the second.
+
+    That generalises past this bug: **a test that never performs the teardown cannot see a defect in
+    the teardown.** The same shape as issue 43's rule about assertions that cannot come out both
+    ways, one step further along the lifecycle.
+
+    **2. The timeline speaks the vocabulary its schema admits.** `build-install-started`,
+    `build-install-finished`, `device-released` and `incident` are all emitted now.
+
+    - The install carries `packageName`, `outcome` and a MEASURED `durationMs`, on the failing path
+      too — an install that took 90s and then failed is a different story from one that failed at
+      once, and `outcome` alone cannot tell them apart.
+    - **`device-released` is deliberately not a duplicate of `session-ended`.** On the hub path they
+      are one instant. On the BOUND path (`mfarm run`) `driver.quit()` ends the WebDriver session
+      and releases nothing, because the caller still owns the device — so a timeline showing one
+      without the other is how a reader learns their device is still held. There is a test that
+      drives exactly that sequence rather than a comment asserting it.
+    - `incident` inherits the insert's idempotency, pinned by a test that sends one fault three
+      times and expects one event. The agent flushes its buffer on reconnect by design; thirty
+      copies of one pulled cable would be worse than none.
+
+    **STILL OPEN, and said plainly rather than left to be discovered:** the reaper's own release
+    paths — `expire_sessions`, `expire_idle_webdriver_sessions`, a host quarantine — take devices
+    back with no event, because they are set-based SQL returning counts rather than ids. A run
+    reclaimed by the farm still ends its timeline at `session-active`. That gap predates this change
+    and is not closed by it.
+
+    Also still open from entry 47: `examples/medishop-suite` never calls
+    `POST /v1/runs/:id/complete`, so every run it produces reads `"status": "incomplete"`. Not a
+    product defect — but the example IS the adoption template, so §4.7 is undiscoverable from it.

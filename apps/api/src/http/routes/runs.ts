@@ -82,10 +82,14 @@ const LIST_SQL = `
              -- queued sessions would report no activity at all, which is when somebody is most
              -- likely to be looking at it.
              max(COALESCE(s.ended_at, s.started_at, s.created_at))       AS last_activity_at,
-             count(DISTINCT w.app_build_id)                              AS build_count,
-             max(w.app_build_id::text)                                   AS one_build
+             -- FROM sessions, NOT from webdriver_sessions (migration 036). The join this used to
+             -- make was on the live proxy mapping, which a client's quit deletes — so this counted
+             -- 0 for every suite that finished properly and non-zero only for ones that leaked
+             -- their session. A run that could not say what it had tested was the symptom; the
+             -- cause was reading a durable question out of an ephemeral row.
+             count(DISTINCT s.app_build_id)                              AS build_count,
+             max(s.app_build_id::text)                                   AS one_build
         FROM sessions s
-        LEFT JOIN webdriver_sessions w ON w.session_id = s.id
        WHERE s.run_id = r.id
     ) agg ON true
     LEFT JOIN app_builds b ON agg.build_count = 1 AND b.id = agg.one_build::uuid
@@ -233,12 +237,14 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.region, s.created_at, s.started_at, s.ended_at, s.end_reason,
                 d.local_id AS device_local_id, d.model AS device_model,
-                w.app_build_id, b.package_name, b.version_name,
+                -- The session's own column, for the reason the list query above documents: the
+                -- webdriver_sessions join this replaced was on a row a client's quit deletes, so
+                -- the per-session build was blank for every suite that finished (migration 036).
+                s.app_build_id, b.package_name, b.version_name,
                 t.total, t.passed, t.failed, t.skipped
            FROM sessions s
            LEFT JOIN devices d            ON d.id = s.device_id
-           LEFT JOIN webdriver_sessions w ON w.session_id = s.id
-           LEFT JOIN app_builds b         ON b.id = w.app_build_id
+           LEFT JOIN app_builds b         ON b.id = s.app_build_id
            -- Lateral again, for the reason the list query documents: joining results directly would
            -- multiply the session row by its result count.
            LEFT JOIN LATERAL (
