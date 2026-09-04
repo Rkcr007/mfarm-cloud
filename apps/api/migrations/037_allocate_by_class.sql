@@ -216,11 +216,22 @@ BEGIN
   RETURN v_promoted;
 END $$;
 
--- ---------------------------------------------------------------- re-assert owner and grant
+-- ---------------------------------------------------------------- re-assert the ACL and the owner
 --
--- The dropped function took its OWNER and its ACL with it. Migration 012 moved every SECURITY
--- DEFINER function to `mfarm_definer` so that a definer function does not run as a superuser, and a
--- new function created here would otherwise be owned by whoever ran the migration.
+-- The dropped function took its OWNER and its ACL with it, and a REPLACEMENT DOES NOT INHERIT
+-- EITHER. Both have to be restated here, and the order is the part that is easy to get wrong.
+--
+-- REVOKE FIRST. Postgres grants EXECUTE to PUBLIC on every new function, so `allocate_device` is
+-- reachable by every role the moment it is created — and it is SECURITY DEFINER, which means it
+-- runs as its owner rather than as its caller. Granting to `mfarm_app` without revoking PUBLIC
+-- leaves the explicit grant decorative: the app pool could already call it, and so could anything
+-- else. Migration 012 made exactly this revoke for the previous signature and said why; dropping
+-- the function threw that away.
+--
+-- OWNERSHIP LAST, for 012's stated reason: doing it before the revoke leaves a window in which the
+-- function both runs as `mfarm_definer` and is callable by PUBLIC.
+REVOKE EXECUTE ON FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb,text,boolean)
+  FROM PUBLIC;
 ALTER FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb,text,boolean)
   OWNER TO mfarm_definer;
 GRANT EXECUTE ON FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb,text,boolean)
