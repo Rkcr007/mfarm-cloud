@@ -1018,11 +1018,33 @@ function pageHead(crumbs, title, sub, actions) {
  * what was actually given. A "reserve this device" button would be describing a feature the control
  * plane does not have.
  */
+/**
+ * Start a session on the class of device the button names.
+ *
+ * `matchProfile` IS WHAT MAKES THE LABEL TRUE. Until migration 037 this sent region, platform and
+ * tier and nothing else, while the button said "Start MFARM X1 Pro" — and the allocator has never
+ * matched on profile, so on a farm whose devices share a tier that button could hand you an X1, or
+ * an unprofiled 720x1280 device, and say nothing about it. The old label named the tier and was at
+ * least accurate; naming the device without constraining the allocation was a promise the control
+ * plane could not keep.
+ *
+ * `d.profile` is UNDEFINED for an unprofiled device, and `?? null` is load-bearing rather than
+ * defensive: with `matchProfile` true, null means "one of the devices that have no profile", which
+ * is exactly what "Start Unprofiled device" is offering. Sending nothing there would allocate any
+ * device on the tier and quietly break the same promise in the one case that looks hardest to
+ * notice.
+ */
 async function startSession(d) {
   try {
     const { session } = await api('/v1/sessions', {
       method: 'POST',
-      body: { region: d.region, platform: d.platform, tier: d.tier },
+      body: {
+        region: d.region,
+        platform: d.platform,
+        tier: d.tier,
+        profile: d.profile ?? null,
+        matchProfile: true,
+      },
     });
     // 202 with no device is a real answer, not a failure: the session is queued and the reaper
     // promotes it when one frees up. Said differently so nobody reads "queued" as "ready".

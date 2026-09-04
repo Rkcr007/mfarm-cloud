@@ -31,6 +31,19 @@ const createSchema = {
         type: 'array', maxItems: 8, uniqueItems: true,
         items: { type: 'string', minLength: 1, maxLength: 64 },
       },
+      /**
+       * The device CLASS, when the caller is asking for one — scheduling input, like
+       * `requireCapabilities` and unlike the opaque `requested` blob above.
+       *
+       * `matchProfile` exists because "no profile" is a class somebody can genuinely ask for: this
+       * farm has unprofiled devices and a picker offering them has to be able to mean it. With one
+       * nullable field that request is indistinguishable from "any device". Nullable rather than
+       * absent-only for the same reason.
+       *
+       * Both omitted by the CLI and the WebDriver hub, whose behaviour is therefore unchanged.
+       */
+      profile: { type: ['string', 'null'], maxLength: 64 },
+      matchProfile: { type: 'boolean' },
     },
   },
 } as const;
@@ -42,6 +55,8 @@ interface CreateBody {
   ttlMinutes?: number;
   requested?: Record<string, unknown>;
   requireCapabilities?: string[];
+  profile?: string | null;
+  matchProfile?: boolean;
 }
 
 /** States in which a session has a device and can still be driven. Outside these there is nothing
@@ -156,6 +171,8 @@ export async function sessionRoutes(app: FastifyInstance) {
       ttlMinutes: req.body.ttlMinutes,
       requested: req.body.requested,
       requireCapabilities: req.body.requireCapabilities,
+      profile: req.body.profile ?? null,
+      matchProfile: req.body.matchProfile ?? false,
     });
 
     let status: number;
