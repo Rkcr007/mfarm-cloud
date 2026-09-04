@@ -1109,6 +1109,53 @@ $('navtoggle').addEventListener('click', () => {
   setNavToggleIcon(root.dataset.nav === 'icons');
 });
 
+/* ============================================================ appearance (document 01, stage 8) ==
+ *
+ * THREE STATES, NOT TWO. "Dark" and "light" are choices; "system" is the ABSENCE of one, and it is
+ * the only one that can keep following an OS that changes at sunset. A two-way toggle silently
+ * converts "I have not decided" into a decision on first click and there is then no way back —
+ * which is the thing people notice a week later and cannot explain.
+ *
+ * The stored value is the CHOICE, never the resolved theme. Persisting "dark" for somebody on
+ * system-dark would freeze them there when their OS flips.
+ */
+const THEMES = ['system', 'dark', 'light'];
+
+function themeChoice() {
+  try {
+    const v = localStorage.getItem('mf-theme');
+    return THEMES.includes(v) ? v : 'system';
+  } catch {
+    // A browser with site data blocked THROWS on read rather than returning null, and the console
+    // must still render for that viewer — they simply get the OS's answer every time.
+    return 'system';
+  }
+}
+
+/** Resolve a choice against the OS, and write it where CSS can see it. */
+function applyTheme(choice) {
+  const dark = choice === 'dark'
+    || (choice === 'system' && !window.matchMedia?.('(prefers-color-scheme: light)').matches);
+  root.dataset.theme = dark ? 'dark' : 'light';
+}
+
+function setTheme(choice) {
+  try { localStorage.setItem('mf-theme', choice); } catch { /* private mode; the OS still decides */ }
+  applyTheme(choice);
+  render();
+}
+
+/**
+ * FOLLOW THE OS WHILE "SYSTEM" IS THE CHOICE, and stop the moment it is not.
+ *
+ * Without this the console picks the OS theme once at boot and then ignores it, so a desk that
+ * goes dark at sunset leaves a bright console open until the next reload — the one moment the
+ * setting exists for.
+ */
+window.matchMedia?.('(prefers-color-scheme: light)').addEventListener?.('change', () => {
+  if (themeChoice() === 'system') applyTheme('system');
+});
+
 /**
  * The collapse chevron, which points the way the rail will go.
  *
@@ -4284,7 +4331,9 @@ function screenCockpit(id) {
   const sess = state.detail?.id === id ? state.detail : state.sessions.find((s) => s.id === id);
   if (!sess || sess.missing) {
     return [
-      pageHead([{ label: 'Farm' }, { label: 'Sessions', to: '#/sessions' }], 'Session', null),
+      // The same crumb the found path uses. Two branches of one screen disagreeing about where
+      // they live is a small thing that reads as the console not knowing where it is.
+      pageHead([{ label: 'Fleet', to: '#/fleet' }, { label: 'Session' }], 'Session', null),
       card(null, {}, empty('That session is not visible to this org.',
         'An id that belongs to another org answers exactly like one that never existed — that is the disclosure boundary, not a bug.')),
     ];
@@ -5709,6 +5758,70 @@ function screenTeam() {
   ];
 }
 
+/**
+ * APPEARANCE — the one setting in this console that is purely the reader's.
+ *
+ * IN SETTINGS AND NOT IN THE HEADER. A theme switch in the top bar is one mis-click away at all
+ * times and is pressed by accident far more often than on purpose; this is a preference somebody
+ * sets once. The three-way choice is explained rather than implied, because "System" is the only
+ * option whose behaviour is not obvious from its name.
+ *
+ * DENSITY AND MOTION ARE HERE TOO, and they were already real: `data-density` and `data-liveness`
+ * have driven the token scales since stage 1 and nothing in the console could set either. A setting
+ * the design specifies, the CSS implements, and no control reaches is indistinguishable from one
+ * that does not exist.
+ */
+function appearanceCard() {
+  const pick = (label, value, current, onpick, why) => h('button', {
+    class: `btn tiny${value === current ? ' primary' : ' ghost'}`,
+    type: 'button',
+    title: why || label,
+    onclick: () => onpick(value),
+  }, label);
+
+  const theme = themeChoice();
+  const density = root.dataset.density || 'comfortable';
+  const liveness = root.dataset.liveness || 'calm';
+
+  const setAttr = (name, key, value) => {
+    root.dataset[name] = value;
+    try { localStorage.setItem(key, value); } catch { /* private mode */ }
+    render();
+  };
+
+  return card('Appearance', {},
+    h('p', { class: 'micro', text: 'Theme' }),
+    h('div', { class: 'row tight mt-xs' },
+      pick('System', 'system', theme, setTheme, 'Follow the operating system, and keep following it when it changes'),
+      pick('Dark', 'dark', theme, setTheme),
+      pick('Light', 'light', theme, setTheme)),
+    h('p', { class: 'caption mt-xs', text: theme === 'system'
+      ? 'Following this device. It changes when your system does, including while this page is open.'
+      : `Always ${theme}, whatever the system is set to.` }),
+
+    h('p', { class: 'micro mt-lg', text: 'Density' }),
+    h('div', { class: 'row tight mt-xs' },
+      // `airy`, not `dense` — the three modes in `design-tokens.css` are comfortable/compact/airy,
+      // and a fourth name here would be a button that sets an attribute no rule matches. A control
+      // that silently does nothing is worse than an absent one.
+      pick('Compact', 'compact', density, (v) => setAttr('density', 'mf-density', v)),
+      pick('Comfortable', 'comfortable', density, (v) => setAttr('density', 'mf-density', v)),
+      pick('Airy', 'airy', density, (v) => setAttr('density', 'mf-density', v))),
+    // The constraint is what makes density safe to offer at all, so it is stated rather than left
+    // for somebody to discover: the three modes scale padding and gap, never type size.
+    h('p', { class: 'caption mt-xs', text: 'Padding and spacing only — text never gets smaller.' }),
+
+    h('p', { class: 'micro mt-lg', text: 'Motion' }),
+    h('div', { class: 'row tight mt-xs' },
+      pick('Calm', 'calm', liveness, (v) => setAttr('liveness', 'mf-liveness', v)),
+      pick('Still', 'still', liveness, (v) => setAttr('liveness', 'mf-liveness', v))),
+    h('p', { class: 'caption mt-xs', text:
+      'Nothing here is conveyed by motion alone, so Still loses no information \u2014 a step that '
+      + 'was pulsing still says what it is waiting for in words. Your system\u2019s '
+      + '“reduce motion” setting already does this on its own.' }),
+  );
+}
+
 function screenSettings() {
   const pending = orgGate();
   const admin = isOrgAdmin();
@@ -5751,6 +5864,7 @@ function screenSettings() {
             : empty('No API keys yet.', 'A key is what a CI job or an Appium suite authenticates with.'))),
       ),
       h('div', { class: 'rail' },
+        appearanceCard(),
         card('Using a key', {},
           h('p', { class: 'caption' }, 'Point an existing Appium suite at the farm by changing one URL:'),
           h('p', { class: 'mono selectable caption mt-sm', text: `${location.origin}/wd/hub` }),
@@ -6227,6 +6341,18 @@ paintNavIcons();
 try {
   const nav = localStorage.getItem('mf-nav');
   if (nav === 'icons') root.dataset.nav = 'icons';
+} catch { /* private mode */ }
+
+/**
+ * And the theme, for the same reason and more urgently: `index.html` ships `data-theme="dark"` so
+ * that a page with no JavaScript yet is not a white flash, and this is the first chance to correct
+ * it for somebody whose choice — or whose OS — says otherwise.
+ */
+applyTheme(themeChoice());
+try {
+  const d = localStorage.getItem('mf-density');
+  if (d === 'compact' || d === 'airy') root.dataset.density = d;
+  if (localStorage.getItem('mf-liveness') === 'still') root.dataset.liveness = 'still';
 } catch { /* private mode */ }
 setNavToggleIcon(root.dataset.nav === 'icons');
 
