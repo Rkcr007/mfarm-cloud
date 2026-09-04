@@ -2611,8 +2611,9 @@ when the feature is broken. See issues 37 and 38.
     reading of that contract agrees with itself, which is the same argument `action-test.yml`
     already makes for the CLI seam and did not have for the hub.
 
-48. **BOTH DEFECTS FROM ENTRY 47 ARE FIXED, AND THE REASON THE TESTS MISSED THEM IS THE MORE USEFUL
-    HALF.** 2026-09-04. Migration 036.
+48. **BOTH DEFECTS FROM ENTRY 47 ARE FIXED, DEPLOYED AND HARDWARE-VERIFIED.** 2026-09-04.
+    Migration 036, control plane `e2304a3`, PR #82. The reason the tests missed them is the more
+    useful half.
 
     **1. A run remembers what it tested.** `sessions.app_build_id` is the durable home for the fact;
     `webdriver_sessions.app_build_id` is kept and still written, because dropping a column the
@@ -2655,3 +2656,44 @@ when the feature is broken. See issues 37 and 38.
     Also still open from entry 47: `examples/medishop-suite` never calls
     `POST /v1/runs/:id/complete`, so every run it produces reads `"status": "incomplete"`. Not a
     product defect — but the example IS the adoption template, so §4.7 is undiscoverable from it.
+
+49. **THE SAME SUITE, RE-RUN AGAINST THE FIX.** 2026-09-04, control plane `e2304a3`.
+
+    `examples/medishop-suite` again: **8/8, 65.8s**, run `medishop-after-036-1788482936`.
+
+    **The run now names what it tested**, after both sessions quit cleanly —
+    `buildCount: 1, com.way2automation.medishop@1.0`, where the identical scenario reported
+    `build: null, buildCount: 0` the night before.
+
+    **The backfill recovered the history**, and was DRY-RUN against the farm's real rows before the
+    migration was ever applied there — the same query, read-only, over ssh. It predicted exactly
+    what it then did: every `verify-*` run and `medishop-first-real-1788478376` recovered
+    `com.way2automation.medishop@1.0`, and `verify-1787507543857` stayed NULL because it never had
+    a successful install. **A backfill is a write you can rehearse; rehearsing it is cheaper than
+    discovering it guessed.**
+
+    **The timeline is whole, and the install carries the number that was missing:**
+
+    ```
+    run-created
+    device-allocated
+    build-install-started      com.way2automation.medishop
+    build-install-finished     DONE, durationMs 9588
+    session-active
+    session-ended              webdriver_quit
+    device-released            webdriver_quit
+    ... and the same seven again for the second lease (install 8578ms)
+    ```
+
+    **~9.5s of a ~10s session open is the install**, which is what "most of the session-open latency
+    was invisible" meant in entry 47 — now a measured field rather than a claim. `device-released`
+    sits beside `session-ended` here because this is the hub path; on the bound path it is absent
+    until the CLI gives the device back, which is the whole reason the two are separate kinds.
+
+    **A CI note worth keeping.** The tarball job's `timeout-minutes: 10` had 5-9 minute runtimes
+    under it and started failing on DURATION: it took down PR #82 once and then CI on `main`,
+    which skipped the Release and blocked the deploy. Re-running the single failed job cleared it.
+    Measured across recent runs: 1.3m to 9.6m against a 10m wall. A commit raising it to 20 exists
+    on this machine, **unpushed** — see the note in the next-session section.
+
+    `mfarm-lab` was stopped afterwards.
