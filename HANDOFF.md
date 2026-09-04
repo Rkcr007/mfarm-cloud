@@ -2935,3 +2935,35 @@ when the feature is broken. See issues 37 and 38.
     for every device in the fleet, forever, and looked like a farm that had never reset anything. It
     now merges `GET /devices/:id` over the poll row, so it paints immediately and fills in.
 
+54. **THE FARM ITSELF CORRECTED THE PAGE I HAD JUST VERIFIED.** 2026-09-05. Control plane
+    `06cf349` deployed and checked 34/34 and 6/6 — and then the SCREENSHOT of a real device showed
+    two things no fixture could have.
+
+    **THE SENTENCE THAT RESTATED ITSELF.** `quarantine_host` writes the reason and the source from
+    the same fact, so the X1 Pro read: *"Its host was quarantined. It comes back on its own when the
+    host beats again. The note reads 'its host was quarantined: no heartbeat for 90s'."* My local
+    fixture had an operator's note, which adds information; a machine's note beside its own source
+    sentence does not. The rule is about WHO WROTE IT rather than about matching strings — a health
+    check has no actor either, and its detail ("device did not answer adb within 30s") is worth
+    every character.
+
+    **AND THE BUTTON THAT COULD ONLY MAKE THINGS WORSE.** The same card printed "it comes back on
+    its own" and then offered **Authorise one recovery attempt** above a list explaining that only a
+    passing health check can return the device. Two true sentences that contradict each other, one
+    of them attached to a red button — and the button is worse than redundant: releasing sets the
+    device PREPARING and asks the host to reset it, which is the same host that is not answering.
+    Migration 035's timeout then quarantines it again with a new reason. An operator would have
+    turned "waiting for a host" into "failed a recovery" and learned nothing.
+
+    A host quarantine now gets its own list — *returns automatically / authorising does not speed
+    that up / an unanswered attempt times out and lengthens the history* — with **when the farm last
+    heard from that host** beside it, which is the fact the decision turns on and which only exists
+    because of ADR-0026. The action stays, demoted out of `--bad-solid` and renamed "Ask for a
+    recovery attempt anyway": an admin may know the host is coming back, and deleting a control an
+    admin might need is the mistake stage 5 exists to correct.
+
+    **THIS IS THE THIRD TIME THE SAME SHAPE HAS SHIPPED** — a control offered on a premise that is
+    false in that state. Entry 51's quarantined class offering "Join the queue" the allocator would
+    never serve; stage 5's rail claiming "not yet" for "not ever"; and now this. Each was found by
+    LOOKING AT REAL DATA, never by a test, because in every case the code was internally consistent
+    and the fixture agreed with it. The farm is the only place that disagrees.

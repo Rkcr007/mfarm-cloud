@@ -169,6 +169,22 @@ else
   bad "the consequence list is not in the deployed console"
 fi
 
+# THE OTHER STORY. A host quarantine is not the operator's to fix — `clear_silence_quarantine`
+# returns those devices on the host's next beat — and the page used to offer a recovery button
+# above a list saying only a health check could return the device. Two true sentences, contradicting
+# each other, one attached to a red button.
+if grep -q "This one comes back on its own" <<<"$FLEET_JS"; then
+  ok "a host quarantine tells its own story"
+  grep -qF "this host is not answering" <<<"$FLEET_JS" \
+    && ok "  ... and says what pressing the button would cost" \
+    || bad "  the host-quarantine list no longer names why the attempt is futile"
+  grep -qF "Ask for a recovery attempt anyway" <<<"$FLEET_JS" \
+    && ok "  ... with the action demoted, not deleted" \
+    || bad "  the demoted action is gone — an admin who knows the host is back has no button"
+else
+  bad "a host quarantine still gets the device-level consequence list"
+fi
+
 # The fetch that a cold load depends on. `hashchange` does not fire on load, so a device URL opened
 # directly is fed by this and nothing else — and the failure is a card that says "Loading…" for as
 # long as the page is open, which nobody reports as a bug.

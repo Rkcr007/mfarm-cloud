@@ -1511,6 +1511,97 @@ describe('device detail', () => {
         'a member who cannot press it still needs to know the button does not make it available');
     });
 
+    /**
+     * A HOST QUARANTINE IS A DIFFERENT STORY, and the page used to tell the wrong one.
+     *
+     * Found on the deployed farm. The page printed "It comes back on its own when the host beats
+     * again" and then offered "Authorise one recovery attempt" above a list explaining that only a
+     * health check can return it — two true sentences that contradict each other, one of them
+     * attached to a red button. Pressing it asks the host that is not answering, times out, and
+     * quarantines the device again with a new reason.
+     */
+    describe('a host quarantine', () => {
+      function hostQuarantined() {
+        const { device } = seed({ name: 'device', id: 'dev-1' });
+        device.state = 'QUARANTINED';
+        (device as any).quarantine = {
+          at: new Date(Date.now() - 25_200_000).toISOString(),
+          reason: 'its host was quarantined: no heartbeat for 90s',
+          source: 'host',
+        };
+        mod.state.deviceDetail = {
+          id: 'dev-1',
+          loaded: true,
+          device: { ...device, hostLastSeenAt: new Date(Date.now() - 25_200_000).toISOString() },
+        };
+        mod.state.quarantineLog = { id: 'dev-1', loaded: true, events: [] };
+        return device;
+      }
+
+      test('it says the device returns on its own, and does not claim a check is the only way', () => {
+        hostQuarantined();
+        const text = textOf(mod.SCREENS.device());
+        assert.match(text, /comes back on its own/);
+        assert.match(text, /returns to the pool\s+automatically/);
+        assert.doesNotMatch(text, /Authorising recovery does one thing/,
+          'that list is about a device-level quarantine and contradicts the sentence above it here');
+      });
+
+      test('it names what pressing the button would actually cost', () => {
+        hostQuarantined();
+        const text = textOf(mod.SCREENS.device());
+        assert.match(text, /this host is not answering/);
+        assert.match(text, /times out and quarantines the device again/);
+        assert.match(text, /last heard from that host 7h ago/,
+          'the deciding fact belongs beside the decision');
+      });
+
+      /**
+       * The action stays — an admin may know the host is coming back — but out of the solid
+       * variant, which is reserved for the action that is the right one to take.
+       */
+      test('the action is offered, demoted, and renamed', () => {
+        hostQuarantined();
+        const tree = mod.SCREENS.device();
+        assert.match(textOf(tree), /Ask for a recovery attempt anyway/);
+        assert.equal(findByClass(tree, 'danger-solid'), null,
+          'the solid variant would say this is the right thing to do, and it is not');
+        assert.ok(findByClass(tree, 'danger'), 'but it must still be reachable');
+      });
+
+      /**
+       * `quarantine_host` writes the reason and the source from the same fact, so printing both
+       * read: "Its host was quarantined. It comes back on its own when the host beats again. The
+       * note reads 'its host was quarantined: no heartbeat for 90s'."
+       */
+      test('the machine-written note is not printed back beside the sentence it came from', () => {
+        hostQuarantined();
+        const text = textOf(mod.SCREENS.device());
+        assert.doesNotMatch(text, /The note reads/);
+        assert.match(text, /Its host was quarantined/,
+          'the source sentence is the one that carries the fact');
+      });
+
+      /**
+       * The rule is about WHO WROTE THE NOTE, not about matching strings. A health check has no
+       * actor either, and its detail is an independent fact worth every character.
+       */
+      test("a health check's detail is still shown, though it also has no actor", () => {
+        const { device } = seed({ name: 'device', id: 'dev-1' });
+        device.state = 'QUARANTINED';
+        (device as any).quarantine = {
+          at: new Date().toISOString(),
+          reason: 'device did not answer adb within 30s',
+          source: 'health',
+        };
+        mod.state.quarantineLog = { id: 'dev-1', loaded: true, events: [] };
+        const text = textOf(mod.SCREENS.device());
+        assert.match(text, /device did not answer adb within 30s/);
+        assert.match(text, /Authorising recovery does one thing/,
+          'a health-check quarantine IS the operator\'s to act on');
+      });
+    });
+
     test('a healthy device offers the quarantine action instead', () => {
       seed({ name: 'device', id: 'dev-1' });
       const text = textOf(mod.SCREENS.device());
