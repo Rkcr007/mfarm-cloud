@@ -1065,22 +1065,50 @@ kbd {
 }
 .devbtn:active:not(:disabled) { background: var(--mf-accent-soft, rgba(117, 94, 184, .16)); }
 /**
- * Disabled is genuinely UNAVAILABLE here, never "you lack permission": the control is wired to a
- * channel that is not open, or to a capability this device does not declare. It reads as inert
- * rather than as forbidden.
+ * TWO KINDS OF UNAVAILABLE, and they must not look the same.
  *
- * The dashed border is what separates the two readings at a glance. A dimmed solid control looks
- * like something that will work in a moment; a dashed one looks like an outline of something that
- * is not there — which is exactly right, because the tooltip says which capability is missing and
- * no amount of waiting will supply it.
+ * Stage 2 gave every disabled rail control the dashed border, which was half right and therefore
+ * misleading: it made a control WAITING FOR THE STREAM look identical to one the device can never
+ * honour. "Not yet" and "not ever" are the two things a person at this rail most needs to tell
+ * apart, and the dash was saying "not ever" to both.
+ *
+ * Neither is ever "you lack permission". This console does not have that state.
  */
+
+/* NOT YET — the channel is not open. Dimmed, solid, and it will come back on its own. */
 .devbtn:disabled {
-  opacity: .45;
+  opacity: .4;
   cursor: default;
-  border-style: dashed;
-  border-color: var(--b-dash, #303033);
   color: var(--t-strike, #4A4A4A);
 }
+
+/**
+ * NOT EVER — the device does not declare the capability.
+ *
+ * Visible and inert rather than removed, which is document 04's rule and the same reasoning that
+ * keeps an undeclared capability in the chip list instead of filtering it out: an absence you can
+ * see is explained, and an absence you cannot see is a gap the reader has to guess at.
+ *
+ * Dashed for the outline of something that is not there, and STRUCK for the same reason the
+ * capability chip is struck — one visual language for "declared absent", wherever it appears.
+ */
+.devbtn.undeclared:disabled {
+  opacity: .55;
+  border-style: dashed;
+  border-color: var(--b-dash, #303033);
+}
+.devbtn.undeclared::after {
+  content: '';
+  position: absolute;
+  left: 5px; right: 5px; top: 50%;
+  height: 1px;
+  background: var(--t-strike, #4A4A4A);
+  transform: rotate(-32deg);
+  pointer-events: none;
+}
+/* The strike is absolutely positioned against the button, so the button has to be a containing
+   block. It was `display: grid` with no position, which put the line against the page. */
+.devbtn { position: relative; }
 .devbar-sep { height: 1px; margin: 5px 4px; background: var(--b-row, #151517); }
 
 /* -------------------------------------------------------------------- the screen */

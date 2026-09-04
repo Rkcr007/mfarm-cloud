@@ -1214,3 +1214,92 @@ describe('the fleet', () => {
     );
   });
 });
+
+
+/**
+ * THE COCKPIT RAIL — a control the device cannot honour is VISIBLE and inert, never removed.
+ *
+ * Document 04 S2 and `RailControl` in 07 both require it, and the console removed two of them:
+ * `caps.includes('screenshot') ? toolBtn(…) : null`. A person on a device without `screenshot` got
+ * a rail with a gap in it and no way to learn why — the same lie by omission as filtering an
+ * undeclared capability out of the chip list, which this console has always been careful not to do.
+ *
+ * These tests are written against the RENDERED RAIL rather than against `toolBtn`, because the bug
+ * was at the call site: the component was innocent and the ternary in front of it was not.
+ */
+describe('the cockpit rail explains what it cannot do', () => {
+  function railFor(caps: string[]) {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].capabilities = caps;
+    mod.state.liveState = 'streaming';
+    mod.state.stage = null;
+    const tree = mod.SCREENS.cockpit();
+    return { tree, bar: findByClass(tree, 'devbar') };
+  }
+
+  /** A control per rail entry, whether or not the device can honour it. */
+  const buttons = (bar: { children: unknown[] }) =>
+    (bar?.children ?? []).filter((n: any) => typeof n?.className === 'string' && n.className.includes('devbtn'));
+
+  /**
+   * `title` is an ATTRIBUTE, not a property.
+   *
+   * `h()` routes everything it does not special-case through `setAttribute`, and the shim keeps
+   * those in `attrs` — so `b.title` is `undefined` and an assertion against it passes or fails for
+   * the wrong reason. Read it the way it is actually stored.
+   */
+  const titleOf = (b: any): string => b.getAttribute?.('title') ?? '';
+
+  test('the rail is the same length with and without the optional capabilities', () => {
+    const rich = buttons(railFor([
+      'screen-stream', 'input-datachannel', 'screenshot', 'ui-hierarchy', 'logcat',
+    ]).bar as never);
+    const poor = buttons(railFor(['screen-stream', 'input-datachannel']).bar as never);
+
+    assert.ok(rich.length > 0, 'the rail rendered no controls at all');
+    assert.equal(
+      poor.length, rich.length,
+      'controls vanished when the capability did — the reader cannot see what is missing',
+    );
+  });
+
+  /**
+   * AND THE ONES IT CANNOT HONOUR SAY SO. The class is what draws the dash and the strike; the
+   * tooltip is what names the capability. Both matter: the first is seen, the second is read.
+   */
+  test('an undeclared control is marked, disabled, and names the capability', () => {
+    const { bar } = railFor(['screen-stream', 'input-datachannel']);
+    const undeclared = buttons(bar as never).filter((b: any) => b.className.includes('undeclared'));
+
+    assert.ok(undeclared.length >= 2, 'screenshot and the inspector should both be marked');
+    for (const b of undeclared as any[]) {
+      assert.equal(b.disabled, true, 'a control the device cannot honour must be inert');
+      assert.match(titleOf(b), /does not declare/, `no reason given: ${titleOf(b)}`);
+      assert.match(titleOf(b), /screenshot|ui-hierarchy/, `the tooltip must name the capability: ${titleOf(b)}`);
+    }
+  });
+
+  /**
+   * NOT YET IS NOT NOT EVER, and this is the assertion that stops the two collapsing back into one
+   * appearance. A control waiting on the stream comes good on its own; one the device cannot honour
+   * never will. Stage 2 gave both the dashed border, which said "not ever" to both.
+   */
+  test('a control waiting for the stream is not marked as undeclared', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].capabilities = ['screen-stream', 'input-datachannel', 'screenshot', 'ui-hierarchy'];
+    // Attached, but no video yet — zoom and the inspector are waiting, not impossible.
+    mod.state.liveState = 'negotiating';
+    mod.state.stage = null;
+    const bar = findByClass(mod.SCREENS.cockpit(), 'devbar');
+
+    const marked = buttons(bar as never).filter((b: any) => b.className.includes('undeclared'));
+    assert.deepEqual(marked, [], 'the device declares these — they are merely not ready yet');
+
+    const waiting = buttons(bar as never).filter((b: any) => b.disabled);
+    assert.ok(waiting.length > 0, 'something should be waiting on the stream in this state');
+    for (const b of waiting as any[]) {
+      assert.doesNotMatch(titleOf(b), /does not declare/,
+        'a control waiting for the stream must not claim the device lacks the capability');
+    }
+  });
+});
