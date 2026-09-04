@@ -1,0 +1,419 @@
+/**
+ * MFARM design tokens — the single source of colour, type, space, shape, elevation and motion.
+ *
+ * SHARED ON PURPOSE. Both consoles read these: the vanilla console at `/` links this file directly,
+ * and the React console at `/app` is meant to import it rather than keep a second vocabulary. That
+ * is the whole reason it is a standalone file instead of a `:root` block inside `console.css` —
+ * a token that lives in a component stylesheet is a token only that component can have.
+ *
+ * NAMES ARE NOT NEW. Every token that already existed in `console.css` keeps its exact name, so
+ * this landed as an evolution of that file and not a replacement of it. Additions are marked NEW
+ * in their section, which is also how a reviewer can tell what the design document actually
+ * changed from what it merely restated.
+ *
+ * THE ONE IDEA, so the values below have something to be judged against: the console is a neutral
+ * desk and the device is the warm object sitting on it. Every surface here stays chromatically
+ * quiet so that the phone — the only thing in the product with material, temperature and depth — is
+ * where the eye lands. That is what buys the premium read without a gradient anywhere in the chrome.
+ *
+ * COLOUR NEVER CARRIES MEANING ALONE. Every state in the markup is a dot AND a label AND a
+ * timestamp. Delete the colour and the sentence still says what happened and when. That rule is
+ * what lets the light theme below re-derive every hex without a single state becoming ambiguous —
+ * and it is enforced in the components, not here (see `StatusPill`, whose timestamp is required).
+ */
+
+/* ============================================================================ type ===========
+ *
+ * Three families, three jobs, self-hosted as woff2 from this origin.
+ *
+ * NEVER A CDN, and the CSP is what makes that structural rather than a preference: the console
+ * ships `default-src 'none'` and the only widening it has ever taken is `font-src 'self'`. A
+ * self-hosted product that phones a font host on every page load is not self-hosted, and it puts a
+ * third party in the load path of a page somebody's fleet depends on.
+ *
+ * These are the SAME THREE FILES the React console uses — one copy in `public/fonts`, served at
+ * `/fonts/*`, referenced by both. The alternative was vite bundling a second identical copy into
+ * `/app/fonts/*`, which is 112 KB of duplicate typeface in the image and two allowlist blocks to
+ * keep in step.
+ *
+ * `format('woff2-variations')` and a `font-weight` RANGE, because these are variable faces: naming
+ * a single weight would make the browser synthesise every other one, and synthetic bold on a
+ * display face is exactly the tell that separates a typeset product from a styled one. No design in
+ * the package needs a weight outside 400–700, but each range below is declared as the FILE
+ * supplies it, not as the design uses it: a range narrower than the file makes the browser clamp,
+ * and a `font-weight: 800` added to one rule two years from now then silently renders at 700.
+ */
+
+@font-face {
+  font-family: 'Instrument Sans Variable';
+  font-style: normal;
+  font-display: swap;              /* text is readable during the load; it is never invisible */
+  font-weight: 400 700;
+  src: url('/fonts/instrument-sans-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+                 U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191,
+                 U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Bricolage Grotesque Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url('/fonts/bricolage-grotesque-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+                 U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191,
+                 U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('/fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+                 U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191,
+                 U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  /**
+   * REGISTER SEPARATES PROSE FROM MACHINE, and it is the reason there are three families rather
+   * than one with weights. Anything the farm generated — ids, URLs, ABIs, geometry, log lines — is
+   * mono and selectable. Anything MFARM wrote to a human is sans. The reader always knows which
+   * they are looking at without being told.
+   */
+  --f-display: 'Bricolage Grotesque Variable', 'Instrument Sans Variable', ui-sans-serif, system-ui, sans-serif;
+  --f-ui:      'Instrument Sans Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono:    'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /**
+   * The type scale, as size/line-height/weight/tracking quadruples applied by the `.t-*` classes in
+   * `console.css`. Sizes are literal rather than derived: a modular scale that lands on 13.47px is
+   * a scale that renders differently in every browser's rounding.
+   */
+  --ty-display-xl: 700 40px/42px var(--f-display);   /* -3.5% tracking */
+  --ty-display-lg: 600 26px/30px var(--f-display);   /* -2%   */
+  --ty-display-md: 600 18px/22px var(--f-display);   /* -1.5% */
+  --ty-stat:       600 32px/32px var(--f-display);   /* tabular */
+  --ty-body:       400 13.5px/22px var(--f-ui);
+  --ty-strong:     500 12.5px/17px var(--f-ui);
+  --ty-label:      500 10px/10px var(--f-ui);        /* +10%  */
+  --ty-machine:    400 11.5px/17px var(--f-mono);
+  --ty-log:        400 11px/17px var(--f-mono);      /* tabular */
+
+  /* Tracking is a separate axis because `font:` shorthand cannot carry it. */
+  --tr-display-xl: -.035em;
+  --tr-display-lg: -.02em;
+  --tr-display-md: -.015em;
+  --tr-label:      .1em;
+
+  /* ========================================================================= runtime knobs ===
+   *
+   * Consumed everywhere through `var()` WITH A LITERAL FALLBACK, so a stylesheet that loads before
+   * the script still renders correctly and the four tweaks apply without a re-render.
+   */
+  --mf-accent:      #755EB8;
+  --mf-accent-soft: rgba(117, 94, 184, .16);
+  --mf-accent-line: rgba(117, 94, 184, .42);
+  --mf-pulse:       2.2s;
+  --mf-navw:        198px;
+  --mf-navlabel:    block;
+
+  /* ============================================================================ surfaces === */
+  --s-app:     #08080A;   /* the page ground behind everything */
+  --s-chrome:  #050506;   /* top bar — recedes in dark, advances in light */
+  --s-nav:     #0A0A0C;   /* sidebar */
+  --s-card:    #0D0D0F;   /* every panel, card and dock */
+  --s-inset:   #050506;   /* recessed wells: logcat, code blocks, the device stage */
+  --s-overlay: #101012;   /* dialogs, command palette, toasts */
+  --s-btn:     #131315;   /* secondary button face */
+  --s-chip:    #191919;   /* capability chips, filter pills, badges */
+  --s-scrim:   rgba(0, 0, 0, .66);   /* NEW — behind dialogs and the palette */
+
+  /* ============================================================================= borders === */
+  --b-card:         #1F1F22;   /* panel edge — the workhorse hairline */
+  --b-chrome:       #191919;   /* top bar and sidebar separators */
+  --b-field:        #242427;   /* inputs, selects, copy fields */
+  --b-btn:          #2B2B2E;   /* secondary button outline */
+  --b-inset:        #1A1A1C;   /* the edge of a recessed well */
+  --b-row:          #151517;   /* table row divider — quieter than a card edge */
+  --b-overlay:      #2E2E31;   /* dialog edge, which must read above the scrim */
+  --b-dash:         #303033;   /* drop zones — the only dashed stroke in the system */
+  --b-hover:        #3A3A3D;   /* hover on anything with an outline */
+  --b-hover-strong: #454548;
+  --b-focus:        #8A74D6;   /* NEW — 2px ring, offset 2px. Keyboard only, NEVER suppressed */
+
+  /* ================================================================================ text === */
+  --t-primary:   #F1F1F1;   /* headings, device names, the number that matters */
+  --t-body:      #D4D4D4;   /* prose and table values */
+  --t-secondary: #C4C4C4;
+  --t-label:     #8A8A8A;   /* field labels and section keys */
+  --t-help:      #787878;   /* the explanatory sentence under a control */
+  --t-caption:   #6A6A6A;   /* timestamps and geometry strings */
+  --t-micro:     #5A5A5A;   /* the quietest legible tier. Never load-bearing */
+  --t-navhead:   #484848;
+  --t-nav:       #ADADAD;
+  /**
+   * NEW — a capability the device does not declare.
+   *
+   * Struck through, present, dimmed, NEVER REMOVED. Filtering an absence out of a capability list
+   * is how a console starts lying by omission: the reader cannot tell "this device cannot do it"
+   * from "nobody thought to show it". `CapabilityMatrix` takes both lists rather than one so that
+   * this token always has something to colour.
+   */
+  --t-strike:    #4A4A4A;
+
+  /* ============================================================================ semantic ===
+   *
+   * Separate from the accent ON PURPOSE. A status must not read as a call to action — if READY and
+   * "Start this device" are the same colour, the eye cannot tell a fact from a button.
+   */
+  --ok-dot:  #6FCB63;
+  --ok-text: #7FD873;
+  --ok-bg:   rgba(111, 203, 99, .10);
+  --ok-line: rgba(111, 203, 99, .28);
+
+  --warn:      #E8A30E;   /* waiting on something unobservable, queued, degraded */
+  --warn-bg:   rgba(232, 163, 14, .06);
+  --warn-line: rgba(232, 163, 14, .24);
+
+  --bad-dot:          #E0505F;
+  --bad-text:         #EE7C88;
+  --bad-mono:         #F0A0A8;
+  --bad-bg:           rgba(224, 80, 95, .07);
+  --bad-line:         rgba(224, 80, 95, .30);
+  --bad-solid:        #B32333;   /* destructive confirm — identical in both themes on purpose */
+  --bad-solid-hover:  #C93343;
+  --bad-outline:      #4A2436;
+
+  --info: #7FA0D8;   /* physical device badge, neutral informational */
+
+  /* =============================================================================== shape ===
+   *
+   * NEW SCALE. Chips and status pills take `--r-pill`; buttons and fields `--r-md`; panels
+   * `--r-lg`; the stage and dialogs `--r-xl`.
+   *
+   * THE DEVICE CHASSIS IS THE ONE EXCEPTION and does not appear here: its radius is computed from
+   * reported geometry, because a corner radius picked off a scale is a corner radius that is wrong
+   * for every device except the one it was picked for.
+   */
+  --r-xs:   4px;
+  --r-sm:   6px;
+  --r-md:   9px;
+  --r-lg:   12px;
+  --r-xl:   16px;
+  --r-pill: 999px;
+
+  /* =========================================================================== elevation ===
+   *
+   * NEW. Depth is a STATE, not styling — a device's shadow is shallow until its data plane
+   * attaches and lands when it does, so the object visibly becomes physical at the moment it
+   * becomes real. Nothing floats decoratively.
+   */
+  --e-0: none;                                                    /* panels at rest: a hairline is the whole treatment */
+  --e-1: 0 1px 2px rgba(0, 0, 0, .34);                            /* hover and dropdowns */
+  --e-2: 0 4px 14px -4px rgba(0, 0, 0, .55);                      /* palette, popovers, toasts */
+  --e-3: 0 18px 48px -12px rgba(0, 0, 0, .72);                    /* modal dialogs over the scrim */
+
+  /**
+   * THE ONE EXPENSIVE SHADOW, and the only one in the console that changes with state.
+   *
+   * Three cast layers plus a warm inset highlight, because the device is the only object in the
+   * product that should read as physical. NOTHING ELSE IN THE CONSOLE GETS A SHADOW — and this one
+   * is never animated over a live stage: rendering is software and frame rate is the proof the
+   * session is healthy, so compositing cost near the panel is a bug and not a style choice. The two
+   * states below cross-fade exactly once, on attach, and never again.
+   */
+  --e-device-flat: 0 1px 0 rgba(255, 240, 225, .2) inset,
+                   0 4px 10px -4px rgba(0, 0, 0, .5);
+  --e-device:      0 1px 0 rgba(255, 240, 225, .2) inset,
+                   0 2px 3px rgba(0, 0, 0, .7),
+                   0 20px 36px -8px rgba(0, 0, 0, .78),
+                   0 50px 90px -22px rgba(0, 0, 0, .9);
+
+  /**
+   * The glass sheen over the framebuffer.
+   *
+   * It tints REAL PIXELS by 7% at the top edge, and that is the tradeoff: it is most of what makes
+   * the frame read as glass rather than as a hole cut in a card. Shipped on, with a settings toggle
+   * to 0 for anyone doing visual-comparison work, where any tint over the framebuffer is
+   * unacceptable. A number rather than a boolean so the toggle is a value change, not a branch.
+   */
+  --glass-sheen: .07;
+
+  /* ============================================================================== motion ===
+   *
+   * Motion here has ONE JOB: to show a real machine changing state. Every duration below is a
+   * transition between two confirmed states, never a depiction of progress the console cannot
+   * observe. A bar that fills on a timer, a checkmark that lands before the worker confirms, an ETA
+   * the allocator never gave us — each of those turns this console's core asset into a liability.
+   */
+  --m-instant: 90ms;    /* press feedback, checkbox, chip toggle */
+  --m-fast:    160ms;   /* hover, focus ring, tooltip */
+  --m-base:    240ms;   /* panel open, tab change, toast in */
+  --m-slow:    400ms;   /* dialog, palette, nav collapse, step state change */
+  --m-arrive:  700ms;   /* the device frame materialising, the screen waking */
+  --m-settle:  900ms;   /* shadow landing, the frame moving into the session layout */
+
+  --ease-out:      cubic-bezier(.22, 1, .36, 1);    /* almost everything: arrivals, state changes */
+  --ease-in-out:   cubic-bezier(.4, 0, .2, 1);      /* things that move and stay, like a collapsing rail */
+  --ease-emphatic: cubic-bezier(.16, 1, .3, 1);     /* the device arriving. Once per session, deliberately */
+}
+
+/* ============================================================================== density ===
+ *
+ * A REAL AXIS, and the constraint is what makes it one: the three modes scale PADDING AND GAP ONLY,
+ * never type size. A compact console loses whitespace and never loses legibility, so density is
+ * safe to default differently per person in a way a font-size switch would not be.
+ */
+:root,
+[data-density='comfortable'] {
+  --mf-cp:  15px;   /* card padding */
+  --mf-rp:  13px;   /* row padding  */
+  --mf-gap: 16px;   /* grid gap     */
+  --mf-navw: 198px;
+}
+
+[data-density='compact'] {
+  --mf-cp:  11px;
+  --mf-rp:  10px;
+  --mf-gap: 12px;
+  --mf-navw: 198px;
+}
+
+[data-density='airy'] {
+  --mf-cp:  21px;
+  --mf-rp:  16px;
+  --mf-gap: 22px;
+  --mf-navw: 216px;
+}
+
+/* =============================================================================== light ===
+ *
+ * A TRUE PEER, not a filter. Every value is re-derived against a warm off-white ground rather than
+ * inverted, because an inverted dark theme gives you hairlines that vanish and an accent that fails
+ * contrast on white. Two consequences worth stating:
+ *
+ *   - Surfaces INVERT THEIR RELATIONSHIP. In dark the top bar recedes below the page; in light it
+ *     advances above it. Chrome that is darker than the page reads as chrome in one theme and as a
+ *     shadow in the other.
+ *   - SEMANTIC COLOURS DARKEN. They are never the same hex in both themes — a green that reads as
+ *     "ready" on #08080A is illegible on #FBFBFA. `--bad-solid` is the single exception, and it is
+ *     deliberate: the destructive confirm does not soften because the room got brighter.
+ *
+ * Scoped to the attribute rather than to `prefers-color-scheme`, because the console already ships
+ * `data-theme` on `<html>` and a user's explicit choice must outrank their OS.
+ */
+[data-theme='light'] {
+  --mf-accent:      #5A45A0;
+  --mf-accent-soft: rgba(90, 69, 160, .10);
+  --mf-accent-line: rgba(90, 69, 160, .32);
+
+  --s-app:     #FBFBFA;
+  --s-chrome:  #FFFFFF;
+  --s-nav:     #F6F6F5;
+  --s-card:    #FFFFFF;
+  --s-inset:   #F2F2F1;
+  --s-overlay: #FFFFFF;
+  --s-btn:     #FFFFFF;
+  --s-chip:    #F0F0EF;
+  --s-scrim:   rgba(30, 30, 28, .34);
+
+  --b-card:         #E6E6E4;
+  --b-chrome:       #EDEDEB;
+  --b-field:        #DCDCD9;
+  --b-btn:          #D4D4D1;
+  --b-inset:        #E9E9E7;
+  --b-row:          #EFEFED;
+  --b-overlay:      #D8D8D5;
+  --b-dash:         #CFCFCC;
+  --b-hover:        #BFBFBB;
+  --b-hover-strong: #ABABA6;
+  --b-focus:        #5A45A0;
+
+  --t-primary:   #141414;
+  --t-body:      #3A3A3A;
+  --t-secondary: #4A4A4A;
+  --t-label:     #6E6E6E;
+  --t-help:      #7E7E7E;
+  --t-caption:   #8C8C8C;
+  --t-micro:     #9A9A9A;
+  --t-navhead:   #9A9A9A;
+  --t-nav:       #3A3A3A;
+  --t-strike:    #AFAFAB;
+
+  --ok-dot:  #3E9B33;
+  --ok-text: #2F7F27;
+  --ok-bg:   rgba(62, 155, 51, .10);
+  --ok-line: rgba(62, 155, 51, .26);
+
+  --warn:      #A8730A;
+  --warn-bg:   rgba(168, 115, 10, .08);
+  --warn-line: rgba(168, 115, 10, .24);
+
+  --bad-dot:         #C8303F;
+  --bad-text:        #B02231;
+  --bad-mono:        #B02231;
+  --bad-bg:          rgba(200, 48, 63, .07);
+  --bad-line:        rgba(200, 48, 63, .26);
+  --bad-solid:       #B32333;   /* identical in both themes — this one does not soften */
+  --bad-solid-hover: #C93343;
+  --bad-outline:     #E8C2C7;
+
+  --info: #3E6BAE;
+
+  /* A phone on a bright desk has a SHORTER SHADOW. The warm inset highlight stays; the cast layers
+     lose roughly half their opacity. */
+  --e-1: 0 1px 2px rgba(30, 30, 28, .10);
+  --e-2: 0 4px 14px -4px rgba(30, 30, 28, .16);
+  --e-3: 0 18px 48px -12px rgba(30, 30, 28, .22);
+  --e-device-flat: 0 1px 0 rgba(255, 250, 245, .5) inset,
+                   0 4px 10px -4px rgba(30, 30, 28, .22);
+  --e-device:      0 1px 0 rgba(255, 250, 245, .5) inset,
+                   0 2px 3px rgba(30, 30, 28, .30),
+                   0 20px 36px -8px rgba(30, 30, 28, .34),
+                   0 50px 90px -22px rgba(30, 30, 28, .40);
+}
+
+/**
+ * DISABLING MOTION, both ways at once.
+ *
+ * `data-liveness="still"` is the console's own setting and `prefers-reduced-motion` is the
+ * platform's; they resolve to the same thing rather than to two nearly-identical things. Nothing in
+ * this product is conveyed by motion alone, so the console with every animation removed loses no
+ * information: a step that was pulsing amber still reads "waiting on the worker's next heartbeat"
+ * in words.
+ *
+ * `--mf-pulse: 0s` rather than a removed animation, because the pulse is applied through that
+ * variable in a dozen places and a variable is one edit where a selector list is twelve.
+ */
+[data-liveness='still'] {
+  --mf-pulse:  0s;
+  --m-instant: 1ms;
+  --m-fast:    1ms;
+  --m-base:    1ms;
+  --m-slow:    1ms;
+  --m-arrive:  1ms;
+  --m-settle:  1ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --mf-pulse:  0s;
+    --m-instant: 1ms;
+    --m-fast:    1ms;
+    --m-base:    1ms;
+    --m-slow:    1ms;
+    --m-arrive:  1ms;
+    --m-settle:  1ms;
+  }
+
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

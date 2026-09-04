@@ -75,22 +75,62 @@ describe('the console is served from an allowlist', () => {
     }
   });
 
-  test('the new console at /app names assets the allowlist actually serves', async () => {
-    // Same failure mode as the module-graph test above, one build system further along: vite writes
-    // the script and stylesheet paths into index.html, and a filename change there that is not
-    // mirrored in the allowlist is a blank page with a 401 in the network tab.
-    const html = (await get('/app')).body;
-    for (const ref of html.matchAll(/(?:src|href)="(\/app\/[^"]+)"/g)) {
-      const res = await get(ref[1]!);
-      assert.equal(res.statusCode, 200, `/app/index.html references ${ref[1]}, which is not served`);
+  /**
+   * EVERY absolute reference either console makes, not only the ones under its own prefix.
+   *
+   * This scan used to be anchored to `/app/`, and that made it quietly conditional: the day the
+   * React console started pointing at the SHARED fonts under `/fonts/`, the loop matched nothing
+   * and the test passed by finding no work to do. A test that goes vacuous when the thing it
+   * guards moves is worse than no test, because the green tells you it checked.
+   *
+   * So both consoles, both stylesheets, and any root-relative `src`/`href`/`url()` in them.
+   */
+  test('every asset either console names is a path the allowlist serves', async () => {
+    const pages: Array<[string, string]> = [
+      ['/', (await get('/')).body],
+      ['/app', (await get('/app')).body],
+      ['/console.css', (await get('/console.css')).body],
+      ['/design-tokens.css', (await get('/design-tokens.css')).body],
+      ['/app/app.css', (await get('/app/app.css')).body],
+    ];
+
+    let checked = 0;
+    for (const [where, body] of pages) {
+      const refs = new Set<string>();
+      // href="/x" and src="/x" in markup; url(/x) and url('/x') in CSS. Not `//host` — that is a
+      // protocol-relative external origin, which the CSP forbids and a separate test asserts.
+      for (const m of body.matchAll(/(?:src|href)="(\/[^"/][^"]*)"/g)) refs.add(m[1]!);
+      for (const m of body.matchAll(/url\(['"]?(\/[^'")]+)['"]?\)/g)) refs.add(m[1]!);
+
+      for (const ref of refs) {
+        const res = await get(ref);
+        assert.equal(res.statusCode, 200, `${where} references ${ref}, which the allowlist does not serve`);
+        checked += 1;
+      }
     }
 
-    // And the stylesheet's own font references, which no HTML attribute mentions.
+    // The guard against the vacuous pass above. Five stylesheets and two documents between them
+    // name the two scripts, two stylesheets and three faces at minimum.
+    assert.ok(checked >= 7, `expected the consoles to name several assets, found ${checked}`);
+  });
+
+  /**
+   * THE THREE FACES ARE SERVED ONCE, TO BOTH CONSOLES.
+   *
+   * They were bundled into `/app/fonts/` by vite, which meant the old console at `/` had no
+   * webfonts at all and giving it the same three would have put a second identical copy in the
+   * image. They are checked in under `public/fonts` now and referenced by absolute path from both
+   * stylesheets. This asserts the OLD paths are gone, because a stale allowlist entry pointing at a
+   * file vite no longer emits is a 500 on a path nothing requests — invisible until it is not.
+   */
+  test('the fonts live at /fonts and no longer under /app', async () => {
+    const { SERVED_PATHS } = await import('../src/http/routes/ui.ts');
+    const fonts = SERVED_PATHS.filter((p) => p.endsWith('.woff2'));
+    assert.equal(fonts.length, 3, 'three faces, latin wght only — see sync-fonts.mjs');
+    for (const p of fonts) assert.ok(p.startsWith('/fonts/'), `${p} should be shared, not under /app`);
+
     const css = (await get('/app/app.css')).body;
-    for (const ref of css.matchAll(/url\((\/app\/[^)]+)\)/g)) {
-      const res = await get(ref[1]!);
-      assert.equal(res.statusCode, 200, `app.css references ${ref[1]}, which is not served`);
-    }
+    assert.doesNotMatch(css, /\/app\/fonts\//, 'the React console still bundles its own copy');
   });
 
   test('nothing outside the allowlist resolves, however it is spelled', async () => {

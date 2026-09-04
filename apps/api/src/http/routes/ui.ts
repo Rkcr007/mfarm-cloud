@@ -51,6 +51,16 @@ const PUBLIC_DIR = join(HERE, '..', '..', '..', 'public');
 const FILES: Record<string, { file: string; type: string }> = {
   '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
   '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
+  /**
+   * THE DESIGN TOKENS, and they are a separate file on purpose.
+   *
+   * Colour, type, space, shape, elevation and motion for BOTH consoles: this one links it from
+   * `index.html`, and the React console at `/app` is meant to import it rather than maintain a
+   * second vocabulary for the same product. A token defined inside a component stylesheet is a
+   * token only that component can have, which is how two consoles end up with two palettes that
+   * drift by a hex at a time.
+   */
+  '/design-tokens.css': { file: 'design-tokens.css', type: 'text/css; charset=utf-8' },
   '/console.css': { file: 'console.css', type: 'text/css; charset=utf-8' },
   '/console.js': { file: 'console.js', type: 'text/javascript; charset=utf-8' },
   // Imported as a module by console.js. Separate because it is the one part of the console that is
@@ -85,17 +95,26 @@ const FILES: Record<string, { file: string; type: string }> = {
   '/app/app.css': { file: 'app/app.css', type: 'text/css; charset=utf-8' },
 
   /**
-   * Three faces, latin only — the console declares them by hand rather than importing a package
-   * entry point precisely so this list stays three lines instead of eleven. Adding a subset means
-   * adding it here too, and `ui.test.ts` derives that requirement from the built stylesheet so a
-   * font added without an allowlist entry fails the suite rather than 404ing in production.
+   * Three faces, latin only, and ONE COPY SERVED TO BOTH CONSOLES.
+   *
+   * They used to live under `/app/fonts/` because vite bundled them out of `node_modules` for the
+   * React console alone, which meant the old console at `/` had no webfonts at all and the image
+   * would have carried a second identical 112 KB of typeface the moment it got them. These are
+   * checked in under `public/fonts` instead and referenced by absolute path from
+   * `design-tokens.css`, so there is one set of bytes, one allowlist block, and no way for the two
+   * consoles to end up on different cuts of the same face.
+   *
+   * The console declares them by hand rather than importing a package entry point precisely so this
+   * list stays three lines instead of eleven. Adding a subset means adding it here too, and
+   * `ui.test.ts` derives that requirement from the stylesheets themselves, so a font added without
+   * an allowlist entry fails the suite rather than 404ing in production.
    */
-  '/app/fonts/instrument-sans-latin-wght-normal.woff2':
-    { file: 'app/fonts/instrument-sans-latin-wght-normal.woff2', type: 'font/woff2' },
-  '/app/fonts/bricolage-grotesque-latin-wght-normal.woff2':
-    { file: 'app/fonts/bricolage-grotesque-latin-wght-normal.woff2', type: 'font/woff2' },
-  '/app/fonts/jetbrains-mono-latin-wght-normal.woff2':
-    { file: 'app/fonts/jetbrains-mono-latin-wght-normal.woff2', type: 'font/woff2' },
+  '/fonts/instrument-sans-latin-wght-normal.woff2':
+    { file: 'fonts/instrument-sans-latin-wght-normal.woff2', type: 'font/woff2' },
+  '/fonts/bricolage-grotesque-latin-wght-normal.woff2':
+    { file: 'fonts/bricolage-grotesque-latin-wght-normal.woff2', type: 'font/woff2' },
+  '/fonts/jetbrains-mono-latin-wght-normal.woff2':
+    { file: 'fonts/jetbrains-mono-latin-wght-normal.woff2', type: 'font/woff2' },
 };
 
 /** Exported so a test can assert this table covers every module `console.js` actually imports. */

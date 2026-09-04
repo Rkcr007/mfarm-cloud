@@ -6,87 +6,49 @@
  * are the only other colour, and they never carry state alone — every state in the markup pairs a
  * dot with a label and a timestamp.
  *
- * System mono only. The CSP forbids external origins, so there are no webfonts to fall back from.
+ * THREE SELF-HOSTED FAMILIES, and the register they carry is load-bearing: Bricolage Grotesque
+ * for display, Instrument Sans for anything MFARM wrote to a human, JetBrains Mono for anything the
+ * machine produced. The CSP still forbids external origins — the faces are served from this same
+ * origin under `/fonts`, which cost exactly one directive (`font-src 'self'`) and no third party in
+ * the load path. This file previously said "system mono only"; that stopped being true when the
+ * three faces landed.
  *
- * The runtime knobs at the top of :root are consumed everywhere through var() WITH A LITERAL
- * FALLBACK, so a stylesheet that loads before the script still renders correctly and the four
- * tweaks (accent, density, liveness, nav width) apply without a re-render.
+ * EVERY TOKEN LIVES IN `design-tokens.css` NOW, not here. That file is linked before this one in
+ * `index.html` and is shared with the React console at `/app`, which is the whole reason it is
+ * separate: a token defined inside a component stylesheet is a token only that component can have.
+ * Adding a colour, a radius or a duration means editing that file, never this one.
+ *
+ * The runtime knobs are consumed everywhere through var() WITH A LITERAL FALLBACK, so a stylesheet
+ * that loads before the script still renders correctly and the four tweaks (accent, density,
+ * liveness, nav width) apply without a re-render.
  */
 
-:root {
-  /* -------------------------------------------------------------- runtime knobs */
-  --mf-accent: #755EB8;
-  --mf-accent-soft: rgba(117, 94, 184, .16);
-  --mf-accent-line: rgba(117, 94, 184, .42);
-  --mf-cp: 15px;   /* card padding   */
-  --mf-rp: 13px;   /* row padding    */
-  --mf-gap: 16px;  /* grid gap       */
-  --mf-pulse: 2.2s;
-  --mf-navw: 198px;
-  --mf-navlabel: block;
+/**
+ * The nav-collapse knob is the ONE token that stays here, and the reason is scope: it is not a
+ * design decision, it is this shell's own geometry. `design-tokens.css` is shared with a console
+ * whose sidebar does not collapse to 56px, and shipping it a width for a rail it does not have
+ * would be a token that describes nothing.
+ */
+:root[data-nav="icons"] { --mf-navw: 56px; --mf-navlabel: none; }
 
-  /* -------------------------------------------------------------- surfaces */
-  --s-app: #08080A;
-  --s-chrome: #050506;
-  --s-nav: #0A0A0C;
-  --s-card: #0D0D0F;
-  --s-inset: #050506;
-  --s-overlay: #101012;
-  --s-btn: #131315;
-  --s-chip: #191919;
+/* ---------------------------------------------------------------------------- type */
 
-  /* -------------------------------------------------------------- borders */
-  --b-card: #1F1F22;
-  --b-chrome: #191919;
-  --b-field: #242427;
-  --b-btn: #2B2B2E;
-  --b-inset: #1A1A1C;
-  --b-row: #151517;
-  --b-overlay: #2E2E31;
-  --b-dash: #303033;
-  --b-hover: #3A3A3D;
-  --b-hover-strong: #454548;
-
-  /* -------------------------------------------------------------- text */
-  --t-primary: #F1F1F1;
-  --t-body: #D4D4D4;
-  --t-secondary: #C4C4C4;
-  --t-label: #8A8A8A;
-  --t-help: #787878;
-  --t-caption: #6A6A6A;
-  --t-micro: #5A5A5A;
-  --t-navhead: #484848;
-  --t-nav: #ADADAD;
-
-  /* -------------------------------------------------------------- semantic */
-  --ok-dot: #6FCB63;
-  --ok-text: #7FD873;
-  --ok-bg: rgba(111, 203, 99, .10);
-  --ok-line: rgba(111, 203, 99, .28);
-
-  --warn: #E8A30E;
-  --warn-bg: rgba(232, 163, 14, .06);
-  --warn-line: rgba(232, 163, 14, .24);
-
-  --bad-dot: #E0505F;
-  --bad-text: #EE7C88;
-  --bad-mono: #F0A0A8;
-  --bad-bg: rgba(224, 80, 95, .07);
-  --bad-line: rgba(224, 80, 95, .30);
-  --bad-solid: #B32333;
-  --bad-solid-hover: #C93343;
-  --bad-outline: #4A2436;
-
-  --info: #7FA0D8;
-
-  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-/* Density tweak. Comfortable is the default above. */
-:root[data-density="compact"]     { --mf-cp: 11px; --mf-rp: 10px; --mf-gap: 12px; }
-:root[data-density="airy"]        { --mf-cp: 21px; --mf-rp: 16px; --mf-gap: 22px; }
-:root[data-liveness="still"]      { --mf-pulse: 0s; }
-:root[data-nav="icons"]           { --mf-navw: 56px; --mf-navlabel: none; }
+/**
+ * THE TYPE SCALE, applied. The families and the metrics are in `design-tokens.css`; what follows is
+ * the mapping from a role to the markup that wears it.
+ *
+ * Tracking is set alongside the `font:` shorthand rather than inside it, because the shorthand
+ * resets `letter-spacing` to normal and cannot carry it — a display heading that quietly loses its
+ * -3.5% is the single most common way this scale gets undone by a later edit.
+ */
+.t-display-xl { font: var(--ty-display-xl); letter-spacing: var(--tr-display-xl); color: var(--t-primary, #F1F1F1); }
+.t-display-lg { font: var(--ty-display-lg); letter-spacing: var(--tr-display-lg); color: var(--t-primary, #F1F1F1); }
+.t-display-md { font: var(--ty-display-md); letter-spacing: var(--tr-display-md); color: var(--t-primary, #F1F1F1); }
+.t-stat       { font: var(--ty-stat); font-variant-numeric: tabular-nums; color: var(--t-primary, #F1F1F1); }
+.t-body       { font: var(--ty-body); }
+.t-strong     { font: var(--ty-strong); }
+.t-machine    { font: var(--ty-machine); }
+.t-log        { font: var(--ty-log); font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------------------- reset */
 
@@ -94,15 +56,23 @@
 
 html, body { height: 100%; }
 
+/**
+ * THE DEFAULT IS SANS NOW, and that is the single highest-leverage line in this file.
+ *
+ * The console used to set `--mono` on `<body>`, so every sentence MFARM wrote to a human inherited
+ * a monospace face. That inverts the register rule the whole system rests on: mono is how the
+ * reader knows a string came out of the machine, and when the prose is mono too, the signal carries
+ * nothing. Machine text now opts IN through `.mono`, `code`, `.t-machine` and `.t-log`.
+ */
 body {
   margin: 0;
   background: var(--s-app, #08080A);
   color: var(--t-body, #D4D4D4);
-  font-family: var(--mono);
-  font-size: 12.5px;
-  letter-spacing: .01em;
-  line-height: 1.55;
+  font-family: var(--f-ui);
+  font-size: 13px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 h1, h2, h3, p, dl, dd, figure { margin: 0; }
@@ -117,13 +87,21 @@ button, input, select, textarea {
 button { cursor: pointer; background: none; border: none; padding: 0; }
 button[disabled] { cursor: not-allowed; opacity: .45; }
 
-code, .mono { font-family: var(--mono); }
+/* Machine text opts in. Always selectable — a value you cannot select is a value you cannot use. */
+code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; }
 
 [hidden] { display: none !important; }
 
+/**
+ * The focus ring, and it is NEVER SUPPRESSED anywhere in this stylesheet.
+ *
+ * `--b-focus` is its own token rather than the accent, because in light theme the accent is dark
+ * enough that a 2px ring around a dark button vanishes into it. Offset 2px so the ring sits outside
+ * a filled control rather than eating its first two pixels of padding.
+ */
 :focus-visible {
-  outline: 2px solid var(--mf-accent, #755EB8);
-  outline-offset: 1px;
+  outline: 2px solid var(--b-focus, #8A74D6);
+  outline-offset: 2px;
 }
 
 ::selection { background: var(--mf-accent-soft, rgba(117,94,184,.16)); }
@@ -275,7 +253,7 @@ kbd {
   background: rgba(255, 255, 255, .05);
   border: 1px solid var(--b-btn, #2B2B2E);
   border-radius: 2px;
-  font-family: var(--mono);
+  font-family: var(--f-mono);
   font-size: 10px;
   color: var(--t-label, #8A8A8A);
 }
@@ -1371,7 +1349,7 @@ kbd {
   font-size: 12px;
   line-height: 1.5;
   color: var(--t-body, #D4D4D4);
-  font-family: var(--mono);
+  font-family: var(--f-mono);
   background: var(--s-inset, #050506);
   border: 1px solid var(--b-inset, #1A1A1C);
   border-radius: 6px;
