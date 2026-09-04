@@ -973,7 +973,13 @@ describe('the copy rules hold', () => {
     mod.state.stage = null;
     const text = textOf(mod.SCREENS.cockpit());
     assert.match(text, /property of the device, not a fault/);
-    assert.match(text, /Input, logcat, install and WebDriver still work/);
+    /**
+     * The list GREW with stage 5, and the growth is the point. It used to name four capabilities
+     * and omit keyboard and launch, so somebody deciding whether this device was worth keeping read
+     * a shorter list than the device actually has. Document 04 S2 heads it "Everything else works":
+     * only the three that need pixels do not.
+     */
+    assert.match(text, /Input, keyboard, install, launch, logcat and WebDriver are all live/);
     assert.doesNotMatch(text, /failed|error/i, 'nothing here went wrong');
   });
 
@@ -1733,5 +1739,192 @@ describe('a route fetches what its screen needs', () => {
     const urls = recording();
     await mod.loadForRoute();
     assert.deepEqual(urls, [], 'the fleet is the 5s poll; a second read on navigation is waste');
+  });
+});
+
+/* ============================================ the cockpit's four states (document 04, stage 5) ==
+ *
+ * Every assertion here is about what the panel CLAIMS, because the cockpit's failure mode is not a
+ * broken render — it is a control or an indicator that depicts something the control plane never
+ * reported.
+ */
+describe('the cockpit', () => {
+  test('the device is the title, and the uuid moves to the identity line', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Unprofiled device/, 'the person is holding a device, not a uuid');
+    assert.match(text, /sess-1 · android 17 · 720 × 1280/,
+      'the id, the OS and the geometry the DEVICE reported — never the profile table (ADR-0016)');
+    assert.match(text, /Fleet/, 'devices live under the Fleet now');
+  });
+
+  describe('an action in flight (S3)', () => {
+    /**
+     * THE BAR THAT CONTRADICTED THE SENTENCE ABOVE IT.
+     *
+     * This panel drew `.bar.indet` — a 32% sliver sweeping left to right — two lines underneath its
+     * own caption promising "You will see the outcome, not a progress bar". The control plane
+     * cannot dial a worker, so an app verb has exactly two reportable states: queued, and finished.
+     * Document 04: "A filling bar here would be the one lie that discredits the other five."
+     */
+    test('a queued action shows no bar', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.action = {
+        id: 'a9', kind: 'install', state: 'PENDING', appId: 'app-1',
+        app: { packageName: 'com.acme.app', label: 'Acme' },
+        requestedAt: new Date().toISOString(), finishedAt: null,
+      };
+      /**
+       * Scoped to the action strip, not to the page. `.bar.lease` is elsewhere in the cockpit and
+       * is entirely legitimate — it measures elapsed lease time against a real expiry. The rule is
+       * not "no bars", it is "no bar without a number behind it".
+       */
+      const strip = findByClass(mod.SCREENS.cockpit(), 'actionstrip');
+      assert.ok(strip, 'the queued action should have a panel at all');
+      assert.equal(findByClass(strip, 'indet'), null,
+        'nothing has reported progress, so nothing may depict it');
+      assert.equal(findByClass(strip, 'bar'), null, 'not a smaller bar either');
+      assert.ok(findByClass(strip, 'breathe'), 'a pulse has no extent and cannot read as 40% done');
+      assert.match(textOf(strip), /Queued for the worker's next heartbeat/);
+    });
+
+    /**
+     * NOT "no bars" — "no bar without a number behind it". The moment a worker reports bytes, a
+     * bar is measuring something and is legitimate.
+     */
+    test('a real byte count brings the bar back', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.action = {
+        id: 'a9', kind: 'install', state: 'PENDING', appId: 'app-1',
+        app: { packageName: 'com.acme.app' },
+        requestedAt: new Date().toISOString(),
+        bytesDone: 18_400_000, bytesTotal: 42_100_000,
+      };
+      const strip = findByClass(mod.SCREENS.cockpit(), 'actionstrip');
+      assert.ok(findByClass(strip, 'bar'), 'a percentage is legitimate the moment it is real');
+      assert.match(textOf(strip), /44%/);
+    });
+
+    /** The gap between asking and hearing back is the heartbeat interval, made concrete. */
+    test('an outcome says when, and how long after queueing', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      const t0 = Date.now() - 30_000;
+      mod.state.action = {
+        id: 'a9', kind: 'install', state: 'DONE', appId: 'app-1',
+        app: { packageName: 'com.acme.app' },
+        requestedAt: new Date(t0).toISOString(),
+        finishedAt: new Date(t0 + 8200).toISOString(),
+      };
+      const text = textOf(mod.SCREENS.cockpit());
+      assert.match(text, /Confirmed by the worker/);
+      assert.match(text, /8\.2s after queueing/);
+    });
+
+    /** A row from before the column existed has no duration, and one must not be invented. */
+    test('an outcome with no requestedAt invents no duration', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.action = {
+        id: 'a9', kind: 'install', state: 'DONE', appId: 'app-1',
+        app: { packageName: 'com.acme.app' },
+        requestedAt: null, finishedAt: new Date().toISOString(),
+      };
+      assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /after queueing/);
+    });
+  });
+
+  describe('after it ended (S4)', () => {
+    function ended() {
+      const { session, device } = seed({ name: 'cockpit', id: 'sess-1' });
+      // A new object rather than mutating the seed's: the fixture's fields are inferred as their
+      // literal types, so assigning a string to `endedAt: null` is a type error rather than a test.
+      const done = { ...session, state: 'ENDED', endedAt: new Date().toISOString(), endReason: 'client_request' };
+      mod.state.sessions = [done];
+      mod.state.detail = { ...done, dataPlane: null, ice: null, fetchedAt: Date.now() };
+      return { session: done, device };
+    }
+
+    test('it accounts for what the session used and produced', () => {
+      ended();
+      const text = textOf(mod.SCREENS.cockpit());
+      assert.match(text, /held for/);
+      assert.match(text, /action/);
+      assert.match(text, /artifact/);
+    });
+
+    /**
+     * ADR-0012: the three resets are not interchangeable, and a device may declare none. Writing
+     * "reset from snapshot" under a session on an install-reset handset would name a mechanism
+     * that did not run.
+     */
+    test('it names the reset the device actually declares', () => {
+      const { device } = ended();
+      assert.match(textOf(mod.SCREENS.cockpit()), /snapshot/);
+
+      device.capabilities = device.capabilities.filter((c: string) => c !== 'snapshot-reset');
+      const text = textOf(mod.SCREENS.cockpit());
+      assert.match(text, /no reset declared/);
+      assert.doesNotMatch(text, /reset from snapshot/);
+    });
+
+    /**
+     * The offer names the CLASS, because that is the only thing ADR-0025 lets the allocator
+     * promise — and it is withheld when the class has nothing free, which is entry 51's
+     * "Join the queue" mistake in a different place.
+     */
+    test('it offers another of the same class, and only when one is free', () => {
+      const { device } = ended();
+      assert.match(textOf(mod.SCREENS.cockpit()), /Start another Unprofiled device/);
+
+      device.state = 'QUARANTINED';
+      const text = textOf(mod.SCREENS.cockpit());
+      assert.doesNotMatch(text, /Start another/);
+      assert.match(text, /will queue you/, 'said, rather than a button that quietly queues them');
+    });
+  });
+
+  /**
+   * WAITING IS NOT ENDING. `live` is false for a QUEUED session because it has no device, so the
+   * stage overlay told somebody whose session had not started that it had ended.
+   */
+  test('a queued session is not described as an ended one', () => {
+    const { session } = seed({ name: 'cockpit', id: 'sess-1' });
+    const queued = { ...session, state: 'QUEUED', deviceId: null, startedAt: null };
+    mod.state.sessions = [queued];
+    mod.state.detail = { ...queued, dataPlane: null, ice: null, fetchedAt: Date.now() };
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.doesNotMatch(text, /Session ended/);
+    assert.doesNotMatch(text, /This session has ended/,
+      'the Tools rail used `!live` to mean "ended" too');
+    assert.match(text, /in line/, 'a queue position is a real fact and this one has it');
+    assert.doesNotMatch(text, /held for/, 'nothing was held, so there is nothing to account for');
+    assert.match(text, /moves on by itself/,
+      'the one thing a waiting person needs to know is that they need not watch');
+    assert.doesNotMatch(text, /minutes|ETA|estimate is/,
+      'the soonest lease is only an upper bound — no number may be invented here');
+  });
+
+  /**
+   * The half-list was doing the opposite of its job: it left out keyboard and launch, so somebody
+   * deciding whether to keep this device read a shorter capability list than the device has.
+   */
+  test('a device with no stream names everything that still works', () => {
+    const { device } = seed({ name: 'cockpit', id: 'sess-1' });
+    device.capabilities = device.capabilities.filter((c: string) => c !== 'screen-stream');
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Everything else works/);
+    assert.match(text, /Input, keyboard, install, launch, logcat and WebDriver/);
+    assert.match(text, /property of the device, not a fault/);
+  });
+
+  /**
+   * The reason changed, so the sentence had to. `GET /v1/sessions` returns `expiresAt` now, so
+   * "the API does not report other sessions' lease times" became false — while the answer stayed
+   * the same, for a different and still-true reason.
+   */
+  test('the queue explains its missing estimate with a reason that is still true', () => {
+    seed({ name: 'fleet' });
+    const text = textOf(mod.SCREENS.fleet());
+    assert.doesNotMatch(text, /API does not report other sessions/,
+      'expiresAt exists now; that explanation is a leftover');
   });
 });

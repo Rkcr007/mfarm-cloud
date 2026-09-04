@@ -2967,3 +2967,45 @@ when the feature is broken. See issues 37 and 38.
     never serve; stage 5's rail claiming "not yet" for "not ever"; and now this. Each was found by
     LOOKING AT REAL DATA, never by a test, because in every case the code was internally consistent
     and the fixture agreed with it. The farm is the only place that disagrees.
+
+55. **STAGE 5, ACTUALLY FINISHED — AND THE BAR THAT CONTRADICTED THE SENTENCE ABOVE IT.**
+    2026-09-05.
+
+    I had been calling stage 5 done since entry 52. Its spec is *"four states from 04, the new
+    StreamPanel, and the capability-driven rail"*, and I had built only the rail. Correcting that in
+    the log because the mislabel is what nearly let stage 6 start on an unfinished foundation.
+
+    **THE DEFECT WORTH THE ENTRY.** `actionStatusStrip` drew `.bar.indet` — a 32% sliver sweeping
+    left to right — for a queued app action, TWO LINES underneath its own caption promising *"You
+    will see the outcome, not a progress bar"*. The page contradicted itself and the bar was the
+    half that was lying: the control plane cannot dial a worker, so an app verb has exactly two
+    reportable states, queued and finished. Document 04 says it outright — *"A filling bar here
+    would be the one lie that discredits the other five."* Replaced with a mark that breathes on the
+    2.2s system loop: a pulse has no extent, so it cannot be read as 40% done. The rule is not "no
+    bars" — a real byte count brings one back, and is legitimate the moment it is measuring
+    something.
+
+    **WAITING IS NOT ENDING, in two places.** `live` is false for a QUEUED session because it has no
+    device, and both the stage overlay and the Tools rail used that to mean "ended" — so somebody
+    waiting in the queue was told their session had finished. Third and fourth instances of the
+    false-premise family in two days.
+
+    **AND A BLUR OVER MY OWN EXPLANATION.** The queued frame is deliberately unresolved (blurred,
+    dim, flat, per document 04) and I put the sentence explaining that INSIDE it. `filter: blur()`
+    applies to every descendant. The design had always drawn that copy as a block beside the frame,
+    for the reason that only became obvious in a screenshot: there is nothing on the panel to
+    annotate until a device is claimed.
+
+    Also built: the cockpit is titled by the DEVICE with the uuid moved to an identity strip beside
+    the OS and geometry (S1); S4's accounting — held for, actions, artifacts, and the reset the
+    device actually declares, never an assumed "from snapshot"; and "Start another <class>",
+    withheld when the class has nothing free, because offering it would queue somebody who has just
+    finished.
+
+    **A STALE REASON, FOUND ON THE WAY.** The queue card explained its missing ETA with *"the API
+    does not report other sessions' lease times"*. It does now — `expiresAt` shipped in entry 51. The
+    answer is unchanged and the reason is not: the soonest expiry is only an upper bound. Three
+    surfaces now carry that sentence and they must not drift.
+
+    `attempts.test.ts` failed once in three full runs (`the usage endpoint reports both numbers`),
+    which is the order-dependent family issue 43 records. Nothing here can reach metering.

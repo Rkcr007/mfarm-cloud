@@ -205,6 +205,46 @@ for cls in "card.gate" "csq-list" "csq-note" "badge"; do
     || bad "css: .$cls is missing — the gate renders as a plain section"
 done
 
+# ---------------------------------------------------------------- 3d. the cockpit's four states
+#
+# Document 04, stage 5. Each of these is a CLAIM the panel makes, and the cockpit's failure mode is
+# not a broken render — it is an indicator depicting something the control plane never reported.
+say "The cockpit (document 04)"
+
+# THE BAR THAT CONTRADICTED THE SENTENCE ABOVE IT. `.bar.indet` swept a 32% sliver across a queued
+# action, two lines under a caption promising "You will see the outcome, not a progress bar". The
+# control plane cannot dial a worker: an app verb has exactly two reportable states.
+grep -q "bar indet" <<<"$FLEET_JS" \
+  && bad "the indeterminate bar is back — nothing reported that progress" \
+  || ok "no indeterminate bar on a queued action"
+grep -qF "Queued for the worker's next heartbeat" <<<"$FLEET_JS" \
+  && ok "a queued action says what it is waiting for" \
+  || bad "the queued action lost its explanation"
+grep -qF "after queueing" <<<"$FLEET_JS" \
+  && ok "an outcome says how long after queueing it landed" \
+  || bad "the outcome no longer reports the gap"
+
+# S2's list grew: it used to omit keyboard and launch, so somebody deciding whether to keep a
+# stream-less device read a shorter capability list than the device has.
+grep -qF "Input, keyboard, install, launch, logcat and WebDriver" <<<"$FLEET_JS" \
+  && ok "a stream-less device names everything that still works" \
+  || bad "the no-stream panel is back to a partial list"
+
+# WAITING IS NOT ENDING. `live` is false for a QUEUED session, and two places used that to mean
+# "ended" — telling somebody whose session had not started that it had finished.
+grep -qF "No device has been allocated yet" <<<"$FLEET_JS" \
+  && ok "a queued session is not described as an ended one" \
+  || bad "the Tools rail is back to calling a queued session ended"
+grep -q "queuedNote" <<<"$FLEET_JS" \
+  && ok "a queued session explains the wait beside the frame, not inside the blur" \
+  || bad "the queued explanation is gone"
+
+for cls in "endstats" "dot.breathe" "gate.waiting"; do
+  grep -q "\.$cls" <<<"$DD_CSS" \
+    && ok "css: .$cls" \
+    || bad "css: .$cls is missing"
+done
+
 # ---------------------------------------------------------------- 4. the CSP is still the CSP
 #
 # A CSP mistake is invisible from the outside: a blocked socket surfaces in the browser as a bare

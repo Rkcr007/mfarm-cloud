@@ -1412,9 +1412,17 @@ function queueCard() {
             ),
             h('p', { class: 'caption', text: `Session ${short(s.id)} · requested ${s.region}` }),
           )),
-          // No estimate. Producing one needs every holder's expiresAt, and the list endpoint does
-          // not return it — a number invented from nothing is worse than an honest absence.
-          h('p', { class: 'caption', text: 'A queued session starts automatically when a device frees up. There is no estimate here because the API does not report other sessions’ lease times.' }),
+          /**
+           * NO ESTIMATE — and the REASON changed, so the sentence had to.
+           *
+           * This used to say the API does not report other sessions' lease times. It does now:
+           * `GET /v1/sessions` returns `expiresAt` (entry 51). The absence is no longer a missing
+           * field, it is that the soonest expiry is only an UPPER BOUND on the wait — a holder can
+           * release early, and a queued session ahead of you takes the device first. Same answer,
+           * and a reason that is still true, which is the difference between a decision and a
+           * leftover. `fleetHeadline` carries the same reasoning; the two must not drift.
+           */
+          h('p', { class: 'caption', text: 'A queued session starts automatically when a device frees up. There is no estimate here because the soonest lease to expire is only an upper bound — a holder can release early, and anyone ahead of you takes the device first.' }),
         )
       : empty('All devices are available.', 'Nobody is waiting.'),
     q.length ? h('div', { class: 'mt-md' }, btn('Open queue', 'ghost wide', () => go('#/queue'))) : null,
@@ -3435,6 +3443,31 @@ function paintOverlay(sess, live, caps) {
    * device somebody released are different stories, and reading "released by you" about an expiry
    * would be a small lie in the one place a person is trying to work out what happened.
    */
+  /**
+   * WAITING IS NOT ENDING, and this branch used to call them the same thing.
+   *
+   * `live` is false for a QUEUED session — it has no device yet — so a queued session opened at
+   * `#/sessions/<id>` was told "Session ended" about a session that has not started. The frame is
+   * present but UNRESOLVED here, per document 04's queued state: it has not been allocated, so it
+   * is not yet a real object and nothing about it firms up until a device is claimed.
+   */
+  if (!live && sess.state === 'QUEUED') {
+    /**
+     * THE COPY GOES OUTSIDE THE BLUR, and finding out why cost a screenshot.
+     *
+     * `filter: blur()` applies to every descendant, and the overlay lives inside the frame's glass
+     * — so the first version of this put the sentence explaining the unresolved frame INSIDE the
+     * unresolved frame, and rendered nine pixels of blur over its own explanation. The design
+     * agrees and always did: its queued state draws the copy as a block BESIDE the frame, not on
+     * it, because there is nothing on the panel to annotate yet.
+     */
+    st.root.dataset.resolved = 'no';
+    st.overlay.replaceChildren();
+    st.overlay.hidden = true;
+    return;
+  }
+  st.root.dataset.resolved = 'yes';
+
   if (!live) {
     return show(
       h('p', { class: 'micro', text: 'Session ended' }),
@@ -3453,7 +3486,15 @@ function paintOverlay(sess, live, caps) {
     return show(
       h('p', { class: 'micro', text: 'No live view' }),
       h('p', { class: 'help', text: 'This device declares no screen-stream. That is a property of the device, not a fault.' }),
-      h('p', { class: 'caption', text: 'Input, logcat, install and WebDriver still work.' }),
+      /**
+       * NAMED IN FULL, because the half-list was doing the opposite of its job. It read "Input,
+       * logcat, install and WebDriver still work" and left out keyboard and launch — so a person
+       * deciding whether this device was worth keeping read a shorter list of capabilities than the
+       * device actually has. Document 04 S2 heads this "Everything else works" for that reason: the
+       * point is not that some things work, it is that only the three needing pixels do not.
+       */
+      h('p', { class: 'micro mt-sm', text: 'Everything else works' }),
+      h('p', { class: 'caption', text: 'Input, keyboard, install, launch, logcat and WebDriver are all live. Screenshot, zoom and fullscreen are struck through in the rail because they need the stream.' }),
     );
   }
 
@@ -3799,21 +3840,168 @@ function capturesCard() {
   );
 }
 
+/**
+ * AN ACTION IN FLIGHT — document 04 S3, and the bar that had to go.
+ *
+ * THIS PANEL USED TO DRAW AN INDETERMINATE PROGRESS BAR while an action was queued, two lines
+ * underneath its own caption promising "You will see the outcome, not a progress bar". The page
+ * contradicted itself, and the bar was the half that was lying: the control plane cannot dial a
+ * worker, so an app verb has exactly two reportable states — queued, and finished. A 32% sliver
+ * sweeping left to right depicted progress that nobody had reported and nobody could report.
+ *
+ * Document 04 is explicit about it: *"There is no running state for this. The worker reports an
+ * outcome when it is done, so the console shows you a queued verb and then a result — never a bar.
+ * A filling bar here would be the one lie that discredits the other five."*
+ *
+ * WHAT REPLACES IT IS A BREATHING MARK, not a smaller bar. Something has to say the page is alive
+ * and waiting rather than stuck — but it must not imply a position along a journey. A pulse has no
+ * extent, so it cannot be read as 40% done.
+ *
+ * A REAL PERCENTAGE IS STILL WELCOME. If a byte count ever arrives on the action, the bar comes
+ * back and is legitimate the moment it is measuring something. That is the whole rule: not "no
+ * bars", but "no bar without a number behind it".
+ */
+/**
+ * WAITING, EXPLAINED — document 04's queued state.
+ *
+ * Beside the frame rather than on it: the frame is deliberately unresolved here, and a blur applies
+ * to every descendant, so a sentence placed inside it would be blurred along with the thing it is
+ * explaining. That is not a CSS accident to work around, it is the design's own arrangement — there
+ * is nothing on the panel to annotate until a device is claimed.
+ *
+ * A POSITION, AND NO ESTIMATE. The rank is real: it is this session's place in the queue the
+ * console already lists. The ETA is not, for the reason `fleetHeadline` and the queue card both
+ * give — the soonest lease to expire is only an upper bound, because a holder can release early and
+ * anyone ahead of you takes the device first. Three places now carry that reasoning and they must
+ * not drift.
+ */
+function queuedNote(sess) {
+  if (sess.state !== 'QUEUED') return null;
+  const q = queuedSessions();
+  const at = q.findIndex((x) => x.id === sess.id);
+  const ahead = at > 0 ? at : 0;
+
+  return h('section', { class: 'card gate waiting' },
+    h('div', { class: 'card-head' },
+      h('p', { class: 'card-title', text: at < 0
+        ? 'Waiting for a device'
+        : at === 0 ? 'Next in line' : `${ordinal(at + 1)} in line` }),
+      h('span', { class: 'pill-at', text: `asked ${ago(sess.createdAt)}` })),
+    h('p', { class: 'help' },
+      ahead
+        ? `${ahead} ${ahead === 1 ? 'session is' : 'sessions are'} ahead of you. `
+        : 'You are first. ',
+      'The farm hands a device over the moment a lease ends, and this page moves on by itself \u2014 '
+      + 'there is nothing to press and nothing to watch for.'),
+    h('p', { class: 'caption mt-md', text:
+      'No estimate: the soonest lease to expire is only an upper bound, because a holder can '
+      + 'release early and anyone ahead of you takes the device first.' }),
+  );
+}
+
+/** `1st`, `2nd`, `3rd`. Small, and the alternative is "Position 3", which reads like a rank in a table. */
+function ordinal(n) {
+  const rest = n % 100;
+  if (rest >= 11 && rest <= 13) return `${n}th`;
+  return `${n}${['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
+}
+
+/**
+ * WHAT THE SESSION LEFT BEHIND — document 04 S4.
+ *
+ * Four numbers under a frame that stays exactly where it was. The frame not being replaced is the
+ * point of the state, and it already behaves that way (`state.stage` is never unmounted); what was
+ * missing is the accounting, and it is the accounting somebody actually wants: how much of the
+ * lease they used, what they sent, what was kept, and whether the device came back clean.
+ *
+ * "reset from snapshot" IS NOT ASSUMED. Every device declares which of ADR-0012's three resets it
+ * has, and a device with none is a real thing on this farm — writing "reset from snapshot" under a
+ * session on an install-reset handset would be a sentence about a mechanism that did not run.
+ *
+ * And the offer at the end names the CLASS, not the device: ADR-0025 constrains allocation to a
+ * class and promises nothing about which unit, so "Start another MFARM X1 Pro" is exactly the
+ * promise the allocator can keep.
+ */
+function endedSummary(sess, live) {
+  if (live || sess.state === 'QUEUED') return null;
+  const device = deviceById(sess.deviceId);
+  const acts = actionsFor(sess.id);
+  const arts = state.artifacts.sessionId === sess.id ? state.artifacts.items : [];
+  const reset = device ? resetStory(device) : 'not reported';
+
+  const stat = (value, label) => h('div', { class: 'endstat' },
+    h('span', { class: 'endstat-v tnum', text: value }),
+    h('span', { class: 'endstat-l', text: label }));
+
+  return h('section', { class: 'card ended' },
+    h('div', { class: 'endstats' },
+      stat(duration(sess.startedAt || sess.createdAt, sess.endedAt), 'held for'),
+      stat(String(acts.length), acts.length === 1 ? 'action' : 'actions'),
+      stat(String(arts.length), arts.length === 1 ? 'artifact' : 'artifacts'),
+      stat(reset === 'none declared' ? 'none' : reset.replace('-reset', ''),
+        reset === 'none declared' ? 'no reset declared' : 'reset'),
+    ),
+    device && device.state === 'READY'
+      ? h('div', { class: 'row tight mt-lg' },
+          btn(`Start another ${deviceName(device)}`, 'primary', () => startSession(device)))
+      // Not offered when the class has nothing free: the button would queue somebody who has just
+      // finished, which is the "Join the queue" mistake from entry 51 in a different place.
+      : device
+        ? h('p', { class: 'caption mt-lg', text: `No ${deviceName(device)} is free right now. Starting one from the Fleet will queue you.` })
+        : null,
+  );
+}
+
 function actionStatusStrip() {
   const a = state.action;
   if (!a) return null;
   const meta = ACTION_STATE[a.state] || { label: a.state, tone: '' };
-  const running = a.state === 'PENDING';
+  const queued = a.state === 'PENDING';
+
+  // Only when the worker actually reports bytes. `bytesTotal` is not sent by any worker today, and
+  // the panel above is the design until one does — see document 04 S3's "WITH BYTE PROGRESS".
+  const measured = queued && a.bytesTotal > 0 && a.bytesDone >= 0;
+  const pct = measured ? Math.round((a.bytesDone / a.bytesTotal) * 100) : null;
+
+  /**
+   * "confirmed by worker · 00:14 · 8.2s after queueing".
+   *
+   * The gap between asking and hearing back is the number worth showing: it is the heartbeat
+   * interval a person is learning to expect, and it turns "that felt slow" into a figure. Computed
+   * only when both timestamps exist — an action that finished without a `requestedAt` is a row
+   * from before the column existed, and inventing a duration for it would be worse than omitting.
+   */
+  const gap = a.finishedAt && a.requestedAt
+    ? (new Date(a.finishedAt) - new Date(a.requestedAt)) / 1000
+    : null;
+
   return h('div', { class: 'inset actionstrip' },
     h('div', { class: 'row tight' },
-      h('span', { class: `dot ${meta.tone} ${running ? 'live' : ''}`.trim() }),
-      h('span', { class: 'secondary', text: `${KIND_LABEL[a.kind] || a.kind} — ${meta.label.toLowerCase()}` }),
+      // `breathe` on a queued action, `live` never: `live` is the pulse that means "a stream is
+      // arriving", and this is the opposite — nothing is arriving, and that is expected.
+      h('span', { class: `dot ${meta.tone} ${queued ? 'breathe' : ''}`.trim() }),
+      h('span', { class: 'secondary', text: queued
+        ? `${KIND_LABEL[a.kind] || a.kind}ing ${a.app?.label || a.app?.packageName || short(a.appId)}`.replace(/^Installing/, 'Installing')
+        : `${KIND_LABEL[a.kind] || a.kind} — ${meta.label.toLowerCase()}` }),
     ),
-    h('p', { class: 'meta', text: `${a.app?.packageName || short(a.appId)} · ${ago(a.requestedAt)}` }),
-    running
-      ? h('div', { class: 'bar indet' }, h('i'))
-      : h('p', { class: a.state === 'FAILED' ? 'meta bad-text' : 'meta ok-text', text: a.error || (a.state === 'DONE' ? 'The worker confirmed it.' : '') }),
-    running ? h('p', { class: 'meta', text: 'Accepted by the API. No worker has claimed it yet.' }) : null,
+    queued
+      ? [
+        h('p', { class: 'meta', text: "Queued for the worker's next heartbeat." }),
+        measured
+          ? h('div', { class: 'stack tight mt-xs' },
+              h('div', { class: 'bar' }, h('i', { style: { width: `${pct}%` } })),
+              h('p', { class: 'meta tnum', text: `${bytes(a.bytesDone)} / ${bytes(a.bytesTotal)} · ${pct}%` }))
+          : null,
+      ]
+      : [
+        h('p', { class: a.state === 'FAILED' ? 'meta bad-text' : 'meta ok-text',
+          text: a.error || (a.state === 'DONE' ? 'Confirmed by the worker.' : '') }),
+        h('p', { class: 'meta tnum', text: [
+          a.finishedAt ? new Date(a.finishedAt).toLocaleTimeString() : null,
+          gap !== null ? `${gap.toFixed(1)}s after queueing` : null,
+        ].filter(Boolean).join(' \u00b7 ') }),
+      ],
+    h('p', { class: 'meta', text: a.app?.packageName || short(a.appId) }),
   );
 }
 
@@ -3823,11 +4011,15 @@ function toolsCard(sess, live) {
   const picked = state.apps.find((a) => a.id === state.pickedApp) || state.apps[0] || null;
 
   return card('Tools', {},
-    !live
-      ? h('p', { class: 'help', text: 'This session has ended. Nothing can be sent to the device.' })
-      : !state.apps.length
-        ? empty('No builds yet.', 'Upload an APK on the Apps screen first.')
-        : !canInstall
+    // Three states, not two. `!live` was standing in for "ended" here exactly as it was in the
+    // stage overlay, so a person waiting in the queue was told their session had ended.
+    sess.state === 'QUEUED'
+      ? h('p', { class: 'help', text: 'No device has been allocated yet, so there is nothing to send to. These become available the moment the farm hands one over.' })
+      : !live
+        ? h('p', { class: 'help', text: 'This session has ended. Nothing can be sent to the device.' })
+        : !state.apps.length
+          ? empty('No builds yet.', 'Upload an APK on the Apps screen first.')
+          : !canInstall
           // Not a disabled button with a tooltip: the API refuses this with `capability_missing`,
           // so the honest UI is a sentence and a route to the thing that does work.
           ? h('p', { class: 'help', text: 'This device does not declare the app-install capability, so the API will refuse install, launch and uninstall. WebDriver still reaches it.' })
@@ -4000,9 +4192,20 @@ function screenCockpit(id) {
   const acts = actionsFor(sess.id);
 
   return [
+    /**
+     * THE DEVICE IS THE TITLE, not the session's uuid — document 04 S1.
+     *
+     * "Session 3b97a8de" names the row in a table; the person on this screen is holding an MFARM X1
+     * Pro and every decision they make here is about that device. The uuid does not disappear, it
+     * moves one line down into the identity strip beside the OS and the geometry, which is where a
+     * support message or a log line needs it anyway.
+     *
+     * Geometry comes from the DEVICE'S OWN REPORT via `geometryText` (ADR-0016), so a class whose
+     * members disagreed would show it here rather than average it away.
+     */
     pageHead(
-      [{ label: 'Farm' }, { label: 'Sessions', to: '#/sessions' }],
-      `Session ${short(sess.id)}`,
+      [{ label: 'Fleet', to: '#/fleet' }, { label: 'Session' }],
+      device ? deviceName(device) : (sess.device || `Session ${short(sess.id)}`),
       null,
       h('div', { class: 'row tight' },
         state.liveState === 'streaming'
@@ -4016,9 +4219,17 @@ function screenCockpit(id) {
       ),
     ),
 
+    h('div', { class: 'ident' },
+      h('span', { class: 'mono', text: [
+        short(sess.id),
+        device ? `${device.platform} ${device.osVersion}` : null,
+        device ? geometryText(device) : null,
+        sess.region,
+      ].filter(Boolean).join(' \u00b7 ') }),
+    ),
+
     h('div', { class: 'card mb-gap' },
       h('div', { class: 'row' },
-        h('span', { class: 'secondary', text: `${device ? deviceName(device) : (sess.device || short(sess.deviceId) || 'no device')} · ${sess.region || '—'}` }),
         app ? pill(`${app.label || app.packageName} ${app.versionName || ''}`.trim(), 'warn plain', {
           dot: false,
           title: 'Session-only. Releasing restores the clean snapshot and removes it.',
@@ -4037,7 +4248,9 @@ function screenCockpit(id) {
 
     h('div', { class: 'split' },
       h('div', { class: 'content' },
+        queuedNote(sess),
         stagePanel(sess, live),
+        endedSummary(sess, live),
         logcatDock(sess, live),
         card('Actions on this session', { aside: h('span', { class: 'caption', text: `${acts.length} total` }) },
           acts.length
