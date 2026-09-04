@@ -2697,3 +2697,89 @@ when the feature is broken. See issues 37 and 38.
     on this machine, **unpushed** — see the note in the next-session section.
 
     `mfarm-lab` was stopped afterwards.
+
+50. **DESIGN STAGES 1–4, SHIPPED AND VERIFIED ON THE FARM.** 2026-09-04. Control plane `7b8f5a9`,
+    migration 037, PRs #85 and #86. Two laps through the chain, because the first lap shipped a
+    defect that only the live farm could show.
+
+    The design package in `Farm_app_design_exploration/` (docs 00–08) landed stages 1–4 on the
+    **vanilla console at `/`**, not the React one at `/app`. Not a preference — 01's token names ARE
+    `console.css`'s, the twenty Unicode glyphs were only in `console.js`, and every copy-deck string
+    lives there. The React console has no fleet/apps/runs/health screens, so stages 2 and 4 would
+    have meant *building the missing screens*.
+
+    **What is live:** `design-tokens.css` shared by both consoles; three self-hosted faces served
+    ONCE at `/fonts/*` (vite was bundling a second copy into `/app/fonts/` while the old console had
+    no webfonts at all); a generated Lucide sprite replacing the Unicode glyphs; `frame.js`, one
+    device-frame component drawn at the cockpit, cards, picker and palette; and the copy deck.
+
+    **THE ALLOCATOR DID NOT KEEP THE PROMISE THE COPY MADE.** The card's button became
+    `Start MFARM X1 Pro`, and `allocate_device` had never matched on profile — region, platform,
+    tier, capabilities, and nothing else. On a farm whose devices share a tier, that button could
+    hand you an X1 or an unprofiled 720×1280 device and say nothing. The label it replaced named the
+    tier and was at least ACCURATE. The design package's stated assumption, "allocation is
+    class-only", was not a description of the code: allocation was TIER-only, a coarser grain.
+
+    Migration 037 and ADR-0025 fix it. **Two parameters, not one,** because "no profile" is a class
+    somebody can ask for — this farm has two unprofiled devices and the picker offers them; with a
+    single nullable value that request is indistinguishable from "any device", so
+    `Start Unprofiled device` would have allocated an X1 Pro. Nicer than asked for, still wrong, and
+    never reported. `promote_queued` honours the same constraint, because a constraint dropped at
+    promotion time holds only while you are watching.
+
+    **THREE DEFECTS CAUGHT BEFORE THE FARM SAW THEM,** each by a different thing:
+
+    - **CI caught a security regression the local suite could not.** Postgres grants EXECUTE to
+      PUBLIC on every new function; `CREATE OR REPLACE` keeps the ACL but a DROP-then-CREATE does
+      not, so migration 012's `REVOKE ... FROM PUBLIC` silently stopped applying and the explicit
+      grant beside it became decorative. That assertion lived ONLY in `ci.yml`.
+      `definer-acl.test.ts` is now the same checks where they fail in two seconds.
+    - **Reading `mfarm-deploy.sh` before running it caught a worse one.** It migrates then restarts,
+      so the old API briefly serves the new schema — calling the 8-arg signature 037 had dropped.
+      And the script promises "rollback is this same command with an older sha" while migrations do
+      not roll back, so a dropped signature turns any rollback into a farm that cannot allocate. The
+      8-arg form survives as a forwarder.
+    - **Running the console caught two more.** `stageState` tested for the LiveSession OBJECT rather
+      than the state machine, so the frame's depth-as-a-state never fired; and `idle` was drawn as
+      an 80% progress ring for a negotiation that had never been attempted.
+
+    **AND THE ONE ONLY THE DEPLOYED PAGE COULD SHOW.** After the first deploy, asking production
+    what it had loaded:
+
+    ```
+    ["Instrument Sans Variable loaded",
+     "Bricolage Grotesque Variable unloaded",     ← shipped, wired to nothing
+     "JetBrains Mono Variable loaded"]
+    ```
+
+    Stage 1 self-hosted the display face, allowlisted it, added the CSP directive and deployed it
+    without a single rule referencing it. 41 KB in the image, never a glyph rendered, every heading
+    falling back to Instrument Sans. **727 tests green. `verify-console.sh` green — the file serves,
+    the bytes are intact woff2, the content type is right. The screenshot looked correct**, because
+    a working fallback is what a fallback is for. PR #86 puts the face on the six selectors that
+    already carry headings.
+
+    The guard is two tests, and **the obvious one is false comfort**: "every family is referenced by
+    a rule" passes on the unused `.t-display-*` classes, which is exactly the bug. Only the second —
+    the display selectors appear in markup the console renders — goes red when reverted.
+
+    **VERIFIED ON THE FARM, not in tests:** `verify-console.sh` 18/18 (it was 10/1 before the
+    deploy, failing on "no stylesheet names any asset" — a check that had to flip rather than one
+    already green); `verify-allocation.mjs` 4/4 against real devices — asked for `mfarm-x1` and got
+    MFARM X1, asked for the unprofiled class and got a device with no profile, and the unconstrained
+    call returned the X1 Pro, which is incidental proof the ordering was not handing back the X1 by
+    luck; `farm-check.sh` green end to end; and `document.fonts` on production now reporting all
+    three faces `loaded` with `.headline` computing to Bricolage Grotesque.
+
+    **A BELIEF THAT TURNED OUT WRONG, recorded so it is not repeated.** The suite's order-dependent
+    failures DO fire in CI, despite CI getting a fresh Postgres — PR #86 went red on
+    `apps.test.ts`'s blob-store test, whose entire diff was a stylesheet and a test file, alongside
+    an `EADDRINUSE`. I had reasoned that a clean database was the condition under which they pass.
+    A red X here needs two questions — can my diff reach that code, and does the file pass alone —
+    before `gh run rerun --failed`.
+
+    **Still open:** stage 5 removes two rail controls entirely when a capability is absent, where 04
+    and `RailControl` both require them visible and struck through. Stages 6 and 8 unbuilt; stage 7
+    has its decision (direction B) and needs `user_id` and `expires_at` on the sessions payload.
+
+    `mfarm-lab` was stopped afterwards.
