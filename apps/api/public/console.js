@@ -3026,9 +3026,25 @@ function paintToolbar(sess, live, caps) {
       { active: state.inspect.on, requires: 'ui-hierarchy', declared: caps }),
     toolBtn('refresh', 'Reconnect', Boolean(live), () => reconnectLive()),
     h('span', { class: 'devbar-sep' }),
-    toolBtn('zoomin', 'Zoom in', streaming, () => setZoom(st.zoom + 0.15)),
-    toolBtn('zoomout', 'Zoom out', streaming, () => setZoom(st.zoom - 0.15)),
-    toolBtn('fit', 'Fit to panel', streaming, () => setZoom(1)),
+    /**
+     * ZOOM AND FIT NEED THE STREAM, so they are gated on the CAPABILITY as well as the transport.
+     *
+     * Document 04 S2 names them alongside screenshot — "screenshot, zoom and fullscreen are struck
+     * through in the rail because they need the stream" — and gating them on `streaming` alone gets
+     * the wrong half of that. On a device that declares no `screen-stream` these can never work, and
+     * a transport gate says "not available until the live view is connected": "not yet" for
+     * something that is "not ever".
+     *
+     * That inaccuracy was INTRODUCED by the commit before this one. The buttons were dimmed with a
+     * bare "Zoom in" title, which claimed nothing; adding a reason made them claim something false
+     * on the one device where it matters. A better tooltip is worse than none if it is wrong.
+     */
+    toolBtn('zoomin', 'Zoom in', streaming, () => setZoom(st.zoom + 0.15),
+      { requires: 'screen-stream', declared: caps }),
+    toolBtn('zoomout', 'Zoom out', streaming, () => setZoom(st.zoom - 0.15),
+      { requires: 'screen-stream', declared: caps }),
+    toolBtn('fit', 'Fit to panel', streaming, () => setZoom(1),
+      { requires: 'screen-stream', declared: caps }),
     /**
      * Hide the phone body — and with it the punch-hole, which is the only thing this console draws
      * over the device screen.

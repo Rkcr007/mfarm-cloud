@@ -1280,6 +1280,35 @@ describe('the cockpit rail explains what it cannot do', () => {
   });
 
   /**
+   * A DEVICE THAT DECLARES NO STREAM CAN NEVER ZOOM, and the rail has to say so.
+   *
+   * 04 S2 names zoom and fullscreen alongside screenshot: they need the stream. Gating them on the
+   * transport alone tells a person with a no-video device "not available until the live view is
+   * connected" — a live view that is never coming. This farm's physical handset is exactly that
+   * device, which is how the gap was found: I claimed it would demonstrate the undeclared rail and
+   * then read its capabilities, and it declares screenshot and ui-hierarchy but NOT screen-stream.
+   */
+  test('zoom and fit are struck on a device that declares no stream', () => {
+    const { bar } = railFor(['input-datachannel', 'screenshot', 'ui-hierarchy', 'logcat']);
+    const marked = buttons(bar as never).filter((b: any) => b.className.includes('undeclared'));
+    const reasons = marked.map((b: any) => titleOf(b));
+
+    assert.ok(
+      reasons.some((t: string) => /Zoom in .*does not declare screen-stream/.test(t)),
+      `zoom should be struck on a no-stream device, got: ${JSON.stringify(reasons)}`,
+    );
+    assert.ok(
+      reasons.some((t: string) => /Fit to panel .*does not declare screen-stream/.test(t)),
+      'fit should be struck too',
+    );
+    // And the ones it CAN honour are not struck — the whole point is telling them apart.
+    assert.ok(
+      !reasons.some((t: string) => /Screenshot/.test(t)),
+      'this device declares screenshot; it must not be marked undeclared',
+    );
+  });
+
+  /**
    * NOT YET IS NOT NOT EVER, and this is the assertion that stops the two collapsing back into one
    * appearance. A control waiting on the stream comes good on its own; one the device cannot honour
    * never will. Stage 2 gave both the dashed border, which said "not ever" to both.
