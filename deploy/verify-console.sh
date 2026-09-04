@@ -86,8 +86,14 @@ if [ -n "$CSS_REFS" ]; then
         # the browser SILENTLY REFUSES — no console error, no failed request, and the only symptom
         # is that the page renders in the fallback face. Checking the bytes is the only way to see
         # it from out here.
-        magic="$(fetch "$BASE$r" | head -c 4)"
-        size="$(curl -sS --max-time 20 -o /dev/null -w '%{size_download}' "$BASE$r")"
+        # `curl | head -c 4` makes curl write into a closed pipe and print "Failure writing output
+        # to destination" on every font — noise that looks like a failure in a script whose whole
+        # job is to distinguish those. Read the bytes to a file and take the magic from there.
+        tmp="$(mktemp)"
+        curl -sS --max-time 20 -o "$tmp" "$BASE$r"
+        magic="$(head -c 4 "$tmp")"
+        size="$(wc -c < "$tmp" | tr -d ' ')"
+        rm -f "$tmp"
         if [ "$magic" = "wOF2" ] && [ "$size" -gt 10000 ]; then ok "$r  (intact woff2, ${size}B)"
         else bad "$r  (magic='$magic' size=${size}B — corrupted, the page will use the fallback face)"; fi
         ;;
@@ -115,6 +121,29 @@ for entry in /console.js; do
     [ "$code" = "200" ] && ok "$entry imports $i  ($code)" || bad "$entry imports $i  ($code — blank page)"
   done
 done
+
+# ---------------------------------------------------------------- 3b. the fleet's redirect table
+#
+# Devices, Sessions and Queue merged into one Fleet route with four lenses, and the promise that
+# made that safe to ship is that the OLD PATHS STILL LAND. Bookmarks, links in runbooks, and the
+# `G D` / `G R` / `G Q` shortcuts all depend on it.
+#
+# Checked in the SHIPPED SOURCE rather than by driving a browser: the console is a hash router, so
+# `#/devices` never reaches the server and curl cannot see the resolution at all. What can be
+# verified from here is that the resolver deployed still names those routes — which is what a
+# well-meant tidy-up would remove.
+say "The fleet's merged routes"
+FLEET_JS="$(fetch "$BASE/console.js")"
+if grep -q "LENS_FOR_ROUTE" <<<"$FLEET_JS"; then
+  for old_route in devices sessions queue; do
+    grep -qE "$old_route: '(capacity|live|waiting)'" <<<"$FLEET_JS" \
+      && ok "#/$old_route still resolves onto a lens" \
+      || bad "#/$old_route is no longer in the redirect table — a bookmark to it now 404s in the router"
+  done
+  grep -q "f: 'fleet'" <<<"$FLEET_JS" && ok "G F reaches the fleet" || bad "the G F shortcut is gone"
+else
+  bad "no LENS_FOR_ROUTE in the deployed console — either this is an older build, or the merged routes were dropped"
+fi
 
 # ---------------------------------------------------------------- 4. the CSP is still the CSP
 #
