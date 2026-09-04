@@ -290,10 +290,25 @@ export async function sessionRoutes(app: FastifyInstance) {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.device_id, s.region, s.created_at, s.started_at, s.ended_at,
                 s.end_reason, d.local_id AS device_local_id, d.model AS device_model,
-                s.run_id, r.external_id AS run_external_id
+                s.run_id, r.external_id AS run_external_id,
+                s.expires_at, u.email AS holder_email
            FROM sessions s
            LEFT JOIN devices d ON d.id = s.device_id
            LEFT JOIN runs r    ON r.id = s.run_id
+           -- WHO IS HOLDING IT, and WHEN THEY GIVE IT BACK.
+           --
+           -- The fleet's capacity view answers one question - can I get a device right now, and if
+           -- not, why not - and it cannot answer the second half without these two. "In use" tells
+           -- somebody to go away; "in use by priya, 12 minutes left" tells them whether to wait.
+           --
+           -- NOT A DISCLOSURE. The sessions table carries FORCE ROW LEVEL SECURITY scoped to the
+           -- org, so this join can only ever surface a colleague inside the same organisation - the
+           -- same people already listed on the Team page. A LEFT join because a session opened by
+           -- an API key has no user, and that is the ordinary case (every CI run).
+           --
+           -- NO BACKTICKS IN HERE. This is inside a template literal, so one ends the string and
+           -- TypeScript then reports a syntax error pointing at prose several lines away.
+           LEFT JOIN users u   ON u.id = s.user_id
           WHERE ($1::text IS NULL OR s.state = $1::session_state)
           ORDER BY s.created_at DESC
           LIMIT $2`,
@@ -313,6 +328,13 @@ export async function sessionRoutes(app: FastifyInstance) {
         startedAt: r.started_at,
         endedAt: r.ended_at,
         endReason: r.end_reason,
+        // The lease, so a queued reader can see when the device in front of them frees up. Sent as
+        // the instant rather than as a remaining duration: a duration computed here is stale by the
+        // time it renders, and the console already ticks every second.
+        expiresAt: r.expires_at,
+        // Null for a session an API key opened, which is most of them. The console shows the key's
+        // run id instead where there is one — see `holderOf`.
+        holder: r.holder_email ?? null,
         // Both ids: the uuid is what links to the run, `runId` is the name the caller gave it and
         // the only one they will recognise in their own CI.
         run: r.run_id ? { id: r.run_id, runId: r.run_external_id } : null,

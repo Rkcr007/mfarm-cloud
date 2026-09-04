@@ -251,6 +251,72 @@ describe('principal separation', () => {
   });
 });
 
+/**
+ * WHAT THE FLEET'S CAPACITY VIEW NEEDS, and it is two fields the list did not return.
+ *
+ * "In use" tells somebody to go away. "In use by priya, twelve minutes left" tells them whether to
+ * wait, and that is the whole question the fleet page exists to answer. Without `expiresAt` there is
+ * no lease to count down and without `holder` the column is an em-dash.
+ */
+describe('the sessions list carries the holder and the lease', () => {
+  test('an allocated session reports when it expires', async () => {
+    await clearDevices();
+    await seedDevices(1);
+    const created = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+      payload: { region: REGION, platform: 'android', ttlMinutes: 30 },
+    });
+    assert.equal(created.statusCode, 201);
+
+    const list = await app.inject({ method: 'GET', url: '/v1/sessions', headers: auth(keyA) });
+    assert.equal(list.statusCode, 200);
+    const row = list.json().sessions.find((x: { id: string }) => x.id === created.json().session.id);
+
+    assert.ok(row, 'the session it just created is not in the list');
+    assert.ok(row.expiresAt, 'no expiresAt — the fleet cannot show a lease remaining');
+    assert.ok(
+      new Date(row.expiresAt).getTime() > Date.now(),
+      `expiresAt is in the past: ${row.expiresAt}`,
+    );
+  });
+
+  /**
+   * `holder` is NULL for an API key, which is the ordinary case rather than an edge one — every CI
+   * run opens its sessions that way. The column has to be honest about that instead of inventing a
+   * name, because "nobody" and "somebody we did not record" are different answers.
+   */
+  test('a session opened by an API key has no holder, and says so', async () => {
+    await clearDevices();
+    await seedDevices(1);
+    const created = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+      payload: { region: REGION, platform: 'android' },
+    });
+
+    const list = await app.inject({ method: 'GET', url: '/v1/sessions', headers: auth(keyA) });
+    const row = list.json().sessions.find((x: { id: string }) => x.id === created.json().session.id);
+    assert.equal(row.holder, null, 'an API key is not a person and must not be given a name');
+  });
+
+  /**
+   * AND THE HOLDER STAYS INSIDE THE ORG. The join reaches `users`, which is a table another tenant
+   * also has rows in — so this asserts the thing that would be a genuine disclosure if row-level
+   * security ever stopped covering the sessions list.
+   */
+  test('another org cannot see this org sessions at all', async () => {
+    await clearDevices();
+    await seedDevices(1);
+    await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+      payload: { region: REGION, platform: 'android' },
+    });
+
+    const other = await app.inject({ method: 'GET', url: '/v1/sessions', headers: auth(keyB) });
+    assert.equal(other.statusCode, 200);
+    assert.deepEqual(other.json().sessions, [], 'org B can see org A sessions');
+  });
+});
+
 describe('session creation', () => {
   test('allocates and returns a verifiable data-plane token', async () => {
     await clearDevices();

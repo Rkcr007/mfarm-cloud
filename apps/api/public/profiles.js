@@ -197,3 +197,72 @@ export function freeText(devices, device) {
   const kin = (devices || []).filter((d) => deviceClass(d) === key);
   return `${kin.filter((d) => d.state === 'READY').length} of ${kin.length} free`;
 }
+
+/**
+ * `384 dp`, or '' when the device reported no density.
+ *
+ * THE NUMBER A LAYOUT BUG IS ACTUALLY EXPRESSED IN. Two devices can share a panel and differ only
+ * here — this farm's X1 and X1 Pro are 1080x2340 on both, and 360 dp against 384 dp — so the pixel
+ * count alone cannot tell somebody which one their layout will break on. Same formula as the React
+ * console's `geometry.ts`; if these ever disagree, one of them is drawing a device that does not
+ * exist.
+ */
+export function widthDp(device) {
+  const s = device?.screen;
+  if (!s?.width || !s?.density || s.density <= 0) return '';
+  return `${Math.round((s.width * 160) / s.density)} dp`;
+}
+
+/* ================================================================= the catalogue's prose ======
+ *
+ * WHAT A CLASS IS FOR, in a sentence, for the one page that advertises the fleet as products.
+ *
+ * PRESENTATION ONLY, like everything else in this file, and the constraint is sharper here than it
+ * looks: every sentence below has to stay true of the DEVICE, because the catalogue sits beside the
+ * real geometry and the real capability chips, and a reader will compare them.
+ *
+ * SO: NO SENTENCE HERE NAMES A CAPABILITY. The first draft of the Pro's blurb said "the full
+ * capability set — live view, UI inspection and screenshots", and a test caught it immediately: the
+ * card below it advertises the INTERSECTION of what its devices declare, so the prose could promise
+ * a screenshot the class does not have. Capabilities are a fact the device reports and the chips
+ * already show; prose that restates them is prose that can contradict them.
+ *
+ * These describe what the class is FOR — the judgement a buyer or a tester is making — and nothing
+ * a device could disagree with.
+ *
+ * Document 05 asks for this to come from the profile table as a marketing-facing column. It does
+ * not exist there, and adding it would mean a worker change and a re-registration to ship a
+ * sentence. Here it is one file, no protocol change, and the honest fallback 05 itself names —
+ * "the catalogue shows specs without prose" — is what an unlisted class already gets.
+ */
+export const CLASS_BLURB = {
+  'mfarm-x1-pro': {
+    badge: 'FLAGSHIP',
+    blurb: 'The roomier of the two layouts. Start here unless you are specifically testing how a '
+      + 'screen behaves when it gets narrower.',
+  },
+  'mfarm-x1': {
+    badge: 'STANDARD',
+    blurb: 'The same panel at a higher density, so a narrower layout in the units a layout is '
+      + 'written in. This is the width most Android phones actually report.',
+  },
+};
+
+/** The badge and sentence for a device's class, or nulls where we have nothing honest to say. */
+export function classBlurb(device) {
+  if (device?.tier === 'physical') {
+    return {
+      badge: 'REAL DEVICE',
+      blurb: 'A real phone plugged into a real machine. It cannot be reset from a snapshot — only '
+        + 'apps are cleared between sessions — and it is named by its own model number rather than '
+        + 'an MFARM class.',
+    };
+  }
+  const known = device?.profile && CLASS_BLURB[device.profile];
+  if (known) return known;
+  return {
+    badge: 'NO PROFILE',
+    blurb: 'A device the farm knows the geometry of and nothing else. Everything works; there is '
+      + 'simply no class description to give you.',
+  };
+}

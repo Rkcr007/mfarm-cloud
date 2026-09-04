@@ -23,8 +23,8 @@
 
 import { ATTACHED, LiveSession, parseLogLine, parseHierarchy, nodeAt, selectorsFor } from '/live.js';
 import {
-  geometryText, hasChrome,
-  deviceName, capacityText, freeText as classFreeText,
+  geometryText, hasChrome, widthDp, classBlurb,
+  deviceName, deviceClass, capacityText, freeText as classFreeText,
 } from '/profiles.js';
 import { iconSvg } from '/icons.js';
 import { frameFor, buildFrame, applyFrame, staticFrame } from '/frame.js';
@@ -181,6 +181,12 @@ export const state = {
   poll: null,
   tick: null,
   palIndex: 0,
+  /**
+   * Which lens the Fleet is showing. DERIVED from the route by `parseHash`, never set on its own —
+   * two places holding "which lens" is how the URL and the highlighted tab come to disagree the
+   * first time somebody presses back.
+   */
+  lens: 'capacity',
   error: null,
   /**
    * When the data on screen was last known to be true.
@@ -857,20 +863,57 @@ async function refreshAll() {
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'team', 'settings']);
+const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'team', 'settings']);
 
-function parseHash() {
-  const raw = location.hash.replace(/^#\/?/, '');
+/**
+ * THE OLD ROUTES ARE NOT DELETED, THEY ARE LENSES.
+ *
+ * `#/devices`, `#/sessions` and `#/queue` were three pages answering one question, and the Fleet
+ * surface merges them — but a bookmark, a `G` shortcut, a link in somebody's runbook and eight
+ * months of muscle memory all still point at the old names. Each lands on the lens that used to be
+ * that page, so nothing a current user knows stops working. That is also why the lens lives in the
+ * URL rather than in component state: a lens you cannot link to is a tab, not a route.
+ *
+ * `#/devices/<id>` is untouched. Device detail is a different job — the operator's page — and it
+ * was never one of the three.
+ */
+const LENS_FOR_ROUTE = { devices: 'capacity', sessions: 'live', queue: 'waiting' };
+
+/**
+ * A hash to a route. EXPORTED AND TAKES ITS INPUT, rather than reading `location` — the redirect
+ * table below is the promise that makes merging three routes into one safe for anybody with a
+ * bookmark, and a promise nothing can test is a promise somebody tidies away.
+ */
+export function parseHash(hash = location.hash) {
+  const raw = String(hash || '').replace(/^#\/?/, '');
   const [name, id] = raw.split('/');
   if (name === 'devices' && id) return { name: 'device', id };
   if (name === 'sessions' && id) return { name: 'cockpit', id };
+  // `#/fleet/<lens>`; a bare `#/fleet` is capacity.
+  if (name === 'fleet') return { name: 'fleet', id: null, lens: LENSES.some(([k]) => k === id) ? id : 'capacity' };
+  // The three merged routes, each arriving on the lens it used to be.
+  if (LENS_FOR_ROUTE[name] && !id) return { name: 'fleet', id: null, lens: LENS_FOR_ROUTE[name] };
   // `#/runs/<id>` takes either half of a run's identity — the uuid, or the name the suite gave it.
   // The API resolves both, so a person can paste a CI build number straight into the URL.
   if (name === 'runs' && id) return { name: 'run', id: decodeURIComponent(id) };
   // `#/launch` picks; `#/launch/<sessionId>` watches one come up. The session id is in the URL so
   // that a reload mid-bring-up rejoins the same session rather than allocating a second device.
   if (name === 'launch' && id) return { name: 'launching', id };
-  return { name: ROUTES.has(name) ? name : 'devices', id: null };
+  return { name: ROUTES.has(name) ? name : 'fleet', id: null, lens: 'capacity' };
+}
+
+/**
+ * Set the route AND the lens it implies, together.
+ *
+ * Two call sites parse the hash — `boot()` on a cold load and the `hashchange` listener afterwards
+ * — and `hashchange` does not fire on load. Assigning them separately meant a cold load of
+ * `#/fleet/catalogue` rendered capacity, because only one of the two places knew about the lens.
+ * One function, so they cannot drift.
+ */
+function setRoute() {
+  state.route = parseHash();
+  state.lens = state.route.lens || null;
+  return state.route;
 }
 
 function go(hash) {
@@ -880,7 +923,7 @@ function go(hash) {
 
 window.addEventListener('hashchange', () => {
   const previous = state.route;
-  state.route = parseHash();
+  setRoute();
   state.action = null;
   closeOverlays();
   // Leaving the cockpit — or opening a DIFFERENT session's cockpit — closes the socket and the peer
@@ -947,7 +990,9 @@ function renderChrome() {
   $('fs-holding').hidden = !held;
 
   // Nav highlight. The two detail routes keep their parent lit rather than lighting nothing.
-  const parent = { device: 'devices', cockpit: 'sessions', run: 'runs', launching: 'launch' }[state.route.name] || state.route.name;
+  // Detail routes light their parent rather than lighting nothing. `device` and `cockpit` both
+  // belong to Fleet now, because the three pages they came from are lenses on it.
+  const parent = { device: 'fleet', cockpit: 'fleet', run: 'runs', launching: 'launch' }[state.route.name] || state.route.name;
   for (const item of document.querySelectorAll('.navitem')) {
     item.classList.toggle('is-active', item.dataset.route === parent);
   }
@@ -1304,6 +1349,337 @@ function activityCard(filter) {
         }))
       : empty('Nothing has happened yet.', 'App actions appear here as workers confirm them.'),
   );
+}
+
+/* ============================================================================ the fleet =======
+ *
+ * ONE SURFACE, FOUR LENSES — direction B in document 03, chosen 2026-09-04.
+ *
+ * Devices, Sessions and Queue were three routes answering one question: CAN I GET A DEVICE RIGHT
+ * NOW, AND IF NOT, WHY NOT. The free count was on Devices, the wait was on Queue, and who was
+ * holding what was on Sessions — so the engineer arriving mid-incident had to visit three pages and
+ * assemble the answer themselves. They also all read the same allocator state, which meant three
+ * places to keep consistent and three chances to disagree on a refresh.
+ *
+ * The lens is a VIEW, not a filter: one data source, one poll, four questions.
+ *
+ *   capacity   everything, ordered by whether you can have it. The default, because it is the
+ *              question that brought you here.
+ *   catalogue  the same fleet as products — for choosing a screen size, and for a buyer.
+ *   live       the sessions that hold a device right now.
+ *   waiting    the queue, with positions.
+ *
+ * LAUNCH IS NOT A LENS AND NOT A ROUTE. Launching is something you DO, and it always begins from a
+ * device you are already looking at — so Start lives on every row instead. That is also what makes
+ * the substitution problem addressable at all: on one surface the thing you clicked and the thing
+ * you got are the same object, and the console can say so when they differ.
+ */
+
+const LENSES = [
+  ['capacity', 'Capacity'],
+  ['catalogue', 'Catalogue'],
+  ['live', 'Live'],
+  ['waiting', 'Waiting'],
+];
+
+/**
+ * The one line at the top that answers the arriving engineer.
+ *
+ * It states the WORST TRUE THING first — fully booked before free counts — because somebody who
+ * cannot get a device needs to know that before they read anything else, and somebody who can will
+ * find out by the button being there.
+ */
+function fleetHeadline() {
+  const free = state.devices.filter((d) => d.state === 'READY').length;
+  const waiting = queuedSessions().length;
+  const held = state.sessions.filter((x) => LIVE_SESSION_STATES.has(x.state) && x.deviceId).length;
+
+  if (!state.devices.length) return 'No devices are registered. Start a worker and one appears within a heartbeat.';
+
+  const capacity = free === 0
+    ? 'Every device is in use.'
+    : `${free} of ${state.devices.length} device${state.devices.length === 1 ? '' : 's'} free.`;
+
+  /**
+   * NO ETA, and its absence is deliberate. Producing "the next one frees in about 12 minutes" needs
+   * every current holder's lease, and while the sessions list now returns `expiresAt`, the soonest
+   * expiry is only an upper bound on the wait: a holder can release early, and a queued session
+   * ahead of you takes the device first. Stating a number we cannot stand behind is the one thing
+   * this console does not do — so it says what IS true, which is that the handover is automatic.
+   */
+  const queue = waiting === 0
+    ? (held ? 'Nobody is waiting.' : '')
+    : `${waiting === 1 ? 'One person is' : `${waiting} people are`} waiting — the farm hands over the moment a lease ends.`;
+
+  return `${capacity} ${queue}`.trim();
+}
+
+/** `you`, a colleague's email, a CI run, or nothing — in that order of usefulness. */
+function holderOf(sess) {
+  if (!sess) return null;
+  const mine = state.me?.user?.email;
+  if (sess.holder && mine && sess.holder === mine) return 'you';
+  if (sess.holder) return sess.holder;
+  // An API key opened it. The run id is the only handle its owner would recognise.
+  if (sess.run?.runId) return `CI run ${sess.run.runId}`;
+  return null;
+}
+
+/** The live session holding this device, if any. */
+function sessionHolding(deviceId) {
+  return state.sessions.find((x) => x.deviceId === deviceId && LIVE_SESSION_STATES.has(x.state)) || null;
+}
+
+/**
+ * CAPACITY — everything, ordered by whether you can have it.
+ *
+ * Free first, then in use (they come back on their own), then out of the pool (they do not). That
+ * ordering IS the answer to the page's question, so it is not configurable and there is no sort
+ * control: a table you have to sort before it tells you anything has not told you anything.
+ */
+function fleetCapacity() {
+  const rank = (d) => (d.state === 'READY' ? 0 : BUSY_STATES.has(d.state) ? 1 : 2);
+  const rows = [...state.devices].sort((a, b) =>
+    rank(a) - rank(b) || deviceName(a).localeCompare(deviceName(b)));
+
+  if (!rows.length) {
+    return card(null, {}, empty('No devices are registered in this region yet.',
+      'Start a worker and it appears here within a heartbeat.'));
+  }
+
+  return card(null, { class: 'flat' }, h('table', { class: 'table fleet-table' },
+    h('thead', null, h('tr', null,
+      h('th', { text: 'Device' }),
+      h('th', { text: 'Screen' }),
+      h('th', { text: 'State' }),
+      h('th', { text: 'Holder' }),
+      h('th', { class: 'right', text: '' }),
+    )),
+    h('tbody', null, rows.map((d) => {
+      const st = DEVICE_STATE[d.state] || { label: d.state, tone: '', note: '' };
+      const sess = sessionHolding(d.id);
+      const who = holderOf(sess);
+      const mine = sess && heldSession()?.id === sess.id;
+
+      return h('tr', null,
+        /**
+         * NAME AND ID, no frame.
+         *
+         * Stage 3's rule is that a device should be recognisable by its SHAPE before its name is
+         * read, and it earns its place on a card, a picker row and a palette result. Not here: at a
+         * table row's height the frame is a fourteen-pixel sliver that reads as a dark smudge, and
+         * the SCREEN column beside it already states the geometry in words. A component used where
+         * it cannot do its job is decoration.
+         */
+        h('td', null, h('div', { class: 'row tight' },
+          h('span', { class: 'stack none' },
+            h('span', { class: 'fleet-name', text: deviceName(d) }),
+            h('code', { class: 'caption', text: short(d.id) }),
+          ),
+          isRealDevice(d) ? h('span', { class: 'kindtag real', text: 'REAL' }) : null,
+        )),
+
+        // Geometry, in the register it came from. The dp width is the number a layout bug is
+        // actually expressed in, so it earns its place beside the pixels.
+        h('td', null, geometryText(d)
+          ? h('span', { class: 'stack none' },
+              h('code', { class: 'caption', text: `${d.screen.width} × ${d.screen.height}` }),
+              h('span', { class: 'micro', text: widthDp(d) }))
+          : h('span', { class: 'caption', text: 'not reported' })),
+
+        h('td', null, h('span', { class: 'stack none' },
+          pill(st.label, st.tone, { live: d.state === 'READY' }),
+          // WHEN, beside the state and never inside it — a lease that is ticking down, or how long
+          // a quarantine has stood. Both are facts the state alone does not carry.
+          sess?.expiresAt
+            ? ticker('until', sess.expiresAt, { suffix: ' left', cls: 'caption' })
+            : d.quarantine?.at
+              ? h('span', { class: 'caption', text: ago(d.quarantine.at) })
+              : null,
+        )),
+
+        /**
+         * WHO HAS IT — and for a free device, nobody, said as an em-dash.
+         *
+         * The obvious filler here is the state's own note ("Allocatable now"), and it is wrong: it
+         * restates the pill one column to the left, so the row says the same thing twice and the
+         * column stops meaning "holder". A quarantine reason is different — that IS what occupies
+         * the device, and it is the operator's first question.
+         */
+        h('td', null, who
+          ? h('span', { class: 'stack none' },
+              h('span', { class: 'secondary', text: who }),
+              sess?.startedAt ? h('span', { class: 'caption', text: `since ${when(sess.startedAt).split(', ').pop()}` }) : null)
+          : h('span', { class: 'caption', text: d.quarantine?.reason || (d.state === 'READY' ? '—' : st.note) })),
+
+        /**
+         * ONE ACTION PER ROW, and it is the one that applies to THIS device in THIS state. Start
+         * where it is free, the cockpit where you already hold it, recovery where it is out of the
+         * pool — and Details as the fallback, because every device has something to say.
+         */
+        h('td', { class: 'right' }, h('div', { class: 'rowactions' },
+          mine
+            ? btn('Open cockpit', 'tiny primary', () => go(`#/sessions/${sess.id}`))
+            : d.state === 'READY'
+              ? btn(`Start ${deviceName(d)}`, 'tiny primary', () => startSession(d))
+              : d.state === 'QUARANTINED'
+                ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
+                : null,
+          btn('Details', 'tiny ghost', () => go(`#/devices/${d.id}`)),
+        )),
+      );
+    })),
+  ));
+}
+
+/**
+ * CATALOGUE — the fleet advertised as products.
+ *
+ * The buyer's page, and also the page an engineer uses to CHOOSE A SCREEN SIZE. It answers "what
+ * can I test on" before "what is free right now", which is why it is grouped by class rather than
+ * listing devices: a class is what the allocator hands over (ADR-0025), so it is the only unit a
+ * card here can honestly promise.
+ *
+ * The free count is a FRACTION on every card, because "2 of 2 free" and "0 of 2 free" are the same
+ * card with different consequences and the denominator is what tells them apart.
+ */
+function fleetCatalogue() {
+  const classes = new Map();
+  for (const d of state.devices) {
+    const key = deviceClass(d);
+    if (!classes.has(key)) classes.set(key, []);
+    classes.get(key).push(d);
+  }
+  if (!classes.size) {
+    return card(null, {}, empty('Nothing to show yet.', 'No device has registered with this farm.'));
+  }
+
+  /**
+   * Free first, then flagship before standard.
+   *
+   * Free is the primary key because this is a catalogue of things you may be about to take, and one
+   * you cannot have belongs below one you can. Within that, the order is the CLASS RANK rather than
+   * the name — sorting alphabetically put "MFARM X1" above "MFARM X1 Pro", so the flagship led with
+   * its cheaper sibling, which is the wrong first impression on the one page that is also a sales
+   * surface.
+   */
+  const rank = (d) => ({ FLAGSHIP: 0, STANDARD: 1, 'NO PROFILE': 2, 'REAL DEVICE': 3 }[classBlurb(d).badge] ?? 4);
+  const groups = [...classes.entries()].sort((a, b) => {
+    const freeA = a[1].some((d) => d.state === 'READY') ? 0 : 1;
+    const freeB = b[1].some((d) => d.state === 'READY') ? 0 : 1;
+    return freeA - freeB || rank(a[1][0]) - rank(b[1][0]) || deviceName(a[1][0]).localeCompare(deviceName(b[1][0]));
+  });
+
+  return h('div', { class: 'catgrid' }, groups.map(([, members]) => {
+    const d = members[0];
+    const free = members.filter((x) => x.state === 'READY').length;
+    // COMING BACK vs NEVER COMING BACK. A device somebody else is using frees up on its own; a
+    // quarantined or offline one does not, and the allocator only ever promotes onto READY.
+    const coming = members.some((x) => BUSY_STATES.has(x.state));
+    const { badge, blurb } = classBlurb(d);
+    /**
+     * THE INTERSECTION, not the union. A class can only promise what EVERY device in it can do,
+     * because the allocator may hand over any of them — advertising a capability that two of three
+     * devices declare is advertising a coin toss.
+     */
+    const caps = members.reduce(
+      (acc, x) => acc.filter((c) => (x.capabilities || []).includes(c)),
+      [...(d.capabilities || [])]);
+
+    return card(null, { class: 'stack cat-card' },
+      h('div', { class: 'row between' },
+        h('span', { class: `kindtag ${isRealDevice(d) ? 'real' : 'virtual'}`, text: badge }),
+        h('span', { class: `caption${free ? '' : ' warn-text'}`, text: `${free} of ${members.length} free` }),
+      ),
+
+      h('div', { class: 'row tight' },
+        deviceThumb(d, 108),
+        h('span', { class: 'stack tight' },
+          h('span', { class: 'card-title', text: deviceName(d) }),
+          h('p', { class: 'help cat-blurb', text: blurb }),
+        ),
+      ),
+
+      h('div', { class: 'device-meta' },
+        [['Screen', geometryText(d) ? `${d.screen.width} × ${d.screen.height}` : null],
+          ['Density', d.screen?.density ? `${d.screen.density} dpi` : null],
+          ['Layout width', widthDp(d)],
+          ['Android', d.osVersion]]
+          .filter(([, v]) => v)
+          .map(([k, v]) => h('div', null,
+            h('p', { class: 'micro', text: k }),
+            h('p', { class: 'v mono', text: v }))),
+      ),
+
+      caps.length
+        ? h('div', { class: 'caps' }, caps.map((c) => chip(c, true)))
+        : h('p', { class: 'caption', text: 'The devices in this class declare no capabilities in common.' }),
+
+      /**
+       * THREE CASES, AND THE THIRD IS THE ONE THAT MATTERS.
+       *
+       * Free: start it. Busy: join the queue — a real and often correct choice, and the reason
+       * ADR-0025 makes the allocator queue rather than hand over a different class.
+       *
+       * BUT A CLASS WITH NOTHING COMING BACK MUST NOT OFFER A QUEUE. Every device quarantined or
+       * offline means the queue is one nothing will ever serve: the allocator only promotes onto a
+       * READY device, so pressing it buys a session that waits forever. The first draft offered it
+       * anyway, because it only asked whether anything was FREE — the same "busy versus
+       * unavailable" distinction the launch picker already makes, missed one screen over.
+       */
+      h('div', { class: 'row tight' },
+        free
+          ? btn(`Start ${deviceName(d)}`, 'primary', () => startSession(d))
+          : coming
+            ? btn(`Join the queue for ${deviceName(d)}`, 'ghost', () => startSession(d))
+            : null,
+        btn('Full specification', 'ghost', () => go(`#/devices/${d.id}`)),
+      ),
+
+      free || coming
+        ? null
+        : h('p', { class: 'caption', text: members.length === 1
+            ? 'Out of the pool. Nothing is queued for it, because a queue here would never be served.'
+            : 'Every device in this class is out of the pool. A queue here would never be served.' }),
+    );
+  }));
+}
+
+/**
+ * THE FLEET, and the four lenses over it.
+ *
+ * The old routes still work — `#/devices`, `#/sessions`, `#/queue` land here on the lens that used
+ * to be that page — so no bookmark, no `G` shortcut and no muscle memory breaks. That is the whole
+ * reason the lens is in the URL rather than in local state.
+ */
+function screenFleet() {
+  const lens = state.lens || 'capacity';
+  const waiting = queuedSessions().length;
+  const live = state.sessions.filter((x) => LIVE_SESSION_STATES.has(x.state) && x.deviceId).length;
+  const counts = { live, waiting };
+
+  return [
+    pageHead([{ label: 'Farm' }], 'Fleet', fleetHeadline()),
+
+    h('div', { class: 'row tight mb-gap lensrow' }, LENSES.map(([key, label]) => h('button', {
+      class: `lens${lens === key ? ' on' : ''}`,
+      onclick: () => go(`#/fleet/${key}`),
+    },
+      label,
+      // A count only where a count is the point. "Capacity 5" would be a second, worse copy of the
+      // headline; "Waiting 2" is the number somebody is looking for.
+      counts[key] ? h('span', { class: 'lens-n', text: String(counts[key]) }) : null,
+    ))),
+
+    lens === 'catalogue' ? fleetCatalogue()
+      : lens === 'live' ? screenSessionsBody()
+        : lens === 'waiting' ? screenQueueBody()
+          // FULL WIDTH, and no rail. The rail carried a queue card that said "All devices are
+          // available / Nobody is waiting" — which the headline four lines above already said, in
+          // the same words. Two panels stating one fact is exactly the duplication this surface was
+          // built to remove, and the queue has its own lens.
+          : fleetCapacity(),
+  ];
 }
 
 function screenDevices() {
@@ -3549,11 +3925,24 @@ function screenApps() {
 
 /* ---------------------------------------------------------------------------- screen: sessions */
 
+/**
+ * The Sessions route, which is now the Fleet's `live` lens with a page header on it.
+ *
+ * SPLIT RATHER THAN COPIED. A lens that reimplemented this table would be a second thing to keep
+ * correct, and the two would disagree the first time somebody fixed a column in one of them — which
+ * is precisely the four-places-to-keep-consistent problem the Fleet surface exists to end.
+ */
 function screenSessions() {
-  const rows = state.sessions;
   return [
     pageHead([{ label: 'Farm' }], 'Sessions',
       'Every session this org has opened, newest first. A WebDriver suite creates these too.'),
+    screenSessionsBody(),
+  ];
+}
+
+function screenSessionsBody() {
+  const rows = state.sessions;
+  return [
     card(null, { class: 'flush' },
       rows.length
         ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
@@ -4011,14 +4400,23 @@ function inspectorCard(caps) {
 
 /* ---------------------------------------------------------------------------- screen: queue */
 
+/** The Queue route, which is the Fleet's `waiting` lens with a page header on it. */
 function screenQueue() {
+  const waiting = queuedSessions();
+  const holding = state.sessions.filter((s) => LIVE_SESSION_STATES.has(s.state) && s.deviceId);
+  return [
+    pageHead([{ label: 'Operations' }], 'Queue',
+      `${holding.length} device${holding.length === 1 ? '' : 's'} held · ${waiting.length} waiting`),
+    screenQueueBody(),
+  ];
+}
+
+function screenQueueBody() {
   const waiting = queuedSessions();
   const holding = state.sessions.filter((s) => LIVE_SESSION_STATES.has(s.state) && s.deviceId);
   const mine = heldSession();
 
   return [
-    pageHead([{ label: 'Operations' }], 'Queue',
-      `${holding.length} device${holding.length === 1 ? '' : 's'} held · ${waiting.length} waiting`),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
         card('Leases', {},
@@ -4297,7 +4695,12 @@ $('palette-input').addEventListener('keydown', (e) => {
 let gPending = 0;
 // `r` was already Sessions when Runs arrived, and rebinding it would have broken the one shortcut
 // people here use most. `u` is what "run" has left once r, n and s are taken.
-const G_ROUTES = { d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', t: 'team', s: 'settings' };
+/**
+ * `G` then a letter. THE THREE MERGED ROUTES KEEP THEIR LETTERS — `d`, `r` and `q` still resolve,
+ * through `parseHash`, onto the Fleet lens that used to be that page. A shortcut somebody has in
+ * their fingers is not a thing to reclaim for tidiness.
+ */
+const G_ROUTES = { f: 'fleet', d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', t: 'team', s: 'settings' };
 
 /**
  * Is this keystroke meant for something that takes typing, rather than for the console?
@@ -4754,6 +5157,7 @@ function randomPassword() {
 export const SCREENS = {
   launch: () => screenLaunch(),
   launching: () => screenLaunching(state.route.id),
+  fleet: () => screenFleet(),
   devices: () => screenDevices(),
   device: () => screenDevice(state.route.id),
   apps: () => screenApps(),
@@ -5074,7 +5478,7 @@ async function boot() {
   $('palette-kbd').textContent = navigator.platform?.startsWith('Mac') ? '⌘K' : 'Ctrl K';
   void showBuild();
 
-  state.route = parseHash();
+  setRoute();
   await refreshAll();
   if (state.route.name === 'cockpit') await loadSessionDetail(state.route.id);
   // A run URL is the one people paste to each other — "what happened on 4471" — so a cold load of

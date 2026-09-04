@@ -1078,3 +1078,139 @@ describe('the copy rules hold', () => {
     assert.match(text, /back in the pool/);
   });
 });
+
+
+/**
+ * THE FLEET SURFACE — direction B, one route with four lenses.
+ *
+ * Devices, Sessions and Queue answered one question between them: can I get a device right now, and
+ * if not, why not. They are lenses now. The tests that matter most here are not the ones that check
+ * the table renders — they are the ones that check the OLD ROUTES STILL LAND, because that promise
+ * is what makes the merge safe to ship to people with bookmarks and muscle memory.
+ */
+describe('the fleet', () => {
+  test('every lens builds a tree', () => {
+    for (const lens of ['capacity', 'catalogue', 'live', 'waiting']) {
+      seed({ name: 'fleet' });
+      mod.state.lens = lens;
+      const tree = mod.SCREENS.fleet();
+      assert.ok(countElements(tree) > 0, `the ${lens} lens rendered nothing`);
+    }
+  });
+
+  /**
+   * `#/devices`, `#/sessions` and `#/queue` each land on the lens that used to be that page. A
+   * bookmark, a link in a runbook and a `G` shortcut all go through here, so this is the test that
+   * fails if somebody later "tidies up" the redirect table.
+   */
+  test('the three merged routes still resolve, onto the right lens', () => {
+    for (const [hash, lens] of [
+      ['#/devices', 'capacity'],
+      ['#/sessions', 'live'],
+      ['#/queue', 'waiting'],
+      ['#/fleet', 'capacity'],
+      ['#/fleet/catalogue', 'catalogue'],
+    ] as const) {
+      const route = mod.parseHash(hash);
+      assert.equal(route.name, 'fleet', `${hash} should reach the fleet`);
+      assert.equal(route.lens, lens, `${hash} should open the ${lens} lens`);
+    }
+  });
+
+  /**
+   * AND THE DETAIL ROUTES ARE UNTOUCHED. `#/devices/<id>` is the operator's page and was never one
+   * of the three; `#/sessions/<id>` is the cockpit. Collapsing their parents must not swallow them.
+   */
+  test('the detail routes are not swallowed by the merge', () => {
+    assert.deepEqual(
+      { name: mod.parseHash('#/devices/abc').name, id: mod.parseHash('#/devices/abc').id },
+      { name: 'device', id: 'abc' },
+    );
+    assert.equal(mod.parseHash('#/sessions/xyz').name, 'cockpit');
+  });
+
+  /**
+   * An unknown hash lands on the fleet rather than on a blank page — it is the console's front door
+   * now, the way Devices was.
+   */
+  test('an unknown route falls back to the fleet', () => {
+    assert.equal(mod.parseHash('#/nonsense').name, 'fleet');
+  });
+
+  /**
+   * THE CATALOGUE PROMISES ONLY WHAT EVERY DEVICE IN THE CLASS CAN DO.
+   *
+   * A class is what the allocator hands over (ADR-0025), so advertising a capability that two of
+   * three devices declare is advertising a coin toss. The intersection is the only honest set.
+   */
+  test('a class advertises the intersection of its devices capabilities', () => {
+    seed({ name: 'fleet' });
+    mod.state.lens = 'catalogue';
+    mod.state.devices = [
+      { ...mod.state.devices[0], id: 'a', profile: 'mfarm-x1-pro', capabilities: ['app-install', 'logcat', 'screenshot'] },
+      { ...mod.state.devices[0], id: 'b', profile: 'mfarm-x1-pro', capabilities: ['app-install', 'logcat'] },
+    ];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.match(text, /app-install/);
+    assert.match(text, /logcat/);
+    assert.doesNotMatch(text, /screenshot/,
+      'only one of the two devices declares screenshot; the class cannot promise it');
+  });
+
+  /**
+   * A class with nothing free still offers the queue, and says so. ADR-0025 made the allocator
+   * queue rather than substitute, so this button is the whole point of that decision being visible.
+   */
+  test('a fully booked class offers the queue rather than nothing', () => {
+    seed({ name: 'fleet' });
+    mod.state.lens = 'catalogue';
+    mod.state.devices = [{ ...mod.state.devices[0], profile: 'mfarm-x1-pro', state: 'SESSION_ACTIVE' }];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.match(text, /0 of 1 free/);
+    assert.match(text, /Join the queue/);
+  });
+
+  /**
+   * AND A CLASS NOTHING WILL COME BACK FROM MUST NOT OFFER ONE.
+   *
+   * The allocator only ever promotes a queued session onto a READY device, so a queue behind a
+   * quarantined class is one that is never served — the button buys a session that waits forever
+   * and looks completely reasonable while doing it.
+   *
+   * The first draft offered it, because it only asked whether anything was FREE. The launch picker
+   * has made this exact busy-versus-unavailable distinction for months; the catalogue missed it one
+   * screen over, which is what a new surface built from the same data does when the reasoning is
+   * not carried across with it.
+   */
+  test('a class that is out of the pool does not offer a queue nobody would serve', () => {
+    seed({ name: 'fleet' });
+    mod.state.lens = 'catalogue';
+    mod.state.devices = [{
+      ...mod.state.devices[0], profile: 'mfarm-x1-pro', state: 'QUARANTINED',
+      quarantine: { at: new Date().toISOString(), reason: 'adb keeps dropping', source: 'health' },
+    }];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.doesNotMatch(text, /Join the queue/,
+      'the allocator only promotes onto READY — this queue would never be served');
+    assert.match(text, /never be served/, 'and it has to say why the button is absent');
+  });
+
+  /**
+   * The flagship leads. Sorting alphabetically put "MFARM X1" above "MFARM X1 Pro", so the cheaper
+   * sibling led the one page that is also a sales surface.
+   */
+  test('the flagship comes before the standard class', () => {
+    seed({ name: 'fleet' });
+    mod.state.lens = 'catalogue';
+    const base = mod.state.devices[0];
+    mod.state.devices = [
+      { ...base, id: 'x1', profile: 'mfarm-x1', state: 'READY' },
+      { ...base, id: 'pro', profile: 'mfarm-x1-pro', state: 'READY' },
+    ];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.ok(
+      text.indexOf('FLAGSHIP') < text.indexOf('STANDARD'),
+      'the flagship should lead the catalogue',
+    );
+  });
+});
