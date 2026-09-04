@@ -173,6 +173,15 @@ Five things decided while building it that are not obvious from the capability:
   upgrade test, an A/B — so one denormalised column would silently pick a winner. The build is
   recorded on the SESSION that installed it, and the run reports `buildCount`, naming a build only
   when there is exactly one.
+- **CORRECTED 2026-09-04 — the column was right and the TABLE was wrong.** `webdriver_sessions` is
+  the live proxy mapping, and `driver.quit()` deletes the row. So the run rollup, which read the
+  build through a join on it, reported `build: null, buildCount: 0` for **every suite that finished
+  properly**, and named a build only for sessions that LEAKED. Found by running
+  `examples/medishop-suite` against the farm: 8/8 green, and a run that could not say what it had
+  tested. Migration 036 moves the durable fact to `sessions.app_build_id`; the ephemeral copy stays
+  and is still written, because dropping it would break a rollback. **The unit tests could not see
+  this: every one of them asserted before the quit.**
+
 - **`webdriver_sessions.app_build_id` is now a column, not just a jsonb key.** §4.1 already recorded
   the resolved build, but inside `capabilities`, which is stored for support. "What failed on build
   X" is the query this whole section exists for, and against jsonb it is a scan with a cast in the
@@ -331,6 +340,17 @@ Five things decided while building it:
   can, and eventually does.
 - **A queued session emits BOTH `session-queued` and `device-allocated`.** One combined event would
   make "how much did anything queue last week" a scan of a jsonb key instead of a count of a kind.
+- **CORRECTED 2026-09-04 — four of the nine kinds the CHECK admitted were never written.**
+  `build-install-started`, `build-install-finished`, `device-released` and `incident` existed only
+  as union members in `executionEvents.ts`, so the first real suite's timeline read
+  `device-allocated → session-active → session-ended` with a ~10s install — most of the
+  session-open latency, and the whole of what `mfarm:appId` does — invisible between the first two,
+  and no trace of a device fault. A vocabulary the schema admits and the system never speaks is
+  ADR-0003's rule inverted. All four are emitted now. **`device-released` is deliberately NOT the
+  same event as `session-ended`**: on the hub path they coincide, and on the bound path
+  (`mfarm run`) quit ends the session while the caller keeps the device — so the pair is what makes
+  that difference readable. Still not emitted from the REAPER's release paths (`expire_sessions`,
+  the idle sweep, a host quarantine), which are set-based SQL returning counts rather than ids.
 - **A bound session's allocation is recorded with the time it ACTUALLY happened.** `mfarm run`
   allocates the session and hands the hub its id, so the device was claimed minutes before the hub
   saw it. The first version recorded nothing rather than stamp it `now()` — a timeline that is wrong

@@ -530,19 +530,38 @@ export async function webdriverRoutes(app: FastifyInstance) {
         ...(run ? { 'mfarm:runId': run.externalId } : {}),
       };
 
-      await withTenant(orgId, (c) =>
-        c.query(
-          // `app_build_id` is a COLUMN as well as a capability (migration 020). The jsonb blob is
-          // kept for support — it is the upstream's answer, verbatim — but "which sessions ran this
-          // build" has to be an indexed foreign key, not a cast inside a predicate.
+      await withTenant(orgId, async (c) => {
+        // `app_build_id` is a COLUMN as well as a capability (migration 020). The jsonb blob is
+        // kept for support — it is the upstream's answer, verbatim — but "which sessions ran this
+        // build" has to be an indexed foreign key, not a cast inside a predicate.
+        await c.query(
           `INSERT INTO webdriver_sessions
              (session_id, org_id, device_id, upstream_session_id, upstream_base_url, capabilities,
               hub_allocated, app_build_id)
            VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
           [sessionId, orgId, deviceId, created.id, base,
            JSON.stringify(redact(sessionCaps)), hubAllocated, build?.id ?? null],
-        ),
-      );
+        );
+        /**
+         * AND ON THE SESSION, WHICH IS THE ONE THAT SURVIVES (migration 036).
+         *
+         * The row above is the live proxy mapping and `DELETE /wd/hub/session/:id` deletes it on
+         * `driver.quit()` — correctly, because the upstream session is gone. That made the build a
+         * fact **the client destroyed by behaving properly**: `routes/runs.ts` read it through a
+         * join on `webdriver_sessions`, so every well-behaved suite reported `build: null`, and the
+         * only runs that ever named a build were the ones whose sessions leaked.
+         *
+         * Found by running `examples/medishop-suite` against the farm on 2026-09-04 — 8/8 green,
+         * and a run that could not say what it had tested.
+         *
+         * Written only when there is a build. A session that named none must not have the column
+         * overwritten with NULL on a re-bind: `mfarm run` can open a second WebDriver session
+         * against a device it already holds, and the first one is the one that installed.
+         */
+        if (build) {
+          await c.query('UPDATE sessions SET app_build_id = $2 WHERE id = $1', [sessionId, build.id]);
+        }
+      });
 
       // The WebDriver session being live IS the session being active — there is no separate signal
       // to wait for, and leaving it ALLOCATING would have the reaper collect a working session. A
@@ -624,6 +643,22 @@ export async function webdriverRoutes(app: FastifyInstance) {
     if (row.hub_allocated) {
       await recordSessionEvent(orgId, req.params.sessionId, 'session-ended', { reason: 'webdriver_quit' });
       await release(orgId, req.params.sessionId, 'webdriver_quit');
+      /**
+       * `device-released` beside `session-ended`, and on this path they are the same instant.
+       *
+       * That is exactly why the distinction is easy to lose and worth keeping: on the BOUND path
+       * (`mfarm run`) the branch above does not run at all, so a reader sees `session-ended` and no
+       * release — which is the truth, because the caller still holds the device. Emitting the pair
+       * here is what makes that absence legible rather than ambiguous.
+       *
+       * NOT YET EMITTED by the reaper's own release paths — `expire_sessions`,
+       * `expire_idle_webdriver_sessions` and a host quarantine all take devices back with no event.
+       * Those are set-based SQL returning counts rather than ids, so recording per-session events
+       * from them is a change to the functions' signatures rather than a line here. A timeline that
+       * ends at `session-active` still means "the farm reclaimed this", and that is worse than it
+       * sounds — but it is the gap that already existed, not one this introduces.
+       */
+      await recordSessionEvent(orgId, req.params.sessionId, 'device-released', { reason: 'webdriver_quit' });
     }
 
     return { value: null };
@@ -889,6 +924,24 @@ export async function webdriverRoutes(app: FastifyInstance) {
       'installing a library build before handing over the webdriver session',
     );
 
+    /**
+     * THE INSTALL ON THE TIMELINE (migration 030's `build-install-started`/`-finished`).
+     *
+     * Both kinds have been in the schema's CHECK since 030 and were written by nothing. The first
+     * real suite run made the cost visible: its timeline read `device-allocated → session-active →
+     * session-ended`, with a ~10s install — most of the session-open latency, and the whole of what
+     * `mfarm:appId` does — invisible between the first two.
+     *
+     * That is ADR-0003's rule inverted. A capability list may not claim what the system cannot do;
+     * an event vocabulary may not either.
+     */
+    const installedAt = Date.now();
+    await recordSessionEvent(orgId, sessionId, 'build-install-started', {
+      appId: build.id, packageName: build.packageName,
+      ...(build.versionName ? { versionName: build.versionName } : {}),
+      actionId: action.id,
+    });
+
     const outcome = await awaitAppAction(orgId, action.id, {
       timeoutMs: appInstallTimeoutMs(),
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -896,6 +949,16 @@ export async function webdriverRoutes(app: FastifyInstance) {
       // handler when the socket closes, and the caller's catch releases the device — so stopping
       // here gives it back seconds rather than minutes.
       abandoned: gone,
+    });
+
+    // MEASURED, both ways. The reader's question is "how long did my session take to open, and
+    // where did the time go", and the answer is only useful if the failing case carries it too — an
+    // install that took 90 seconds and then failed is a different story from one that failed at
+    // once, and `outcome.state` alone cannot tell them apart.
+    await recordSessionEvent(orgId, sessionId, 'build-install-finished', {
+      appId: build.id, packageName: build.packageName, actionId: action.id,
+      outcome: outcome.state, durationMs: Date.now() - installedAt,
+      ...(outcome.state === 'FAILED' && outcome.error ? { error: outcome.error } : {}),
     });
 
     if (outcome.state === 'DONE') return;

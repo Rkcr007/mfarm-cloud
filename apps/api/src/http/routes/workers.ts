@@ -7,6 +7,7 @@ import { negotiate, deviceAutomationEndpoint, classifyReason, type AppActionKind
 import { finishRecovery, resetComplete, sessionAttach } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
 import { recordInfraRetry } from '../../attempts.ts';
+import { recordSessionEvent } from '../../executionEvents.ts';
 import { appActions, deviceRecoveries, hostsRecovered, meteringEvents, workerResets } from '../../metrics.ts';
 import { requireWorker } from '../server.ts';
 import { unauthorized, badRequest } from '../errors.ts';
@@ -796,6 +797,35 @@ export async function workerRoutes(app: FastifyInstance) {
        * tables. Neither is ever a test failure — the farm cannot see one (spec §13).
        */
       if (accepted && i.sessionId) {
+        /**
+         * ON THE TIMELINE TOO (migration 030's `incident`, declared and written by nothing until
+         * now).
+         *
+         * §18 gave the farm somewhere to record that a device went bad; §4.6 gave a reader
+         * somewhere to see what happened to their execution; and the two were never joined, so a
+         * run whose device dropped adb mid-session showed a timeline of
+         * `device-allocated → session-active → session-ended` and nothing about the fault. That is
+         * the shape §13 exists to prevent — an infrastructure failure that a tester reads as their
+         * own test being flaky.
+         *
+         * The ORG comes from the device row, never from the worker's body, which is the same rule
+         * the insert above follows (architecture rule 4). Only for an ACCEPTED incident, so the
+         * agent's idempotent re-send after a partition does not draw the same fault thirty times.
+         */
+        const orgForEvent = await withSystem(async (c) => {
+          const { rows } = await c.query(
+            'SELECT COALESCE(s.org_id, d.org_id) AS org_id FROM devices d '
+            + 'LEFT JOIN sessions s ON s.id = $2 AND s.device_id = d.id WHERE d.id = $1',
+            [i.deviceId, i.sessionId],
+          );
+          return rows[0]?.org_id as string | undefined;
+        });
+        if (orgForEvent) {
+          await recordSessionEvent(orgForEvent, i.sessionId, 'incident', {
+            class: cls, reason: i.reason,
+            ...(i.detail ? { detail: i.detail.slice(0, 500) } : {}),
+          });
+        }
         try {
           await recordInfraRetry(
             i.sessionId,

@@ -132,6 +132,39 @@ async function openSession(key: string, extra: Record<string, unknown> = {}): Pr
 const quit = (key: string, sessionId: string) =>
   app.inject({ method: 'DELETE', url: `/wd/hub/session/${sessionId}`, headers: auth(key) });
 
+/**
+ * One heartbeat, and a success report for anything it was offered.
+ *
+ * Module scope because two describes need it — the run rollup opens sessions with a build, and so
+ * does the timeline. The worker token is minted here rather than kept from `before`, because the
+ * plaintext is discarded at registration and only the hash is stored: the same property that makes
+ * it a credential rather than a name.
+ */
+async function beatAndAck(): Promise<void> {
+  /**
+   * MINTED EVERY CALL, not cached. A cached one was the first version and it silently stopped
+   * working: `sendIncidents` in the incidents suite rotates this same host's credential, so a token
+   * held across describes is dead by the time the timeline suite uses it. The beat then answers 401,
+   * this returns without acking, and the install the hub is waiting on times out four minutes
+   * later — a fixture failure that reads exactly like a product one.
+   */
+  const wt = generateWorkerToken();
+  await withSystem((c) => c.query(
+    'UPDATE hosts SET token_prefix = $2, token_hash = $3 WHERE id = $1',
+    [hostId, wt.prefix, wt.hash]));
+  const beatToken = wt.plaintext;
+  const beat = await app.inject({
+    method: 'POST', url: '/v1/workers/heartbeat', headers: auth(beatToken),
+  });
+  assert.equal(beat.statusCode, 200, `the fixture worker could not beat: ${beat.body}`);
+  const offered = beat.json().actions as Array<{ actionId: string }>;
+  if (offered.length === 0) return;
+  await app.inject({
+    method: 'POST', url: '/v1/workers/events', headers: auth(beatToken),
+    payload: { actions: offered.map((a) => ({ actionId: a.actionId, ok: true })) },
+  });
+}
+
 before(async () => {
   upstreamUrl = await startUpstream();
   await withSystem(async (c) => {
@@ -442,6 +475,73 @@ describe('GET /v1/runs', () => {
     assert.equal(run.build, null);
   });
 
+  /**
+   * THE TEST THAT WAS MISSING — and why it was missing matters more than the test.
+   *
+   * The two tests above open a session with a build and read the run back, and they passed for
+   * months against an implementation that lost the build the moment the client called
+   * `driver.quit()`. Neither of them quits. The run rollup read `app_build_id` off
+   * `webdriver_sessions`, which is the LIVE PROXY MAPPING and is deleted at quit — so
+   * `GET /v1/runs` reported `build: null, buildCount: 0` for every suite that finished properly,
+   * and reported a build only for sessions that LEAKED.
+   *
+   * Found on 2026-09-04 by running `examples/medishop-suite` against the farm: 8/8 green, and a
+   * run that could not say what it had tested. No unit test could see it, because every one of
+   * them asserted before the delete.
+   *
+   * So this asserts the same fact TWICE — once before the quit, which is what the old tests did,
+   * and once after, which is the half that was never checked. Reverting migration 036 fails only
+   * the second assertion, which is the point.
+   */
+  test('the build survives the quit that deletes the proxy row', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const shop = await seedBuild(orgA, 'com.acme.shop', '1.4.2');
+    const sessionId = await openWithBuild('quit-then-ask', shop);
+
+    const named = async () => {
+      const list = await app.inject({ method: 'GET', url: '/v1/runs', headers: auth(keyA) });
+      return list.json().runs.find((r: { runId: string }) => r.runId === 'quit-then-ask');
+    };
+
+    // Before: the fixture is real, so a failure below is about the quit rather than about setup.
+    assert.equal((await named()).build.id, shop);
+
+    const q = await quit(keyA, sessionId);
+    assert.equal(q.statusCode, 200, q.body);
+
+    // The proxy row IS gone, and that is correct behaviour rather than the bug — asserted here so
+    // that a future change which stops deleting it does not make this test pass for a new reason.
+    const proxyRows = await withSystem(async (c) => Number((await c.query(
+      'SELECT count(*) AS n FROM webdriver_sessions WHERE session_id = $1', [sessionId],
+    )).rows[0].n));
+    assert.equal(proxyRows, 0, 'quit deletes the live mapping; the durable fact must not live there');
+
+    const after = await named();
+    assert.equal(after.buildCount, 1,
+      'a suite that finished properly must not lose what it tested');
+    assert.equal(after.build.id, shop);
+    assert.equal(after.build.packageName, 'com.acme.shop');
+    assert.equal(after.build.versionName, '1.4.2');
+  });
+
+  test('and the run detail still names it per session, not only in the rollup', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const shop = await seedBuild(orgA, 'com.acme.till', '2.0.0');
+    const sessionId = await openWithBuild('detail-after-quit', shop);
+    await quit(keyA, sessionId);
+
+    const r = await app.inject({
+      method: 'GET', url: '/v1/runs/detail-after-quit', headers: auth(keyA),
+    });
+    assert.equal(r.statusCode, 200, r.body);
+    const session = r.json().sessions.find((x: { id: string }) => x.id === sessionId);
+    assert.ok(session, 'the session should still belong to the run');
+    assert.equal(session.build.packageName, 'com.acme.till',
+      '"which build did THIS session run" is the per-session half of the same question');
+  });
+
   /** A session with `mfarm:appId`, with a worker playing the install beside it. */
   async function openWithBuild(runId: string, appId: string): Promise<string> {
     const pending = app.inject({
@@ -452,7 +552,7 @@ describe('GET /v1/runs', () => {
     void pending.then(() => { settled = true; }, () => { settled = true; });
 
     for (let i = 0; i < 400 && !settled; i++) {
-      await beatOnce();
+      await beatAndAck();
       await new Promise((r) => setTimeout(r, 20));
     }
     assert.ok(settled, 'the hub never answered — it is still waiting on the install');
@@ -461,33 +561,6 @@ describe('GET /v1/runs', () => {
     return reply.json().value.sessionId;
   }
 
-  /**
-   * One heartbeat, and a success report for anything it was offered.
-   *
-   * The worker token is minted here rather than kept from `before`, because the plaintext is
-   * discarded at registration and only the hash is stored — the same property that makes it a
-   * credential rather than a name.
-   */
-  let beatToken: string | null = null;
-  async function beatOnce(): Promise<void> {
-    if (!beatToken) {
-      const wt = generateWorkerToken();
-      await withSystem((c) => c.query(
-        'UPDATE hosts SET token_prefix = $2, token_hash = $3 WHERE id = $1',
-        [hostId, wt.prefix, wt.hash]));
-      beatToken = wt.plaintext;
-    }
-    const beat = await app.inject({
-      method: 'POST', url: '/v1/workers/heartbeat', headers: auth(beatToken),
-    });
-    if (beat.statusCode !== 200) return;
-    const offered = beat.json().actions as Array<{ actionId: string }>;
-    if (offered.length === 0) return;
-    await app.inject({
-      method: 'POST', url: '/v1/workers/events', headers: auth(beatToken),
-      payload: { actions: offered.map((a) => ({ actionId: a.actionId, ok: true })) },
-    });
-  }
 });
 
 describe('outcome reporting', () => {
@@ -899,13 +972,131 @@ describe('execution timeline', () => {
     const body = r.json();
     const k = kinds(body);
 
-    assert.deepEqual(k, ['run-created', 'device-allocated', 'session-active', 'session-ended'],
+    // `device-released` joined this list on 2026-09-04. On THIS path it is the same instant as
+    // `session-ended` — and that is precisely why it has to be here: on the bound path (`mfarm run`)
+    // quit records the end and releases nothing, so a timeline showing one without the other is the
+    // signal that the caller still holds the device. A pair that is redundant in the simple case is
+    // what makes the interesting case readable.
+    assert.deepEqual(
+      k, ['run-created', 'device-allocated', 'session-active', 'session-ended', 'device-released'],
       'the order is the timeline; a set of kinds would not be one');
     assert.equal(body.truncated, false);
     // The run-level event belongs to no lease; every other one names the session it happened to.
     assert.equal(body.events[0].sessionId, null);
     for (const e of body.events.slice(1)) assert.equal(e.sessionId, s);
     assert.equal(body.events[3].detail.reason, 'webdriver_quit');
+    assert.equal(body.events[4].detail.reason, 'webdriver_quit');
+  });
+
+  /**
+   * THE INSTALL, which was declared in migration 030's CHECK and written by nothing.
+   *
+   * Found the same way as the build defect: the first real suite's timeline read
+   * `device-allocated → session-active → session-ended`, with a ~10s install — most of the
+   * session-open latency, and the whole of what `mfarm:appId` does — invisible between the first
+   * two. A vocabulary the schema admits and the system never speaks is ADR-0003's rule inverted.
+   */
+  test('an install appears on the timeline, with what it installed and how long it took', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const build = await seedBuild(orgA, 'com.acme.pos', '3.1.0');
+
+    const pending = app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:runId': 'tl-install', 'mfarm:appId': build }),
+    });
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    for (let i = 0; i < 400 && !settled; i++) {
+      await beatAndAck();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const reply = await pending;
+    assert.equal(reply.statusCode, 200, reply.body);
+
+    const body = (await readTimeline(keyA, 'tl-install')).json();
+    const k = kinds(body);
+    assert.ok(k.includes('build-install-started'), `no install on the timeline; saw ${k.join(',')}`);
+    assert.ok(k.includes('build-install-finished'), `the install never finished; saw ${k.join(',')}`);
+
+    // ORDER, not just presence: the whole claim of `mfarm:appId` is that the app is on the device
+    // BEFORE the automation session opens, and a timeline that put the install after
+    // `session-active` would be describing the bug that capability exists to prevent.
+    assert.ok(k.indexOf('build-install-finished') < k.indexOf('session-active'),
+      `the install must finish before the session goes active; saw ${k.join(',')}`);
+
+    const finished = body.events.find((e: { kind: string }) => e.kind === 'build-install-finished');
+    assert.equal(finished.detail.outcome, 'DONE');
+    assert.equal(finished.detail.packageName, 'com.acme.pos');
+    assert.ok(Number.isFinite(finished.detail.durationMs),
+      'a duration is the reason this event is worth having — "where did the time go"');
+  });
+
+  /**
+   * §18 met §4.6, which they never had. The farm has recorded incidents since migration 024 and the
+   * timeline has admitted an `incident` kind since 030, and nothing ever wrote one — so a run whose
+   * device dropped adb mid-session showed `device-allocated -> session-active -> session-ended` and
+   * no hint that anything went wrong. That is the shape §13 exists to prevent: an infrastructure
+   * fault a tester reads as their own test being flaky.
+   */
+  test('a device fault the farm saw appears on the run timeline', async () => {
+    await clearFleet();
+    const [deviceId] = await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'tl-incident' });
+
+    const wt = generateWorkerToken();
+    await withSystem((c) => c.query(
+      'UPDATE hosts SET token_prefix = $1, token_hash = $2 WHERE id = $3',
+      [wt.prefix, wt.hash, hostId]));
+    const r = await app.inject({
+      method: 'POST', url: '/v1/workers/events', headers: auth(wt.plaintext),
+      payload: { incidents: [{
+        eventId: randomUUID(), deviceId, sessionId: s,
+        reason: 'device-disconnected', detail: 'adb: device offline',
+        occurredAt: new Date().toISOString(),
+      }] },
+    });
+    assert.equal(r.statusCode, 200, r.body);
+
+    const body = (await readTimeline(keyA, 'tl-incident')).json();
+    const incident = body.events.find((e: { kind: string }) => e.kind === 'incident');
+    assert.ok(incident, `no incident on the timeline; saw ${kinds(body).join(',')}`);
+    assert.equal(incident.sessionId, s);
+    assert.equal(incident.detail.reason, 'device-disconnected');
+    assert.equal(incident.detail.class, 'infrastructure',
+      'the class is the farm-s, derived from the reason — never the worker-s to assert');
+  });
+
+  /**
+   * The agent re-sends its buffer on reconnect BY DESIGN, so one pulled cable arriving thirty times
+   * is the expected case. The incident insert is idempotent on `event_id`; this asserts the
+   * TIMELINE inherited that rather than drawing the same fault thirty times, which would be a worse
+   * outcome than not drawing it at all.
+   */
+  test('a re-sent incident does not draw itself twice', async () => {
+    await clearFleet();
+    const [deviceId] = await seedDevices(1);
+    const s = await openSession(keyA, { 'mfarm:runId': 'tl-incident-dup' });
+
+    const wt = generateWorkerToken();
+    await withSystem((c) => c.query(
+      'UPDATE hosts SET token_prefix = $1, token_hash = $2 WHERE id = $3',
+      [wt.prefix, wt.hash, hostId]));
+    const eventId = randomUUID();
+    const send = () => app.inject({
+      method: 'POST', url: '/v1/workers/events', headers: auth(wt.plaintext),
+      payload: { incidents: [{
+        eventId, deviceId, sessionId: s, reason: 'device-unresponsive',
+        occurredAt: new Date().toISOString(),
+      }] },
+    });
+    await send();
+    await send();
+    await send();
+
+    const body = (await readTimeline(keyA, 'tl-incident-dup')).json();
+    const n = body.events.filter((e: { kind: string }) => e.kind === 'incident').length;
+    assert.equal(n, 1, 'three deliveries of one fault are one fault');
   });
 
   test('a session that names no run produces no events at all', async () => {
@@ -1032,6 +1223,59 @@ describe('timeline honesty on the bound path', () => {
       .find((e) => e.kind === 'device-allocated');
     assert.equal(alloc?.detail.allocatedBy, 'hub');
   });
+
+  /**
+   * WHY `device-released` IS NOT THE SAME EVENT AS `session-ended`, demonstrated rather than
+   * asserted in a comment.
+   *
+   * On the hub path they are one instant and the pair looks redundant. Here they are minutes apart:
+   * `driver.quit()` ends the WebDriver session and the hub deliberately releases NOTHING, because
+   * the caller owns the device (ADR-0002 D1). A timeline that only ever said `session-ended` could
+   * not tell a reader whether their device was still held — which on a four-device farm is the
+   * question they are actually asking.
+   */
+  test('quitting a bound session ends it without releasing the device, and the timeline says so',
+    async () => {
+      await clearFleet();
+      await seedDevices(1);
+
+      const created = await app.inject({
+        method: 'POST', url: '/v1/sessions', headers: auth(keyA),
+        payload: { region: REGION, platform: 'android', requireCapabilities: ['webdriver'] },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      const owned = created.json().session.id as string;
+
+      const bound = await app.inject({
+        method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+        payload: androidCaps({ 'mfarm:sessionId': owned, 'mfarm:runId': 'tl-bound-release' }),
+      });
+      assert.equal(bound.statusCode, 200, bound.body);
+      await quit(keyA, owned);
+
+      const read = async () => (await app.inject({
+        method: 'GET', url: '/v1/runs/tl-bound-release/timeline', headers: auth(keyA),
+      })).json().events.map((e: { kind: string }) => e.kind);
+
+      // After quit: the device is still the caller's, and the timeline must not claim otherwise.
+      const afterQuit = await read();
+      assert.ok(!afterQuit.includes('device-released'),
+        `quit must not release a bound device; saw ${afterQuit.join(',')}`);
+      const state = await withSystem(async (c) => (await c.query(
+        'SELECT state::text AS s FROM sessions WHERE id = $1', [owned])).rows[0].s);
+      assert.equal(state, 'ACTIVE',
+        'the mfarm session outlives the WebDriver session on this path');
+
+      // The CLI gives it back. NOW the device is released, and only now.
+      const del = await app.inject({
+        method: 'DELETE', url: `/v1/sessions/${owned}`, headers: auth(keyA),
+      });
+      assert.equal(del.statusCode, 204, del.body);
+
+      const afterRelease = await read();
+      assert.ok(afterRelease.includes('device-released'),
+        `the release must be on the timeline; saw ${afterRelease.join(',')}`);
+    });
 });
 
 /**
@@ -1181,7 +1425,10 @@ describe('execution event stream, over a real socket', () => {
     // The backlog is what makes this stream self-sufficient. A viewer that fetched /timeline and
     // then subscribed would lose anything in between, and the hole is invisible — the stream looks
     // healthy and the run merely appears to skip a step.
-    const backlogThenLive = readEvents(res, 5);
+    // SIX, not five: the backlog is run-created, device-allocated, session-active, session-ended
+    // and device-released, so the live `run-completed` below is the sixth. Reading only the backlog
+    // count would make this test assert that a live event arrives while never waiting for one.
+    const backlogThenLive = readEvents(res, 6);
 
     // Produce a live one while the stream is open.
     await new Promise((r) => setTimeout(r, 100));

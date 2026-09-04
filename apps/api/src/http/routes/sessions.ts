@@ -8,6 +8,7 @@ import { loadConfig } from '../../config.ts';
 import { requireTenant } from '../server.ts';
 import { notFound, badRequest } from '../errors.ts';
 import { idempotencyKey, claim, complete, abandon } from '../idempotency.ts';
+import { recordSessionEvent } from '../../executionEvents.ts';
 
 const createSchema = {
   body: {
@@ -394,6 +395,19 @@ export async function sessionRoutes(app: FastifyInstance) {
     const { orgId } = requireTenant(req);
     const ok = await release(orgId, req.params.id, 'client_request');
     if (!ok) throw notFound('Active session');
+    /**
+     * `device-released`, which is NOT the same event as `session-ended` (migration 030).
+     *
+     * On the plain WebDriver path the two coincide, which is why the distinction is easy to lose —
+     * and it is exactly the case where losing it costs nothing. On the BOUND path (`mfarm run`,
+     * ADR-0002 D1) they are minutes apart: `driver.quit()` records `session-ended` and the hub
+     * deliberately releases nothing, because the caller still owns the device. THIS is where the
+     * lease actually ends and the device goes to CLEANING.
+     *
+     * Recorded AFTER the release rather than before, so the event cannot claim something the
+     * `release_device` call then failed to do.
+     */
+    await recordSessionEvent(orgId, req.params.id, 'device-released', { reason: 'client_request' });
     return reply.code(204).send();
   });
 }
