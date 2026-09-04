@@ -34,6 +34,31 @@ async function seedDevices(n: number, orgId: string | null = null) {
   });
 }
 
+/**
+ * Devices of a named class, in one region, all otherwise identical.
+ *
+ * `profile` NULL is a real class — this farm's unprofiled devices — so it is seeded deliberately
+ * rather than left off, and the tests below depend on being able to ask for exactly it.
+ */
+async function seedProfiled(profile: string | null, n = 1) {
+  return withSystem(async (c) => {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const { rows } = await c.query(
+        `INSERT INTO devices (host_id, org_id, region, platform, tier, model, os_version, state,
+                              capabilities, profile, screen)
+         VALUES ($1, NULL, $2, 'android', 'cuttlefish', $3, '17', 'READY',
+                 '["screen-stream","app-install"]'::jsonb, $4, $5::jsonb)
+         RETURNING id`,
+        [host, REGION, profile ?? 'cf_x86_64', profile,
+          JSON.stringify(profile ? { width: 1080, height: 2340, density: 450 } : { width: 720, height: 1280, density: 320 })],
+      );
+      ids.push(rows[0].id);
+    }
+    return ids;
+  });
+}
+
 async function resetFleet() {
   // Scoped to this file's own org/host: node:test runs test FILES in parallel against one database,
   // so an unscoped DELETE here would silently wipe the HTTP suite's fixtures mid-run.
@@ -582,5 +607,141 @@ describe('idle WebDriver sweep', () => {
         c.query("SELECT expire_idle_webdriver_sessions(make_interval(secs => 1))")),
       /permission denied/i,
     );
+  });
+});
+
+
+/**
+ * ALLOCATION BY CLASS — migration 037.
+ *
+ * The console's primary action reads "Start MFARM X1 Pro". Until 037 the allocator matched on
+ * region, platform, tier and capabilities and had never matched on profile, so on a farm whose
+ * devices share a tier that button could hand you a different device entirely and say nothing.
+ * These tests are the promise, on both paths that can keep it or break it.
+ */
+describe('allocating a device class', () => {
+  test('a named class allocates only that class', async () => {
+    await resetFleet();
+    const [pro] = await seedProfiled('mfarm-x1-pro');
+    await seedProfiled('mfarm-x1');
+    await seedProfiled(null);
+
+    const a = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish',
+      profile: 'mfarm-x1-pro', matchProfile: true,
+    });
+    assert.equal(a.deviceId, pro, 'asked for an X1 Pro and must get the X1 Pro');
+  });
+
+  /**
+   * THE CASE THAT LOOKS HARDEST TO NOTICE, and the reason `matchProfile` is a second field.
+   *
+   * "No profile" is a class somebody can genuinely ask for — this farm has unprofiled devices and
+   * the picker offers them. With a single nullable parameter that request is indistinguishable
+   * from "any device at all", so pressing "Start Unprofiled device" would allocate an X1 Pro: a
+   * nicer device than was asked for, still not the one the button named, and the kind of wrong
+   * that never generates a complaint.
+   */
+  test('the unprofiled devices are themselves a class you can ask for', async () => {
+    await resetFleet();
+    await seedProfiled('mfarm-x1-pro');
+    const [plain] = await seedProfiled(null);
+
+    const a = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish',
+      profile: null, matchProfile: true,
+    });
+    assert.equal(a.deviceId, plain, 'null profile with matchProfile means the unprofiled class');
+  });
+
+  /**
+   * QUEUED RATHER THAN SUBSTITUTED, which is the whole behaviour the copy promises: "The farm picks
+   * a free MFARM X1 Pro. If none is free when you press this, you will be queued."
+   */
+  test('no free device of that class queues instead of handing over another', async () => {
+    await resetFleet();
+    await seedProfiled('mfarm-x1');      // free, and the wrong class
+    await seedProfiled(null);            // free, and also the wrong class
+
+    const a = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish',
+      profile: 'mfarm-x1-pro', matchProfile: true,
+    });
+    assert.equal(a.state, 'QUEUED');
+    assert.equal(a.deviceId, null, 'two devices were free and neither was the one asked for');
+  });
+
+  /**
+   * THE SLOWER PATH IS THE ONE SOMEBODY IS ACTUALLY WAITING ON.
+   *
+   * `promote_queued` re-runs the decision minutes later off `sessions.constraints`. A constraint
+   * honoured at allocate time and dropped at promotion time is worse than no constraint: it holds
+   * only while you are watching, and breaks precisely when you have gone to make coffee.
+   */
+  test('promotion off the queue honours the class too', async () => {
+    await resetFleet();
+    await seedProfiled('mfarm-x1');
+    const queued = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish',
+      profile: 'mfarm-x1-pro', matchProfile: true,
+    });
+    assert.equal(queued.state, 'QUEUED');
+
+    // A device of the WRONG class turns up free. Nothing should move.
+    await seedProfiled('mfarm-x1');
+    assert.equal((await reap()).promoted, 0, 'a free X1 must not satisfy a request for an X1 Pro');
+
+    // The right one turns up.
+    const [pro] = await seedProfiled('mfarm-x1-pro');
+    assert.equal((await reap()).promoted, 1);
+
+    const row = await withTenant(orgA, async (c) =>
+      (await c.query('SELECT device_id FROM sessions WHERE id = $1', [queued.sessionId])).rows[0]);
+    assert.equal(row.device_id, pro, 'promoted onto the class it queued for');
+  });
+
+  /**
+   * EVERY EXISTING CALLER IS UNCHANGED, which is what makes this migration safe to deploy ahead of
+   * the console that uses it. The CLI and the WebDriver hub want any device they can drive and pass
+   * neither field; `matchProfile` is false and the predicate collapses.
+   */
+  test('a caller that says nothing about class still gets any device', async () => {
+    await resetFleet();
+    await seedProfiled('mfarm-x1-pro');
+    const a = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish',
+    });
+    assert.ok(a.deviceId, 'the hub and the CLI allocate exactly what they allocated before');
+  });
+
+  /**
+   * THE EIGHT-ARGUMENT SIGNATURE STILL EXISTS, and this is the test for the deploy window rather
+   * than for a feature.
+   *
+   * `mfarm-deploy.sh` applies migrations and THEN restarts the API, so for a few seconds the OLD
+   * code serves against the NEW schema — and it calls `allocate_device` with eight arguments. The
+   * same shape is what a rollback looks like, permanently: the deploy script promises "rollback is
+   * this same command with an older sha" and states that migrations do not roll back, so a dropped
+   * signature turns a rollback into a farm that cannot allocate at all.
+   *
+   * Called as raw SQL rather than through `allocate()`, because `allocate()` passes ten arguments
+   * by construction and therefore cannot exercise the path this is about.
+   */
+  test('the previous eight-argument signature still allocates — the deploy window and rollback', async () => {
+    await resetFleet();
+    const [pro] = await seedProfiled('mfarm-x1-pro');
+
+    const row = await withTenant(orgA, async (c) => {
+      const { rows } = await c.query(
+        `SELECT o_device_id AS device_id, o_state AS state
+           FROM allocate_device($1, NULL, $2, 'android', 'cuttlefish',
+                                make_interval(mins => 30), '{}'::jsonb, '[]'::jsonb)`,
+        [orgA, REGION],
+      );
+      return rows[0];
+    });
+
+    assert.equal(row.state, 'ALLOCATING');
+    assert.equal(row.device_id, pro, 'the old signature still hands over a device');
   });
 });

@@ -27,3 +27,15 @@ spikes
 # root, and it silently swallowed the web console's shell as well — the image built cleanly and
 # served a 404 for `/`. Negations are evaluated in order, so this must stay BELOW that rule.
 !apps/api/public/*.html
+
+# The design source, and the one file in it that must never ship.
+#
+# `Farm_app_design_exploration/ref/panel-x1pro.png` is a REAL SCREEN CAPTURE. It exists so the
+# device frames could be designed against real pixels, and it is a stand-in — inside a frame, the
+# only thing that may ever appear is the live framebuffer. A screenshot dressed as a running device
+# is the exact lie the whole frame system is built to avoid.
+#
+# The `*.html` rule above matches root-level files ONLY, so the `.dc.html` documents and this
+# capture would both be copied into the image the moment somebody commits the folder. Nothing
+# references them today; this is what stops that changing quietly.
+Farm_app_design_exploration

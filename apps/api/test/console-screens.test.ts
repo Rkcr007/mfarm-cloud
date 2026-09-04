@@ -20,11 +20,11 @@ process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, rm, mkdtemp } from 'node:fs/promises';
+import { readFile, readdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installDom, countElements, classesOf, textOf } from './dom-shim.ts';
+import { installDom, countElements, classesOf, textOf, findByClass } from './dom-shim.ts';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -46,22 +46,41 @@ let mod: any;
 
 before(async () => {
   /**
-   * `console.js` imports `/live.js` and `/profiles.js` — ABSOLUTE URL paths, which are correct in a
-   * browser (the origin resolves them) and unresolvable in Node, where `/live.js` means the
-   * filesystem root.
+   * The console's modules import each other by ABSOLUTE URL PATH — `/live.js`, `/profiles.js`,
+   * `/icons.js`, `/frame.js` — which is correct in a browser, where the origin resolves them, and
+   * unresolvable in Node, where `/live.js` means the filesystem root.
    *
-   * Rewritten to file URLs in a copy rather than changed at source: the absolute specifier is what
+   * Rewritten to file URLs in a COPY rather than changed at source: the absolute specifier is what
    * makes the console work with no bundler and no import map, and bending the shipped file to suit
-   * a test would be the tail wagging the dog.
+   * a test would be the tail wagging the dog. The copy goes to a temp directory and never into
+   * `public/`, which is served to the internet — see the note on `SHIMMED`.
    *
-   * Rewritten by PATTERN rather than one call per file, because the previous form silently did
-   * nothing for a specifier it did not name — the next browser module added to the console would
-   * have failed every screen test with a module-not-found that points at a temp directory.
+   * THE WHOLE GRAPH, NOT JUST THE ENTRY POINT. This used to rewrite `console.js` alone, which
+   * worked only while every browser module was a leaf. The first module to import another —
+   * `frame.js` importing `/profiles.js` — failed every screen test at once with a
+   * module-not-found pointing at the filesystem root, because the rewrite never reached it. Copying
+   * every module and rewriting each one costs a few milliseconds and cannot go stale: a file added
+   * to `public/` is picked up by being there.
+   *
+   * Subdirectories are skipped deliberately. `public/app/` is the React console's BUILD OUTPUT —
+   * a bundle, not a browser module this console imports, and not something to rewrite.
    */
-  const src = (await readFile(join(PUBLIC, 'console.js'), 'utf8'))
-    .replace(/from '\/([\w.-]+\.js)'/g, (_m, file) => `from ${JSON.stringify(pathToFileURL(join(PUBLIC, file)).href)}`);
-  SHIMMED = join(await mkdtemp(join(tmpdir(), 'mfarm-console-')), 'console.undertest.mjs');
-  await writeFile(SHIMMED, src);
+  const dir = await mkdtemp(join(tmpdir(), 'mfarm-console-'));
+  const modules = (await readdir(PUBLIC, { withFileTypes: true }))
+    .filter((e) => e.isFile() && e.name.endsWith('.js'))
+    .map((e) => e.name);
+
+  const rewrite = (src: string) => src.replace(
+    /from '\/([\w.-]+\.js)'/g,
+    (whole, file: string) => (modules.includes(file)
+      ? `from ${JSON.stringify(pathToFileURL(join(dir, file)).href)}`
+      : whole),
+  );
+
+  for (const name of modules) {
+    await writeFile(join(dir, name), rewrite(await readFile(join(PUBLIC, name), 'utf8')));
+  }
+  SHIMMED = join(dir, 'console.js');
 
   installDom();
   mod = await import(pathToFileURL(SHIMMED).href);
@@ -379,14 +398,39 @@ describe('real and virtual devices are told apart', () => {
     mod.state.deviceKind = 'real';
     const real = textOf(mod.SCREENS.devices());
     assert.match(real, /Pixel 9/);
-    assert.doesNotMatch(real, /cf_x86_64/, 'a virtual device must not survive the real filter');
+    assert.doesNotMatch(real, /Unprofiled device/, 'a virtual device must not survive the real filter');
 
     mod.state.deviceKind = 'virtual';
     const virtual = textOf(mod.SCREENS.devices());
-    assert.match(virtual, /cf_x86_64/);
+    // `dev-1` is an unprofiled Cuttlefish device, and "Unprofiled device" is what it is CALLED —
+    // see `deviceName`. It used to render as its raw model string, `cf_x86_64`, which names an
+    // implementation the reader did not choose and cannot act on.
+    assert.match(virtual, /Unprofiled device/);
     assert.doesNotMatch(virtual, /Pixel 9/);
 
     mod.state.deviceKind = 'all';
+  });
+
+  /**
+   * THE RAW STACK VOCABULARY NEVER APPEARS IN A NAME.
+   *
+   * A device is addressed by what it IS. `cf_x86_64` and `cuttlefish` are still shown — in the
+   * details table, as machine text, where the mono register itself tells the reader this came from
+   * the machine rather than from us. What they may never be is the device's name.
+   *
+   * The physical handset is the exception and is checked here too: `Pixel 9` is its OWN model
+   * number, and naming it accurately is the opposite of the counterfeiting ADR-0017 forbids.
+   */
+  test('a device is named by what it is, not by the stack it runs on', () => {
+    withPhone();
+    mod.state.deviceKind = 'all';
+    const text = textOf(mod.SCREENS.devices());
+
+    assert.doesNotMatch(text, /cf_x86_64/, 'the raw model is not a name');
+    assert.match(text, /Unprofiled device/, 'it is called what it is');
+    assert.match(text, /Pixel 9/, 'a real handset keeps its own model number');
+    // Still present, and still available to copy — placed, not banned.
+    assert.match(text, /cuttlefish/, 'the tier stays in the details table');
   });
 
   /**
@@ -442,7 +486,10 @@ describe('the device detail carries the quarantine gate', () => {
     });
     assert.match(t, /adb keeps dropping mid-session/);
     assert.match(t, /failed a health check/i, 'the source is what says where to look');
-    assert.match(t, /Release quarantine/);
+    // The button names the AUTHORISATION, not an outcome the operator cannot produce. "Release
+    // quarantine" promised a state change that releasing does not make — only a passing health
+    // check returns the device to the pool.
+    assert.match(t, /Authorise one recovery attempt/);
   });
 
   test('and the screen refuses to imply that releasing makes it available', () => {
@@ -463,14 +510,14 @@ describe('the device detail carries the quarantine gate', () => {
     });
     assert.match(t, /usb dropped/, 'what it is recovering FROM is the context for the wait');
     assert.match(t, /health check/i);
-    assert.doesNotMatch(t, /Release quarantine/,
+    assert.doesNotMatch(t, /Authorise one recovery attempt/,
       'there is nothing left to release — a second click must not be offered');
   });
 
   test('a healthy device offers the way IN, since §30 needs one', () => {
     const t = withDevice({ state: 'READY' });
     assert.match(t, /Quarantine device/);
-    assert.doesNotMatch(t, /Release quarantine/);
+    assert.doesNotMatch(t, /Authorise one recovery attempt/);
   });
 });
 
@@ -771,7 +818,7 @@ describe('device profiles', () => {
     assert.doesNotMatch(text, /Screen/, 'an N-1 worker sends no screen; a "— × —" row is worse than none');
   });
 
-  test('the stage draws a body and a punch-hole for a profiled device', () => {
+  test('the stage draws a chassis and a punch-hole for a profiled device', () => {
     withProfiled();
     mod.state.route = { name: 'cockpit', id: 'sess-1' };
     // `state.detail`, which is the key the cockpit actually reads. It was `state.sessionDetail`
@@ -780,33 +827,53 @@ describe('device profiles', () => {
     // passed, because the two it made are true of every device.
     mod.state.detail = { ...mod.state.detail, deviceId: 'dev-3' };
     mod.state.stage = null;
-    const classes = classesOf(mod.SCREENS.cockpit());
-    assert.ok(classes.includes('dev-body'), 'the phone body');
-    assert.ok(classes.includes('dev-cutout'), 'the camera, which sits IN the display on this body');
+    const tree = mod.SCREENS.cockpit();
+    const classes = classesOf(tree);
+    assert.ok(classes.includes('mf-chassis'), 'the phone body');
+    assert.ok(classes.includes('mf-glass'), 'the screen box, which carries the panel radius');
+
     /**
-     * The SIDE BUTTONS, and this is the assertion that carries the test.
+     * THE RAILS ARE THE ASSERTION THAT CARRIES THIS TEST.
      *
-     * `dev-body` and `dev-cutout` are built once with the panel and exist for EVERY device, profiled
-     * or not — so asserting them proves the panel was built and nothing more. This one is different:
-     * a button only exists when `chromeFor` matched a real profile, so it is the only line here that
-     * fails if the device never resolves and the chrome silently falls back to plain.
+     * `mf-chassis`, `mf-glass` and `mf-cutout` are built once with the panel and exist for EVERY
+     * device, profiled or not — the cutout is merely `hidden` when there is none — so asserting
+     * them proves the frame was built and nothing more. A rail is different: `frameFor` returns an
+     * EMPTY rail list for the neutral chassis, so a rail element exists only when the resolver
+     * matched a real profile. It is the one line here that fails if the device never resolves and
+     * the frame silently falls back to unprofiled.
      *
-     * It is also the line that would have caught the crash. Buttons are the one piece of chrome
-     * written through `h()`, and `h()` writes styles as `Object.assign(node.style, value)` — a
+     * It is also the line that would have caught the old crash. Rails are the one piece of chrome
+     * built element-by-element, and `h()` writes styles as `Object.assign(node.style, value)` — a
      * string there spreads across the indices `0`, `1`, `2`… A real `CSSStyleDeclaration` throws on
      * that; the shim used to accept it. Both halves are fixed, and this reaches the code.
      */
-    assert.ok(classes.includes('dev-btn-right'), 'the volume and power keys down the right edge');
+    assert.ok(classes.includes('mf-rail'), 'the volume and power keys down the right edge');
+
+    // And the punch-hole is actually SHOWN, not merely present. `hidden` is how a frame with no
+    // cutout is drawn, so "the element exists" and "this device has a camera" are separate facts.
+    const cutout = findByClass(tree, 'mf-cutout');
+    assert.ok(cutout, 'the cutout element');
+    assert.equal(cutout.hidden, false, 'an X1 Pro has a punch-hole and it is drawn');
   });
 
-  test('an unprofiled device still renders — the plain bezel is the ordinary case', () => {
+  test('an unprofiled device still renders — the neutral chassis is the ordinary case', () => {
     // Two of this farm's four devices are deliberately unprofiled, every physical handset is, and an
     // N-1 worker profiles nothing. This path is the common one and must never look like an error.
     seed({ name: 'cockpit', id: 'sess-1' });
     mod.state.stage = null;
     const tree = mod.SCREENS.cockpit();
     assert.ok(countElements(tree) > 0);
-    assert.ok(classesOf(tree).includes('dev-frame'), 'the screen is still drawn');
+    assert.ok(classesOf(tree).includes('mf-glass'), 'the screen is still drawn');
+
+    /**
+     * AND IT HAS NO CUTOUT, which is the honest half rather than an omission.
+     *
+     * We do not know where this device's camera is, so drawing one would be inventing data — and
+     * the whole point of the neutral chassis is that it is honest about what the farm knows:
+     * geometry, and nothing more.
+     */
+    assert.equal(findByClass(tree, 'mf-cutout')?.hidden, true, 'no camera is invented');
+    assert.ok(!classesOf(tree).includes('mf-rail'), 'no side keys are invented either');
   });
 
   test('an unknown profile falls back instead of blanking the panel', () => {
@@ -815,6 +882,199 @@ describe('device profiles', () => {
     seed({ name: 'cockpit', id: 'sess-1' });
     mod.state.devices[0].profile = 'mfarm-x9-from-the-future';
     mod.state.stage = null;
-    assert.ok(classesOf(mod.SCREENS.cockpit()).includes('dev-frame'));
+    assert.ok(classesOf(mod.SCREENS.cockpit()).includes('mf-glass'));
+  });
+
+  /**
+   * The frame's SHAPE comes from the device's own pixels, never from the profile table.
+   *
+   * A 720×1280 device is visibly stubbier than a 1080×2340 one and it must be — screen shape is the
+   * reason somebody chose a device, so the frame is where that difference becomes visible before
+   * they start testing. This is the assertion that fails if the aspect is ever taken from the table
+   * instead, which would draw a shape the device is not.
+   */
+  test('the panel aspect is the device\'s reported geometry', () => {
+    withProfiled();
+    mod.state.route = { name: 'cockpit', id: 'sess-1' };
+    mod.state.detail = { ...mod.state.detail, deviceId: 'dev-3' };
+    mod.state.stage = null;
+    mod.SCREENS.cockpit();
+
+    const frame = mod.state.stage.dom.root;
+    assert.equal(frame.style['--f-aspect'], String(1080 / 2340));
+  });
+});
+
+/**
+ * THE COPY RULES, asserted rather than reviewed.
+ *
+ * Copy is the part of a design that decays fastest, because every one of these sentences is one
+ * edit away from being replaced by something shorter that means something slightly different — and
+ * nothing in a code review reliably catches "this button now promises an outcome it cannot
+ * produce". These tests are the rules from the copy deck, in the places they apply.
+ */
+describe('the copy rules hold', () => {
+  /**
+   * THE ONE RULE UNDER ALL OF IT: a device is addressed by what it IS.
+   *
+   * Internal vocabulary — tier, cuttlefish, fence, host id, region code — belongs in a details
+   * panel or a copyable field, never in a button or a heading. It is not banned, it is PLACED: the
+   * mono register tells the reader a string came from the machine rather than from us, which is
+   * exactly why it can stay where it is genuinely useful.
+   */
+  test('no button or heading names the stack', () => {
+    seed({ name: 'devices' });
+    // Nobody is holding it, so the card offers the primary action rather than "View session".
+    mod.state.sessions = [];
+    mod.state.held = null;
+    const text = textOf(mod.SCREENS.devices());
+    assert.doesNotMatch(text, /on tier /i, 'a tier is not something a person chose');
+    assert.doesNotMatch(text, /Start a session on/i);
+    assert.match(text, /Start Unprofiled device/, 'the primary action names the device');
+  });
+
+  /**
+   * A CAPACITY LINE IS A FRACTION.
+   *
+   * "3 free" answers "can I get one" and stops. "3 of 4" also answers "is this farm nearly full",
+   * which is the question behind it and the one that decides whether somebody starts now or waits.
+   */
+  test('capacity is stated as a fraction, never a bare count', () => {
+    seed({ name: 'launch' });
+    const text = textOf(mod.SCREENS.launch());
+    assert.match(text, /\d+ of \d+ (free|busy)/, 'the denominator is not decoration');
+  });
+
+  /**
+   * NO LIVE VIEW IS A PROPERTY OF THE DEVICE, NOT A FAULT.
+   *
+   * This panel is otherwise identical to the ones reporting a real failure, so the words are the
+   * only thing separating "this cannot happen here" from "this went wrong" — and naming what still
+   * works is what stops somebody abandoning a device that would have served them fine.
+   */
+  test('a device with no screen-stream is not described as broken', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].capabilities = ['app-install', 'webdriver', 'logcat'];
+    mod.state.stage = null;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /property of the device, not a fault/);
+    assert.match(text, /Input, logcat, install and WebDriver still work/);
+    assert.doesNotMatch(text, /failed|error/i, 'nothing here went wrong');
+  });
+
+  /**
+   * BEING QUEUED SAYS THAT THE PAGE MOVES ON BY ITSELF.
+   *
+   * A rank alone — "Queue 4", "Position 4 of 6" — leaves the reader to work out whether they have
+   * to keep watching. And there is deliberately NO ETA: producing one needs every current holder's
+   * lease time, which the sessions list does not return, so a number here would be invented.
+   */
+  test('the queued state promises the handover and estimates nothing', () => {
+    seed({ name: 'launching', id: 'sess-q' });
+    mod.state.sessions = [{
+      id: 'sess-q', state: 'QUEUED', deviceId: null, region: 'lab',
+      createdAt: new Date().toISOString(), startedAt: null, expiresAt: null,
+      endedAt: null, endReason: null,
+    }];
+    mod.state.bringup = { sessionId: 'sess-q', appId: null, launchAfter: false, install: null, launch: null, error: null };
+    // `screenLaunching` reads `state.detail`, not the list — the list is what `queueNote` ranks
+    // against, so both are needed and they are two different reads.
+    mod.state.detail = { ...mod.state.sessions[0], fetchedAt: Date.now() };
+    const text = textOf(mod.SCREENS.launching('sess-q'));
+    assert.match(text, /moves on by itself/);
+    assert.doesNotMatch(text, /about \d+ minutes|estimated|ETA/i,
+      'the API does not report other tenants\' lease times, so any estimate here is invented');
+  });
+
+  /**
+   * A DESTRUCTIVE-ADJACENT BUTTON NAMES THE AUTHORISATION, NOT AN OUTCOME.
+   *
+   * Releasing a quarantine does not return the device to the pool; it permits one restart and one
+   * health check, and only a passing check puts it back. The green safety line has to survive too,
+   * because it is the last thing read before the click.
+   */
+  test('the quarantine gate promises only what it can deliver', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    mod.state.devices[0].state = 'QUARANTINED';
+    mod.state.devices[0].quarantine = { at: new Date().toISOString(), reason: 'frozen', source: 'health' };
+    const text = textOf(mod.SCREENS.device('dev-1'));
+    assert.match(text, /Authorise one recovery attempt/);
+    assert.match(text, /only a passing (health )?check/i, 'the safety property, immediately above the button');
+  });
+
+  /**
+   * IDLE IS NOT PROGRESS.
+   *
+   * `ensureLive` returns without starting anything when a session carries no browser route to the
+   * data plane, leaving `liveState` at its initial `idle`. The overlay's `default:` arm used to
+   * catch that alongside the three real negotiation states, so the panel drew a ring at 80% and
+   * "Negotiating the media connection" for a connection nobody had attempted — a bar filling for
+   * something that is not happening, which is the exact motion this console refuses to ship. It
+   * also contradicted the panel beside it, which was already saying there were no data-plane
+   * coordinates.
+   *
+   * Found by opening the page and reading it, not by a test — 80 of these were green while it was
+   * on screen. That is the argument for looking at the thing.
+   */
+  test('a session with no data-plane route does not pretend to be connecting', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.liveState = 'idle';
+    mod.state.stage = null;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.doesNotMatch(text, /Negotiating the media connection/,
+      'nothing is being negotiated — there is no route to negotiate over');
+    assert.doesNotMatch(text, /\d+\s*%/, 'a percentage nobody reported is an invented number');
+    assert.match(text, /no route to the data plane/i);
+    assert.match(text, /WebDriver still works/, 'what does work is the half that keeps somebody moving');
+  });
+
+  /**
+   * DEPTH IS A STATE VARIABLE, and the frame has to be told which one.
+   *
+   * `stageState` first tested for the LiveSession OBJECT, which exists from the moment a socket
+   * opens and says nothing about whether anything is on screen — so a cockpit mid-negotiation
+   * reported `off`, the shadow never landed, and the whole mechanic silently did nothing while
+   * looking implemented. It reads the state machine now, which is what the overlay beside it reads.
+   */
+  test('the frame reports the panel state the live view is actually in', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+
+    for (const [liveState, expected] of [
+      ['idle', 'off'],
+      ['connecting', 'waking'],
+      ['negotiating', 'waking'],
+      ['streaming', 'live'],
+      ['nostream', 'nosignal'],
+      ['failed', 'off'],
+    ] as const) {
+      mod.state.liveState = liveState;
+      mod.state.stage = null;
+      const tree = mod.SCREENS.cockpit();
+      const frame = findByClass(tree, 'mf-device');
+      assert.equal(frame?.dataset.state, expected, `liveState "${liveState}" should draw "${expected}"`);
+    }
+  });
+
+  /**
+   * A SESSION THAT ENDED SAYS WHO ENDED IT AND WHEN.
+   *
+   * "Session ended" is the state, and the state is the least useful thing to tell somebody looking
+   * at a screen that visibly stopped. The reasons are keyed on the literals the control plane
+   * actually writes — a merely plausible key falls through to the generic word while looking as
+   * though it explained something.
+   */
+  test('an ended session explains itself from real end reasons', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.sessions = [{
+      ...mod.state.sessions[0],
+      state: 'ENDED', endReason: 'client_request',
+      endedAt: new Date().toISOString(),
+      startedAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+    }];
+    mod.state.detail = { ...mod.state.sessions[0] };
+    mod.state.stage = null;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Released by you/);
+    assert.match(text, /back in the pool/);
   });
 });

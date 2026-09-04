@@ -4,6 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MFARM Console</title>
+<!--
+  TOKENS FIRST, then the component stylesheet that consumes them. Two files rather than one because
+  `design-tokens.css` is shared with the React console at /app — see its header.
+
+  The three faces are PRELOADED. Without this the browser does not discover them until it has parsed
+  design-tokens.css, matched a rule and laid out a text node, which is three round trips deep and
+  shows as a flash of the fallback face on every cold load. `crossorigin` is required on a font
+  preload even same-origin: fonts are fetched in CORS mode, and a preload without it warms a
+  different cache entry than the one @font-face then asks for — the file is fetched twice and the
+  preload buys nothing.
+
+  Only two of the three. Mono is not on the critical path for first paint — preloading everything
+  is the same as preloading nothing, because it puts three fonts in front of the stylesheet that
+  decides which of them the page actually needs.
+-->
+<link rel="preload" href="/fonts/instrument-sans-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/design-tokens.css">
 <link rel="stylesheet" href="/console.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23755EB8'/><text x='8' y='12' font-size='11' font-family='monospace' fill='white' text-anchor='middle'>M</text></svg>">
 </head>
@@ -90,14 +108,19 @@
     <!-- Farm status. A button, because it goes somewhere: Health. -->
     <button class="farmstat" id="farmstat" title="Open farm health">
       <span class="seg"><span class="dot ok live" id="fs-dot"></span><b id="fs-devices">—</b> ready</span>
-      <span class="seg">Queue <b id="fs-queue">—</b></span>
+      <!--
+        The queue segment carries the WHOLE phrase, not a number after a label. "Queue 0" makes the
+        reader translate a zero into "nobody is waiting" on every glance; the sentence does that
+        work once, here. `renderChrome` writes it.
+      -->
+      <span class="seg" id="fs-queue">—</span>
       <span class="seg" id="fs-holding">Holding <b id="fs-held">—</b></span>
     </button>
 
     <span class="spacer"></span>
 
     <button class="palette-btn" id="palette-btn">
-      <span>Search or run command</span><span class="spacer"></span><kbd id="palette-kbd">&#8984;K</kbd>
+      <span>Search or run a command</span><span class="spacer"></span><kbd id="palette-kbd">&#8984;K</kbd>
     </button>
 
     <!--
@@ -113,22 +136,28 @@
     </div>
   </header>
 
+  <!--
+    The nav's icons are NAMED HERE and DRAWN BY `console.js`, which is the only shape that works
+    under this CSP: an inline <svg> per item would be ten copies of Lucide geometry in the document,
+    and an external sprite referenced by <use> is a fetch `default-src 'none'` forbids. Each glyph
+    span is deliberately empty until `paintNavIcons()` fills it — see console.js.
+  -->
   <nav class="sidebar" id="sidebar">
     <p class="navgroup">Farm</p>
-    <button class="navitem" data-route="launch"><span class="glyph">&#9654;</span><span class="txt">Launch</span><span class="sc">G L</span></button>
-    <button class="navitem" data-route="devices"><span class="glyph">&#9632;</span><span class="txt">Devices</span><span class="sc">G D</span></button>
-    <button class="navitem" data-route="apps"><span class="glyph">&#10010;</span><span class="txt">Apps</span><span class="sc">G A</span></button>
-    <button class="navitem" data-route="sessions"><span class="glyph">&#9776;</span><span class="txt">Sessions</span><span class="sc">G R</span></button>
-    <button class="navitem" data-route="runs"><span class="glyph">&#9636;</span><span class="txt">Runs</span><span class="sc">G U</span></button>
+    <button class="navitem" data-route="launch"><span class="glyph" data-icon="launch"></span><span class="txt">Launch</span><span class="sc">G L</span></button>
+    <button class="navitem" data-route="devices"><span class="glyph" data-icon="devices"></span><span class="txt">Devices</span><span class="sc">G D</span></button>
+    <button class="navitem" data-route="apps"><span class="glyph" data-icon="apps"></span><span class="txt">Apps</span><span class="sc">G A</span></button>
+    <button class="navitem" data-route="sessions"><span class="glyph" data-icon="sessions"></span><span class="txt">Sessions</span><span class="sc">G R</span></button>
+    <button class="navitem" data-route="runs"><span class="glyph" data-icon="runs"></span><span class="txt">Runs</span><span class="sc">G U</span></button>
 
     <p class="navgroup">Operations</p>
-    <button class="navitem" data-route="queue"><span class="glyph">&#8942;</span><span class="txt">Queue</span><span class="sc">G Q</span></button>
-    <button class="navitem" data-route="health"><span class="glyph">&#9678;</span><span class="txt">Health</span><span class="sc">G H</span></button>
+    <button class="navitem" data-route="queue"><span class="glyph" data-icon="queue"></span><span class="txt">Queue</span><span class="sc">G Q</span></button>
+    <button class="navitem" data-route="health"><span class="glyph" data-icon="health"></span><span class="txt">Health</span><span class="sc">G H</span></button>
 
     <p class="navgroup">Organisation</p>
-    <button class="navitem" data-route="agents"><span class="glyph">&#9741;</span><span class="txt">Agents</span><span class="sc">G G</span></button>
-    <button class="navitem" data-route="team"><span class="glyph">&#9679;</span><span class="txt">Team</span><span class="sc">G T</span></button>
-    <button class="navitem" data-route="settings"><span class="glyph">&#9881;</span><span class="txt">Settings</span><span class="sc">G S</span></button>
+    <button class="navitem" data-route="agents"><span class="glyph" data-icon="agents"></span><span class="txt">Agents</span><span class="sc">G G</span></button>
+    <button class="navitem" data-route="team"><span class="glyph" data-icon="team"></span><span class="txt">Team</span><span class="sc">G T</span></button>
+    <button class="navitem" data-route="settings"><span class="glyph" data-icon="settings"></span><span class="txt">Settings</span><span class="sc">G S</span></button>
 
     <!--
       Still no Activity item. The design has one; the API has no fleet-wide feed behind it, only the
@@ -138,7 +167,7 @@
 
     <span class="spacer"></span>
 
-    <button class="navtoggle" id="navtoggle"><span aria-hidden="true">&laquo;</span> <span class="txt">Collapse</span></button>
+    <button class="navtoggle" id="navtoggle"><span class="glyph" data-icon="collapse"></span><span class="txt">Collapse</span></button>
 
     <div class="sessioncard" id="sessioncard" hidden>
       <p class="micro">Your session</p>
@@ -158,7 +187,7 @@
 <div class="scrim" id="scrim" hidden></div>
 
 <div class="palette" id="palette" hidden role="dialog" aria-label="Command palette">
-  <input id="palette-input" type="text" placeholder="Search or run command" autocomplete="off" spellcheck="false">
+  <input id="palette-input" type="text" placeholder="Search devices, sessions, builds, or run a command" autocomplete="off" spellcheck="false">
   <ul id="palette-list"></ul>
   <footer>&uarr;&darr; navigate &middot; &crarr; run &middot; esc close</footer>
 </div>

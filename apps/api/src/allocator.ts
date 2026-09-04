@@ -13,6 +13,19 @@ export interface AllocationRequest {
   requested?: Record<string, unknown>;
   /** Capabilities the device must declare. The WebDriver hub uses this to demand `webdriver`. */
   requireCapabilities?: string[];
+  /**
+   * The device CLASS to allocate, when the caller is asking for one.
+   *
+   * Two fields rather than one nullable field, because "no profile" is itself a class somebody can
+   * ask for — this farm's unprofiled devices are a real thing to want, and with a single nullable
+   * value they would be indistinguishable from "any device at all". `matchProfile` says the caller
+   * is constraining; `profile` says to what. See migration 037.
+   *
+   * Omitted by the CLI and the WebDriver hub, which want any device they can drive — so their
+   * behaviour is byte-for-byte what it was.
+   */
+  profile?: string | null;
+  matchProfile?: boolean;
 }
 
 export interface Allocation {
@@ -34,7 +47,7 @@ export async function allocate(req: AllocationRequest): Promise<Allocation> {
     const { rows } = await c.query(
       `SELECT o_session_id AS session_id, o_device_id AS device_id,
               o_fence AS fence, o_state AS state
-         FROM allocate_device($1, $2, $3, $4, $5, make_interval(mins => $6), $7, $8)`,
+         FROM allocate_device($1, $2, $3, $4, $5, make_interval(mins => $6), $7, $8, $9, $10)`,
       [
         req.orgId,
         req.userId,
@@ -44,6 +57,8 @@ export async function allocate(req: AllocationRequest): Promise<Allocation> {
         req.ttlMinutes ?? 30,
         JSON.stringify(req.requested ?? {}),
         JSON.stringify(req.requireCapabilities ?? []),
+        req.profile ?? null,
+        req.matchProfile ?? false,
       ],
     );
     const r = rows[0];

@@ -6,87 +6,49 @@
  * are the only other colour, and they never carry state alone — every state in the markup pairs a
  * dot with a label and a timestamp.
  *
- * System mono only. The CSP forbids external origins, so there are no webfonts to fall back from.
+ * THREE SELF-HOSTED FAMILIES, and the register they carry is load-bearing: Bricolage Grotesque
+ * for display, Instrument Sans for anything MFARM wrote to a human, JetBrains Mono for anything the
+ * machine produced. The CSP still forbids external origins — the faces are served from this same
+ * origin under `/fonts`, which cost exactly one directive (`font-src 'self'`) and no third party in
+ * the load path. This file previously said "system mono only"; that stopped being true when the
+ * three faces landed.
  *
- * The runtime knobs at the top of :root are consumed everywhere through var() WITH A LITERAL
- * FALLBACK, so a stylesheet that loads before the script still renders correctly and the four
- * tweaks (accent, density, liveness, nav width) apply without a re-render.
+ * EVERY TOKEN LIVES IN `design-tokens.css` NOW, not here. That file is linked before this one in
+ * `index.html` and is shared with the React console at `/app`, which is the whole reason it is
+ * separate: a token defined inside a component stylesheet is a token only that component can have.
+ * Adding a colour, a radius or a duration means editing that file, never this one.
+ *
+ * The runtime knobs are consumed everywhere through var() WITH A LITERAL FALLBACK, so a stylesheet
+ * that loads before the script still renders correctly and the four tweaks (accent, density,
+ * liveness, nav width) apply without a re-render.
  */
 
-:root {
-  /* -------------------------------------------------------------- runtime knobs */
-  --mf-accent: #755EB8;
-  --mf-accent-soft: rgba(117, 94, 184, .16);
-  --mf-accent-line: rgba(117, 94, 184, .42);
-  --mf-cp: 15px;   /* card padding   */
-  --mf-rp: 13px;   /* row padding    */
-  --mf-gap: 16px;  /* grid gap       */
-  --mf-pulse: 2.2s;
-  --mf-navw: 198px;
-  --mf-navlabel: block;
+/**
+ * The nav-collapse knob is the ONE token that stays here, and the reason is scope: it is not a
+ * design decision, it is this shell's own geometry. `design-tokens.css` is shared with a console
+ * whose sidebar does not collapse to 56px, and shipping it a width for a rail it does not have
+ * would be a token that describes nothing.
+ */
+:root[data-nav="icons"] { --mf-navw: 56px; --mf-navlabel: none; }
 
-  /* -------------------------------------------------------------- surfaces */
-  --s-app: #08080A;
-  --s-chrome: #050506;
-  --s-nav: #0A0A0C;
-  --s-card: #0D0D0F;
-  --s-inset: #050506;
-  --s-overlay: #101012;
-  --s-btn: #131315;
-  --s-chip: #191919;
+/* ---------------------------------------------------------------------------- type */
 
-  /* -------------------------------------------------------------- borders */
-  --b-card: #1F1F22;
-  --b-chrome: #191919;
-  --b-field: #242427;
-  --b-btn: #2B2B2E;
-  --b-inset: #1A1A1C;
-  --b-row: #151517;
-  --b-overlay: #2E2E31;
-  --b-dash: #303033;
-  --b-hover: #3A3A3D;
-  --b-hover-strong: #454548;
-
-  /* -------------------------------------------------------------- text */
-  --t-primary: #F1F1F1;
-  --t-body: #D4D4D4;
-  --t-secondary: #C4C4C4;
-  --t-label: #8A8A8A;
-  --t-help: #787878;
-  --t-caption: #6A6A6A;
-  --t-micro: #5A5A5A;
-  --t-navhead: #484848;
-  --t-nav: #ADADAD;
-
-  /* -------------------------------------------------------------- semantic */
-  --ok-dot: #6FCB63;
-  --ok-text: #7FD873;
-  --ok-bg: rgba(111, 203, 99, .10);
-  --ok-line: rgba(111, 203, 99, .28);
-
-  --warn: #E8A30E;
-  --warn-bg: rgba(232, 163, 14, .06);
-  --warn-line: rgba(232, 163, 14, .24);
-
-  --bad-dot: #E0505F;
-  --bad-text: #EE7C88;
-  --bad-mono: #F0A0A8;
-  --bad-bg: rgba(224, 80, 95, .07);
-  --bad-line: rgba(224, 80, 95, .30);
-  --bad-solid: #B32333;
-  --bad-solid-hover: #C93343;
-  --bad-outline: #4A2436;
-
-  --info: #7FA0D8;
-
-  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-/* Density tweak. Comfortable is the default above. */
-:root[data-density="compact"]     { --mf-cp: 11px; --mf-rp: 10px; --mf-gap: 12px; }
-:root[data-density="airy"]        { --mf-cp: 21px; --mf-rp: 16px; --mf-gap: 22px; }
-:root[data-liveness="still"]      { --mf-pulse: 0s; }
-:root[data-nav="icons"]           { --mf-navw: 56px; --mf-navlabel: none; }
+/**
+ * THE TYPE SCALE, applied. The families and the metrics are in `design-tokens.css`; what follows is
+ * the mapping from a role to the markup that wears it.
+ *
+ * Tracking is set alongside the `font:` shorthand rather than inside it, because the shorthand
+ * resets `letter-spacing` to normal and cannot carry it — a display heading that quietly loses its
+ * -3.5% is the single most common way this scale gets undone by a later edit.
+ */
+.t-display-xl { font: var(--ty-display-xl); letter-spacing: var(--tr-display-xl); color: var(--t-primary, #F1F1F1); }
+.t-display-lg { font: var(--ty-display-lg); letter-spacing: var(--tr-display-lg); color: var(--t-primary, #F1F1F1); }
+.t-display-md { font: var(--ty-display-md); letter-spacing: var(--tr-display-md); color: var(--t-primary, #F1F1F1); }
+.t-stat       { font: var(--ty-stat); font-variant-numeric: tabular-nums; color: var(--t-primary, #F1F1F1); }
+.t-body       { font: var(--ty-body); }
+.t-strong     { font: var(--ty-strong); }
+.t-machine    { font: var(--ty-machine); }
+.t-log        { font: var(--ty-log); font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------------------- reset */
 
@@ -94,15 +56,23 @@
 
 html, body { height: 100%; }
 
+/**
+ * THE DEFAULT IS SANS NOW, and that is the single highest-leverage line in this file.
+ *
+ * The console used to set `--mono` on `<body>`, so every sentence MFARM wrote to a human inherited
+ * a monospace face. That inverts the register rule the whole system rests on: mono is how the
+ * reader knows a string came out of the machine, and when the prose is mono too, the signal carries
+ * nothing. Machine text now opts IN through `.mono`, `code`, `.t-machine` and `.t-log`.
+ */
 body {
   margin: 0;
   background: var(--s-app, #08080A);
   color: var(--t-body, #D4D4D4);
-  font-family: var(--mono);
-  font-size: 12.5px;
-  letter-spacing: .01em;
-  line-height: 1.55;
+  font-family: var(--f-ui);
+  font-size: 13px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 h1, h2, h3, p, dl, dd, figure { margin: 0; }
@@ -117,13 +87,21 @@ button, input, select, textarea {
 button { cursor: pointer; background: none; border: none; padding: 0; }
 button[disabled] { cursor: not-allowed; opacity: .45; }
 
-code, .mono { font-family: var(--mono); }
+/* Machine text opts in. Always selectable — a value you cannot select is a value you cannot use. */
+code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; }
 
 [hidden] { display: none !important; }
 
+/**
+ * The focus ring, and it is NEVER SUPPRESSED anywhere in this stylesheet.
+ *
+ * `--b-focus` is its own token rather than the accent, because in light theme the accent is dark
+ * enough that a 2px ring around a dark button vanishes into it. Offset 2px so the ring sits outside
+ * a filled control rather than eating its first two pixels of padding.
+ */
 :focus-visible {
-  outline: 2px solid var(--mf-accent, #755EB8);
-  outline-offset: 1px;
+  outline: 2px solid var(--b-focus, #8A74D6);
+  outline-offset: 2px;
 }
 
 ::selection { background: var(--mf-accent-soft, rgba(117,94,184,.16)); }
@@ -156,6 +134,22 @@ code, .mono { font-family: var(--mono); }
 .caption { font-size: 11px; color: var(--t-caption, #6A6A6A); }
 .secondary { color: var(--t-secondary, #C4C4C4); }
 
+/**
+ * The icon element itself.
+ *
+ * `flex: 0 0 auto` so an icon never shrinks when the label beside it is long — a squashed 16px
+ * glyph is the tell that an icon set was retrofitted. `vertical-align` because an inline icon sits
+ * on the text baseline and Lucide's 24px box has its optical centre slightly above it.
+ *
+ * NO COLOUR OF ITS OWN. `stroke: currentColor` is set on the element in `icons.js`, so an icon
+ * takes the colour of the text it sits with and can never disagree with its label — which is also
+ * why an icon in this console never carries meaning on its own.
+ */
+.icon {
+  flex: 0 0 auto;
+  vertical-align: -.15em;
+}
+
 /* Status dot. Never alone — the markup always pairs it with a word. */
 .dot {
   width: 6px; height: 6px;
@@ -172,37 +166,79 @@ code, .mono { font-family: var(--mono); }
 .dot.live  { animation: mf-pulse var(--mf-pulse, 2.2s) ease-in-out infinite; }
 
 /* Status pill. */
+/**
+ * Status pill. Dot + label, always, and a timestamp ADJACENT rather than inside.
+ *
+ * The timestamp sits beside the pill rather than within it for a layout reason and a meaning one.
+ * A pill that grows to hold `2 minutes ago` stops being a fixed-width token you can scan down a
+ * column of; and the pill states a CONDITION while the timestamp states WHEN IT WAS OBSERVED,
+ * which are two facts that age differently — a stale poll invalidates the second without touching
+ * the first.
+ *
+ * `--r-pill` now, not the old 2px. 06 gives pills and chips the pill radius and everything else the
+ * ordinary scale, which is what makes a status token read as a token rather than as a small button.
+ */
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 8px;
+  padding: 4px 9px;
   border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 2px;
-  font-size: 10px;
+  border-radius: var(--r-pill, 999px);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: .1em;
+  letter-spacing: .05em;
   color: var(--t-label, #8A8A8A);
   white-space: nowrap;
 }
+/**
+ * Pill + timestamp, laid out as one unit.
+ *
+ * The timestamp is a SIBLING of the pill rather than a child, so the pill keeps the fixed width
+ * that makes a column of them scannable — and so the two can age independently, which they do: the
+ * pill says what the condition is, the timestamp says when we last saw it be that.
+ */
+.pill-row { display: inline-flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+.pill-at  { font-family: var(--f-mono); font-size: 10.5px; color: var(--t-caption, #6A6A6A); }
+
 .pill.ok     { color: var(--ok-text, #7FD873);  background: var(--ok-bg);  border-color: var(--ok-line); }
 .pill.warn   { color: var(--warn, #E8A30E);     background: var(--warn-bg); border-color: var(--warn-line); }
 .pill.bad    { color: var(--bad-text, #EE7C88); background: var(--bad-bg); border-color: var(--bad-line); }
 .pill.info   { color: var(--info, #7FA0D8);     background: rgba(127,160,216,.07); border-color: rgba(127,160,216,.26); }
 .pill.accent { color: #C9BCF0; background: var(--mf-accent-soft); border-color: var(--mf-accent-line); }
 
-/* Capability chip. A capability the device does NOT have renders as a struck-through x chip
-   rather than being hidden, so the absence is legible instead of merely missing. */
+/**
+ * Capability chip.
+ *
+ * A capability the device does NOT declare renders struck through, present and dimmed — never
+ * removed. Filtering an absence out of the list is how a console starts lying by omission: the
+ * reader cannot tell "this device cannot do it" from "nobody thought to show it", and the second
+ * reading is the one that sends somebody to debug a feature that was never there.
+ *
+ * THE ✓ AND × GLYPHS ARE GONE, and their absence is the design decision. FILL AND STRIKE ALREADY
+ * CARRY IT: a filled chip is present, a transparent struck one is not, and adding a tick to the
+ * first said the same thing twice while adding a cross to the second competed with the strike for
+ * the same meaning. It also makes the chip a capability NAME rather than a name plus punctuation,
+ * which matters because the name is a machine string somebody may need to copy.
+ */
 .chip {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 8px;
+  padding: 4px 9px;
   background: var(--s-chip, #191919);
   border: 1px solid var(--b-inset, #1A1A1C);
-  border-radius: 2px;
-  font-size: 11px;
+  border-radius: var(--r-pill, 999px);
+  font-family: var(--f-mono);
+  font-size: 10.5px;
   color: var(--t-secondary, #C4C4C4);
 }
-.chip.yes::before { content: "\2713"; color: var(--ok-text, #7FD873); }
-.chip.no  { color: var(--t-micro, #5A5A5A); background: transparent; }
-.chip.no::before  { content: "\00D7"; }
+.chip.no {
+  color: var(--t-strike, #4A4A4A);
+  background: transparent;
+  border-color: var(--b-row, #151517);
+  text-decoration: line-through;
+  /* The strike must read as deliberate rather than as a rendering artefact at 10.5px. */
+  text-decoration-thickness: 1px;
+}
 
 /* Key/value row. */
 .kv { display: grid; grid-template-columns: minmax(96px, 34%) 1fr; }
@@ -216,11 +252,18 @@ code, .mono { font-family: var(--mono); }
 .kv dt:first-of-type, .kv dt:first-of-type + dd { border-top: none; }
 
 /* Mono value with a copy button. */
+/**
+ * Copy field. Machine text is ALWAYS in one of these.
+ *
+ * Truncation is by ellipsis and never by shortening the data: `3b97a8de…` that scrolls is a value
+ * you can still select and paste, while `3b97a8de` rendered as the whole id is a value that looks
+ * complete and is not. That distinction is the reason this primitive exists rather than a `<code>`.
+ */
 .copyrow {
   display: flex; align-items: center; gap: 8px;
   background: var(--s-inset, #050506);
-  border: 1px solid var(--b-inset, #1A1A1C);
-  border-radius: 2px;
+  border: 1px solid var(--b-field, #242427);
+  border-radius: var(--r-md, 9px);
   padding: 8px 8px 8px 10px;
   min-width: 0;
 }
@@ -235,17 +278,29 @@ code, .mono { font-family: var(--mono); }
 }
 .copyrow code::-webkit-scrollbar { display: none; }
 
-/* Buttons. 2px radius, hairline border, no fills except the two that mean something. */
+/**
+ * Buttons. Three variants and no more: primary, secondary, destructive.
+ *
+ * h32 / pad 8-12 / r9 at comfortable density, per 06. ONE PRIMARY PER SCREEN — that is a rule the
+ * stylesheet cannot enforce and the screens have to keep, and it is what makes the accent mean
+ * "this is the thing to do" rather than "this is a button".
+ *
+ * The destructive variant is only ever reached INSIDE A CONFIRM DIALOG. A bare red row action is
+ * the pattern where somebody destroys a device from a table they were scrolling.
+ */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  padding: 7px 13px;
+  min-height: 32px;
+  padding: 8px 12px;
   background: var(--s-btn, #131315);
   border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 2px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-body, #D4D4D4);
-  font-size: 12px;
+  font: var(--ty-strong);
   white-space: nowrap;
+  transition: border-color var(--m-fast, 160ms) var(--ease-out), background var(--m-fast, 160ms) var(--ease-out);
 }
+.btn:active:not([disabled]) { transform: translateY(.5px); transition-duration: var(--m-instant, 90ms); }
 .btn:hover:not([disabled]) { border-color: var(--b-hover-strong, #454548); color: var(--t-primary, #F1F1F1); }
 
 .btn.primary {
@@ -266,7 +321,7 @@ code, .mono { font-family: var(--mono); }
 .btn.danger-solid:hover:not([disabled]) { background: var(--bad-solid-hover, #C93343); border-color: var(--bad-solid-hover, #C93343); }
 
 .btn.ghost { background: transparent; }
-.btn.tiny { padding: 4px 8px; font-size: 11px; }
+.btn.tiny { min-height: 24px; padding: 4px 8px; font-size: 11px; border-radius: var(--r-sm, 6px); }
 .btn.wide { width: 100%; }
 
 kbd {
@@ -275,7 +330,7 @@ kbd {
   background: rgba(255, 255, 255, .05);
   border: 1px solid var(--b-btn, #2B2B2E);
   border-radius: 2px;
-  font-family: var(--mono);
+  font-family: var(--f-mono);
   font-size: 10px;
   color: var(--t-label, #8A8A8A);
 }
@@ -374,13 +429,28 @@ kbd {
 .tl-title { color: var(--t-body, #D4D4D4); }
 .tl-note  { font-size: 11px; color: var(--t-caption, #6A6A6A); }
 
+/**
+ * Empty state: a sentence saying WHAT IS ABSENT, then the one thing to do about it.
+ *
+ * Never a spinner and never a skeleton where an explanation belongs. A skeleton says "this is
+ * loading" whether or not it is, so it is the one loading affordance that can be a lie — and in a
+ * console whose whole claim is that it does not lie about the machine, the empty state is where
+ * that claim is cheapest to keep and most often broken.
+ */
 .empty {
   padding: 26px 16px;
   text-align: center;
   color: var(--t-help, #787878);
-  font-size: 11.5px;
+  font-size: 12px;
+  text-wrap: pretty;
 }
-.empty strong { display: block; color: var(--t-secondary, #C4C4C4); font-weight: 600; margin-bottom: 4px; }
+.empty strong {
+  display: block;
+  color: var(--t-secondary, #C4C4C4);
+  font: var(--ty-display-md);
+  letter-spacing: var(--tr-display-md);
+  margin-bottom: 6px;
+}
 
 .error-text { color: var(--bad-text, #EE7C88); font-size: 11.5px; }
 .ok-text    { color: var(--ok-text, #7FD873); }
@@ -584,7 +654,13 @@ kbd {
   font-size: 12px;
 }
 .navitem:hover { background: rgba(255, 255, 255, .035); color: var(--t-primary, #F1F1F1); }
-.navitem .glyph { width: 13px; text-align: center; flex: 0 0 auto; color: var(--t-label, #8A8A8A); }
+.navitem .glyph,
+.navtoggle .glyph {
+  display: inline-grid; place-items: center;
+  width: 16px; height: 16px;
+  flex: 0 0 auto;
+  color: var(--t-label, #8A8A8A);
+}
 .navitem .txt { display: var(--mf-navlabel, block); white-space: nowrap; overflow: hidden; }
 .navitem .sc  { display: var(--mf-navlabel, block); margin-left: auto; font-size: 10px; color: var(--t-navhead, #484848); }
 .navitem.is-active {
@@ -698,7 +774,7 @@ kbd {
   display: grid; place-items: center;
   width: 34px; height: 34px;
   border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 2px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-label, #8A8A8A);
   flex: 0 0 auto;
 }
@@ -792,7 +868,19 @@ kbd {
   font-size: 12px;
   text-align: left;
 }
-.cmd .glyph { width: 14px; text-align: center; color: var(--t-label, #8A8A8A); flex: 0 0 auto; }
+.cmd .glyph {
+  display: inline-grid; place-items: center;
+  width: 14px; height: 14px;
+  color: var(--t-label, #8A8A8A);
+  flex: 0 0 auto;
+}
+
+/* The two group headings. `GO TO` and `DO`, never interleaved — see `renderPalette`. */
+.cmd-group { padding: 12px 14px 5px; }
+.cmd-group:first-child { padding-top: 6px; }
+.cmd-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The free count or the geometry, on the row you are about to press. */
+.cmd-note { color: var(--t-caption, #6A6A6A); font-size: 10.5px; flex: 0 0 auto; }
 .cmd .grp { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--t-navhead, #484848); }
 .cmd.is-sel { background: var(--mf-accent-soft, rgba(117,94,184,.16)); color: #fff; }
 .palette footer {
@@ -911,15 +999,24 @@ kbd {
   border-radius: 3px;
   align-self: start;
 }
+/**
+ * Rail control. 34px square, r9.
+ *
+ * NEVER HIDDEN AND NEVER REMOVED when unavailable — it renders dashed, dimmed and inert, with a
+ * tooltip naming the missing capability. A control that disappears when the device cannot do the
+ * thing leaves the reader with no way to learn that the device cannot do the thing; a control that
+ * is visibly unavailable teaches them the shape of what they have.
+ */
 .devbtn {
   width: 34px; height: 34px;
   display: grid; place-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-secondary, #C4C4C4);
   cursor: pointer;
   padding: 0;
+  transition: background var(--m-fast, 160ms) var(--ease-out), border-color var(--m-fast, 160ms) var(--ease-out);
 }
 .devbtn:hover:not(:disabled) {
   background: var(--s-btn, #131315);
@@ -927,9 +1024,23 @@ kbd {
   color: var(--t-primary, #F1F1F1);
 }
 .devbtn:active:not(:disabled) { background: var(--mf-accent-soft, rgba(117, 94, 184, .16)); }
-/* Disabled is genuinely unavailable here, never "you lack permission": the control is wired to a
-   channel that is not open. It reads as inert rather than as forbidden. */
-.devbtn:disabled { opacity: .28; cursor: default; }
+/**
+ * Disabled is genuinely UNAVAILABLE here, never "you lack permission": the control is wired to a
+ * channel that is not open, or to a capability this device does not declare. It reads as inert
+ * rather than as forbidden.
+ *
+ * The dashed border is what separates the two readings at a glance. A dimmed solid control looks
+ * like something that will work in a moment; a dashed one looks like an outline of something that
+ * is not there — which is exactly right, because the tooltip says which capability is missing and
+ * no amount of waiting will supply it.
+ */
+.devbtn:disabled {
+  opacity: .45;
+  cursor: default;
+  border-style: dashed;
+  border-color: var(--b-dash, #303033);
+  color: var(--t-strike, #4A4A4A);
+}
 .devbar-sep { height: 1px; margin: 5px 4px; background: var(--b-row, #151517); }
 
 /* -------------------------------------------------------------------- the screen */
@@ -950,105 +1061,60 @@ kbd {
 }
 .dev-fit { display: grid; place-items: center; }
 
-/* The physical body a profiled device is drawn in — ADR-0016.
-
-   THIS REVERSES WHAT USED TO BE HERE. The frame was deliberately "a thin bezel, not a phone
-   illustration ... no speaker grille, no camera dot, no chrome pretending to be hardware this farm
-   does not have", and that was right while every device was a nameless 720x1280 rectangle. Two of
-   them are now configured to reproduce a specific handset, panel and density and all, and a body
-   drawn to match is not pretence — it is the rest of the same fact, and it carries real information
-   a rectangle cannot: where the thumb falls, how much of the screen a real hand covers, what the
-   safe area actually is.
-
-   What survives the reversal, in full: an UNPROFILED device still gets the plain bezel, because
-   there is no handset to draw. `PLAIN_CHROME` in profiles.js is that case, and it is the ordinary
-   one — physical devices and the two original Cuttlefish devices all take it. */
-.dev-body {
-  position: relative;
-  display: block;
-  /* Hangs off the frame rather than wrapping it in padding: padding would change the box the video
-     is sized against, and the video's box has to stay exactly the device's panel. */
-  padding: 0;
-}
-
-.dev-frame {
-  position: relative;
-  /* Sized from the device's own reported panel, and from nothing else. `--dev-aspect` and
-     `--dev-zoom` are written by `paintFrame`; changing zoom is one property, not a re-render.
-     `--dev-radius` comes from the PROFILE, not the panel — it is the shape of the body, and the
-     plain fallback keeps the old near-square corner. */
-  aspect-ratio: var(--dev-aspect, 0.5625);
-  height: calc(min(68vh, 760px) * var(--dev-zoom, 1));
+/**
+ * THE COCKPIT'S FRAME IS THE SHARED COMPONENT NOW — see `frame.js` and the frame section at the end
+ * of this file. What used to live here was a second, parallel implementation: a bezel drawn with
+ * `box-shadow` spread, a cutout positioned as a percentage of the screen box, and side buttons that
+ * only this screen knew how to draw. All of it is gone, and only the SIZING is left below, because
+ * sizing is the one thing genuinely particular to a full-height stage.
+ *
+ * The reasoning that produced that frame survives intact and is worth keeping:
+ *
+ *   The panel was deliberately "a thin bezel, not a phone illustration ... no speaker grille, no
+ *   camera dot, no chrome pretending to be hardware this farm does not have", and that was right
+ *   while every device was a nameless 720x1280 rectangle. Devices are now configured to a specific
+ *   panel and density, and a body drawn to match is not pretence — it is the rest of the same
+ *   fact, and it carries information a rectangle cannot: where the thumb falls, how much of the
+ *   screen a real hand covers, what the safe area actually is.
+ *
+ *   What survives in full: an UNPROFILED device still gets a plain, cutout-less body, because there
+ *   is no handset to draw. That is the ORDINARY case on this farm, not an error state.
+ *
+ * THE STAGE SIZES BY HEIGHT, which is why this rule exists at all. `frame.js` derives every
+ * dimension from `--f-w`, the rendered panel WIDTH — right for a card, a table row and a palette
+ * result, all of which have a width to fill. A cockpit has a viewport height to fill instead, so
+ * the width is computed back from it through the device's own aspect ratio. One line, and the frame
+ * needs no second sizing mode.
+ */
+.dev-stage .mf-device {
+  --f-w: calc(min(68vh, 760px) * var(--f-aspect));
   max-width: 100%;
-  background: #000;
-  border-radius: var(--dev-radius, 10px);
-  /* The bezel, thickened for a device with a body and left thin for one without.
-
-     `--dev-bezel` is a LENGTH, not a percentage. box-shadow spread does not accept `%`, so a
-     percentage here is discarded silently and every device ends up on the same bezel — which is
-     exactly what happened the first time, and it is invisible until two devices are compared. */
-  box-shadow:
-    0 0 0 1px #2A2A2E,
-    0 0 0 var(--dev-bezel, 8px) #101012,
-    0 0 0 calc(var(--dev-bezel, 8px) + 1px) #2A2A2E,
-    0 24px 60px rgba(0, 0, 0, .6);
-  overflow: hidden;
-  transition: border-radius .12s ease;
 }
 
-/* Chrome off — every profile-driven flourish disappears and the panel is the plain bezel again.
-   One attribute, no re-layout of the video, which is the rule the whole panel is built on. */
-.devpanel[data-chrome="off"] .dev-cutout,
-.devpanel[data-chrome="off"] .dev-buttons { display: none; }
-.devpanel[data-chrome="off"] .dev-frame { border-radius: 10px; }
-
-/* -------------------------------------------------------------------- the punch-hole
-
-   THE ONLY THING THIS CONSOLE DRAWS OVER THE DEVICE SCREEN, and it is allowed for one reason: on a
-   modern phone the camera IS in the display, so putting it in the bezel would be drawing a device
-   nobody makes. Three constraints keep it honest, and any one of them going away should take the
-   cutout with it:
-
-     - `pointer-events: none` — it can never eat a tap meant for the device.
-     - The toolbar's chrome toggle removes it, so the status bar underneath is always one click away.
-     - Nothing else gets to sit on the video by citing this. The keyboard hint below is still
-       rendered outside the frame, for exactly the reasons written there. */
-.dev-cutout {
-  position: absolute;
-  left: var(--cut-x, 50%);
-  top: var(--cut-y, 2%);
-  width: var(--cut-d, 3.5%);
-  aspect-ratio: 1;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  background: #050506;
-  /* A hairline rim, so it reads as a lens rather than as a dead pixel on someone's stream. */
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16), 0 0 0 1px rgba(0, 0, 0, .8);
-  pointer-events: none;
-  z-index: 3;
+/**
+ * Chrome off — every profile-driven flourish disappears and the panel is a plain rounded box again.
+ * One attribute, no re-layout of the video, which is the rule the whole panel is built on.
+ *
+ * The sheen goes to zero through `--glass-sheen` rather than through this rule, because it is a
+ * value the viewer sets and not a state the console decides.
+ */
+.devpanel[data-chrome="off"] .mf-cutout,
+.devpanel[data-chrome="off"] .mf-rails,
+.devpanel[data-chrome="off"] .mf-edge,
+.devpanel[data-chrome="off"] .mf-contact { display: none; }
+.devpanel[data-chrome="off"] .mf-chassis {
+  padding: 6px;
+  background: #101012;
+  box-shadow: 0 0 0 1px #2A2A2E;
+  border-radius: 12px;
 }
-
-/* -------------------------------------------------------------------- side buttons
-
-   OUTSIDE the screen box, so they cost the device no pixels. Decorative — they are not wired to
-   anything, and the toolbar's Power and Volume controls are the ones that actually send. That is a
-   deliberate asymmetry: a drawn button that looked pressable and did nothing would be exactly the
-   thing this console refuses to ship, so these are drawn thin, flush and unhighlighted, and never
-   take a hover or a cursor. */
-.dev-buttons { position: absolute; inset: 0; pointer-events: none; }
-.dev-btn-left,
-.dev-btn-right {
-  position: absolute;
-  width: 3px;
-  border-radius: 2px;
-  background: linear-gradient(180deg, #2E2E33, #1A1A1D);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .6);
-}
-.dev-btn-left  { left: -12px; }
-.dev-btn-right { right: -12px; }
+.devpanel[data-chrome="off"] .mf-glass { border-radius: 8px; }
 
 .dev-video {
   width: 100%; height: 100%;
+  /* CONTAIN, NEVER COVER. The glass box already carries the device's exact aspect ratio, so the two
+     are equivalent in the ordinary case — but where they differ, `cover` crops the framebuffer, and
+     hiding pixels is precisely what a device-mirroring panel must never do. */
   object-fit: contain;
   display: block;
   background: #000;
@@ -1130,10 +1196,12 @@ kbd {
   .devpanel { grid-template-columns: 1fr; grid-template-areas: "stage" "bar" "caption"; }
   .devbar { flex-direction: row; flex-wrap: wrap; justify-content: center; }
   .devbar-sep { height: 22px; width: 1px; margin: 4px 5px; }
-  .dev-frame { height: calc(min(52vh, 560px) * var(--dev-zoom, 1)); }
+  /* The stage's height budget shrinks; `--f-zoom` is applied inside the frame, not here. */
+  .dev-stage .mf-device { --f-w: calc(min(52vh, 560px) * var(--f-aspect)); }
 }
 
-/* Screen-reader-only label. The rail is glyphs, and a glyph is not a name. */
+/* Screen-reader-only label. The rail is icons, and an icon is not a name — every one of them
+   is `aria-hidden`, so this span is the only thing a screen reader has to read. */
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* -------------------------------------------------------------------- progress ring */
@@ -1235,7 +1303,7 @@ kbd {
 .pick-side { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .checkline { cursor: pointer; }
 .field.narrow { width: auto; min-width: 140px; }
-.btn.lg { padding: 9px 18px; font-size: 13px; }
+.btn.lg { min-height: 38px; padding: 9px 18px; font-size: 13px; }
 
 /* -------------------------------------------------------------------- logcat dock */
 
@@ -1371,7 +1439,7 @@ kbd {
   font-size: 12px;
   line-height: 1.5;
   color: var(--t-body, #D4D4D4);
-  font-family: var(--mono);
+  font-family: var(--f-mono);
   background: var(--s-inset, #050506);
   border: 1px solid var(--b-inset, #1A1A1C);
   border-radius: 6px;
@@ -1425,3 +1493,362 @@ kbd {
   border-color: var(--warn-line, rgba(232, 163, 14, .24));
   background: var(--warn-bg, rgba(232, 163, 14, .06));
 }
+
+/* ============================================================== the device frame ==============
+ *
+ * SIX NESTED ELEMENTS AND NO IMAGES. The frame is additive AROUND the panel box and never drawn
+ * over it: bezel is padding on the chassis, rails sit outside the chassis edge, the contact shadow
+ * is a sibling below. Exactly one element overlaps the panel — the punch-hole — and that one is
+ * physically accurate, because a real camera does occlude pixels and Android reserves the region.
+ *
+ * EVERY DIMENSION DERIVES FROM `--f-w`, the rendered panel width. The ratios `frame.js` writes are
+ * unitless, so one component serves a 12px palette result and a 600px cockpit stage from one set of
+ * numbers — and a corner radius that is right at one size is right at all of them.
+ *
+ * THE PERFORMANCE RULES, which are not stylistic. Rendering on this farm is software and frame rate
+ * is the proof the session is healthy, so compositing cost near the panel is a bug:
+ *
+ *   - No `backdrop-filter` anywhere near the stage. Not once.
+ *   - No animated `box-shadow` or `filter` while the stream is live. The two shadow states
+ *     cross-fade exactly once, on attach, and never again.
+ *   - `.mf-sheen` is a STATIC gradient, never a moving highlight.
+ *   - `.mf-panel` gets no transform, so the video layer keeps its own compositor layer. Zoom is
+ *     applied to the chassis instead.
+ */
+
+/**
+ * SIZED BY HEIGHT rather than width — every frame outside the cockpit.
+ *
+ * Given one width, a 720×1280 body and a 1080×2340 body come out at very different heights, so a
+ * row of them reads as "one of these is bigger" rather than as "these are different shapes". Fixing
+ * the height instead makes them share a baseline and differ in WIDTH, which is the comparison that
+ * carries the information: same height, visibly narrower, is a stubbier panel.
+ */
+.mf-device[data-sized="height"] { --f-w: calc(var(--f-h) * var(--f-aspect)); }
+
+.mf-device {
+  --f-w: 300px;
+  --f-h: 74px;
+  --f-zoom: 1;
+  --f-aspect: .4615;
+  --f-bezel: .02;
+  --f-panel-r: .11;
+  --f-chassis-r: .13;
+  --f-edge-a: 1;
+  --f-edge-warm: 255, 246, 235;
+
+  /* Resolved once, so nothing below multiplies `--f-w` a second time. */
+  --f-pw: calc(var(--f-w) * var(--f-zoom));
+  /**
+   * THE BEZEL HAS A FLOOR, and without it the small frames are wrong rather than merely subtle.
+   *
+   * At 34px wide an X1 Pro's `.020w` bezel computes to 0.68px, which most browsers round away —
+   * so the chassis disappears, the gradient has nowhere to render, and a device thumbnail becomes
+   * an unexplained black rectangle sitting on a dark card. The ratio is right at every size a
+   * person actually inspects the device at; the floor is what keeps it a DEVICE at the sizes where
+   * it is only an identifier.
+   */
+  --f-bezel-px: max(2px, calc(var(--f-pw) * var(--f-bezel)));
+
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.mf-chassis {
+  position: relative;
+  padding: var(--f-bezel-px);
+  border-radius: calc(var(--f-pw) * var(--f-chassis-r));
+  box-shadow: var(--e-device-flat);
+  /**
+   * THE ONE TRANSITION ON THIS ELEMENT, and it fires once per session.
+   *
+   * Depth is a STATE here, not styling: the shadow is shallow until the data plane attaches and
+   * lands when it does, so the device visibly becomes physical at the moment it becomes real. That
+   * is a transition between two confirmed states — the definition of legitimate motion in this
+   * system — and it is the only shadow in the console that ever moves.
+   */
+  transition: box-shadow var(--m-settle, 900ms) var(--ease-out);
+}
+
+/**
+ * The ceramic chassis fills. Three, because there are three kinds of object.
+ *
+ * A gradient rather than a flat fill, and this is the ONLY gradient in the console: the chrome is
+ * deliberately flat everywhere else so that the device — the one thing with material, temperature
+ * and depth — is where the eye lands.
+ */
+.mf-device[data-kind="virtual"] .mf-chassis {
+  background: linear-gradient(160deg, #2A2733 0%, #1A1822 38%, #131119 66%, #1E1B26 100%);
+}
+.mf-device[data-kind="physical"] .mf-chassis {
+  /* Warmer and darker. A real handset is a different object and reads as one. */
+  background: linear-gradient(160deg, #33302B 0%, #201E1B 40%, #161512 70%, #262320 100%);
+}
+.mf-device[data-kind="unprofiled"] .mf-chassis {
+  /* Neutral and matte. A deliberate industrial enclosure, not a failed phone — this is the
+     ORDINARY case for a farm whose devices are mostly unprofiled, and it must not read as broken. */
+  background: linear-gradient(160deg, #232326 0%, #1A1A1D 45%, #151517 100%);
+}
+
+/**
+ * The edge highlight: 1px of warm light along the top of the chassis, as if lit from above.
+ *
+ * Inset 2px so it traces the chassis rather than sitting on its outer boundary, where a browser's
+ * subpixel rounding would drop it on half the radii. Neutral rather than warm on the unprofiled
+ * body — a warm highlight implies a material, and we do not know what that device is made of.
+ */
+.mf-edge {
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 1px 0 rgba(var(--f-edge-warm), calc(.22 * var(--f-edge-a)));
+  border: 1px solid rgba(var(--f-edge-warm), calc(.06 * var(--f-edge-a)));
+}
+
+/* Rails hang OUTSIDE the chassis edge, so they cost the device no pixels at all. */
+.mf-rails { position: absolute; inset: 0; pointer-events: none; }
+.mf-rail {
+  position: absolute;
+  width: calc(var(--f-pw) * .009);
+  min-width: 1px;
+  background: linear-gradient(90deg, rgba(255, 250, 244, .10), rgba(0, 0, 0, .45));
+}
+.mf-rail[data-side="right"] { right: calc(var(--f-pw) * -.007); border-radius: 0 2px 2px 0; }
+.mf-rail[data-side="left"]  { left:  calc(var(--f-pw) * -.007); border-radius: 2px 0 0 2px; }
+.mf-device[data-rail="curved"]  .mf-rail { border-radius: 999px; }
+.mf-device[data-rail="squared"] .mf-rail { border-radius: 1px; }
+.mf-device[data-rail="none"]    .mf-rails { display: none; }
+
+/* The screen box. `overflow: hidden` is what makes the panel radius real rather than drawn on top. */
+.mf-glass {
+  position: relative;
+  width: var(--f-pw);
+  aspect-ratio: var(--f-aspect);
+  border-radius: calc(var(--f-pw) * var(--f-panel-r));
+  overflow: hidden;
+  background: #000;
+  /* Below the chassis in stacking order but above its background, without a transform — a
+     transform here would pull the video onto the chassis's compositor layer. */
+  isolation: isolate;
+}
+
+/**
+ * The panel: the framebuffer, and NOTHING ELSE IN HERE.
+ *
+ * No transform, ever. The video keeps its own compositor layer that way, and zoom is applied to
+ * `--f-zoom` on the frame instead — which resizes the box rather than scaling a decoded frame.
+ */
+.mf-panel {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+  border: 0;
+}
+
+/**
+ * The punch-hole. The ONE element allowed over the panel, and only because it is true: a real
+ * camera occludes pixels there and Android reserves the region.
+ *
+ * Centred and sized FROM GEOMETRY, so it cannot land on status-bar content. It never takes a
+ * pointer event, and the chrome toggle removes it — so the status bar underneath is always one
+ * click away. Nothing else that wants to sit on the video gets to cite this as precedent.
+ */
+.mf-cutout {
+  --f-cut-d: .037;
+  --f-cut-y: .030;
+  position: absolute;
+  left: 50%;
+  top: calc(var(--f-pw) * var(--f-cut-y));
+  width: calc(var(--f-pw) * var(--f-cut-d));
+  height: calc(var(--f-pw) * var(--f-cut-d));
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #000;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .06);
+  pointer-events: none;
+}
+
+/**
+ * The glass sheen — a STATIC gradient, never a moving highlight.
+ *
+ * It tints real pixels by 7% at the top edge, and that is the tradeoff: it is most of what makes
+ * the frame read as glass rather than as a hole cut in a card. `--glass-sheen` is a number rather
+ * than a boolean so a viewer doing visual-comparison work can take it to zero without a branch.
+ */
+.mf-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(202deg, rgba(255, 246, 235, 1) 0%, transparent 50%);
+  mix-blend-mode: screen;
+  opacity: var(--glass-sheen, .07);
+  pointer-events: none;
+}
+
+/**
+ * The contact shadow: an ellipse under the device, which is what makes it read as STANDING on the
+ * stage rather than floating over it.
+ *
+ * A sibling rather than a child, because inside the chassis it would be clipped by the corner
+ * radius and read as a vignette. Hidden at small sizes: a 3px blur under a 12px palette result is
+ * noise, not depth.
+ */
+.mf-contact {
+  width: calc(var(--f-pw) * .78);
+  height: calc(var(--f-pw) * .055);
+  margin-top: calc(var(--f-pw) * .02);
+  border-radius: 50%;
+  background: radial-gradient(50% 50% at 50% 50%, rgba(0, 0, 0, .55), transparent 72%);
+  opacity: 0;
+  transition: opacity var(--m-settle, 900ms) var(--ease-out);
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- the four panel states
+ *
+ * DEPTH IS ONE OF THE VARIABLES. The shadow is shallow until the data plane attaches, so the device
+ * becomes physical at the moment it becomes real — and that is the only shadow change in the whole
+ * product.
+ */
+
+/* OFF — glass reflects the room. Flat elevation, no contact shadow: nothing is standing here yet. */
+.mf-device[data-state="off"] .mf-glass::after,
+.mf-device[data-state="ended"] .mf-glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(202deg, rgba(214, 222, 238, .07), transparent 55%);
+  pointer-events: none;
+}
+
+/**
+ * WAKING — the snapshot is restoring, and this is THE ONLY PULSE IN THE FRAME SYSTEM.
+ *
+ * It is allowed because it is the one beat with no observable interior: the console cannot see
+ * inside a snapshot restore, so a bar that filled here would be a depiction of progress nobody
+ * reported. A pulse says "this is alive and we are waiting", which is exactly what is true. It runs
+ * on `--mf-pulse`, so `data-liveness="still"` and `prefers-reduced-motion` both stop it — and the
+ * step's own words still say what it is waiting for.
+ */
+@keyframes mf-wake { 0%, 100% { opacity: .16; } 50% { opacity: .42; } }
+
+.mf-device[data-state="waking"] .mf-glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(70% 50% at 50% 46%, var(--mf-accent, #755EB8), transparent 72%);
+  animation: mf-wake var(--mf-pulse, 2.2s) ease-in-out infinite;
+  pointer-events: none;
+}
+
+/**
+ * LIVE — full elevation lands, and real pixels are the only thing in the box.
+ *
+ * `::after` is deliberately absent in this state. Nothing overlays a live framebuffer except the
+ * punch-hole and the sheen, both of which are physically true of a phone.
+ */
+.mf-device[data-state="live"] .mf-chassis { box-shadow: var(--e-device); }
+.mf-device[data-state="live"] .mf-contact { opacity: 1; }
+
+/**
+ * NO SIGNAL — a sentence, never a black rectangle.
+ *
+ * The panel is not empty because something failed; it is empty because this device DECLARES no
+ * screen-stream, which is a property of the device rather than a fault. Input, logcat, install and
+ * WebDriver all still work, and the caller writes that sentence into the panel — the frame only
+ * makes room for it.
+ */
+.mf-device[data-state="nosignal"] .mf-glass {
+  background: var(--s-inset, #050506);
+  border: 1px dashed var(--b-dash, #303033);
+}
+.mf-device[data-state="nosignal"] .mf-sheen,
+.mf-device[data-state="nosignal"] .mf-cutout { display: none; }
+
+.mf-nosignal {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  align-content: center;
+  gap: 6px;
+  padding: 8%;
+  text-align: center;
+  color: var(--t-help, #787878);
+  font-size: 11.5px;
+  text-wrap: pretty;
+}
+.mf-nosignal strong { display: block; color: var(--t-secondary, #C4C4C4); font-size: 12.5px; }
+
+/**
+ * SMALL SIZES drop the depth entirely.
+ *
+ * A device drawn at 40px in a table row is an IDENTIFIER, not an object — a cast shadow and a
+ * contact ellipse at that scale are three pixels of grey mush that make the row look dirty. The
+ * shape and the aspect still carry every bit of the information: a stubby 720×1280 frame is
+ * recognisably not a 1080×2340 one at 24px.
+ */
+/**
+ * A SMALL FRAME NEEDS CONTRAST BETWEEN BODY AND SCREEN, or it is not a device — it is a rectangle.
+ *
+ * At full size the chassis and the screen separate on material: a gradient, a cast shadow, a warm
+ * edge highlight, a sheen. Every one of those is either invisible or actively harmful at 24px, so
+ * what is left to say "this is a phone" is the SILHOUETTE — a lighter body with a darker screen
+ * inside it. Drawn in the same near-black as the panel, the two merge and the thumbnail reads as an
+ * unexplained dark slab sitting on a dark card.
+ *
+ * So the small chassis is lifted well clear of both the card and the screen. It is the same
+ * decision the full-size frame makes with a gradient, taken with the one tool that survives at this
+ * scale.
+ */
+.mf-device[data-scale="tiny"] .mf-chassis {
+  box-shadow: none;
+  background: #34323C;
+}
+.mf-device[data-scale="tiny"][data-kind="physical"] .mf-chassis { background: #3A3630; }
+.mf-device[data-scale="tiny"][data-kind="unprofiled"] .mf-chassis { background: #2C2C30; }
+
+/* And the screen stays the darkest thing in the row, so the silhouette reads at a glance. */
+.mf-device[data-scale="tiny"] .mf-glass,
+.mf-device[data-scale="tiny"] .mf-panel { background: #08080B; }
+.mf-device[data-scale="tiny"] .mf-contact,
+.mf-device[data-scale="tiny"] .mf-sheen,
+.mf-device[data-scale="tiny"] .mf-rails { display: none; }
+.mf-device[data-scale="tiny"] .mf-edge { inset: 1px; }
+
+/**
+ * A frame inside a row: a card header, a picker, a palette result.
+ *
+ * `align-self: center` rather than the flex default, because the frame is taller than the text
+ * beside it and a stretched frame would have its aspect ratio overridden by the row — which would
+ * draw a shape the device is not. The whole point of putting it here is that the shape is true.
+ */
+.row > .mf-device,
+.pickrow > .mf-device,
+.cmd .glyph > .mf-device { align-self: center; }
+.cmd .glyph { width: auto; }
+/* No gap between the name and the id underneath it — `.stack` adds one by default. */
+.stack.none { display: flex; flex-direction: column; gap: 0; }
+
+/**
+ * The dismiss control on a warning or an error toast.
+ *
+ * Success toasts do not have one — they auto-dismiss in four seconds, having done their whole job.
+ * A toast describing a condition that is still true does not get a timer, so it needs a way out.
+ */
+.toast { position: relative; }
+.toast-x {
+  position: absolute;
+  top: 6px; right: 6px;
+  display: grid; place-items: center;
+  width: 20px; height: 20px;
+  border-radius: var(--r-sm, 6px);
+  color: var(--t-caption, #6A6A6A);
+}
+.toast-x:hover { background: var(--s-btn, #131315); color: var(--t-primary, #F1F1F1); }
+.toast .t-title, .toast .t-body { padding-right: 18px; }

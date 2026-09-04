@@ -112,3 +112,88 @@ export function geometryText(device) {
   if (!s?.width || !s?.height) return '';
   return `${s.width} × ${s.height}${s.density ? ` · ${s.density}dpi` : ''}`;
 }
+
+/* ============================================================ what a device is CALLED ==========
+ *
+ * THE RULE, from the copy deck: a device is addressed by WHAT IT IS. Internal vocabulary — tier,
+ * cuttlefish, fence, host id, region code — belongs in a details panel or a copyable field, never
+ * in a button or a heading. "Start a session on tier cuttlefish" names an implementation the reader
+ * did not choose and cannot act on; "Start MFARM X1 Pro" names the thing they asked for.
+ *
+ * Those terms are not banned, they are PLACED. Session id, WebDriver URL, package name, ABI,
+ * geometry, capability names, log lines, host id and tier are all still shown — as machine text, in
+ * a copy field or a details table. The mono register itself tells the reader this came from the
+ * machine rather than from us, which is exactly why it can stay.
+ */
+
+/** The word for a device with geometry and nothing else. Named by what we know, not by the stack. */
+export const UNPROFILED = 'Unprofiled device';
+
+/**
+ * What to call this device, anywhere a human reads it.
+ *
+ * THREE CASES, and the physical one is the interesting exception. A profiled virtual device is an
+ * MFARM X1 Pro, because that is genuinely what the farm provides it as. A PHYSICAL handset is
+ * called by its own model number — `SM-S918B` — and that is not a lapse from ADR-0017's rule
+ * against other manufacturers' identity: it genuinely IS that device, and naming it accurately is
+ * the opposite of the counterfeiting the ADR forbids. Nobody should ever be unsure which of the two
+ * they are holding.
+ *
+ * An unprofiled device gets a NAME rather than a raw tier string. It used to render as
+ * `cuttlefish`, which tells a tester nothing they can use and quite a lot they should not have to
+ * know.
+ */
+export function deviceName(device) {
+  if (!device) return UNPROFILED;
+  if (device.tier === 'physical') return device.model || UNPROFILED;
+  const chrome = DEVICE_CHROME[device.profile];
+  if (chrome) return chrome.label;
+  /**
+   * A profiled device the console has never heard of.
+   *
+   * The worker can be a VERSION AHEAD of the image serving this file, so a profile added after this
+   * was written arrives with a model string the worker set deliberately. Preferring it over
+   * "Unprofiled device" is the difference between a new device class showing its real name a
+   * release early and showing nothing at all — and it cannot be a stale marketing name, because the
+   * worker is the newer of the two.
+   */
+  if (device.profile && device.model) return device.model;
+  return UNPROFILED;
+}
+
+/**
+ * The stable key for "devices of this kind", which is what the allocator actually hands out.
+ *
+ * ALLOCATION IS CLASS-ONLY. The picker promises a CLASS, never a unit — so every count, every "3 of
+ * 4 free", and the substitution notice at handover are all computed over this key rather than over
+ * a device id. If pinning ever becomes possible this is the one function that has to change.
+ *
+ * Physical handsets are keyed by model, because two handsets of the same model genuinely are
+ * interchangeable and two of different models are not.
+ */
+export function deviceClass(device) {
+  if (!device) return 'unprofiled';
+  if (device.tier === 'physical') return `physical:${device.model || 'unknown'}`;
+  return device.profile || 'unprofiled';
+}
+
+/**
+ * `3 of 4 MFARM X1 Pro free` — capacity as a fraction, over the class.
+ *
+ * A BARE COUNT IS THE BUG THIS REPLACES. "3 free on tier cuttlefish" answers "can I get one" and
+ * nothing else; the fraction also answers "is this farm nearly full", which is the question behind
+ * it and the one that decides whether you start now or wait. The denominator is not decoration.
+ */
+export function capacityText(devices, device) {
+  const key = deviceClass(device);
+  const kin = (devices || []).filter((d) => deviceClass(d) === key);
+  const free = kin.filter((d) => d.state === 'READY').length;
+  return `${free} of ${kin.length} ${deviceName(device)} free`;
+}
+
+/** `2 of 2 free` — the same fraction without the name, for a row that already says the name. */
+export function freeText(devices, device) {
+  const key = deviceClass(device);
+  const kin = (devices || []).filter((d) => deviceClass(d) === key);
+  return `${kin.filter((d) => d.state === 'READY').length} of ${kin.length} free`;
+}

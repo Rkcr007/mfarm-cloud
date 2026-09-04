@@ -22,7 +22,12 @@
  */
 
 import { ATTACHED, LiveSession, parseLogLine, parseHierarchy, nodeAt, selectorsFor } from '/live.js';
-import { chromeFor, geometryText, hasChrome } from '/profiles.js';
+import {
+  geometryText, hasChrome,
+  deviceName, capacityText, freeText as classFreeText,
+} from '/profiles.js';
+import { iconSvg } from '/icons.js';
+import { frameFor, buildFrame, applyFrame, staticFrame } from '/frame.js';
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -177,6 +182,14 @@ export const state = {
   tick: null,
   palIndex: 0,
   error: null,
+  /**
+   * When the data on screen was last known to be true.
+   *
+   * Read only by the API-loss toast, and it is what turns "the connection is down" into something
+   * somebody can act on: a fleet page from forty seconds ago is worth trusting, one from twenty
+   * minutes ago is not, and the console has no business deciding that on the reader's behalf.
+   */
+  lastGoodAt: null,
 };
 
 /** Sessions that still hold a device. Anything else cannot be acted on. */
@@ -443,13 +456,39 @@ function paintBar(i) {
 
 /* ---------------------------------------------------------------------------- primitives */
 
+/**
+ * Status pill: a dot, a label, and — where we genuinely know it — WHEN.
+ *
+ * THE RULE THE WHOLE PALETTE RESTS ON is that colour never carries meaning alone. Delete every hue
+ * from this console and each state still reads as a word and a time. That is what lets the light
+ * theme re-derive every hex without a state becoming ambiguous, and it is why the dot is not
+ * optional on a state pill.
+ *
+ * `at` RENDERS ADJACENT, NEVER INSIDE, and both halves of that matter. A pill that grows to hold
+ * "2 minutes ago" stops being the fixed-width token you can scan down a column of; and the pill
+ * states a CONDITION while the timestamp states WHEN IT WAS OBSERVED — two facts that age
+ * differently, because a stale poll invalidates the second without touching the first.
+ *
+ * WHY `at` IS NOT REQUIRED HERE, which the handover asks for and this deliberately does not do.
+ * Requiring it would only be honest if every state had a truthful timestamp to give, and this
+ * control plane does not have one for a device's state: `devices.updated_at` moves on capability
+ * and automation-endpoint changes too, so rendering it as "READY since" would put a precise wrong
+ * number under a status — the exact failure the rule exists to prevent. Where a real timestamp
+ * exists — quarantine, recovery, lease, session start — it is passed and shown. Closing the gap
+ * properly needs a `state_changed_at` column, which is a migration and not a stylesheet.
+ *
+ * So: passed where it is true, absent where it would be invented. A missing timestamp is a gap
+ * somebody can see; a fabricated one is not.
+ */
 function pill(label, tone, opts = {}) {
-  return h('span', { class: `pill ${tone || ''}`.trim(), title: opts.title || null },
+  const el = h('span', { class: `pill ${tone || ''}`.trim(), title: opts.title || null },
     opts.dot === false ? null : h('span', { class: `dot ${tone || ''} ${opts.live ? 'live' : ''}`.trim() }),
     // `labelId` makes the text paintable. Anything that changes every second belongs in a painter,
     // not in a render — see `renderIfChanged`.
     opts.labelId ? h('span', { id: opts.labelId, text: label }) : label,
   );
+  if (!opts.at) return el;
+  return h('span', { class: 'pill-row' }, el, h('span', { class: 'pill-at', text: ago(opts.at) }));
 }
 
 function chip(label, present) {
@@ -492,6 +531,25 @@ function btn(label, cls, onclick, opts = {}) {
   }, label, opts.kbd ? h('kbd', { text: opts.kbd }) : null);
 }
 
+/**
+ * A device drawn small — a card, a table row, a picker, a palette result.
+ *
+ * THE SAME COMPONENT AS THE COCKPIT, at a different width. That is the point of stage 3 rather than
+ * a nicety: a device is recognisable by its SHAPE before its name is read, and a shape is only
+ * recognisable if it is the same shape everywhere. A 720×1280 device is visibly stubbier than a
+ * 1080×2340 one at 24px, so somebody scanning a fleet list can see which panel they are about to
+ * get without reading a geometry string.
+ *
+ * `tiny` drops the cast shadow, the contact ellipse and the rails. Below about 56px those are three
+ * pixels of grey that make a row look dirty rather than deep — the aspect and the corner radius
+ * still carry every bit of the information.
+ */
+function deviceThumb(device, height = 44) {
+  const el = staticFrame(device, height);
+  if (height <= 64) el.dataset.scale = 'tiny';
+  return el;
+}
+
 function card(title, opts = {}, ...kids) {
   const head = title
     ? h('div', { class: 'card-head' },
@@ -521,15 +579,50 @@ function timeline(items) {
  * "Success" tells nobody anything; "Install queued — waiting for the device worker · com.acme.finance"
  * tells them what to expect and how long it might take.
  */
-function toast(title, body, kind = '') {
+function toast(title, body, kind = '', opts = {}) {
   const box = $('toasts');
+
+  /**
+   * `key` REPLACES rather than stacks.
+   *
+   * Without it, a condition that re-reports — the API being unreachable, which is re-checked every
+   * five seconds — produces a column of identical toasts, and the third one pushes the first out of
+   * a box that holds three. A keyed toast is one toast whose body is rewritten in place, which is
+   * also what lets it be REMOVED when the condition clears.
+   */
+  if (opts.key) box.querySelector(`[data-toast-key="${opts.key}"]`)?.remove();
   while (box.children.length >= 3) box.firstElementChild.remove();
+
   const el = h('div', { class: `toast ${kind}`.trim() },
     h('p', { class: 't-title', text: title }),
     body ? h('p', { class: 't-body', text: body }) : null,
   );
+  if (opts.key) el.dataset.toastKey = opts.key;
+
+  /**
+   * SUCCESS AUTO-DISMISSES; A WARNING OR AN ERROR STAYS.
+   *
+   * A toast that says something went well has done its whole job in four seconds. A toast that says
+   * something is wrong has not: it is describing a condition that is still true, and taking it away
+   * on a timer leaves the reader looking at a page that appears fine. So the failing kinds get a
+   * dismiss control instead of a timer, and the caller can take them down when the condition
+   * actually resolves.
+   */
+  if (kind === 'warn' || kind === 'bad') {
+    el.append(h('button', {
+      class: 'toast-x', type: 'button', title: 'Dismiss',
+      onclick: () => el.remove(),
+    }, icon('x', 14)));
+  } else {
+    setTimeout(() => el.remove(), 4200);
+  }
   box.append(el);
-  setTimeout(() => el.remove(), 4200);
+  return el;
+}
+
+/** Take down a keyed toast, if it is up. Used when the condition it describes has cleared. */
+function clearToast(key) {
+  $('toasts').querySelector(`[data-toast-key="${key}"]`)?.remove();
 }
 
 /* ---------------------------------------------------------------------------- dialog */
@@ -757,6 +850,9 @@ async function refreshHeld(force = false) {
 async function refreshAll() {
   await Promise.all([refreshDevices(), refreshSessions(), refreshApps(), refreshActions(), refreshRuns()]);
   await refreshHeld();
+  // When the data on screen was last known to be true. The API-loss toast reads it to say how
+  // stale the page is, which is the only thing that makes "the connection is down" actionable.
+  state.lastGoodAt = Date.now();
 }
 
 /* ---------------------------------------------------------------------------- router */
@@ -806,13 +902,48 @@ for (const item of document.querySelectorAll('.navitem')) {
 
 /* ---------------------------------------------------------------------------- chrome render */
 
+/**
+ * Fill every `data-icon` slot in the static markup with its Lucide glyph.
+ *
+ * ONCE, AT BOOT, not on every render. These nodes are in `index.html` rather than built by `h()`,
+ * so they survive every re-render — which means painting them repeatedly would be pure allocation
+ * for a tree that never changes. `renderChrome` runs on every poll; this does not.
+ *
+ * The markup names the icon and this draws it, rather than the HTML carrying ten inline `<svg>`
+ * blocks. That is not a style preference: an external sprite referenced by `<use>` is a fetch, and
+ * this console's CSP is `default-src 'none'`.
+ */
+function paintNavIcons() {
+  for (const slot of document.querySelectorAll('[data-icon]')) {
+    slot.replaceChildren(icon(slot.dataset.icon, Number(slot.dataset.iconSize) || 16));
+  }
+}
+
 function renderChrome() {
   const held = heldSession();
 
-  $('fs-devices').textContent = `${state.available}/${state.devices.length}`;
+  /**
+   * THE MOST-READ ELEMENT IN THE CONSOLE, and it used to be written in the shortest possible form
+   * rather than the clearest: `4/4 ready · Queue 0 · Holding fake-2`.
+   *
+   * Three problems, one per segment. `4/4` is a fraction with no units, so it is only legible to
+   * somebody who already knows what is being counted. `Queue 0` makes the reader translate a zero
+   * into "nobody is waiting" every time they glance at it, which is the work a label is supposed
+   * to do for them. And `fake-2` is a host-local id — the name of a slot on a machine, not the
+   * name of the device somebody is holding.
+   */
+  $('fs-devices').textContent = `${state.available} of ${state.devices.length}`;
   $('fs-dot').className = `dot ${state.available > 0 ? 'ok' : 'warn'} live`;
-  $('fs-queue').textContent = String(queuedSessions().length);
-  $('fs-held').textContent = held ? (held.device || short(held.deviceId)) : 'nothing';
+
+  const waiting = queuedSessions().length;
+  $('fs-queue').textContent = waiting === 0 ? 'nobody waiting'
+    : waiting === 1 ? '1 waiting'
+      : `${waiting} waiting`;
+
+  const heldDevice = held ? deviceById(held.deviceId) : null;
+  $('fs-held').textContent = held
+    ? (heldDevice ? deviceName(heldDevice) : held.device || short(held.deviceId))
+    : 'nothing';
   $('fs-holding').hidden = !held;
 
   // Nav highlight. The two detail routes keep their parent lit rather than lighting nothing.
@@ -843,8 +974,23 @@ $('navtoggle').addEventListener('click', () => {
   const icons = root.dataset.nav === 'icons';
   root.dataset.nav = icons ? 'labels' : 'icons';
   try { localStorage.setItem('mf-nav', root.dataset.nav); } catch { /* private mode; not important */ }
-  $('navtoggle').firstElementChild.textContent = icons ? '«' : '»';
+  setNavToggleIcon(root.dataset.nav === 'icons');
 });
+
+/**
+ * The collapse chevron, which points the way the rail will go.
+ *
+ * A helper rather than two call sites, because the OTHER call site runs before first paint from a
+ * restored preference — and the two used to disagree: the boot path wrote a raw `»` character into
+ * the span while the click path wrote `«`, so a console restored into the collapsed state showed
+ * the toggle for expanding it drawn as the toggle for collapsing it.
+ */
+function setNavToggleIcon(collapsed) {
+  const slot = $('navtoggle').querySelector('[data-icon]');
+  if (!slot) return;
+  slot.dataset.icon = collapsed ? 'expand' : 'collapse';
+  slot.replaceChildren(icon(slot.dataset.icon, 16));
+}
 
 /* ---------------------------------------------------------------------------- page header */
 
@@ -872,18 +1018,42 @@ function pageHead(crumbs, title, sub, actions) {
  * what was actually given. A "reserve this device" button would be describing a feature the control
  * plane does not have.
  */
+/**
+ * Start a session on the class of device the button names.
+ *
+ * `matchProfile` IS WHAT MAKES THE LABEL TRUE. Until migration 037 this sent region, platform and
+ * tier and nothing else, while the button said "Start MFARM X1 Pro" — and the allocator has never
+ * matched on profile, so on a farm whose devices share a tier that button could hand you an X1, or
+ * an unprofiled 720x1280 device, and say nothing about it. The old label named the tier and was at
+ * least accurate; naming the device without constraining the allocation was a promise the control
+ * plane could not keep.
+ *
+ * `d.profile` is UNDEFINED for an unprofiled device, and `?? null` is load-bearing rather than
+ * defensive: with `matchProfile` true, null means "one of the devices that have no profile", which
+ * is exactly what "Start Unprofiled device" is offering. Sending nothing there would allocate any
+ * device on the tier and quietly break the same promise in the one case that looks hardest to
+ * notice.
+ */
 async function startSession(d) {
   try {
     const { session } = await api('/v1/sessions', {
       method: 'POST',
-      body: { region: d.region, platform: d.platform, tier: d.tier },
+      body: {
+        region: d.region,
+        platform: d.platform,
+        tier: d.tier,
+        profile: d.profile ?? null,
+        matchProfile: true,
+      },
     });
     // 202 with no device is a real answer, not a failure: the session is queued and the reaper
     // promotes it when one frees up. Said differently so nobody reads "queued" as "ready".
     if (session.deviceId) {
       toast('Session started', `${short(session.id)} on ${short(session.deviceId)} · ${String(session.state).toLowerCase()}`, 'ok');
     } else {
-      toast('Queued for a device', `Nothing is free on tier ${d.tier}. It starts automatically when one is.`, 'warn');
+      toast('Queued for a device',
+        `${capacityText(state.devices, d)} — so you are in line. It starts automatically when one frees up.`,
+        'warn');
     }
     await Promise.all([refreshDevices(), refreshSessions()]);
     await refreshHeld(true);
@@ -1005,8 +1175,12 @@ function deviceCard(d) {
   return card(null, { class: 'stack' },
     h('div', { class: 'row between' },
       h('span', { class: 'row tight' },
-        h('span', { class: 'card-title', text: d.model || 'Device' }),
-        h('code', { class: 'caption', text: short(d.id) }),
+        // The device, at 34px. Its shape is the fastest thing on this card to read.
+        deviceThumb(d, 46),
+        h('span', { class: 'stack none' },
+          h('span', { class: 'card-title', text: deviceName(d) }),
+          h('code', { class: 'caption', text: short(d.id) }),
+        ),
       ),
       pill(st.label, st.tone, { live: d.state === 'READY' }),
     ),
@@ -1071,13 +1245,25 @@ function deviceCard(d) {
       ),
     ] : h('div', { class: 'row tight' },
       d.state === 'READY'
-        ? btn(`Start a session on tier ${d.tier}`, 'primary', () => startSession(d))
+        ? btn(`Start ${deviceName(d)}`, 'primary', () => startSession(d))
         : null,
       btn('Details', 'ghost', () => go(`#/devices/${d.id}`)),
     ),
 
+    /**
+     * WHAT PRESSING THAT BUTTON ACTUALLY DOES, in the reader's terms.
+     *
+     * The sentence this replaces — "the allocator picks a ready device on this tier; it cannot be
+     * pinned to one" — is accurate and answers a question nobody asked. It names a component
+     * ("the allocator"), an internal grouping ("tier") and a capability the reader never expected
+     * to have ("pinned"), and it leaves out the one consequence they will actually meet: that
+     * pressing this when nothing is free puts them in a queue.
+     *
+     * Allocation is CLASS-ONLY and that fact stays — it is just stated as what will happen to you
+     * rather than as what the system is.
+     */
     d.state === 'READY' && !mine
-      ? h('p', { class: 'caption', text: 'The allocator picks a ready device on this tier; it cannot be pinned to one.' })
+      ? h('p', { class: 'caption', text: `The farm picks a free ${deviceName(d)}. If none is free when you press this, you will be queued.` })
       : null,
   );
 }
@@ -1215,7 +1401,7 @@ function askQuarantine(d) {
     maxlength: '500',
   });
   formDialog({
-    title: `Take ${d.model || 'this device'} out of service?`,
+    title: `Take ${deviceName(d)} out of service?`,
     lead: 'It leaves the allocation pool immediately, and any session on it ends. Getting it back '
       + 'needs a release and a passing health check.',
     fields: [
@@ -1251,7 +1437,7 @@ function quarantineCard(d) {
   const admin = isOrgAdmin();
 
   if (d.state === 'PREPARING') {
-    return card('Recovering', { aside: pill('Preparing', 'warn') },
+    return card('Recovering', { aside: pill('Preparing', 'warn', { at: d.recovery?.startedAt }) },
       kv([
         ['Recovering from', d.recovery?.fromReason || 'a quarantine recorded before this was kept'],
         ['Started', d.recovery?.startedAt ? `${when(d.recovery.startedAt)} (${ago(d.recovery.startedAt)})` : '—'],
@@ -1264,7 +1450,7 @@ function quarantineCard(d) {
   }
 
   if (d.state === 'QUARANTINED') {
-    return card('Quarantined', { aside: pill('Out of the pool', 'bad') },
+    return card('Quarantined', { aside: pill('Out of the pool', 'bad', { at: d.quarantine?.at }) },
       kv([
         ['Reason', d.quarantine?.reason || 'not recorded — this quarantine predates the audit log'],
         ['Since', d.quarantine?.at ? `${when(d.quarantine.at)} (${ago(d.quarantine.at)})` : 'not recorded'],
@@ -1278,7 +1464,13 @@ function quarantineCard(d) {
         + 'pool.' }),
       admin
         ? h('div', { class: 'row tight mt-lg' },
-            btn('Release quarantine', 'primary', () => askReleaseQuarantine(d)))
+            /**
+             * "Release quarantine" describes a state change the operator cannot actually make.
+             * Releasing does NOT return the device to the pool — it permits the host one restart
+             * and one health check, and only a passing check returns it. The old label promised
+             * the outcome; this one names the authorisation, which is the thing being granted.
+             */
+            btn('Authorise one recovery attempt', 'primary', () => askReleaseQuarantine(d)))
         // Said rather than silently absent: a member who cannot find the button should learn why
         // instead of concluding the console has none.
         : h('p', { class: 'caption mt-lg', text: 'Only an owner or an admin can release a quarantine.' }),
@@ -1340,7 +1532,7 @@ function screenDevice(id) {
   return [
     pageHead(
       [{ label: 'Farm' }, { label: 'Devices', to: '#/devices' }],
-      d.model || 'Device',
+      deviceName(d),
       d.quarantine?.reason || st.note,
       h('div', { class: 'row tight' },
         pill(st.label, st.tone, { live: d.state === 'READY' }),
@@ -1565,15 +1757,26 @@ function profileRow(p) {
     class: `pickrow${picked ? ' picked' : ''}`,
     onclick: () => { state.launch.profileKey = p.key; render(); },
   },
+    // A frame at 40px, drawn from a representative device in the class. Every device in a profile
+    // row shares a panel and a profile, which is exactly what the frame is derived from — so any of
+    // them draws the same shape, and the row shows you what you are choosing.
+    deviceThumb(p.devices[0], 44),
     h('span', { class: 'pick-main' },
-      h('span', { class: 'pick-title', text: p.model }),
+      h('span', { class: 'pick-title', text: deviceName(p.devices[0]) }),
       h('span', { class: 'pick-sub mono', text: `${p.platform} ${p.osVersion} · ${p.tier} · ${p.region}` }),
     ),
     h('span', { class: 'pick-side' },
+      /**
+       * A FRACTION, NOT A BARE COUNT.
+       *
+       * "3 free" answers "can I get one" and nothing else. "3 of 4" also answers "is this farm
+       * nearly full", which is the question behind it and the one that decides whether somebody
+       * starts now or waits — the denominator is not decoration.
+       */
       p.free
-        ? pill(`${p.free} free`, 'ok', { dot: false })
+        ? pill(`${p.free} of ${p.total} free`, 'ok', { dot: false })
         : p.coming
-          ? pill(`${p.coming} busy`, 'warn', { dot: false })
+          ? pill(`${p.coming} of ${p.total} busy`, 'warn', { dot: false })
           // Nothing free and nothing on its way back. Said in the strongest terms the row has,
           // because picking this profile queues a session that will never be served.
           : pill(`${p.total} unavailable`, 'bad', { dot: false }),
@@ -1665,11 +1868,20 @@ function screenLaunch() {
         ) : null,
       ),
 
-      card('Device', { aside: h('span', { class: 'caption', text: `${state.available} free` }) },
+      card('Device', { aside: h('span', { class: 'caption', text: `${state.available} of ${state.devices.length} free` }) },
         profiles.length
           ? h('div', { class: 'picklist' }, profiles.map(profileRow))
           : empty('No devices are registered.', 'A worker has to register a host before anything can be launched. Check Health.'),
-        h('p', { class: 'caption mt-sm', text: 'The allocator picks a free device matching this profile — there is no way to reserve a particular one, so nothing here pretends otherwise.' }),
+        /**
+         * The same fact as the device card's note, in the place a person is choosing.
+         *
+         * It said "the allocator picks a free device matching this profile", which names a
+         * component and a grouping the reader never asked about. The constraint it is really
+         * stating — you are choosing a KIND of device, not a particular one — is worth keeping,
+         * because it is what makes the substitution notice at handover unsurprising rather than a
+         * broken promise.
+         */
+        h('p', { class: 'caption mt-sm', text: 'You are choosing a kind of device, not a particular one — the farm hands over whichever of them is free.' }),
         !canInstall
           ? h('p', { class: 'help mt-sm', text: `This profile does not declare app-install, so the API would refuse to install ${app?.packageName ?? 'a build'} on it. Choose “No build”, or another profile.` })
           : null,
@@ -1830,7 +2042,7 @@ function bringupSteps(sess) {
   const queued = sess?.state === 'QUEUED';
   steps.push(bringupStep('acquire', 'Acquiring a device from the farm',
     sess?.deviceId ? 'done' : (queued ? 'active' : 'active'),
-    queued ? queueNote() : (sess?.deviceId ? (device?.model || short(sess.deviceId)) : null)));
+    queued ? queueNote() : (sess?.deviceId ? (device ? deviceName(device) : short(sess.deviceId)) : null)));
 
   steps.push(bringupStep('ready', 'Device ready',
     sess?.state === 'ACTIVE' ? 'done' : (sess?.deviceId ? 'active' : 'pending'),
@@ -1878,11 +2090,29 @@ function bringupSteps(sess) {
   return steps;
 }
 
+/**
+ * What being queued actually means for the person reading it.
+ *
+ * "Queue 4" and "Position 4 of 6" are the same sentence in different clothes: both state a rank and
+ * leave the reader to work out whether they should keep the tab open. Three things answer that, and
+ * the wording below says all three — where you are, that the handover is automatic, and that this
+ * page moves on by itself.
+ *
+ * NO ETA, and its absence is deliberate rather than an omission. Producing one needs every current
+ * holder's `expiresAt`, and the sessions list does not return other tenants' lease times — so a
+ * number here would be invented, which is exactly the failure every sentence in this console is
+ * written to avoid. Position without an estimate still works. What would not work is neither.
+ */
 function queueNote() {
   const q = queuedSessions();
   const i = q.findIndex((s) => s.id === state.bringup?.sessionId);
-  if (i < 0) return 'Waiting for a device to free up';
-  return `Position ${i + 1} of ${q.length} in the queue`;
+  const place = i < 0 ? null
+    : i === 0 ? 'Next in line'
+      : i === 1 ? 'Second in line'
+        : `Number ${i + 1} in line`;
+  return place
+    ? `${place}. The farm hands over the moment a lease ends — this page moves on by itself.`
+    : 'Waiting for a device to free up. This page moves on by itself when one does.';
 }
 
 /**
@@ -1934,7 +2164,7 @@ function screenLaunching(id) {
   return [
     pageHead(
       [{ label: 'Farm' }, { label: 'Launch', to: '#/launch' }],
-      device ? device.model : 'Bringing up a device',
+      device ? `Bringing up ${deviceName(device)}` : 'Bringing up a device',
       sess ? `Session ${short(id)} · ${(SESSION_STATE[sess.state] || {}).label || sess.state}` : 'Asking the control plane for a device',
       h('div', { class: 'row tight' },
         btn('Cancel', 'ghost', () => cancelBringup(id)),
@@ -1955,14 +2185,25 @@ function screenLaunching(id) {
               : progressRing(pct),
           ),
         ),
-        h('p', { class: 'caption', text: device ? `${device.model} · Android ${device.osVersion} · ${device.tier}` : 'no device yet' }),
+        h('p', { class: 'caption', text: device ? `${deviceName(device)} · Android ${device.osVersion}${geometryText(device) ? ` · ${geometryText(device)}` : ''}` : 'no device yet' }),
       ),
 
       h('div', { class: 'bringup-steps' },
-        h('p', { class: 'micro', text: `Launching ${device ? device.model : 'a device'}` }),
+        h('p', { class: 'micro', text: `Launching ${device ? deviceName(device) : 'a device'}` }),
         h('ul', { class: 'steplist' }, steps.map((s) => h('li', { class: `step ${s.state}` },
+          /**
+           * The outcome mark. 01 maps these three to `check`, `x` and `minus`.
+           *
+           * `pending` AND `waiting` DRAW NOTHING, which is the honest part. There is no glyph for
+           * "we have not heard yet", and a spinner here would be a depiction of progress the
+           * console cannot observe — the step's own pulse says it is waiting, and the words beside
+           * it say what for.
+           */
           h('span', { class: 'step-mark' },
-            s.state === 'done' ? '✓' : s.state === 'failed' ? '!' : s.state === 'skipped' ? '–' : '',
+            s.state === 'done' ? icon('check', 14)
+              : s.state === 'failed' ? icon('x', 14)
+                : s.state === 'skipped' ? icon('minus', 14)
+                  : null,
           ),
           h('span', { class: 'stack tight' },
             h('span', { class: 'step-label', text: s.label }),
@@ -2073,42 +2314,20 @@ function svgEl(tag, attrs) {
 }
 
 /**
- * The toolbar icon set, drawn to read at 20px.
+ * One icon, at a size.
  *
- * Back, home and overview are deliberately Android's own shapes — triangle, circle, square — rather
- * than invented glyphs, because a person coming from a device toolbar already knows them and any
- * cleverness here costs recognition for nothing.
+ * THE GEOMETRY MOVED OUT. This used to be nineteen hand-drawn path strings in this file, and the
+ * sidebar and the palette used Unicode characters instead — ▶ ■ ✚ ☰ ▤ ⋮ ◎ ☍ ● ⚙ — which is most of
+ * why the chrome read as unfinished: those glyphs come from whatever font the platform picked, at
+ * whatever weight and baseline it felt like, so the same nav looked different on every machine and
+ * matched nothing else on the screen. `icons.js` is Lucide, generated and committed, on one 24px
+ * grid at one stroke weight (ADR note in `build-icon-sprite.mjs`).
+ *
+ * 16px in nav and rails, 14px inline with label text, 20px in empty states. The default is the nav
+ * size because that is where most of the calls are.
  */
-const ICONS = {
-  power: (g) => { g.appendChild(svgEl('path', { d: 'M12 3v9', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M6.6 6.6a7.5 7.5 0 1 0 10.8 0', 'stroke-linecap': 'round' })); },
-  volup: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M18.5 6.5a8 8 0 0 1 0 11', 'stroke-linecap': 'round' })); },
-  voldown: (g) => { g.appendChild(svgEl('path', { d: 'M4 9.5h3.5L12 6v12L7.5 14.5H4z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('path', { d: 'M16 9a4.5 4.5 0 0 1 0 6', 'stroke-linecap': 'round' })); },
-  rotl: (g) => { g.appendChild(svgEl('path', { d: 'M4 12a8 8 0 1 1 2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M4 6.5V12h5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  rotr: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 0-2.4 5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 6.5V12h-5.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  back: (g) => { const p = svgEl('path', { d: 'M15 5 7 12l8 7z', 'stroke-linejoin': 'round' }); p.setAttribute('fill', 'currentColor'); g.appendChild(p); },
-  home: (g) => { const c = svgEl('circle', { cx: 12, cy: 12, r: 7 }); c.setAttribute('fill', 'currentColor'); g.appendChild(c); },
-  overview: (g) => { const r = svgEl('rect', { x: 5.5, y: 5.5, width: 13, height: 13, rx: 1.5 }); r.setAttribute('fill', 'currentColor'); g.appendChild(r); },
-  camera: (g) => { g.appendChild(svgEl('path', { d: 'M3 8.5h3.5L8 6h8l1.5 2.5H21v11H3z', 'stroke-linejoin': 'round' })); g.appendChild(svgEl('circle', { cx: 12, cy: 13.5, r: 3.5 })); },
-  refresh: (g) => { g.appendChild(svgEl('path', { d: 'M20 12a8 8 0 1 1-2.4-5.7', 'stroke-linecap': 'round' })); g.appendChild(svgEl('path', { d: 'M20 4v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  zoomin: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5M11 8.5v5', 'stroke-linecap': 'round' })); },
-  zoomout: (g) => { g.appendChild(svgEl('circle', { cx: 11, cy: 11, r: 6.5 })); g.appendChild(svgEl('path', { d: 'M15.8 15.8 21 21M8.5 11h5', 'stroke-linecap': 'round' })); },
-  fit: (g) => { g.appendChild(svgEl('path', { d: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })); },
-  // The chrome toggle: a phone body with its camera dot — the two things the button adds or removes.
-  phone: (g) => { g.appendChild(svgEl('rect', { x: 7, y: 2.5, width: 10, height: 19, rx: 2.4 })); g.appendChild(svgEl('circle', { cx: 12, cy: 5.4, r: 0.7, fill: 'currentColor', stroke: 'none' })); },
-  // A cursor over a box: pick a thing on the screen. Reads as "inspect" the way a magnifier reads
-  // as "zoom", and the bar already has two magnifiers doing that job.
-  inspect: (g) => {
-    g.appendChild(svgEl('rect', { x: 3.5, y: 3.5, width: 11, height: 11, rx: 1.5, 'stroke-dasharray': '3 2.2' }));
-    const p = svgEl('path', { d: 'M12.5 12.5 21 16l-3.4 1.4L16 21z', 'stroke-linejoin': 'round' });
-    p.setAttribute('fill', 'currentColor');
-    g.appendChild(p);
-  },
-};
-
-function icon(name) {
-  const s = svgEl('svg', { viewBox: '0 0 24 24', width: 20, height: 20, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'aria-hidden': 'true' });
-  (ICONS[name] || ICONS.fit)(s);
-  return s;
+function icon(name, size = 16) {
+  return iconSvg(name, size);
 }
 
 /**
@@ -2122,7 +2341,7 @@ function toolBtn(name, label, enabled, onclick, opts = {}) {
     title: label + (opts.kbd ? ` (${opts.kbd})` : ''),
     disabled: !enabled,
     onclick,
-  }, icon(name), h('span', { class: 'sr', text: label }));
+  }, icon(name, 20), h('span', { class: 'sr', text: label }));
 }
 
 /**
@@ -2142,31 +2361,32 @@ function stagePanel(sess, live) {
   const caps = device?.capabilities || [];
 
   if (!state.stage) {
+    /**
+     * The video IS the frame's panel — it is passed into `buildFrame` rather than created by it.
+     *
+     * That is the continuity requirement, and it is the reason this element is created once here
+     * and never again: a `<video>` that is destroyed and recreated drops its stream, re-attaches
+     * `srcObject` and re-decodes. `render()` replaces the whole page every five seconds, so a
+     * rebuilt panel is a visible stutter twice a minute on the one surface where smoothness is the
+     * product. It also has to survive the transition from bring-up into the session, which is why
+     * `DeviceStage` must not unmount between the two.
+     *
+     * It keeps `dev-video` alongside `mf-panel`: `live.js` finds the tap layer through this
+     * element's parent, and the keyboard-routing checks match on that class.
+     */
     const video = h('video', {
-      id: 'device-video', class: 'dev-video',
+      id: 'device-video', class: 'dev-video mf-panel',
       autoplay: true, playsinline: true, tabindex: '0',
     });
+
+    const dom = buildFrame(video);
     const overlay = h('div', { class: 'dev-overlay' });
     // Local echo of your own taps. `pointer-events: none`, so it can never intercept a gesture.
+    // Inside the glass beside the video, because `live.js` reaches it as `video.parentElement`.
     const taps = h('div', { class: 'dev-taps' });
-    /**
-     * The punch-hole camera. DRAWN ON TOP OF THE DEVICE SCREEN, which reverses a rule this panel
-     * used to hold absolutely — see the comment on the keyboard hint below, which still holds for
-     * everything else.
-     *
-     * The reversal is deliberate (ADR-0017): a modern phone's camera IS in the display, so a body
-     * that puts it in the bezel is drawing a phone nobody makes. What makes it acceptable is that it
-     * is the ONLY thing allowed over the screen, it never takes a pointer event, and the chrome
-     * toggle in the toolbar removes it — so the status bar underneath it is always one click away.
-     * Anything else that wants to sit on the video does not get to cite this as precedent.
-     */
-    const cutout = h('div', { class: 'dev-cutout' });
-    const frame = h('div', { class: 'dev-frame' }, video, overlay, taps, cutout);
-    // The physical body. Buttons hang off it, outside the screen box, so they cost the device no
-    // pixels at all.
-    const buttons = h('div', { class: 'dev-buttons' });
-    const body = h('div', { class: 'dev-body' }, frame, buttons);
-    const screenWrap = h('div', { class: 'dev-fit' }, body);
+    dom.glass.append(overlay, taps);
+
+    const screenWrap = h('div', { class: 'dev-fit' }, dom.root);
     const toolbar = h('div', { class: 'devbar' });
 
     /**
@@ -2174,8 +2394,8 @@ function stagePanel(sess, live) {
      *
      * It was briefly drawn inside the bezel, and that was wrong twice over: it covered Android's
      * own navigation bar, and it sat exactly in the swipe-up gesture zone — so the one affordance
-     * added to explain input was standing on top of the input. Nothing overlays the device screen;
-     * the screen is the thing being tested and it has to be seen exactly as the device draws it.
+     * added to explain input was standing on top of the input. The punch-hole is the single
+     * exception to that rule and is narrow on purpose; this hint is not in its category.
      *
      * A sibling of the caption rather than a child, because the caption is written with
      * `textContent` on every paint and would wipe it out.
@@ -2189,12 +2409,17 @@ function stagePanel(sess, live) {
       h('div', { class: 'dev-stage' }, screenWrap),
     );
     state.stage = {
-      root, video, overlay, frame, body, buttons, cutout, toolbar, caption, zoom: 1,
+      root, video, overlay, toolbar, caption, zoom: 1,
+      dom,
+      // `frame` is the glass box: the inspector places its overlay against it, and it is the
+      // element whose bounds are the device's own panel.
+      frame: dom.glass,
       // Per-viewer, and remembered: someone comparing a screenshot against the device wants the
       // chrome gone, and wants it to stay gone on the next device they open. Wrapped because a
       // browser with site data blocked THROWS on read rather than returning null, and the panel
       // must still render for that viewer.
       chrome: readChromePref(),
+      sheen: readSheenPref(),
     };
     root.appendChild(captionRow);
   }
@@ -2205,53 +2430,68 @@ function stagePanel(sess, live) {
   paintFrame(device);
 
   st.caption.textContent = device
-    ? `${device.model}${screenOf(device)} · Android ${device.osVersion} · ${sess.region || 'lab'}`
+    ? `${deviceName(device)}${screenOf(device)} · Android ${device.osVersion} · ${sess.region || 'lab'}`
     : 'no device';
   return st.root;
 }
 
 /**
- * Shape, chrome and zoom, written as CSS custom properties so resizing costs no layout thrash.
+ * Shape, chrome and state, written as CSS custom properties so resizing costs no layout thrash.
  *
- * GEOMETRY COMES FROM THE DEVICE, chrome comes from the profile, and the two are never mixed. The
- * live socket's `screen` wins over the registered one because it is the panel the stream is
- * actually being encoded from; the registered one is what a card has before a session exists.
+ * GEOMETRY COMES FROM THE DEVICE and the frame comes from the profile, and the two are never mixed.
+ * The live socket's `screen` wins over the registered one because it is the panel the stream is
+ * actually being encoded from; the registered one is what a card has before a session exists. If
+ * the two ever disagree the DEVICE is right — drawing a shape the device is not is the one thing a
+ * device-mirroring panel must never do.
+ *
+ * `frameFor` returns ONE SHAPE for all four cases, so there is no per-device branch left in here.
+ * Adding a profile row gives a new device a correct frame with no change to this function at all —
+ * which is the entire reason the resolver exists.
  */
 function paintFrame(device) {
   const st = state.stage;
-  const s = state.live?.screen || device?.screen;
-  const ratio = s?.width && s?.height ? s.width / s.height : 0.5625;
-  st.frame.style.setProperty('--dev-aspect', String(ratio));
-  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+  applyFrame(st.dom, frameFor(device, state.live?.screen), {
+    state: stageState(device),
+    zoom: st.zoom,
+    // Chrome off flattens the frame to a bare panel: one attribute, no re-layout of the video.
+    sheen: st.chrome ? st.sheen : 0,
+  });
 
-  const chrome = chromeFor(device);
-  st.frame.style.setProperty('--dev-radius', `${chrome.radiusPct}%`);
-  st.body.style.setProperty('--dev-bezel', `${chrome.bezelPx}px`);
-
-  // Hidden rather than absent when there is no cutout, so the element never has to be created or
-  // destroyed on a panel that is deliberately not rebuilt between polls.
-  if (chrome.cutout) {
-    st.cutout.style.setProperty('--cut-x', `${chrome.cutout.xPct}%`);
-    st.cutout.style.setProperty('--cut-y', `${chrome.cutout.yPct}%`);
-    st.cutout.style.setProperty('--cut-d', `${chrome.cutout.dPct}%`);
-  }
-  st.cutout.hidden = !chrome.cutout;
-
-  // Rebuilt only when the set of buttons actually changes — an unconditional rebuild would drop and
-  // recreate DOM on every poll, which is exactly what this panel exists to avoid.
-  const signature = chrome.buttons.map((b) => `${b.side}:${b.topPct}:${b.lenPct}`).join('|');
-  if (st.buttonSignature !== signature) {
-    st.buttonSignature = signature;
-    st.buttons.replaceChildren(...chrome.buttons.map((b) => h('span', {
-      class: `dev-btn-${b.side}`,
-      style: { top: `${b.topPct}%`, height: `${b.lenPct}%` },
-    })));
-  }
-
-  // One attribute drives every piece of chrome in CSS, so hiding it is a class flip and not a
-  // re-layout of the video.
-  st.root.dataset.chrome = st.chrome && hasChrome(device) ? 'on' : 'off';
+  st.dom.root.dataset.chrome = st.chrome ? 'on' : 'off';
+  st.root.dataset.chrome = st.chrome ? 'on' : 'off';
   st.root.dataset.hasChrome = hasChrome(device) ? 'yes' : 'no';
+}
+
+/**
+ * Which of the four panel states this device is in.
+ *
+ * DEPTH IS A STATE VARIABLE, so this is not cosmetic: the shadow is shallow until the data plane
+ * attaches and lands when it does, which is what makes the device visibly become physical at the
+ * moment it becomes real. Get this wrong and the frame is merely a picture of a phone.
+ *
+ * IT READS `state.liveState`, NOT `state.live`. The first version tested for the LiveSession
+ * OBJECT, which exists from the moment a socket is opened and says nothing about whether anything
+ * is on the screen — so a cockpit mid-negotiation reported `off`, the shadow never landed, and the
+ * whole mechanic silently did nothing while looking implemented. `liveState` is the actual state
+ * machine and it is what the overlay beside this already reads.
+ *
+ * `nosignal` is decided by the DEVICE'S DECLARATION, never by a failure to connect. A device
+ * without `screen-stream` is not broken and must not be drawn as though it were — input, logcat,
+ * install and WebDriver all still work on it, and the panel says so in words. A negotiation that
+ * FAILED is a different thing again, and it falls back to `off`: the overlay explains it, and
+ * dressing a transient failure as a permanent property of the device would be the same lie in the
+ * other direction.
+ */
+function stageState(device) {
+  if (device && !(device.capabilities || []).includes('screen-stream')) return 'nosignal';
+  if (state.liveState === 'streaming') return 'live';
+  // The device declared a stream and the negotiation settled on there being no video after all.
+  if (state.liveState === 'nostream' || state.liveState === 'nodisplay') return 'nosignal';
+  // Opening the socket, authenticating, negotiating: alive, and nothing to show yet. The only
+  // state in the system with a pulse, because it is the only one with no observable interior.
+  if (state.liveState && state.liveState !== 'idle' && state.liveState !== 'failed'
+      && state.liveState !== 'unrouted') return 'waking';
+  return 'off';
 }
 
 /** Chrome preference, defaulting to shown, and never throwing on a browser that blocks site data. */
@@ -2260,6 +2500,24 @@ function readChromePref() {
     return localStorage.getItem('mfarm.chrome') !== 'off';
   } catch {
     return true;
+  }
+}
+
+/**
+ * The glass sheen, as a NUMBER the viewer can take to zero.
+ *
+ * It tints real pixels by 7% at the top edge, which is most of what makes the frame read as glass
+ * rather than as a hole cut in a card — and which is unacceptable to anyone doing visual-comparison
+ * work, where any tint over the framebuffer invalidates the comparison. A value rather than a
+ * boolean so it is one property write and no branch.
+ */
+function readSheenPref() {
+  try {
+    const raw = localStorage.getItem('mfarm.sheen');
+    const n = raw === null ? NaN : Number(raw);
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.07;
+  } catch {
+    return 0.07;
   }
 }
 
@@ -2282,7 +2540,9 @@ function setZoom(z) {
   const st = state.stage;
   if (!st) return;
   st.zoom = Math.min(2.5, Math.max(0.4, Number(z.toFixed(2))));
-  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+  // One property on the frame root; the six elements derive from it. No re-render, and no transform
+  // on the video — which would pull the decoded frame onto the chassis's compositor layer.
+  st.dom.root.style.setProperty('--f-zoom', String(st.zoom));
   paintToolbar(state.detail, true, deviceById(state.detail?.deviceId)?.capabilities || []);
 }
 
@@ -2388,16 +2648,37 @@ function paintOverlay(sess, live, caps) {
     return;
   }
 
+  /**
+   * A SESSION THAT ENDED SAYS WHO ENDED IT, WHEN, AND HOW LONG IT RAN.
+   *
+   * "Session ended" is the state, and the state is the least useful thing to tell somebody who is
+   * looking at a screen that has stopped: they can see it stopped. What they cannot see is whether
+   * they released it or the farm expired it, how much of their lease they used, and whether the
+   * device came back clean. Every one of those is a fact the API already returns.
+   *
+   * The end reason is rendered from `endReason` rather than assumed — a lease that expired and a
+   * device somebody released are different stories, and reading "released by you" about an expiry
+   * would be a small lie in the one place a person is trying to work out what happened.
+   */
   if (!live) {
     return show(
       h('p', { class: 'micro', text: 'Session ended' }),
-      h('p', { class: 'help', text: 'This device was released and restored to its clean snapshot.' }),
+      h('p', { class: 'help', text: endedSentence(sess) }),
     );
   }
+  /**
+   * NO LIVE VIEW IS A PROPERTY OF THE DEVICE, NOT A FAULT.
+   *
+   * This panel is otherwise identical to the ones above it that report a failure, so the words are
+   * the only thing that separates "this cannot happen here" from "this went wrong". Naming what
+   * DOES still work is the half that stops somebody abandoning a device that would have served
+   * them perfectly well.
+   */
   if (!canStream) {
     return show(
       h('p', { class: 'micro', text: 'No live view' }),
-      h('p', { class: 'help', text: 'This device does not declare screen-stream. WebDriver and installs still work.' }),
+      h('p', { class: 'help', text: 'This device declares no screen-stream. That is a property of the device, not a fault.' }),
+      h('p', { class: 'caption', text: 'Input, logcat, install and WebDriver still work.' }),
     );
   }
 
@@ -2413,7 +2694,8 @@ function paintOverlay(sess, live, caps) {
     case 'nostream':
       return show(
         h('p', { class: 'micro', text: 'No live view' }),
-        h('p', { class: 'help', text: state.liveDetail || 'This device tier does not negotiate a media stream.' }),
+        h('p', { class: 'help', text: state.liveDetail || 'This device declares no screen-stream. That is a property of the device, not a fault.' }),
+        h('p', { class: 'caption', text: 'Input, logcat, install and WebDriver still work.' }),
       );
     case 'failed':
     case 'unrouted':
@@ -2422,7 +2704,29 @@ function paintOverlay(sess, live, caps) {
         h('p', { class: 'help', text: state.liveDetail || 'No reason was reported.' }),
         h('div', { class: 'row tight mt-sm' }, btn('Try again', 'primary', () => reconnectLive())),
       );
-    default:
+    /**
+     * IDLE IS NOT PROGRESS, and this branch used to draw it as 80% of some.
+     *
+     * `ensureLive` returns without starting anything when the session carries no browser route to
+     * the data plane, leaving `liveState` at its initial `idle` — and this switch's default arm
+     * caught that alongside the three real negotiation states, so the panel showed a ring at 80%
+     * and "Negotiating the media connection" for a connection that had not been attempted and
+     * never would be. A bar that fills for something nobody is doing is precisely the motion this
+     * console refuses to ship, and it contradicted the panel beside it, which was already saying
+     * there were no data-plane coordinates.
+     *
+     * Named explicitly rather than left to the default, so the next state added to the machine
+     * fails loudly here instead of being quietly reported as 80% done.
+     */
+    case 'idle':
+      return show(
+        h('p', { class: 'micro', text: 'No live view yet' }),
+        h('p', { class: 'help', text: 'This session has no route to the data plane, so nothing is being negotiated. The device itself is held and WebDriver still works.' }),
+      );
+
+    case 'connecting':
+    case 'authenticated':
+    case 'negotiating':
       return show(
         progressRing(state.liveState === 'connecting' ? 25 : state.liveState === 'authenticated' ? 55 : 80),
         h('p', { class: 'caption', text:
@@ -2430,7 +2734,66 @@ function paintOverlay(sess, live, caps) {
             : state.liveState === 'authenticated' ? 'Asking the device to stream'
             : 'Negotiating the media connection' }),
       );
+
+    /**
+     * An unrecognised state. It cannot be drawn as progress, because the one thing known about it
+     * is that this file does not know what it means.
+     */
+    default:
+      return show(
+        h('p', { class: 'micro', text: 'Connecting' }),
+        h('p', { class: 'help', text: state.liveDetail || `The live view reported "${state.liveState}", which this console does not have words for yet.` }),
+      );
   }
+}
+
+/**
+ * What happened to this session, in one sentence, from what the API actually reported.
+ *
+ * Three facts, and each is dropped rather than guessed when it is missing: who ended it, when, and
+ * how long it ran. The device's fate is stated only for a virtual device, because it is only true
+ * of one — a physical handset has no snapshot to be restored from, and telling somebody their
+ * borrowed phone was "reset from its clean snapshot" would be inventing a reset that never
+ * happened on the one kind of device where that matters most.
+ */
+function endedSentence(sess) {
+  const device = deviceById(sess?.deviceId);
+  /**
+   * KEYED ON THE REASONS THE CONTROL PLANE ACTUALLY WRITES, not on a plausible set.
+   *
+   * Every string below is a literal passed to `release()` in `allocator.ts`, `sessions.ts` and
+   * `webdriver.ts`, or set directly by a migration's sweep. A key that is merely likely — `expired`
+   * rather than `timeout` — silently falls through to the generic word, and the panel then explains
+   * nothing while looking as though it did.
+   *
+   * The unmapped case says "Ended" rather than printing the raw reason: a reader who meets
+   * `session_not_created` learns nothing from it, and it is on the session's details table anyway,
+   * as machine text, where it belongs.
+   */
+  const cause = {
+    client_request: 'Released by you',
+    webdriver_quit: 'Ended when your driver quit',
+    timeout: 'The lease ran out',
+    idle_timeout: 'Reclaimed by the farm after going idle',
+    device_quarantined: 'Ended because the device was taken out of service',
+    client_disconnect: 'Ended when the connection dropped',
+    no_capacity: 'Ended before it started — no device was free',
+    no_endpoint: 'Ended before it started — the device had no automation endpoint',
+    session_not_created: 'Ended before it started — the device refused the session',
+  }[sess?.endReason] || 'Ended';
+
+  const at = sess?.endedAt ? new Date(sess.endedAt) : null;
+  const clockAt = at && !Number.isNaN(at.getTime())
+    ? ` at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : '';
+  const ran = sess?.startedAt && sess?.endedAt ? `, after ${duration(sess.startedAt, sess.endedAt)}` : '';
+
+  // Virtual devices reset from a snapshot between tenants; a handset does not have one.
+  const fate = !device || isRealDevice(device)
+    ? 'The device is back in the pool.'
+    : 'The device was reset from its clean snapshot and is back in the pool.';
+
+  return `${cause}${clockAt}${ran}. ${fate}`;
 }
 
 /** ` · 720 × 1280`, or nothing at all when neither side has reported a panel size. */
@@ -2708,7 +3071,16 @@ function toolsCard(sess, live) {
                 btn('Uninstall', 'ghost', () => picked && runAction(picked, 'uninstall')),
                 btn('Open Apps', 'ghost', () => go('#/apps')),
               ),
-              h('p', { class: 'caption mt-sm', text: 'Every verb is queued and carried down on the worker’s next heartbeat — usually within 10 seconds.' }),
+              /**
+               * The second sentence is the one that earns its place.
+               *
+               * "You will see the outcome, not a progress bar" sets the expectation this console
+               * is built around: the control plane cannot dial a worker, so an app verb has
+               * exactly two reportable states — queued, and finished. A spinner between them would
+               * be depicting progress nobody reported, which is the failure mode every other
+               * sentence in this product is written to avoid.
+               */
+              h('p', { class: 'caption mt-sm', text: 'Each verb is queued and carried down on the worker’s next heartbeat, usually within 10 seconds. You will see the outcome, not a progress bar.' }),
               actionStatusStrip(),
             ],
     // Text goes down the WebRTC input channel as key events, so it needs no endpoint and no
@@ -2871,7 +3243,7 @@ function screenCockpit(id) {
 
     h('div', { class: 'card mb-gap' },
       h('div', { class: 'row' },
-        h('span', { class: 'secondary', text: `${device?.model || sess.device || short(sess.deviceId) || 'no device'} · ${sess.region || '—'}` }),
+        h('span', { class: 'secondary', text: `${device ? deviceName(device) : (sess.device || short(sess.deviceId) || 'no device')} · ${sess.region || '—'}` }),
         app ? pill(`${app.label || app.packageName} ${app.versionName || ''}`.trim(), 'warn plain', {
           dot: false,
           title: 'Session-only. Releasing restores the clean snapshot and removes it.',
@@ -3016,7 +3388,7 @@ function dropZone() {
   });
 
   const zone = h('label', { class: 'drop', for: 'apk-input' },
-    h('span', { class: 'drop-icon', text: '↑' }),
+    h('span', { class: 'drop-icon' }, icon('upload', 20)),
     h('div', { class: 'stack tight' },
       h('p', { class: 'buildname', text: 'Drop an APK here' }),
       h('p', { class: 'help', text: 'Package, version and size are read on the farm before the build becomes installable. Re-uploading the same file is free — builds are keyed on their checksum.' }),
@@ -3118,7 +3490,7 @@ function failureCard() {
   return card(null, { class: 'stack tight' },
     h('div', { class: 'row tight' }, h('span', { class: 'dot bad' }),
       h('span', { class: 'card-title bad-text', text: `${KIND_LABEL[f.kind] || f.kind} failed` })),
-    h('p', { class: 'help', text: `The worker could not ${f.kind} ${app?.packageName || short(f.appId)} on ${deviceById(f.deviceId)?.model || short(f.deviceId)}.` }),
+    h('p', { class: 'help', text: `The worker could not ${f.kind} ${app?.packageName || short(f.appId)} on ${deviceById(f.deviceId) ? deviceName(deviceById(f.deviceId)) : short(f.deviceId)}.` }),
     h('div', { class: 'inset stack tight' },
       h('p', { class: 'micro', text: 'Reason' }),
       // Straight from the worker, as text.
@@ -3265,8 +3637,8 @@ function runOutcome(run) {
   if (t.total === 0) {
     return h('span', {
       class: 'caption', text: 'Not reported',
-      title: 'No session in this run posted results. The farm cannot see assertions — add a '
-        + 'POST /v1/sessions/:id/result call to your afterEach.',
+      title: 'Your suite has not reported any outcomes. The farm does not run your tests and '
+        + 'cannot judge them — add a POST /v1/sessions/:id/result call to your afterEach.',
     });
   }
   return h('span', { class: 'row tight' },
@@ -3329,7 +3701,8 @@ function screenRuns() {
             ))),
           ))
         : empty('No runs yet.',
-            'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do.'),
+            'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do. '
+            + 'The farm groups sessions by it; it does not run your tests and cannot judge them.'),
     ),
     h('p', { class: 'caption mt-md',
       text: 'Pass and fail come from the suite, never from the farm — WebDriver has no concept of '
@@ -3720,7 +4093,7 @@ function screenHealth() {
                 return h('div', { class: 'buildrow' },
                   h('span', { class: 'row tight idc' },
                     h('span', { class: `dot ${st.tone} ${d.state === 'READY' ? 'live' : ''}`.trim() }),
-                    h('span', { class: 'secondary', text: d.model || short(d.id) }),
+                    h('span', { class: 'secondary', text: deviceName(d) }),
                     h('code', { class: 'caption', text: short(d.id) }),
                   ),
                   h('span', { class: 'caption', text: `${d.platform} ${d.osVersion} · ${d.tier} · ${d.region}` }),
@@ -3746,7 +4119,15 @@ function screenHealth() {
           // the only route that touches it — worker-authenticated and write-only. There is no read
           // endpoint for host state, so this says so instead of showing a dot that means nothing.
           h('p', { class: 'help', text: 'Worker heartbeat and host state are not readable from the console: the only heartbeat route is the workers’ own write path, and the API exposes no host read endpoint.' }),
-          h('p', { class: 'caption mt-sm', text: 'A host that stops heartbeating still shows here indirectly — its devices leave READY, so “Devices ready” drops.' }),
+          /**
+           * HOW TO RECOGNISE IT ANYWAY, which is the half that makes naming the blind spot useful.
+           *
+           * "Its devices leave READY" is true of a quarantine too, so on its own it does not tell
+           * anybody which of the two they are looking at. The distinguishing clause is that nobody
+           * quarantined them — a fleet losing devices with an empty quarantine history is a dead
+           * host, and that is a diagnosis somebody can act on from this screen.
+           */
+          h('p', { class: 'caption mt-sm', text: 'A dead host shows up indirectly, as devices leaving READY without anybody quarantining them.' }),
         ),
         activityCard(),
       ),
@@ -3756,68 +4137,133 @@ function screenHealth() {
 
 /* ---------------------------------------------------------------------------- palette */
 
+/**
+ * Everything the palette can do, in two groups and never interleaved.
+ *
+ * GO TO is a destination and DO is a verb, and 06 is firm that they do not mix: a list where
+ * "Open Devices" sits between "Start a device" and "Release your device" makes Enter a keystroke
+ * you have to read before pressing. `group` is what `renderPalette` sorts on.
+ */
 function commands() {
   const held = heldSession();
   const list = [
-    { glyph: '▶', label: 'Launch a device', group: 'Go', run: () => go('#/launch') },
-    { glyph: '■', label: 'Open Devices', group: 'Go', run: () => go('#/devices') },
-    { glyph: '✚', label: 'Open Apps', group: 'Go', run: () => go('#/apps') },
-    { glyph: '☰', label: 'Open Sessions', group: 'Go', run: () => go('#/sessions') },
-    { glyph: '▤', label: 'Open Runs', group: 'Go', run: () => go('#/runs') },
-    { glyph: '⋮', label: 'Open Queue', group: 'Go', run: () => go('#/queue') },
-    { glyph: '◎', label: 'Open Farm health', group: 'Go', run: () => go('#/health') },
+    { icon: 'launch',   label: 'Launch a device', group: 'Go to', run: () => go('#/launch') },
+    { icon: 'devices',  label: 'Open Devices', group: 'Go to', run: () => go('#/devices') },
+    { icon: 'apps',     label: 'Open Apps', group: 'Go to', run: () => go('#/apps') },
+    { icon: 'sessions', label: 'Open Sessions', group: 'Go to', run: () => go('#/sessions') },
+    { icon: 'runs',     label: 'Open Runs', group: 'Go to', run: () => go('#/runs') },
+    { icon: 'queue',    label: 'Open Queue', group: 'Go to', run: () => go('#/queue') },
+    { icon: 'health',   label: 'Open Farm health', group: 'Go to', run: () => go('#/health') },
   ];
   if (held) {
-    list.unshift({ glyph: '▶', label: 'Open your session cockpit', group: 'Session', run: () => go(`#/sessions/${held.id}`) });
-    list.push({ glyph: '⏻', label: 'Release your device', group: 'Session', run: () => askRelease(held) });
+    list.unshift({ icon: 'sessions', label: 'Open your session cockpit', group: 'Go to', run: () => go(`#/sessions/${held.id}`) });
+    list.push({ icon: 'power', label: 'Release your device', group: 'Do', run: () => askRelease(held) });
   }
   // Offered only where they would work. A palette entry for a capability the device lacks is the
   // same lie as a button for one.
   if (state.route.name === 'cockpit' && state.live) {
     const dev = deviceById(state.detail?.deviceId);
     const caps = dev?.capabilities || [];
-    if (caps.includes('screenshot')) list.push({ glyph: '⧉', label: 'Take a screenshot', group: 'Session', run: () => void takeScreenshot() });
-    if (caps.includes('logcat')) list.push({ glyph: '≡', label: state.log.streaming ? 'Pause logcat' : 'Resume logcat', group: 'Session', run: () => toggleLogcat() });
+    if (caps.includes('screenshot')) list.push({ icon: 'camera', label: 'Take a screenshot', group: 'Do', run: () => void takeScreenshot() });
+    if (caps.includes('logcat')) list.push({ icon: 'logcat', label: state.log.streaming ? 'Pause logcat' : 'Resume logcat', group: 'Do', run: () => toggleLogcat() });
   }
+  /**
+   * Device results carry a FRAME rather than an icon — the same component at its smallest size.
+   *
+   * 12px is small enough to sit inside a result row and large enough that the aspect ratio reads,
+   * which is all it has to do: it identifies WHICH device visually, beside a name that identifies
+   * which one verbally.
+   */
   for (const d of state.devices) {
     if (d.state === 'READY') {
-      list.push({ glyph: '＋', label: `Start a session on ${d.model || short(d.id)} (tier ${d.tier})`, group: 'Device', run: () => startSession(d) });
+      list.push({ frame: d, label: `Start ${deviceName(d)}`, note: classFreeText(state.devices, d), group: 'Do', run: () => startSession(d) });
     }
-    list.push({ glyph: '□', label: `Open ${d.model || short(d.id)}`, group: 'Device', run: () => go(`#/devices/${d.id}`) });
+    list.push({ frame: d, label: `Open ${deviceName(d)}`, note: geometryText(d), group: 'Go to', run: () => go(`#/devices/${d.id}`) });
   }
-  list.push({ glyph: '⇧', label: 'Upload an APK', group: 'Apps', run: () => { go('#/apps'); setTimeout(() => $('apk-input')?.click(), 60); } });
+  list.push({ icon: 'upload', label: 'Upload an APK', group: 'Do', run: () => { go('#/apps'); setTimeout(() => $('apk-input')?.click(), 60); } });
   list.push({
-    glyph: '⧉', label: 'Copy the WebDriver URL', group: 'Apps',
+    icon: 'copy', label: 'Copy the WebDriver URL', group: 'Do',
     run: async () => {
-      try { await navigator.clipboard.writeText(webdriverUrl()); toast('Copied', webdriverUrl(), 'ok'); }
-      catch { toast('Could not copy', 'The clipboard was refused.', 'bad'); }
+      try { await navigator.clipboard.writeText(webdriverUrl()); toast('Copied the WebDriver URL', webdriverUrl(), 'ok'); }
+      catch { toast('Could not copy', 'The clipboard was refused. Select the text instead.', 'bad'); }
     },
   });
-  list.push({ glyph: '«', label: 'Toggle the sidebar', group: 'View', run: () => $('navtoggle').click() });
+  list.push({ icon: 'collapse', label: 'Toggle the sidebar', group: 'Do', run: () => $('navtoggle').click() });
   return list;
 }
 
+/**
+ * The matching commands, IN THE ORDER THEY ARE DRAWN.
+ *
+ * The grouping happens here rather than in `renderPalette`, and that is the whole point: the arrow
+ * keys walk this array by index, so a palette that sorted only for display would highlight one row
+ * and run another. One order, produced once, read by both.
+ *
+ * `.sort` is stable in every engine this console runs in, so within a group the commands keep the
+ * order `commands()` built them in — which is the order they were reasoned about.
+ */
 function paletteMatches() {
   const q = $('palette-input').value.trim().toLowerCase();
   const all = commands();
-  return q ? all.filter((c) => c.label.toLowerCase().includes(q) || c.group.toLowerCase().includes(q)) : all;
+  const hits = q
+    ? all.filter((c) => c.label.toLowerCase().includes(q) || c.group.toLowerCase().includes(q))
+    : all;
+  return hits.sort((a, b) => PALETTE_GROUPS.indexOf(a.group) - PALETTE_GROUPS.indexOf(b.group));
 }
+
+/**
+ * TWO GROUPS, AND THEY DO NOT INTERLEAVE.
+ *
+ * `GO TO` is a destination, `DO` is a verb, and 06 is firm about keeping them apart: in a flat list,
+ * "Open Devices" sits between "Start a device" and "Release your device", so Enter becomes a
+ * keystroke you have to READ before pressing. Separated, the shape of the list tells you which kind
+ * of thing you are about to do before you have read a word of it.
+ *
+ * Destinations first, because they are the safe half — an accidental Enter navigates rather than
+ * allocating hardware.
+ */
+const PALETTE_GROUPS = ['Go to', 'Do'];
 
 function renderPalette() {
   const items = paletteMatches();
   if (state.palIndex >= items.length) state.palIndex = Math.max(0, items.length - 1);
   const ul = $('palette-list');
-  ul.replaceChildren(...items.map((c, i) => h('li', null,
-    h('button', {
-      class: `cmd ${i === state.palIndex ? 'is-sel' : ''}`.trim(),
-      type: 'button',
-      onclick: () => { closeOverlays(); c.run(); },
-    },
-      h('span', { class: 'glyph', text: c.glyph }),
-      h('span', { text: c.label }),
-      h('span', { class: 'grp', text: c.group }),
-    ))));
-  if (!items.length) ul.replaceChildren(h('li', null, h('p', { class: 'empty', text: 'Nothing matches.' })));
+
+  if (!items.length) {
+    ul.replaceChildren(h('li', null, empty('Nothing matches that.', 'Try a device name, a session id, or a verb like "start".')));
+    return;
+  }
+
+  // `items` is ALREADY in this order — see `paletteMatches`. Walking the groups here only decides
+  // where the headings go; it never reorders anything, so `indexOf` below is the same index the
+  // arrow keys move through.
+  const rows = [];
+  for (const group of PALETTE_GROUPS) {
+    const inGroup = items.filter((c) => c.group === group);
+    if (!inGroup.length) continue;
+    rows.push(h('li', { class: 'cmd-group' }, h('p', { class: 'micro', text: group.toUpperCase() })));
+    for (const c of inGroup) {
+      const i = items.indexOf(c);
+      rows.push(h('li', null,
+        h('button', {
+          class: `cmd ${i === state.palIndex ? 'is-sel' : ''}`.trim(),
+          type: 'button',
+          onclick: () => { closeOverlays(); c.run(); },
+        },
+          h('span', { class: 'glyph' }, c.frame ? deviceThumb(c.frame, 22) : icon(c.icon, 14)),
+          h('span', { class: 'cmd-label', text: c.label }),
+          // The free count, or the geometry, inline on the result itself. 06's reason: the top
+          // result is an ACTION, so Enter has to be a safe keystroke — and it is only safe if what
+          // you get is on the row you are about to press.
+          c.note ? h('span', { class: 'cmd-note mono', text: c.note }) : null,
+        )));
+    }
+  }
+  ul.replaceChildren(...rows);
+  // Group headings make the list taller than it was, so the selection can now walk off the bottom
+  // of a scrolling palette. `nearest` rather than `center`, which would jump the list on every
+  // keystroke.
+  ul.querySelector('.cmd.is-sel')?.scrollIntoView({ block: 'nearest' });
 }
 
 function openPalette() {
@@ -4464,14 +4910,34 @@ function startPoll() {
           && Date.now() - (state.detail.fetchedAt || 0) > 10_000) {
         await loadSessionDetail(state.route.id);
       }
+      if (state.error) clearToast('api-down');
       state.error = null;
+      state.lastGoodAt = Date.now();
       // Only rebuild the screen when the poll actually brought something new. The header counters
       // and every elapsed-time field are repainted by the one-second tick regardless, so a skipped
       // render leaves nothing stale — it just leaves the DOM alone.
       if (pollSignature() !== before) render();
     } catch (err) {
-      // A failed poll must not blank a working page or spam a toast every five seconds.
-      if (state.error !== err.message) { state.error = err.message; toast('Lost contact with the API', err.message, 'bad'); }
+      /**
+       * A FAILED POLL MUST NOT BLANK A WORKING PAGE. Never a skeleton, never an empty state — the
+       * console keeps its last-known data and says how old it is.
+       *
+       * The age is the half that makes this useful. "Connection lost" tells somebody something is
+       * wrong and leaves them unable to judge whether what is on screen is worth acting on; "from
+       * 40 seconds ago" lets them decide for themselves. The toast is KEYED, so it is rewritten in
+       * place every five seconds as that number grows rather than stacking, and it is removed the
+       * moment a poll succeeds.
+       */
+      state.error = err.message;
+      const stale = state.lastGoodAt ? ago(new Date(state.lastGoodAt).toISOString()) : null;
+      toast(
+        'Lost the connection to the farm',
+        stale
+          ? `Showing what we last knew, from ${stale}. Retrying.`
+          : 'Showing what we last knew. Retrying.',
+        'bad',
+        { key: 'api-down' },
+      );
     }
   }, 5000);
 }
@@ -4625,11 +5091,16 @@ async function boot() {
   if (state.route.name === 'launching') void watchBringup(state.route.id);
 }
 
+// The chrome's icons, before anything else draws — the nav is in the static markup, so its glyph
+// slots are empty until this runs.
+paintNavIcons();
+
 // Restore the sidebar width before first paint so it does not flash open then collapse.
 try {
   const nav = localStorage.getItem('mf-nav');
-  if (nav === 'icons') { root.dataset.nav = 'icons'; $('navtoggle').firstElementChild.textContent = '»'; }
+  if (nav === 'icons') root.dataset.nav = 'icons';
 } catch { /* private mode */ }
+setNavToggleIcon(root.dataset.nav === 'icons');
 
 $('hub-preview').textContent = `https://<api-key>@${location.host}/wd/hub`;
 checkReach();

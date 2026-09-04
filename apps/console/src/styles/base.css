@@ -1,28 +1,36 @@
 @import 'tailwindcss';
 @import './tokens.css';
 
-/* Self-hosted variable faces. Imported here so Vite emits them into `public/app/fonts/`, which is
-   what the API allowlists — see the note on `font-src` in routes/ui.ts. */
 /**
- * The three faces, declared by hand rather than by importing a package entry point.
+ * The three faces, POINTED AT THE SHARED COPY rather than bundled.
  *
- * WHY BY HAND. Fontsource's entry points ship every subset it has — Cyrillic, Greek, Vietnamese —
- * which is eleven woff2 files for three faces. A browser only downloads the subset its text needs,
- * so the unused ones cost no bandwidth, but every one is a path the API has to ALLOWLIST. Naming
- * the three files we actually use keeps that list short enough to stay honest.
+ * These urls are absolute and root-relative, so vite emits them untouched and no woff2 is written
+ * into `public/app/fonts/` any more. The bytes live once, at `apps/api/public/fonts`, checked in and
+ * allowlisted at `/fonts/*` — see routes/ui.ts. Before this, vite bundled a copy here out of
+ * `node_modules` while the old console at `/` had no webfonts at all; giving that console the same
+ * three faces would have put 112 KB of duplicate typeface in the image and a second allowlist block
+ * to keep in step with this one.
+ *
+ * `@fontsource-variable/*` stays a devDependency because it is still where the files COME FROM —
+ * `apps/api/scripts/sync-fonts.mjs` copies them across and the suite checks the copies match.
+ *
+ * Declared by hand rather than by importing a package entry point: fontsource's entry points ship
+ * every subset it has — Cyrillic, Greek, Vietnamese — which is eleven woff2 files for three faces,
+ * and every one is a path the API would have to allowlist.
  *
  * `font-display: swap`, so a slow font never leaves the console blank — the shell renders in the
  * fallback and the real face swaps in. On a self-hosted farm on a LAN this is invisible; on the
  * first load over a slow link it is the difference between a page and a white rectangle.
  *
- * Add a subset here the day the console is translated, not before.
+ * Add a subset here the day the console is translated, not before — and add it to the shared file
+ * and the allowlist in the same commit.
  */
 @font-face {
   font-family: 'Instrument Sans Variable';
   font-style: normal;
   font-display: swap;
   font-weight: 400 700;
-  src: url('@fontsource-variable/instrument-sans/files/instrument-sans-latin-wght-normal.woff2') format('woff2-variations');
+  src: url('/fonts/instrument-sans-latin-wght-normal.woff2') format('woff2-variations');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
@@ -30,7 +38,7 @@
   font-style: normal;
   font-display: swap;
   font-weight: 200 800;
-  src: url('@fontsource-variable/bricolage-grotesque/files/bricolage-grotesque-latin-wght-normal.woff2') format('woff2-variations');
+  src: url('/fonts/bricolage-grotesque-latin-wght-normal.woff2') format('woff2-variations');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
@@ -38,7 +46,7 @@
   font-style: normal;
   font-display: swap;
   font-weight: 100 800;
-  src: url('@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2') format('woff2-variations');
+  src: url('/fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2-variations');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
