@@ -1907,26 +1907,73 @@ async function quarantineDevice(id, reason) {
  * The DOES row is green and the DOES-NOT rows are red, and the words "one", "not", "not" carry the
  * emphasis rather than the colour: a person who cannot see the difference between the arrow and
  * the cross still reads three sentences that begin "It does not".
+ *
+ * TWO STORIES, BECAUSE THERE ARE TWO KINDS OF QUARANTINE and only one of them is the operator's to
+ * fix. See `hostQuarantineConsequences` below — that distinction was found on the live farm, not
+ * in a fixture.
  */
-function recoveryConsequences() {
-  const line = (mark, tone, ...body) =>
-    h('li', { class: `csq ${tone}` }, h('span', { class: 'csq-mark', text: mark, 'aria-hidden': 'true' }),
-      h('span', { class: 'csq-body' }, ...body));
+function csqLine(mark, tone, ...body) {
+  return h('li', { class: `csq ${tone}` },
+    h('span', { class: 'csq-mark', text: mark, 'aria-hidden': 'true' }),
+    h('span', { class: 'csq-body' }, ...body));
+}
 
+function recoveryConsequences() {
   return h('div', { class: 'consequence' },
     h('p', { class: 'csq-head', text: 'Authorising recovery does one thing' }),
     h('ul', { class: 'csq-list' },
-      line('\u2192', 'yes', 'Permits ', h('strong', { text: 'one' }),
+      csqLine('\u2192', 'yes', 'Permits ', h('strong', { text: 'one' }),
         ' recovery attempt: the host restarts the device and runs a health check.'),
-      line('\u00d7', 'no', 'It does ', h('strong', { text: 'not' }),
+      csqLine('\u00d7', 'no', 'It does ', h('strong', { text: 'not' }),
         ' return the device to the pool. Only a passing health check does that.'),
-      line('\u00d7', 'no', 'It does ', h('strong', { text: 'not' }),
+      csqLine('\u00d7', 'no', 'It does ', h('strong', { text: 'not' }),
         ' clear the quarantine note or its history.'),
-      line('\u00d7', 'no', 'If the check fails, the device stays out and the failure is recorded below.'),
+      csqLine('\u00d7', 'no', 'If the check fails, the device stays out and the failure is recorded below.'),
     ),
     h('p', { class: 'csq-note row tight' },
       h('span', { class: 'dot ok' }),
       'No session can be started on this device until a check passes.'),
+  );
+}
+
+/**
+ * A HOST QUARANTINE IS NOT THE OPERATOR'S TO FIX, and the page used to offer it as though it were.
+ *
+ * Found on the deployed farm rather than in any fixture. `quarantine_host` takes every device on a
+ * silent host out of the pool, and migration 016's `clear_silence_quarantine` puts them back on the
+ * host's next beat — automatically, with no button pressed. The page already printed that sentence
+ * ("It comes back on its own when the host beats again") and then, directly underneath, offered
+ * "Authorise one recovery attempt" above a list explaining that only a health check can return it.
+ * Two true sentences that contradict each other, one of them attached to a red button.
+ *
+ * And the button is worse than redundant here. Releasing sets the device PREPARING and asks its
+ * host to reset it — the same host that is not answering, which is the entire reason the device is
+ * out. The request reaches nobody, migration 035's timeout fires, and the device is quarantined
+ * again with a new reason. An operator would have turned "waiting for a host" into "failed a
+ * recovery" and learned nothing.
+ *
+ * So the action stays — an admin may know the host is coming back, and removing a control an admin
+ * might need is the mistake stage 5 exists to correct — but it is DEMOTED out of the solid
+ * destructive variant and the copy says what pressing it costs. The deciding fact, when the farm
+ * last heard from that host, is put beside it.
+ */
+function hostQuarantineConsequences(hostLastSeenAt) {
+  return h('div', { class: 'consequence' },
+    h('p', { class: 'csq-head', text: 'This one comes back on its own' }),
+    h('ul', { class: 'csq-list' },
+      csqLine('\u2192', 'yes', 'The device returns to the pool ',
+        h('strong', { text: 'automatically' }), ', the moment its host beats again.'),
+      csqLine('\u00d7', 'no', 'Authorising recovery does ', h('strong', { text: 'not' }),
+        ' speed that up. It asks the host to reset the device \u2014 and this host is not answering, '
+        + 'which is why the device is out.'),
+      csqLine('\u00d7', 'no', 'An attempt that goes unanswered times out and quarantines the device '
+        + 'again, with a new reason. Nothing is learned and the history is longer.'),
+    ),
+    h('p', { class: 'csq-note row tight' },
+      h('span', { class: 'dot ok' }),
+      hostLastSeenAt
+        ? `The farm last heard from that host ${ago(hostLastSeenAt)}. Nothing to do until that changes.`
+        : 'The farm has no heartbeat recorded for that host at all.'),
   );
 }
 
@@ -1974,10 +2021,25 @@ function quarantineCard(d) {
      * which is exactly the sort of thing that only ever appears on the device somebody is already
      * confused about.
      */
+    /**
+     * A HOST QUARANTINE'S NOTE RESTATES ITS OWN SOURCE, so it is not shown twice.
+     *
+     * `quarantine_host` writes both fields from the same fact, so the page read: "Its host was
+     * quarantined. It comes back on its own when the host beats again. The note reads 'its host was
+     * quarantined: no heartbeat for 90s'." Seen on the live farm; invisible in a fixture, because a
+     * fixture's note is one somebody wrote by hand.
+     *
+     * The rule is about WHO WROTE IT, not about matching the strings: an operator's note and a
+     * health check's detail are independent facts and always worth showing; a host quarantine's is
+     * machine-derived from the source sentence beside it.
+     */
+    const derivedNote = d.quarantine?.source === 'host';
+    const showNote = Boolean(note) && !derivedNote;
+
     const took = actor
-      ? ['Taken out by ', h('code', { text: actor }), note ? ' with the note ' : '.']
+      ? ['Taken out by ', h('code', { text: actor }), showNote ? ' with the note ' : '.']
       : [(QUARANTINE_SOURCE[d.quarantine?.source] || 'The farm did not record who took it out.'),
-        note ? ' The note reads ' : ''];
+        showNote ? ' The note reads ' : ''];
 
     /**
      * NO SECOND STATE PILL. The page head already carries "Quarantined", and a card that is red,
@@ -1992,12 +2054,12 @@ function quarantineCard(d) {
         since ? h('span', { class: 'pill-at', text: ago(since) }) : null),
       h('p', { class: 'help' },
         ...took,
-        note ? h('q', { text: note }) : null,
-        note ? '. ' : ' ',
+        showNote ? h('q', { text: note }) : null,
+        showNote ? '. ' : ' ',
         'The allocator will not hand this device to anybody while it is quarantined.'),
       admin
         ? [
-          recoveryConsequences(),
+          derivedNote ? hostQuarantineConsequences(d.hostLastSeenAt) : recoveryConsequences(),
           h('div', { class: 'row tight mt-lg' },
             /**
              * "Release quarantine" describes a state change the operator cannot actually make.
@@ -2009,7 +2071,16 @@ function quarantineCard(d) {
              * under document 05 section 03. A destructive action softened into a quiet variant
              * reads as reversible, and this one authorises a device restart.
              */
-            btn('Authorise one recovery attempt', 'danger-solid', () => askReleaseQuarantine(d))),
+            /**
+             * The solid variant is for the action that is the right one to take. On a host
+             * quarantine it is not — the device comes back on its own — so the same action is
+             * offered in the outline variant and named for what it actually is. Kept rather than
+             * removed: an admin may know the host is back, and a control an admin might need is
+             * not the console's to delete (stage 5).
+             */
+            derivedNote
+              ? btn('Ask for a recovery attempt anyway', 'danger', () => askReleaseQuarantine(d))
+              : btn('Authorise one recovery attempt', 'danger-solid', () => askReleaseQuarantine(d))),
         ]
         // Said rather than silently absent: a member who cannot find the button should learn why
         // instead of concluding the console has none.
