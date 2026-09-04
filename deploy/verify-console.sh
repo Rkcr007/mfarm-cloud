@@ -263,9 +263,15 @@ grep -q "bringupBeat" <<<"$FLEET_JS" \
 
 # THREE INVENTED PERCENTAGES, ALL REMOVED. The stage ring measured `done / steps`, which is not a
 # measurement of the wait; the handshake ring was a hardcoded 25/55/80 for stages with no extent.
-grep -q "progressRing" <<<"$FLEET_JS" \
-  && bad "the progress ring is back — it measured nothing" \
-  || ok "no progress ring anywhere"
+# THE DEFINITION AND THE STYLING, never the WORD. The first version of this grepped for
+# `progressRing` and matched the comment that explains why the function was deleted — a check that
+# fails against the very change it was written to protect. The same mistake `theme.test.ts` warns
+# about two sections down: a guard that cries wolf gets deleted, so it has to be precise.
+if grep -q "function progressRing" <<<"$FLEET_JS" || grep -q "\.ring-fill" <<<"$DD_CSS"; then
+  bad "the progress ring is back — it measured nothing"
+else
+  ok "no progress ring anywhere"
+fi
 grep -q "class: 'phone" <<<"$FLEET_JS" \
   && bad "the old phone illustration is back beside the real frame" \
   || ok "no second device drawing"
