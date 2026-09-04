@@ -2855,3 +2855,83 @@ when the feature is broken. See issues 37 and 38.
     the six screens in document 05 that have no stage.
 
     `mfarm-lab` was stopped afterwards.
+
+52. **STAGE 5 — A CONTROL THE DEVICE CANNOT HONOUR IS VISIBLE AND INERT.** 2026-09-04. Control
+    plane `92c757e`, PRs #89 and #90.
+
+    The session rail used to REMOVE a control when the device did not declare its capability.
+    Document 04 requires the opposite: visible, struck through, and saying why. A missing button is
+    indistinguishable from a button you have not found, and the person most likely to be looking for
+    it is the one on the device that cannot do it.
+
+    Two appearances now, because there are two facts and they had collapsed into one:
+
+    | | appearance | what it says |
+    |---|---|---|
+    | waiting on the stream | dimmed, solid | "not available until the live view is connected" |
+    | the device cannot honour it | dashed **and** struck | "does not declare `screen-stream`. That is a property of the device, not a fault." |
+
+    **AND A REGRESSION I INTRODUCED IN THE FIX, caught before it mattered.** Zoom in, zoom out and
+    fit were gated on the transport only, so on a device with no `screen-stream` they claimed "not
+    available until the live view is connected" — which is *not yet* for a thing that is *not ever*.
+    Found by re-reading my own verification plan against the deployed source rather than by a test:
+    the assertion I had written counted the gated controls and I had written the number from memory.
+    Five, not two. `verify-console.sh` now counts them in the deployed file.
+
+    Verified live on `farm.mfarm.dev`: 22/22 console checks, and the deployed `console.js` grepped
+    for all five `requires: 'screen-stream'` call sites.
+
+53. **DEVICE DETAIL — DOCUMENT 05 §03, AND A COLD LOAD THAT NEVER FETCHED.** 2026-09-05.
+
+    The operator's page, built to the design: a class badge and `<short id> · tier · region` under
+    the title; the quarantine gate as a red card headed "Out of the pool since 2 September" naming
+    who took it out and their note; the consequence list promoted ONTO the page; Screen, Reset story
+    and Host last seen in Metadata; the WebDriver endpoint as its own card that says when it works.
+
+    **THE CONSEQUENCE LIST IS THE POINT.** One arrow and three crosses — *permits one attempt* /
+    *does not return it to the pool* / *does not clear the note* / *if the check fails it stays
+    out*. It used to live only behind the confirm dialog, which is read by somebody who has already
+    decided; the page is read by somebody deciding. Every one of the three crosses is a thing a
+    person reasonably expects a "release" button to do, and none of them is true (ADR-0024). The
+    button keeps `--bad-solid` in both themes and is not softened.
+
+    **THE DEFECT THE SCREENSHOT FOUND, AND IT WAS NOT MINE.** `boot()` fetches for `cockpit`, `run`
+    and `launching` on a cold load. `device` was in the `hashchange` listener and MISSING FROM
+    `boot`, and `hashchange` does not fire on load — so the quarantine history said "Loading…"
+    forever for anybody who opened a device link, hit refresh, or came back to a bookmark. It worked
+    on exactly one path: clicking through from the Fleet, which is the path a developer always
+    takes. It has been shipped that way for as long as the screen has existed.
+
+    No test could see it. Every console test seeds `state` and renders — which is the right shape
+    for "does this screen say the correct thing" and structurally blind to "does anything ever fill
+    that state", because the test performs by hand the work it should be checking happened. This is
+    the `app.inject()` blindspot in a different costume.
+
+    Fixed by making the list of per-route fetches ONE function, `loadForRoute()`, called by both.
+    Two copies of a list is what let one drift. It is exported so a test can assert what each route
+    asks for, against a recording `fetch`.
+
+    **TWO MORE FOUND THE SAME WAY, both only visible in a render.** The state pill was drawn twice —
+    in the page head and again inside the gate — and the gate's headline read "Out of the pool since
+    02/09/2026, 02:03:48", asking a reader to parse a timestamp to learn a three-day-old fact. Added
+    `day()` for headline dates; dropped the second pill and kept its relative age.
+
+    **A COPY DEFECT STAGE 5 CREATED.** The capabilities caption ended "it is why a control that needs
+    it is missing" — which described the rail BEFORE stage 5, and stage 5 made those controls visible
+    and struck instead of removing them. A caption about another screen is a claim about another
+    screen, and it goes stale silently when that screen changes. Same species as issue 47.
+
+    **`Host last seen`, and NOT `Host`** — ADR-0026. The design shows `Host lab-host-02`, and that
+    field is deliberately unimplemented: migration 002 revokes `hosts` from the tenant pool
+    entirely, and a hostname is a stable identifier that lets a tenant map the farm's topology and
+    confirm, permanently, which of their devices sit beside somebody else's. A heartbeat sharpens a
+    fact they already read off the device's state; a hostname discloses one they cannot act on. The
+    timestamp is read on the system pool AFTER the tenant read has decided the device is visible —
+    the ordering `/devices/:id/reset-attempts` already documents — and a test asserts the hostname
+    is absent from the whole serialised body, not from a named key.
+
+    **AND THE SCREEN WAS READING THE WRONG ENDPOINT.** It drew from `state.devices`, the 5s fleet
+    poll, whose projection has never carried `last_reset_at` — so "Last reset" read "not reported"
+    for every device in the fleet, forever, and looked like a farm that had never reset anything. It
+    now merges `GET /devices/:id` over the poll row, so it paints immediately and fills in.
+

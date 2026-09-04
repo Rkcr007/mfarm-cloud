@@ -278,6 +278,86 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   text-decoration-thickness: 1px;
 }
 
+/* ============================================================ device detail (document 05 §03) ==
+ *
+ * The operator's page. Its whole job is to state what is wrong, what has been tried, and precisely
+ * what an action will and will not do — so the two things it adds to the shared vocabulary are a
+ * card that is visibly a WARNING rather than a section, and a list that is visibly a CONTRACT.
+ */
+
+/* Identity under the page title: what kind of thing this is, then how to name it in a log line. */
+.ident {
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap;
+  margin: -6px 0 18px;
+}
+.ident .mono { font-size: 11px; color: var(--t-caption, #6A6A6A); }
+.badge {
+  padding: 3px 8px;
+  border-radius: var(--r-pill, 999px);
+  background: rgba(127, 160, 216, .10);
+  border: 1px solid rgba(127, 160, 216, .32);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--info, #7FA0D8);
+}
+
+/*
+ * THE GATE. A quarantine card is not a section of the page, it is the reason the page was opened,
+ * so it carries the bad tint on its own surface rather than relying on a pill to signal it.
+ */
+.card.gate {
+  background: var(--bad-bg, rgba(224, 80, 95, .07));
+  border-color: var(--bad-line, rgba(224, 80, 95, .30));
+  border-radius: var(--r-lg, 12px);
+  padding: 18px 20px;
+}
+.card.gate .card-title { color: var(--bad-text, #EE7C88); font-size: 15px; }
+.card.gate .help { max-width: 62ch; color: var(--t-secondary, #C4C4C4); }
+.card.gate .help code, .card.gate .help q {
+  font-family: var(--f-mono); font-size: 11px; color: var(--t-secondary, #C4C4C4);
+}
+
+/*
+ * The consequence list, on the darkest surface the page has.
+ *
+ * It sits INSIDE the tinted gate on a plain ground, which is the whole visual argument: the tint
+ * says "something is wrong", and the panel inside it says "here is exactly what pressing the button
+ * does". Reversing those — a list tinted red — would make the contract read as another alarm.
+ */
+.consequence {
+  margin-top: 14px;
+  padding: 14px 15px;
+  border-radius: var(--r-md, 9px);
+  background: var(--s-card, #0D0D0F);
+  border: 1px solid var(--b-card, #1F1F22);
+}
+.csq-head {
+  font-size: 11.5px; font-weight: 500;
+  color: var(--t-primary, #F1F1F1);
+  margin-bottom: 10px;
+}
+.csq-list { list-style: none; margin: 0 0 13px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.csq { display: flex; gap: 8px; align-items: flex-start; }
+.csq-mark { flex: none; font-family: var(--f-mono); font-size: 10px; line-height: 1.6; }
+.csq.yes .csq-mark { color: var(--ok-text, #7FD873); }
+.csq.no  .csq-mark { color: var(--bad-text, #EE7C88); }
+.csq-body { font-size: 11.5px; line-height: 1.5; color: var(--t-help, #787878); }
+/* The emphasis is on the WORD — "one", "not" — so the sentence still reads correctly in mono, in
+ * a screen reader, and to anyone who cannot tell the arrow from the cross by colour. */
+.csq-body strong { color: var(--t-secondary, #C4C4C4); font-weight: 600; }
+.csq-note {
+  padding: 9px 11px;
+  border-radius: var(--r-sm, 6px);
+  background: var(--ok-bg, rgba(111, 203, 99, .06));
+  border: 1px solid var(--ok-line, rgba(111, 203, 99, .24));
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ok-text, #7FD873);
+}
+
 /* Key/value row. */
 .kv { display: grid; grid-template-columns: minmax(96px, 34%) 1fr; }
 .kv dt, .kv dd {

@@ -605,6 +605,61 @@ describe('data-plane coordinates on GET', () => {
   });
 });
 
+/**
+ * The device DETAIL read, which is a strictly larger row than the list's — and one field larger
+ * than the tenant pool can reach on its own.
+ */
+describe('device detail says when the farm last heard from the host, and never names it', () => {
+  let id: string;
+  before(async () => { [id] = await seedDevices(1); });
+  after(async () => { await clearDevices(); });
+
+  test('hostLastSeenAt comes back, and it is the host beat', async () => {
+    const res = await app.inject({ method: 'GET', url: `/v1/devices/${id}`, headers: auth(keyA) });
+    assert.equal(res.statusCode, 200);
+    const { device } = res.json();
+    assert.ok(device.hostLastSeenAt, 'the fixture host beat at insert time, so this must be set');
+    // Not `devices.updated_at` wearing a new name. Registration writes that column and the beat
+    // does not, so the two are only equal by accident on a freshly inserted row — this asserts the
+    // value tracks the HOST, by moving the host's beat and nothing else.
+    const moved = new Date(Date.now() - 3_600_000).toISOString();
+    await withSystem((c) => c.query('UPDATE hosts SET last_heartbeat_at = $1 WHERE id = $2', [moved, hostId]));
+    const again = await app.inject({ method: 'GET', url: `/v1/devices/${id}`, headers: auth(keyA) });
+    assert.equal(new Date(again.json().device.hostLastSeenAt).toISOString(), moved,
+      'the device row did not change; only the host beat did, and that is what this field reports');
+    await withSystem((c) => c.query('UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1', [hostId]));
+  });
+
+  /**
+   * THE FIELD THAT IS DELIBERATELY NOT THERE (ADR-0026).
+   *
+   * The design package's device detail screen shows `Host lab-host-02`. A hostname is a stable
+   * identifier: given it, a tenant can map how many machines the farm has and confirm, permanently,
+   * which of their devices sit beside which of somebody else's. The heartbeat leaks no fact they
+   * cannot already infer from a device going OFFLINE — it only sharpens one.
+   *
+   * Asserted against the WHOLE SERIALISED BODY rather than a named key, because the way this
+   * regresses is somebody adding `host: { ... }` in one go and the hostname riding along inside it.
+   */
+  test('the hostname is not in the payload, under any key', async () => {
+    const res = await app.inject({ method: 'GET', url: `/v1/devices/${id}`, headers: auth(keyA) });
+    assert.doesNotMatch(res.body, /http-test-host/,
+      'hosts are farm topology; migration 002 revokes the table from the tenant pool for this reason');
+  });
+
+  /**
+   * The system-pool read is reached only AFTER the tenant read has proved the device visible, which
+   * is the same ordering `/devices/:id/reset-attempts` documents. A device belonging to another org
+   * must 404 before that second read happens at all.
+   */
+  test('a device another org owns still 404s, beat or no beat', async () => {
+    await withSystem((c) => c.query('UPDATE devices SET org_id = $1 WHERE id = $2', [orgB, id]));
+    const res = await app.inject({ method: 'GET', url: `/v1/devices/${id}`, headers: auth(keyA) });
+    assert.equal(res.statusCode, 404);
+    await withSystem((c) => c.query('UPDATE devices SET org_id = NULL WHERE id = $1', [id]));
+  });
+});
+
 describe('tenant isolation over HTTP', () => {
   test("another org's session is 404, not 403", async () => {
     await clearDevices();

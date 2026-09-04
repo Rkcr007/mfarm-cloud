@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { withTenant } from '../../db.ts';
+import { withSystem, withTenant } from '../../db.ts';
 import { requireTenant, requireUser } from '../server.ts';
 import { forbidden, notFound } from '../errors.ts';
 import {
@@ -138,8 +138,44 @@ export async function deviceRoutes(app: FastifyInstance) {
       return rows[0];
     });
     if (!row) throw notFound('Device');
+
+    /**
+     * WHEN THE FARM LAST HEARD FROM THE MACHINE BEHIND THIS DEVICE.
+     *
+     * On the tenant pool and not from `devices`, because neither is a substitute:
+     *
+     *   - `devices.updated_at` moves on a state change or a re-registration, and registration
+     *     happens at agent start and on a fingerprint change — NOT on the ten-second beat. Labelling
+     *     it "last seen" would say a healthy idle device had been silent for days.
+     *   - `hosts.last_heartbeat_at` is the beat, and migration 002 revokes `hosts` from `mfarm_app`
+     *     entirely, so the tenant pool cannot reach it at all.
+     *
+     * The order is the authorisation, exactly as in `/devices/:id/reset-attempts` below: the
+     * `withTenant` read above is what decides whether this device is visible to this caller, and
+     * only a device that survived RLS gets a second, system-pool read keyed to its own id.
+     *
+     * A TIMESTAMP, NEVER THE HOSTNAME — see ADR-0026. The design package's device detail screen
+     * shows `Host lab-host-02`, and that field is deliberately not implemented: a hostname is a
+     * stable identifier that lets a tenant map the farm's topology and confirm, permanently, which
+     * of their devices sit beside which of somebody else's. The heartbeat adds no fact the tenant
+     * cannot already infer — a host that stops beating takes its devices OFFLINE, which they can
+     * see — it only adds precision to a fact they already have.
+     */
+    const heard = await withSystem(async (c) => {
+      const { rows } = await c.query<{ last_heartbeat_at: Date | null }>(
+        `SELECT h.last_heartbeat_at
+           FROM hosts h JOIN devices d ON d.host_id = h.id
+          WHERE d.id = $1`,
+        [req.params.id],
+      );
+      return rows[0]?.last_heartbeat_at ?? null;
+    });
+
     return {
       device: {
+        // Named for what it measures. "lastSeenAt" would invite a reader to attach it to the
+        // device, and a device can be unplugged from a host that is beating perfectly.
+        hostLastSeenAt: heard,
         id: row.id, region: row.region, platform: row.platform, tier: row.tier,
         model: row.model, osVersion: row.os_version, state: row.state,
         capabilities: row.capabilities, lastResetAt: row.last_reset_at,
