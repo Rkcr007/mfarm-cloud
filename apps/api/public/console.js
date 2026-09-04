@@ -92,6 +92,19 @@ export const state = {
   runDetail: null,
   /** `GET /devices/:id/quarantine-log` for the device detail screen. One device at a time. */
   quarantineLog: null,
+  /**
+   * `GET /devices/:id` — the DETAIL read, which is a strictly larger row than the list's.
+   *
+   * The device screen used to draw from `state.devices`, the 5s fleet poll, and that is where its
+   * "Last reset" row came from: the list projection has never carried `last_reset_at`, so the field
+   * read "not reported" on every device in the fleet, forever, and looked exactly like a farm that
+   * had never reset anything. `hostLastSeenAt` and `resetAttempts` are list-absent for the same
+   * reason — a fleet poll should not carry what only one screen reads.
+   *
+   * The poll row stays the FALLBACK, so the screen paints immediately on navigation and fills in
+   * rather than showing a skeleton over facts it already has.
+   */
+  deviceDetail: null,
   /** GET /sessions/:id for the session we hold — the only source of expiresAt and dataPlane. */
   held: null,
   heldFetchedAt: 0,
@@ -375,6 +388,29 @@ function when(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
+}
+
+/**
+ * `2 September` — a DAY, for a headline.
+ *
+ * `when()` is a full locale datetime, which is right in a metadata row where somebody may be
+ * correlating with a log, and wrong in a sentence: "Out of the pool since 02/09/2026, 02:03:48"
+ * asks a reader to parse a timestamp to learn a fact that is three days old. The precise value is
+ * still one row away, in Metadata, and the pill beside this carries the relative age.
+ */
+function day(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  return d.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'long',
+    // The year only when it is not this one. On a farm where almost everything happened this year
+    // it is four characters of noise, and on the one row where it matters its absence would be a
+    // lie by omission.
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+  });
 }
 
 /** Relative time, coarse on purpose: nobody needs "1m 43s ago" in a list. */
@@ -819,6 +855,27 @@ async function loadQuarantineLog(id) {
   }
 }
 
+/**
+ * One device, read from the endpoint that knows the most about it.
+ *
+ * Same shape and same reasoning as `loadQuarantineLog` above, including the stale check: a person
+ * clicking through three quarantined devices must not have the first one's answer land on the
+ * third one's screen.
+ */
+async function loadDevice(id) {
+  if (state.deviceDetail?.id !== id) state.deviceDetail = { id, device: null, loaded: false };
+  try {
+    const out = await api(`/v1/devices/${encodeURIComponent(id)}`);
+    if (state.deviceDetail?.id !== id) return;
+    state.deviceDetail = { id, device: out.device || null, loaded: true };
+  } catch {
+    // Loaded with nothing, and the screen falls back to the poll's row. A failed detail read costs
+    // the four fields only this endpoint carries; it must not blank a page that can already say
+    // what the device is and why it is out of the pool.
+    if (state.deviceDetail?.id === id) state.deviceDetail = { id, device: null, loaded: true };
+  }
+}
+
 async function loadRunDetail(id) {
   if (state.runDetail?.id !== id) state.runDetail = { id, run: null, sessions: [], loaded: false };
   try {
@@ -921,6 +978,38 @@ function go(hash) {
   else location.hash = hash;
 }
 
+/**
+ * THE FETCHES A ROUTE NEEDS BEFORE IT CAN DRAW ITSELF.
+ *
+ * ONE FUNCTION, because there are two callers — `boot()` on a cold load and the `hashchange`
+ * listener afterwards — and `hashchange` DOES NOT FIRE ON LOAD. Keeping the list in both places
+ * means a route added to one and not the other works when you click to it and is empty when you
+ * open its URL, which is the half nobody exercises by hand.
+ *
+ * That is not hypothetical: `device` was in the listener and missing from `boot`, so the device
+ * screen's quarantine history said "Loading…" forever for anybody who opened a device link, hit
+ * refresh, or came back to a bookmark — every path except clicking through from the Fleet. It
+ * shipped that way and no test could see it, because the console tests render a screen from state
+ * they seeded themselves and never ask who was supposed to fill it.
+ *
+ * Returns a promise, so a caller can await it before the first paint (a cold load, where the
+ * alternative is a flash of empty state) or let it land on a later render (a navigation, where the
+ * screen already has the poll's data to draw).
+ *
+ * EXPORTED so a test can assert what a route asks for. The defect this replaces was not a wrong
+ * request — it was an ABSENT one, and no assertion about a rendered screen can see that: the tests
+ * seed the state a screen draws from, which is exactly the work this function does.
+ */
+export function loadForRoute() {
+  const { name, id } = state.route;
+  if (name === 'cockpit') return loadSessionDetail(id);
+  if (name === 'run') return loadRunDetail(id);
+  // Two reads for one screen, deliberately: the device row and its audit log are different
+  // endpoints with different lifetimes, and the screen renders correctly with either one missing.
+  if (name === 'device') return Promise.all([loadDevice(id), loadQuarantineLog(id)]);
+  return Promise.resolve();
+}
+
 window.addEventListener('hashchange', () => {
   const previous = state.route;
   setRoute();
@@ -933,9 +1022,7 @@ window.addEventListener('hashchange', () => {
     closeLive();
   }
   render();
-  if (state.route.name === 'cockpit') loadSessionDetail(state.route.id).then(render);
-  if (state.route.name === 'run') loadRunDetail(state.route.id).then(render);
-  if (state.route.name === 'device') loadQuarantineLog(state.route.id).then(render);
+  loadForRoute().then(render);
   if (state.route.name === 'launching') watchBringup(state.route.id);
 });
 
@@ -1808,6 +1895,55 @@ async function quarantineDevice(id, reason) {
   }
 }
 
+/**
+ * WHAT AUTHORISING RECOVERY WILL AND WILL NOT DO — one arrow and three crosses.
+ *
+ * On the page rather than only behind the confirm dialog, which is where it used to live alone.
+ * The dialog is read by somebody who has already decided; the page is read by somebody deciding,
+ * and this list is the thing that changes the decision. It is also the list most likely to be
+ * remembered wrongly — every one of these three crosses is a thing an operator reasonably expects
+ * a "release" button to do, and none of them is true (ADR-0024).
+ *
+ * The DOES row is green and the DOES-NOT rows are red, and the words "one", "not", "not" carry the
+ * emphasis rather than the colour: a person who cannot see the difference between the arrow and
+ * the cross still reads three sentences that begin "It does not".
+ */
+function recoveryConsequences() {
+  const line = (mark, tone, ...body) =>
+    h('li', { class: `csq ${tone}` }, h('span', { class: 'csq-mark', text: mark, 'aria-hidden': 'true' }),
+      h('span', { class: 'csq-body' }, ...body));
+
+  return h('div', { class: 'consequence' },
+    h('p', { class: 'csq-head', text: 'Authorising recovery does one thing' }),
+    h('ul', { class: 'csq-list' },
+      line('\u2192', 'yes', 'Permits ', h('strong', { text: 'one' }),
+        ' recovery attempt: the host restarts the device and runs a health check.'),
+      line('\u00d7', 'no', 'It does ', h('strong', { text: 'not' }),
+        ' return the device to the pool. Only a passing health check does that.'),
+      line('\u00d7', 'no', 'It does ', h('strong', { text: 'not' }),
+        ' clear the quarantine note or its history.'),
+      line('\u00d7', 'no', 'If the check fails, the device stays out and the failure is recorded below.'),
+    ),
+    h('p', { class: 'csq-note row tight' },
+      h('span', { class: 'dot ok' }),
+      'No session can be started on this device until a check passes.'),
+  );
+}
+
+/**
+ * Who took this device out, from the audit log rather than from a new API field.
+ *
+ * `GET /devices/:id` carries the quarantine's reason, time and SOURCE but not its actor — and the
+ * actor is already recorded, on the `quarantined` event in the quarantine log this screen loads
+ * beside it. Reading it here rather than widening the device payload keeps one writer for that
+ * fact. Null while the log is still loading, and null for a quarantine older than the audit log,
+ * which is why every caller below has a sentence that works without it.
+ */
+function quarantineActor(id) {
+  const log = state.quarantineLog?.id === id ? state.quarantineLog : null;
+  return (log?.events || []).find((e) => e.event === 'quarantined')?.actor || null;
+}
+
 /** The card that carries the whole gate: why it is out, and the one action that is offered. */
 function quarantineCard(d) {
   const admin = isOrgAdmin();
@@ -1816,7 +1952,7 @@ function quarantineCard(d) {
     return card('Recovering', { aside: pill('Preparing', 'warn', { at: d.recovery?.startedAt }) },
       kv([
         ['Recovering from', d.recovery?.fromReason || 'a quarantine recorded before this was kept'],
-        ['Started', d.recovery?.startedAt ? `${when(d.recovery.startedAt)} (${ago(d.recovery.startedAt)})` : '—'],
+        ['Started', d.recovery?.startedAt ? `${when(d.recovery.startedAt)} (${ago(d.recovery.startedAt)})` : '\u2014'],
       ]),
       h('p', { class: 'help mt-md', text:
         'Its host has been asked to reset it and report a health check. It becomes available only '
@@ -1826,30 +1962,58 @@ function quarantineCard(d) {
   }
 
   if (d.state === 'QUARANTINED') {
-    return card('Quarantined', { aside: pill('Out of the pool', 'bad', { at: d.quarantine?.at }) },
-      kv([
-        ['Reason', d.quarantine?.reason || 'not recorded — this quarantine predates the audit log'],
-        ['Since', d.quarantine?.at ? `${when(d.quarantine.at)} (${ago(d.quarantine.at)})` : 'not recorded'],
-      ]),
-      h('p', { class: 'help mt-md row tight' },
-        h('span', { class: 'dot bad' }),
-        QUARANTINE_SOURCE[d.quarantine?.source] || 'The farm did not record why.'),
-      h('p', { class: 'caption mt-md', text:
-        'Releasing a quarantine does not mark this device available. It authorises one recovery '
-        + 'attempt — a reset, then a health check — and only a passing check puts it back in the '
-        + 'pool.' }),
+    const actor = quarantineActor(d.id);
+    const note = d.quarantine?.reason;
+    const since = d.quarantine?.at;
+
+    /**
+     * ONE SENTENCE, ASSEMBLED FROM WHAT IS ACTUALLY KNOWN. The design's line reads "Taken out by
+     * admin@mfarm.local with the note ..." and both halves are optional in real data: a health
+     * check has no actor, and a quarantine older than the audit log has neither. Building this as
+     * a template with holes would produce "Taken out by with the note" on the fleet's oldest rows,
+     * which is exactly the sort of thing that only ever appears on the device somebody is already
+     * confused about.
+     */
+    const took = actor
+      ? ['Taken out by ', h('code', { text: actor }), note ? ' with the note ' : '.']
+      : [(QUARANTINE_SOURCE[d.quarantine?.source] || 'The farm did not record who took it out.'),
+        note ? ' The note reads ' : ''];
+
+    /**
+     * NO SECOND STATE PILL. The page head already carries "Quarantined", and a card that is red,
+     * headed "Out of the pool" and offering a recovery button is not ambiguous about the state —
+     * repeating the pill here spent the reader's attention restating what they had just read. The
+     * age is the part that was doing work, so the age is what stays.
+     */
+    return h('section', { class: 'card gate' },
+      h('div', { class: 'card-head' },
+        h('p', { class: 'card-title',
+          text: since ? `Out of the pool since ${day(since)}` : 'Out of the pool' }),
+        since ? h('span', { class: 'pill-at', text: ago(since) }) : null),
+      h('p', { class: 'help' },
+        ...took,
+        note ? h('q', { text: note }) : null,
+        note ? '. ' : ' ',
+        'The allocator will not hand this device to anybody while it is quarantined.'),
       admin
-        ? h('div', { class: 'row tight mt-lg' },
+        ? [
+          recoveryConsequences(),
+          h('div', { class: 'row tight mt-lg' },
             /**
              * "Release quarantine" describes a state change the operator cannot actually make.
              * Releasing does NOT return the device to the pool — it permits the host one restart
              * and one health check, and only a passing check returns it. The old label promised
              * the outcome; this one names the authorisation, which is the thing being granted.
+             *
+             * `danger-solid`, and it stays `danger-solid` in the light theme too — see the note
+             * under document 05 section 03. A destructive action softened into a quiet variant
+             * reads as reversible, and this one authorises a device restart.
              */
-            btn('Authorise one recovery attempt', 'primary', () => askReleaseQuarantine(d)))
+            btn('Authorise one recovery attempt', 'danger-solid', () => askReleaseQuarantine(d))),
+        ]
         // Said rather than silently absent: a member who cannot find the button should learn why
         // instead of concluding the console has none.
-        : h('p', { class: 'caption mt-lg', text: 'Only an owner or an admin can release a quarantine.' }),
+        : h('p', { class: 'caption mt-lg', text: 'Only an owner or an admin can release a quarantine. Releasing authorises one reset and one health check; only a passing check returns the device to the pool.' }),
     );
   }
 
@@ -1857,7 +2021,7 @@ function quarantineCard(d) {
   return card('Take out of service', {},
     h('p', { class: 'help', text:
       'Quarantining removes this device from allocation immediately and ends any session on it. '
-      + 'Use it when the device itself is the problem — a test that fails is not.' }),
+      + 'Use it when the device itself is the problem \u2014 a test that fails is not.' }),
     h('div', { class: 'row tight mt-lg' },
       btn('Quarantine device', 'danger', () => askQuarantine(d))),
   );
@@ -1894,26 +2058,95 @@ function quarantineHistoryCard(id) {
 
 /* ------------------------------------------------------------------ screen: device detail */
 
+/**
+ * WHICH OF THE THREE RESETS THIS DEVICE HAS — ADR-0012's distinction, said in one line.
+ *
+ * The three are mutually exclusive and they are not interchangeable: a snapshot restore returns the
+ * whole disk, a session reset clears app state, and an install reset only removes what was
+ * installed. "This device resets" is not the useful sentence; which one it does is, because it
+ * decides what the next tenant inherits.
+ *
+ * Reported as absent rather than assumed, because a device with none of the three is a real and
+ * important thing to see: it is never handed out (`workers.ts` registers it OFFLINE), and this row
+ * is where an operator finds out why.
+ */
+const RESET_STORY = {
+  'snapshot-reset': 'snapshot-reset',
+  'session-reset': 'session-reset',
+  'install-reset': 'install-reset',
+};
+function resetStory(d) {
+  const found = Object.keys(RESET_STORY).filter((c) => (d.capabilities || []).includes(c));
+  if (!found.length) return 'none declared';
+  // More than one is a device describing itself in a way ADR-0012 says cannot be true. Shown rather
+  // than resolved by picking a favourite: the console is not the place that decides which reset a
+  // device really has.
+  return found.join(' + ');
+}
+
+/** `1440 x 3088`, from the device's own report and never from the profile table (ADR-0016). */
+function screenSize(d) {
+  const sc = d.screen;
+  return sc?.width && sc?.height ? `${sc.width} \u00d7 ${sc.height}` : 'not reported';
+}
+
 function screenDevice(id) {
-  const d = deviceById(id);
+  /**
+   * THE DETAIL READ FIRST, THE POLL ROW AS A FALLBACK.
+   *
+   * `state.devices` comes from `GET /v1/devices`, whose projection has never carried
+   * `last_reset_at` — so this screen's "Last reset" row read "not reported" on every device in the
+   * fleet for as long as it has existed, and looked like a farm that had never reset anything
+   * rather than like a field the list does not send. `hostLastSeenAt` and `resetAttempts` are
+   * absent from the list for the same reason and would have arrived the same way.
+   *
+   * Merged rather than swapped, so navigation paints the name, the state and the quarantine reason
+   * from the poll immediately and the four detail-only fields fill in a moment later. A skeleton
+   * over facts already in hand would be slower for no gain.
+   */
+  const polled = deviceById(id);
+  const fetched = state.deviceDetail?.id === id ? state.deviceDetail.device : null;
+  const d = fetched || polled ? { ...(polled || {}), ...(fetched || {}) } : null;
+
   if (!d) {
+    // Only once the detail read has answered. Before that this is an unknown id on a page that has
+    // not finished loading, and "not in this fleet" is a much stronger claim than the console can
+    // make yet.
+    if (!state.deviceDetail?.loaded) {
+      return [
+        pageHead([{ label: 'Fleet', to: '#/fleet' }], 'Device', null),
+        card(null, {}, h('p', { class: 'help', text: 'Loading\u2026' })),
+      ];
+    }
     return [
-      pageHead([{ label: 'Farm' }, { label: 'Devices', to: '#/devices' }], 'Device', null),
+      pageHead([{ label: 'Fleet', to: '#/fleet' }], 'Device', null),
       card(null, {}, empty('That device is not in this fleet.',
-        'It may have been evicted, or it belongs to another org — the API answers those the same way, on purpose.')),
+        'It may have been evicted, or it belongs to another org \u2014 the API answers those the same way, on purpose.')),
     ];
   }
   const st = DEVICE_STATE[d.state] || { label: d.state, tone: '', note: '' };
+  const inPool = d.state === 'READY';
 
   return [
     pageHead(
-      [{ label: 'Farm' }, { label: 'Devices', to: '#/devices' }],
+      [{ label: 'Fleet', to: '#/fleet' }, { label: 'Device' }],
       deviceName(d),
-      d.quarantine?.reason || st.note,
+      null,
       h('div', { class: 'row tight' },
-        pill(st.label, st.tone, { live: d.state === 'READY' }),
-        d.state === 'READY' ? btn('Start session', 'primary', () => startSession(d)) : null,
+        pill(st.label, st.tone, { live: inPool, title: st.note }),
+        inPool ? btn('Start session', 'primary', () => startSession(d)) : null,
       ),
+    ),
+    /**
+     * IDENTITY UNDER THE NAME, in the farm's own vocabulary and in one line.
+     *
+     * A class badge, then `<short id> · <tier> · <region>`. The short id is what appears in a log
+     * line and in a support message, so it is the half of the uuid worth showing at a glance; the
+     * whole of it is a click away in Metadata, where it can be copied.
+     */
+    h('div', { class: 'ident' },
+      h('span', { class: 'badge', text: d.tier === 'physical' ? 'Real device' : 'Virtual device' }),
+      h('span', { class: 'mono', text: `${String(d.id).slice(0, 8)} \u00b7 ${d.tier} \u00b7 ${d.region}` }),
     ),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
@@ -1922,32 +2155,66 @@ function screenDevice(id) {
         quarantineCard(d),
         card('Metadata', {},
           kv([
-            ['Device id', d.id, true],
-            ['Region', d.region],
-            ['Platform', d.platform],
-            ['OS', d.osVersion],
+            ['Platform', `${d.platform} ${d.osVersion}`],
+            ['Screen', screenSize(d), true],
+            ['Reset story', resetStory(d), true],
             ['Tier', d.tier],
-            ['State', st.label],
-            ['Dedicated', d.dedicated ? 'yes — reserved to this org' : 'no — shared pool'],
-            ['Last reset', d.lastResetAt ? `${when(d.lastResetAt)} (${ago(d.lastResetAt)})` : 'not reported'],
+            ['Region', d.region],
+            /**
+             * THE HOST'S BEAT, NOT THE DEVICE'S. Named for what it measures — a device can be
+             * unplugged from a host that is beating perfectly, and the row would then be
+             * reassuring about the wrong machine.
+             *
+             * The design package puts `Host lab-host-02` beside this and that field is
+             * deliberately absent (ADR-0026): a hostname is a stable identifier that maps the
+             * farm's topology and confirms which of your devices sit beside somebody else's,
+             * while a timestamp only sharpens a fact the tenant can already infer from the
+             * device going OFFLINE.
+             */
+            ['Host last seen', d.hostLastSeenAt ? `${ago(d.hostLastSeenAt)} (${when(d.hostLastSeenAt)})` : 'never'],
+            ['Dedicated', d.dedicated ? 'yes \u2014 reserved to this org' : 'no \u2014 shared pool'],
+            // Relative first, absolute in the bracket — the same order as the row above it. A
+            // person reads "9d ago" and stops; the timestamp is there for whoever is correlating
+            // this with a log, and putting it first made two adjacent rows read in two directions.
+            ['Last reset', d.lastResetAt ? `${ago(d.lastResetAt)} (${when(d.lastResetAt)})` : 'not reported'],
           ]),
-          h('p', { class: 'micro mt-lg', text: 'WebDriver' }),
-          h('div', { class: 'mt-xs' }, copyrow(webdriverUrl())),
-          h('p', { class: 'caption mt-xs' },
-            'Authenticate with an org API key as the user half: ',
-            h('code', { text: `https://<api-key>@${location.host}/wd/hub` }),
-          ),
+          h('p', { class: 'micro mt-lg', text: 'Device id' }),
+          h('div', { class: 'mt-xs' }, copyrow(d.id)),
         ),
         card('Capabilities', {},
           h('div', { class: 'caps' },
             KNOWN_CAPS.map((c) => chip(c, (d.capabilities || []).includes(c))),
             (d.capabilities || []).filter((c) => !KNOWN_CAPS.includes(c)).map((c) => chip(c, true)),
           ),
-          h('p', { class: 'caption mt-md', text: 'A capability the device does not declare is shown struck out rather than hidden — it is why a control that needs it is missing.' }),
+          /**
+           * THIS SENTENCE WAS FALSE FOR A DAY. It used to end "it is why a control that needs it is
+           * missing", which described the rail before stage 5 — and stage 5 made those controls
+           * visible and struck through instead of removing them, so the explanation on this page
+           * went on pointing at an absence that no longer happens. A caption about another screen
+           * is a claim about another screen, and it goes stale silently when that screen changes.
+           */
+          h('p', { class: 'caption mt-md', text: 'Struck-through capabilities are declared absent by the device. A control that depends on one is visible and disabled in the session rail, never removed \u2014 so the rail can say why it will not work.' }),
         ),
       ),
       h('div', { class: 'rail' },
         quarantineHistoryCard(d.id),
+        /**
+         * ITS OWN CARD, and it says when it works.
+         *
+         * This url used to sit at the bottom of Metadata with no note, on a page whose whole
+         * purpose is a device that is out of the pool — so the one screen most likely to be read
+         * about a quarantined device offered a WebDriver endpoint and said nothing about the fact
+         * that it cannot currently reach this device. The endpoint is the farm's, not the
+         * device's: it stays correct, it just has nothing to hand out.
+         */
+        card('WebDriver endpoint', {},
+          copyrow(webdriverUrl()),
+          h('p', { class: 'caption mt-xs' },
+            inPool
+              ? 'Authenticate with an org API key as the user half: '
+              : 'This device is not allocatable, so a session naming its class will queue rather than start here. Authenticate with an org API key as the user half: ',
+            h('code', { text: `https://<api-key>@${location.host}/wd/hub` }),
+          )),
         activityCard((a) => a.deviceId === d.id)),
     ),
   ];
@@ -5541,11 +5808,14 @@ async function boot() {
 
   setRoute();
   await refreshAll();
-  if (state.route.name === 'cockpit') await loadSessionDetail(state.route.id);
-  // A run URL is the one people paste to each other — "what happened on 4471" — so a cold load of
-  // it has to fetch before the first paint, exactly like the cockpit. `hashchange` does not fire on
-  // load, and without this the screen renders its own empty state for a run that has plenty in it.
-  if (state.route.name === 'run') await loadRunDetail(state.route.id);
+  /**
+   * BEFORE THE FIRST PAINT, not after it. A run URL is the one people paste to each other — "what
+   * happened on 4471" — and a device URL is the one an operator is sent when something is wrong;
+   * both render their own empty state if nothing has fetched yet, and an empty state that resolves
+   * a moment later reads as "there is nothing here" for exactly as long as somebody is looking at
+   * it. `hashchange` does not fire on load, so this is the only chance.
+   */
+  await loadForRoute();
   render();
   startPoll();
   startTick();

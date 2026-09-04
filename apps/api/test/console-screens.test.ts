@@ -165,6 +165,12 @@ function seed(route: { name: string; id?: string | null }) {
       }],
     },
     route: { name: route.name, id: route.id ?? null },
+    // Explicitly cleared, not left over. Both are fetched on navigation rather than by the poll, so
+    // a test that does not set them would otherwise inherit whichever device the PREVIOUS test
+    // opened — and the device screen merges the detail read over the poll row, which is exactly the
+    // place a stale fixture would look like a passing assertion.
+    deviceDetail: null,
+    quarantineLog: null,
     error: null,
   });
   return { device, session };
@@ -497,10 +503,19 @@ describe('the device detail carries the quarantine gate', () => {
       state: 'QUARANTINED',
       quarantine: { at: new Date().toISOString(), reason: 'frozen', source: 'operator' },
     });
-    // The one sentence this whole change is about. If it ever disappears from the page, the button
-    // reads exactly like the `UPDATE devices SET state = 'READY'` that ADR-0024 refused to build.
-    assert.match(t, /does not (mark|make) this device available/i);
-    assert.match(t, /health check/i);
+    /**
+     * The one CLAIM this whole change is about. If it ever disappears from the page, the button
+     * reads exactly like the `UPDATE devices SET state = 'READY'` that ADR-0024 refused to build.
+     *
+     * The WORDING moved with document 05 §03: the page used to carry it as a single line of prose,
+     * "Releasing a quarantine does not mark this device available", and it is now the second entry
+     * in the consequence list, where it sits beside the two other things a release does not do. The
+     * assertion follows the claim rather than the sentence — but it is deliberately still two
+     * halves, because "it does not return the device" without "only a passing check does" is a
+     * refusal with no path forward, and somebody would eventually soften it back.
+     */
+    assert.match(t, /does\s+not\s+return the device to the pool/i);
+    assert.match(t, /only a passing health check does that/i);
   });
 
   test('a device already recovering offers no second release, and says what it is waiting on', () => {
@@ -1330,5 +1345,302 @@ describe('the cockpit rail explains what it cannot do', () => {
       assert.doesNotMatch(titleOf(b), /does not declare/,
         'a control waiting for the stream must not claim the device lacks the capability');
     }
+  });
+});
+
+/* ==================================================================== device detail (05 §03) ===
+ *
+ * The operator's page. Every assertion below is about a SENTENCE rather than about a layout,
+ * because the failure mode this screen has is not a broken render — it is a sentence that was true
+ * when it was written and describes something the console no longer does.
+ */
+describe('device detail', () => {
+  /** A device out of the pool, with an audit log that knows who took it out. */
+  function quarantined(opts: { actor?: string | null; reason?: string | null } = {}) {
+    const { device } = seed({ name: 'device', id: 'dev-1' });
+    device.state = 'QUARANTINED';
+    (device as any).quarantine = {
+      at: new Date(Date.now() - 86_400_000).toISOString(),
+      reason: opts.reason === undefined ? 'adb keeps dropping mid-session' : opts.reason,
+      source: 'operator',
+    };
+    mod.state.quarantineLog = {
+      id: 'dev-1',
+      loaded: true,
+      events: opts.actor === null ? [] : [{
+        event: 'quarantined',
+        actor: opts.actor ?? 'admin@mfarm.local',
+        reason: opts.reason === undefined ? 'adb keeps dropping mid-session' : opts.reason,
+        occurredAt: new Date(Date.now() - 86_400_000).toISOString(),
+      }],
+    };
+    return device;
+  }
+
+  test('it names the class, the short id, the tier and the region', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    const text = textOf(mod.SCREENS.device());
+    assert.match(text, /Unprofiled device/, 'the title is what the device IS');
+    assert.match(text, /dev-1 · cuttlefish · lab/,
+      'the identity line is how you name this device in a log line or a support message');
+    assert.match(text, /Virtual device/, 'and what kind of thing it is');
+  });
+
+  test('a real device is badged as one', () => {
+    const { device } = seed({ name: 'device', id: 'dev-1' });
+    device.tier = 'physical';
+    device.model = 'SM-S918B';
+    assert.match(textOf(mod.SCREENS.device()), /Real device/);
+  });
+
+  /**
+   * THE LIST DOES NOT CARRY `lastResetAt`, AND THIS SCREEN USED TO READ THE LIST.
+   *
+   * So "Last reset" said "not reported" for every device in the fleet, forever — a field that
+   * looked like a farm which had never reset anything. The merge is what fixes it, and the merge is
+   * what this asserts: a field present ONLY in the detail read has to reach the page.
+   */
+  test('a field only the detail read carries reaches the page', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    // Deliberately not on `state.devices[0]` — the poll row has never had these.
+    mod.state.deviceDetail = {
+      id: 'dev-1',
+      loaded: true,
+      device: {
+        ...mod.state.devices[0],
+        lastResetAt: new Date(Date.now() - 7_200_000).toISOString(),
+        hostLastSeenAt: new Date(Date.now() - 172_800_000).toISOString(),
+      },
+    };
+    const text = textOf(mod.SCREENS.device());
+    assert.doesNotMatch(text, /Last reset\s+not reported/,
+      'the detail read carries a reset time; showing "not reported" means the poll row won the merge');
+    assert.match(text, /Host last seen/);
+    assert.match(text, /2d ago/);
+  });
+
+  /**
+   * "Host last seen", not "Last seen". A device can be unplugged from a host that is beating
+   * perfectly, and a row labelled for the device would then be reassuring about the wrong machine.
+   */
+  test('the heartbeat row says whose heartbeat it is', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    const text = textOf(mod.SCREENS.device());
+    assert.match(text, /Host last seen/);
+  });
+
+  test('the reset story names which of the three resets this device has', () => {
+    const { device } = seed({ name: 'device', id: 'dev-1' });
+    assert.match(textOf(mod.SCREENS.device()), /Reset story\s+snapshot-reset/);
+
+    device.capabilities = device.capabilities.filter((c: string) => c !== 'snapshot-reset');
+    assert.match(textOf(mod.SCREENS.device()), /none declared/,
+      'a device with no reset is never handed out; this row is where an operator learns why');
+  });
+
+  describe('the quarantine gate', () => {
+    /**
+     * THE CONTRACT, ON THE PAGE. It used to live only behind the confirm dialog — read by somebody
+     * who has already decided. Each of these three is a thing a person reasonably expects a
+     * "release" button to do, and none of them is true (ADR-0024).
+     */
+    test('it states what authorising recovery will and will not do', () => {
+      quarantined();
+      const text = textOf(mod.SCREENS.device());
+      assert.match(text, /Authorising recovery does one thing/);
+      assert.match(text, /Permits\s+one\s+recovery attempt/);
+      assert.match(text, /not\s+return the device to the pool/);
+      assert.match(text, /not\s+clear the quarantine note/);
+      assert.match(text, /the device stays out and the failure is recorded/);
+      assert.match(text, /No session can be started on this device until a check passes/);
+    });
+
+    /**
+     * The mark is not the message. Somebody who cannot tell the arrow from the cross by colour
+     * still has to read three sentences that say "does not".
+     */
+    test('every consequence reads correctly without its arrow or cross', () => {
+      quarantined();
+      const marks = classesOf(mod.SCREENS.device()).filter((c) => c === 'csq-mark');
+      assert.equal(marks.length, 4, 'one mark per consequence');
+      const text = textOf(mod.SCREENS.device()).replace(/[→×]/g, '');
+      assert.match(text, /It does\s+not\s+return the device to the pool/);
+    });
+
+    test('it names who took the device out, from the audit log', () => {
+      quarantined({ actor: 'admin@mfarm.local' });
+      const text = textOf(mod.SCREENS.device());
+      assert.match(text, /Taken out by/);
+      assert.match(text, /admin@mfarm\.local/);
+      assert.match(text, /adb keeps dropping mid-session/);
+      assert.match(text, /will not hand this device to anybody while it is quarantined/);
+    });
+
+    /**
+     * A HEALTH CHECK HAS NO ACTOR, and a quarantine older than the audit log has neither actor nor
+     * note. Building the sentence as a template with holes produces "Taken out by  with the note"
+     * on exactly the oldest, most confusing rows in the fleet.
+     */
+    test('with no actor and no note it is still a sentence', () => {
+      quarantined({ actor: null, reason: null });
+      const text = textOf(mod.SCREENS.device());
+      assert.doesNotMatch(text, /Taken out by\s+with/);
+      assert.doesNotMatch(text, /the note\s*\./);
+      assert.doesNotMatch(text, /undefined|null/);
+      assert.match(text, /An operator took it out of service/,
+        'the source is what is known, so the source is what it says');
+    });
+
+    /**
+     * Not softened by a quiet variant — see the note under document 05 §03. A destructive action
+     * drawn as a secondary button reads as reversible, and this one authorises a device restart.
+     */
+    test('the destructive button keeps the solid variant', () => {
+      quarantined();
+      assert.ok(findByClass(mod.SCREENS.device(), 'danger-solid'),
+        'quarantine and release exist to be used correctly, not gently');
+    });
+
+    test('a member sees no button and is told what release would have done', () => {
+      quarantined();
+      mod.state.me.role = 'member';
+      const text = textOf(mod.SCREENS.device());
+      assert.doesNotMatch(text, /Authorise one recovery attempt/);
+      assert.match(text, /Only an owner or an admin/);
+      assert.match(text, /only a passing check returns the device to the pool/i,
+        'a member who cannot press it still needs to know the button does not make it available');
+    });
+
+    test('a healthy device offers the quarantine action instead', () => {
+      seed({ name: 'device', id: 'dev-1' });
+      const text = textOf(mod.SCREENS.device());
+      assert.match(text, /Take out of service/);
+      assert.doesNotMatch(text, /Authorising recovery does one thing/);
+    });
+  });
+
+  /**
+   * THE CAPTION THAT WENT STALE. It used to end "it is why a control that needs it is missing",
+   * which described the rail BEFORE stage 5 — and stage 5 made those controls visible and struck
+   * through instead of removing them. A caption about another screen is a claim about another
+   * screen, and it rots silently when that screen changes.
+   */
+  test('the capability caption describes the rail as it is now', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    const text = textOf(mod.SCREENS.device());
+    assert.match(text, /visible and disabled/);
+    assert.match(text, /never removed/);
+    assert.doesNotMatch(text, /is why a control that needs it is missing/,
+      'stage 5 stopped removing them; this sentence has to move with it');
+  });
+
+  /**
+   * The WebDriver endpoint is the FARM's, so it stays correct on a device that is out of the pool —
+   * it just has nothing to hand out. The page most likely to be read about a quarantined device
+   * used to offer it with no note at all.
+   */
+  test('the WebDriver card says what happens when the device is not allocatable', () => {
+    quarantined();
+    const text = textOf(mod.SCREENS.device());
+    assert.match(text, /WebDriver endpoint/);
+    assert.match(text, /will queue rather than start/);
+
+    seed({ name: 'device', id: 'dev-1' });
+    assert.doesNotMatch(textOf(mod.SCREENS.device()), /will queue rather than start/,
+      'an available device has nothing to warn about');
+  });
+
+  /**
+   * "That device is not in this fleet" is a much stronger claim than a console that has not
+   * finished loading can make — and it is the sentence a person screenshots and sends to support.
+   */
+  test('an unknown id waits for the detail read before calling it missing', () => {
+    seed({ name: 'device', id: 'nope' });
+    mod.state.deviceDetail = { id: 'nope', device: null, loaded: false };
+    assert.match(textOf(mod.SCREENS.device()), /Loading/);
+    assert.doesNotMatch(textOf(mod.SCREENS.device()), /not in this fleet/);
+
+    mod.state.deviceDetail = { id: 'nope', device: null, loaded: true };
+    assert.match(textOf(mod.SCREENS.device()), /not in this fleet/);
+  });
+
+  /**
+   * A FAILED DETAIL READ MUST NOT BLANK THE PAGE. It costs the four fields only that endpoint
+   * carries; the name, the state and the quarantine reason are all in the poll row already, and
+   * those are what somebody opened this screen for.
+   */
+  test('a failed detail read still draws everything the poll knows', () => {
+    quarantined();
+    mod.state.deviceDetail = { id: 'dev-1', device: null, loaded: true };
+    const text = textOf(mod.SCREENS.device());
+    assert.match(text, /Out of the pool/);
+    assert.match(text, /adb keeps dropping mid-session/);
+    assert.doesNotMatch(text, /not in this fleet/);
+  });
+
+  test('it goes back to the Fleet, which is where devices now live', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    assert.match(textOf(mod.SCREENS.device()), /Fleet/);
+  });
+});
+
+/* =============================================================== what a route fetches for itself
+ *
+ * THE DEFECT NO RENDERED-SCREEN ASSERTION CAN SEE.
+ *
+ * Every other test in this file seeds `state` and renders. That is the right shape for "does this
+ * screen say the correct thing", and it is structurally blind to "does anything ever put data in
+ * that state" — the test performs, by hand, precisely the work it should be checking happened.
+ *
+ * `device` was in the `hashchange` listener and missing from `boot()`. `hashchange` does not fire
+ * on load, so the device screen's quarantine history read "Loading…" forever for anybody who opened
+ * a device link, refreshed the page, or returned to a bookmark. It worked only if you clicked
+ * through from the Fleet, which is the one path a developer always takes.
+ */
+describe('a route fetches what its screen needs', () => {
+  /** Record every url `api()` reaches for, and answer each one with an empty, valid body. */
+  function recording() {
+    const urls: string[] = [];
+    (globalThis as any).fetch = async (url: string) => {
+      urls.push(String(url));
+      return { ok: true, status: 200, text: async () => '{}' };
+    };
+    return urls;
+  }
+
+  const realFetch = (globalThis as any).fetch;
+  after(() => { (globalThis as any).fetch = realFetch; });
+
+  test('the device screen asks for the device AND its audit log', async () => {
+    seed({ name: 'device', id: 'dev-1' });
+    const urls = recording();
+    await mod.loadForRoute();
+    assert.ok(urls.some((u) => u === '/v1/devices/dev-1'),
+      'the detail read carries lastResetAt and hostLastSeenAt, which the fleet poll does not');
+    assert.ok(urls.some((u) => u.includes('/quarantine-log')),
+      'without this the history card says "Loading…" for as long as the page is open');
+  });
+
+  test('the cockpit and the run screen still ask for theirs', async () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    let urls = recording();
+    await mod.loadForRoute();
+    assert.ok(urls.some((u) => u.includes('/v1/sessions/sess-1')));
+
+    seed({ name: 'run', id: 'run-1' });
+    urls = recording();
+    await mod.loadForRoute();
+    assert.ok(urls.some((u) => u.includes('/v1/runs/run-1')));
+  });
+
+  /**
+   * A screen with nothing of its own to fetch must not fetch, and must not throw. `boot()` awaits
+   * this before the first paint, so a rejection here is a console that never renders at all.
+   */
+  test('a screen the poll already feeds asks for nothing, quietly', async () => {
+    seed({ name: 'fleet' });
+    const urls = recording();
+    await mod.loadForRoute();
+    assert.deepEqual(urls, [], 'the fleet is the 5s poll; a second read on navigation is waste');
   });
 });
