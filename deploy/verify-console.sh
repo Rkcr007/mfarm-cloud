@@ -145,6 +145,50 @@ else
   bad "no LENS_FOR_ROUTE in the deployed console — either this is an older build, or the merged routes were dropped"
 fi
 
+# ---------------------------------------------------------------- 3c. the device detail contract
+#
+# THE PAGE IS ITS SENTENCES, so the sentences are what gets checked — in the DEPLOYED source, which
+# is the only place a stale build or a half-finished deploy is visible. Every line below is a claim
+# a person acts on while a device is out of the pool, and every one of them has been wrong at some
+# point in this console's history.
+say "Device detail (document 05 §03)"
+if grep -q "Authorising recovery does one thing" <<<"$FLEET_JS"; then
+  ok "the consequence list is on the page, not only behind the dialog"
+  # Three crosses, not two. Each is a thing a person reasonably expects a "release" button to do.
+  for claim in \
+    "return the device to the pool" \
+    "clear the quarantine note" \
+    "the device stays out and the failure is recorded" \
+    "No session can be started on this device until a check passes"
+  do
+    grep -qF "$claim" <<<"$FLEET_JS" \
+      && ok "  ... $claim" \
+      || bad "  MISSING: \"$claim\" — ADR-0024's refusal is only as good as this list"
+  done
+else
+  bad "the consequence list is not in the deployed console"
+fi
+
+# The fetch that a cold load depends on. `hashchange` does not fire on load, so a device URL opened
+# directly is fed by this and nothing else — and the failure is a card that says "Loading…" for as
+# long as the page is open, which nobody reports as a bug.
+grep -q "loadForRoute" <<<"$FLEET_JS" \
+  && ok "one loader for both the cold load and the hashchange" \
+  || bad "no loadForRoute — a device URL opened directly will never fetch its audit log"
+
+# The caption stage 5 made true. It described the OLD rail, which removed a control the device could
+# not honour; the rail now shows it struck through and says why.
+grep -q "visible and disabled in the session rail, never removed" <<<"$FLEET_JS" \
+  && ok "the capability caption matches the rail as it actually behaves" \
+  || bad "the capabilities caption does not describe stage 5's rail"
+
+DD_CSS="$(fetch "$BASE/console.css")"
+for cls in "card.gate" "csq-list" "csq-note" "badge"; do
+  grep -q "\.$cls" <<<"$DD_CSS" \
+    && ok "css: .$cls" \
+    || bad "css: .$cls is missing — the gate renders as a plain section"
+done
+
 # ---------------------------------------------------------------- 4. the CSP is still the CSP
 #
 # A CSP mistake is invisible from the outside: a blocked socket surfaces in the browser as a bare
