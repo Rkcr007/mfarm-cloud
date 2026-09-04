@@ -34,8 +34,18 @@
 /* ---------------------------------------------------------------------------- type */
 
 /**
- * THE TYPE SCALE, applied. The families and the metrics are in `design-tokens.css`; what follows is
- * the mapping from a role to the markup that wears it.
+ * THE TYPE SCALE. The families and the metrics are in `design-tokens.css`; what follows is the
+ * mapping from a role to the markup that wears it.
+ *
+ * THE `.t-*` CLASSES BELOW ARE A VOCABULARY, NOT THE APPLICATION. Nothing in the console wears one
+ * yet, and for a while that meant the display face was SERVED AND NEVER RENDERED — 41 KB of
+ * Bricolage Grotesque in the image that no rule referenced, which no test could see and which a
+ * screenshot looked entirely fine without. It was caught by asking the deployed page which faces it
+ * had actually loaded (`document.fonts` reported it `unloaded`).
+ *
+ * The display roles are applied to the EXISTING selectors further down instead, because those are
+ * the elements that already exist and already carry the headings. Reach for a `.t-*` class when
+ * adding new markup; do not add one to markup that a selector below already styles.
  *
  * Tracking is set alongside the `font:` shorthand rather than inside it, because the shorthand
  * resets `letter-spacing` to normal and cannot carry it — a display heading that quietly loses its
@@ -55,6 +65,34 @@
 *, *::before, *::after { box-sizing: border-box; }
 
 html, body { height: 100%; }
+
+/**
+ * THE DISPLAY FACE, on the five places that carry a heading.
+ *
+ * Bricolage Grotesque is for page titles, device names, dialog headings and stat numbers — 01's
+ * list, and the reason the face is in the image at all. Grouped here rather than repeated at each
+ * selector so that "which things are display type" is one answer in one place; the SIZES stay with
+ * their own rules, because those are layout and were tuned against screens this change is not
+ * re-laying-out.
+ *
+ * TRACKING IS SET ALONGSIDE, and it is the half that gets lost: a display face at 26px with default
+ * tracking reads loose and slightly amateur, which is most of what separates typeset from styled.
+ */
+.headline,
+.page-title,
+.card > h2,
+.card-title,
+.dialog h2,
+.signin-card h1,
+.stat .val {
+  font-family: var(--f-display);
+}
+.page-title  { letter-spacing: var(--tr-display-lg); }
+.card-title,
+.card > h2,
+.dialog h2,
+.signin-card h1 { letter-spacing: var(--tr-display-md); }
+.stat .val { font-variant-numeric: tabular-nums; }
 
 /**
  * THE DEFAULT IS SANS NOW, and that is the single highest-leverage line in this file.
@@ -711,7 +749,9 @@ kbd {
 .crumb button:hover { color: var(--t-secondary, #C4C4C4); }
 
 .page-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 6px 0 18px; }
-.page-title { font-size: 21px; font-weight: 600; color: var(--t-primary, #F1F1F1); letter-spacing: 0; }
+/* `display-lg` in 01: 26/30, 600, -2%. The `letter-spacing: 0` this replaces was there to stop a
+   system face tracking oddly at 21px; the display face carries its own tracking above. */
+.page-title { font-size: 26px; font-weight: 600; line-height: 30px; color: var(--t-primary, #F1F1F1); }
 .page-sub { color: var(--t-label, #8A8A8A); }
 
 /* The wrapping content+rail row. Never a fixed two-track grid: at 900px a grid overflows,

@@ -17,6 +17,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 import { FACES } from '../scripts/sync-fonts.mjs';
 
 describe('the self-hosted faces', () => {
@@ -51,6 +55,69 @@ describe('the self-hosted faces', () => {
       assert.equal(bytes.subarray(0, 4).toString('latin1'), 'wOF2', `${face.file} is not woff2`);
       assert.ok(bytes.length > 10_000, `${face.file} is ${bytes.length} bytes, which is not a face`);
     }
+  });
+
+  /**
+   * EVERY FACE THE IMAGE CARRIES IS ACTUALLY WORN BY SOMETHING.
+   *
+   * This is the check that was missing. Stage 1 defined the display face, self-hosted it, served it
+   * correctly and wired it to nothing — so Bricolage Grotesque shipped 41 KB into the image and
+   * never rendered a glyph. Every test was green, the asset check was green, and a screenshot of
+   * the deployed page looked entirely correct, because the fallback in the stack is another face
+   * that IS loaded. It was caught only by asking the live page which faces it had loaded.
+   *
+   * A font nobody uses is not a cosmetic problem: it is bytes in the image, an entry in the
+   * allowlist, and a CSP directive, all bought for nothing — and the fact that it looks fine is
+   * exactly why it would have stayed.
+   *
+   * Asserted through `--f-*`, not through the family name, because the family name appears in
+   * `design-tokens.css` by definition. What matters is whether a RULE reaches for it.
+   */
+  test('each family is referenced by a rule that some markup can match', async () => {
+    const css = await readFile(join(PUBLIC, 'console.css'), 'utf8');
+    const tokens = await readFile(join(PUBLIC, 'design-tokens.css'), 'utf8');
+
+    for (const [family, token] of [
+      ['Bricolage Grotesque', '--f-display'],
+      ['Instrument Sans', '--f-ui'],
+      ['JetBrains Mono', '--f-mono'],
+    ] as const) {
+      assert.ok(tokens.includes(family), `${family} is not declared in design-tokens.css`);
+
+      // Directly (`font-family: var(--f-display)`) or through the scale (`font: var(--ty-*)`,
+      // whose value is built on the family token). Either is a real use.
+      const direct = new RegExp(`var\\(${token}\\)`).test(css);
+      const viaScale = /font:\s*var\(--ty-/.test(css)
+        && new RegExp(`--ty-[a-z-]+:[^;]*var\\(${token}\\)`).test(tokens);
+
+      assert.ok(
+        direct || viaScale,
+        `${family} is served but no rule in console.css reaches for ${token} — ` +
+        'it is bytes in the image, an allowlist entry and a CSP directive bought for nothing, ' +
+        'and the page looks fine because it falls back to a face that IS loaded.',
+      );
+    }
+  });
+
+  /**
+   * And the display face specifically is on markup that EXISTS, not only on a utility class nobody
+   * applies. `.t-display-*` being defined proved nothing — that was the shape of the bug.
+   */
+  test('the display face is on selectors the console actually renders', async () => {
+    const [css, js, html] = await Promise.all([
+      readFile(join(PUBLIC, 'console.css'), 'utf8'),
+      readFile(join(PUBLIC, 'console.js'), 'utf8'),
+      readFile(join(PUBLIC, 'index.html'), 'utf8'),
+    ]);
+
+    // The selector list that carries `--f-display`, as class names.
+    const block = css.slice(css.indexOf('.headline,'), css.indexOf('font-family: var(--f-display)'));
+    const selectors = [...block.matchAll(/\.([a-z][a-z0-9-]*)/g)].map((m) => m[1]);
+    assert.ok(selectors.length >= 4, `expected several display selectors, found ${selectors.length}`);
+
+    const markup = js + html;
+    const orphans = selectors.filter((cls) => !markup.includes(cls));
+    assert.deepEqual(orphans, [], 'these carry the display face and no markup uses them');
   });
 
   /**
