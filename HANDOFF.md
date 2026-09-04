@@ -3106,3 +3106,39 @@ when the feature is broken. See issues 37 and 38.
 
     Verified in light on seven screens: fleet, device detail with the gate, cockpit, bring-up,
     settings, health and sign-in.
+
+58. **THE RENDER PATH, MEASURED — AND A CHECK THAT FAILED AGAINST ITS OWN FIX.** 2026-09-05.
+    Control plane `97f5c8a`: stages 5, 6 and 8 all deployed together, `verify-console.sh` 63/63.
+
+    **THE CHECK THAT CRIED WOLF.** `verify-console.sh` grepped the deployed `console.js` for
+    `progressRing` and reported "the progress ring is back". The only occurrence was the COMMENT
+    explaining why the function had been deleted — a guard failing against the very change it was
+    written to protect. It now matches `function progressRing` and `.ring-fill`, which is what its
+    own neighbour two sections down warns about: a guard that cries wolf gets deleted.
+
+    **THE RENDER PATH HAD NEVER BEEN MEASURED** and "it feels fine" is not evidence, particularly
+    with a frame system, six beats and a shared stage element newly in the tree. Measured through
+    `performance` in the page, at **4× CPU throttle**, against a seeded 40-device fleet with 12
+    sessions and 25 actions — 30 samples each:
+
+    | screen | nodes | build p50 / p95 | +forced layout p50 / p95 |
+    |---|---|---|---|
+    | fleet (capacity) | 873 | 3.1 / 7.9 ms | 16.8 / 27.1 ms |
+    | catalogue | 450 | 2.1 / 5.4 ms | 11.9 / 26.9 ms |
+    | cockpit | 418 | 2.7 / 6.7 ms | 11.5 / 24.4 ms |
+    | health | 417 | 1.6 / 4.4 ms | 8.2 / 23.6 ms |
+
+    Worst case is **27ms p95 at 4× throttle** — roughly 7ms on an unthrottled machine, against a
+    16.7ms frame budget. One dropped frame, at most, on a heavily loaded laptop.
+
+    **AND THE POLL ALREADY DOES THE RIGHT THING**, which the measurement is what proved. `startPoll`
+    compares `pollSignature()` before and after and only calls `render()` when the fetch actually
+    brought something new — so an idle farm leaves the DOM untouched entirely. A probe that waited
+    seven seconds on a quiet farm saw no rebuild at all; forcing a device state change in Postgres
+    underneath the page produced one immediately, and **scroll position survived it** (`<html>` is
+    the scroller and the content height is stable across a rebuild).
+
+    That first probe is worth recording as a method note: it called `mod.refreshAll?.()`, which is
+    NOT exported, got `undefined`, and reported a scroll position nothing had disturbed. A sentinel
+    `data-` attribute on the first row is what caught it — without something proving the render
+    happened, the measurement was of nothing.
