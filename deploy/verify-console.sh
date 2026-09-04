@@ -245,6 +245,37 @@ for cls in "endstats" "dot.breathe" "gate.waiting"; do
     || bad "css: .$cls is missing"
 done
 
+# ---------------------------------------------------------------- 3e. the bring-up choreography
+#
+# Document 04, stage 6. Six beats, each keyed to a CONFIRMED event — the failure mode of a
+# choreography is animating ahead of the farm.
+say "Bring-up (document 04, stage 6)"
+
+# THE ONE CONTINUITY RULE: the stage element is never unmounted between bring-up and session. The
+# bring-up screen used to draw its own `.phone.big` div and mount the cockpit's video inside it —
+# a different element, a different shape, and a hard cut at the moment the sequence pays off.
+grep -q "ensureStage" <<<"$FLEET_JS" \
+  && ok "one frame element, shared between bring-up and the cockpit" \
+  || bad "no ensureStage — the two screens are drawing different frames again"
+grep -q "bringupBeat" <<<"$FLEET_JS" \
+  && ok "the six beats resolve from confirmed state" \
+  || bad "the beat resolver is gone"
+
+# THREE INVENTED PERCENTAGES, ALL REMOVED. The stage ring measured `done / steps`, which is not a
+# measurement of the wait; the handshake ring was a hardcoded 25/55/80 for stages with no extent.
+grep -q "progressRing" <<<"$FLEET_JS" \
+  && bad "the progress ring is back — it measured nothing" \
+  || ok "no progress ring anywhere"
+grep -q "class: 'phone" <<<"$FLEET_JS" \
+  && bad "the old phone illustration is back beside the real frame" \
+  || ok "no second device drawing"
+
+for cls in "dev-tile" "devpanel\[data-beat" "devpanel\[data-mode"; do
+  grep -q "$cls" <<<"$DD_CSS" \
+    && ok "css: $cls" \
+    || bad "css: $cls is missing — a beat has no styling behind it"
+done
+
 # ---------------------------------------------------------------- 4. the CSP is still the CSP
 #
 # A CSP mistake is invisible from the outside: a blocked socket surfaces in the browser as a bare

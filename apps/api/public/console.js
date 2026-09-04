@@ -2754,6 +2754,79 @@ function bringupStep(key, label, st, note) {
  * so, or a peer connection is carrying frames — which is why the last step can sit at `active` for
  * a while on a cold device and why that is the truth rather than a stalled animation.
  */
+/**
+ * WHICH BEAT THE BRING-UP IS ON — document 04's six events, resolved from CONFIRMED state only.
+ *
+ * Each beat is a transition between two things the farm has actually told us, never a timer. The
+ * numbers are the document's own, so a reader can hold the spec beside the code:
+ *
+ *   0  nothing claimed      the frame is unresolved — blurred, dim, flat
+ *   1  a device is ours     chassis resolves out of blur. Screen stays off
+ *   2  device ready         the screen wakes: the restore glow
+ *   3  attached             DEPTH LANDS. This is where the device becomes a physical object
+ *   4  live view            real pixels cross-fade up, the sheen with them
+ *   5  installing           the build waits outside the frame, breathing, until the worker confirms
+ *   6  opened               nothing is drawn; the app arriving IS the animation
+ *
+ * BEAT 3 IS THE ONE THAT MOVED. Depth used to land on `data-state="live"` — the stream — so a
+ * device that declares no `screen-stream` never became physical at all, and one whose negotiation
+ * was slow stayed flat while it was already fully attached and driveable. The socket is what makes
+ * the session real (migration 017); the video is a nicety on top of it.
+ */
+function bringupBeat(sess, steps) {
+  // `key`, not `id` — `bringupStep(key, ...)` is the shape, and looking for the wrong field made
+  // every beat resolve to 1 while looking entirely reasonable.
+  const at = (key) => steps.find((x) => x.key === key);
+  const done = (key) => at(key)?.state === 'done';
+
+  if (!sess?.deviceId) return 0;
+  if (done('launch')) return 6;
+  if (at('install') && at('install').state !== 'pending') return 5;
+  if (done('stream')) return 4;
+  if (done('attach')) return 3;
+  if (done('ready')) return 2;
+  return 1;
+}
+
+/**
+ * The persistent frame, positioned for the bring-up screen and told which beat it is on.
+ *
+ * Everything below is an ATTRIBUTE, not a rebuild: `data-beat` drives the CSS transitions and
+ * `paintFrame` writes the geometry, so the element a person is watching is never replaced while
+ * they watch it.
+ */
+function bringupStage(sess, device, steps) {
+  const st = ensureStage();
+  st.root.dataset.mode = 'bringup';
+  const beat = bringupBeat(sess, steps);
+  st.root.dataset.beat = String(beat);
+  st.root.dataset.resolved = beat === 0 ? 'no' : 'yes';
+
+  // The panel interior follows the same rules it does in the cockpit — `stageState` already knows
+  // about a device that declares no stream, and beat 4 is exactly its `live`.
+  paintFrame(device);
+
+  /**
+   * THE BUILD'S TILE, WAITING OUTSIDE THE FRAME.
+   *
+   * Document 04's beat 05 travels the tile down into the screen as bytes arrive, and says plainly
+   * what to do without byte progress: *"the tile waits outside the frame and lands on
+   * confirmation"*. No worker reports install bytes today, so the fallback IS the design — and it
+   * is honest in a way the travelling version could not be, because there is nothing to map travel
+   * to. It breathes on the system loop while queued and lands when the worker confirms.
+   */
+  const install = steps.find((x) => x.key === 'install');
+  st.tile.hidden = !install || install.state === 'pending';
+  if (install) {
+    st.tile.dataset.state = install.state;
+    st.tile.textContent = install.label.replace(/^Installing /, '');
+  }
+
+  st.overlay.hidden = true;
+  st.overlay.replaceChildren();
+  return st.root;
+}
+
 function bringupSteps(sess) {
   const b = state.bringup;
   const app = b?.appId ? appById(b.appId) : null;
@@ -2875,7 +2948,15 @@ function bringupDone(sess) {
 const STEP_TONE = { done: 'ok', active: 'accent', failed: 'bad', skipped: '', pending: '' };
 
 function screenLaunching(id) {
-  const sess = state.detail?.id === id ? state.detail : null;
+  /**
+   * `missing` IS NOT A SESSION. `loadSessionDetail` stores `{ id, missing: true, message }` when the
+   * read 404s, and this used to accept that object as a session because it has the right `id` — so
+   * the header rendered "Session d946ed62 · undefined", the `undefined` being
+   * `SESSION_STATE[undefined]?.label || sess.state`. A person sent a stale bring-up link saw a
+   * screen that looked half-loaded rather than one that said what had happened.
+   */
+  const detail = state.detail?.id === id ? state.detail : null;
+  const sess = detail && !detail.missing ? detail : null;
   const steps = bringupSteps(sess);
   const counted = steps.filter((s) => s.state !== 'skipped');
   const done = counted.filter((s) => s.state === 'done').length;
@@ -2887,7 +2968,14 @@ function screenLaunching(id) {
     pageHead(
       [{ label: 'Farm' }, { label: 'Launch', to: '#/launch' }],
       device ? `Bringing up ${deviceName(device)}` : 'Bringing up a device',
-      sess ? `Session ${short(id)} · ${(SESSION_STATE[sess.state] || {}).label || sess.state}` : 'Asking the control plane for a device',
+      sess
+        ? `Session ${short(id)} \u00b7 ${(SESSION_STATE[sess.state] || {}).label || sess.state}`
+        : detail?.missing
+          // The bring-up screen is the one people are SENT a link to, so this is the sentence a
+          // stale link lands on. It says which session and that it is gone, rather than looking
+          // like a page still loading.
+          ? `Session ${short(id)} is not visible to this org`
+          : 'Asking the control plane for a device',
       h('div', { class: 'row tight' },
         btn('Cancel', 'ghost', () => cancelBringup(id)),
       ),
@@ -2895,18 +2983,22 @@ function screenLaunching(id) {
 
     h('div', { class: 'bringup' },
       h('div', { class: 'bringup-stage' },
-        h('div', { class: 'phone big' },
-          h('div', { class: 'phone-screen' },
-            // The video is mounted from the first moment there is a session, not once every step is
-            // green: the frames start arriving before the install does, and watching the app appear
-            // on the device is the most convincing thing this screen can show.
-            // The same persistent element the cockpit uses, so arriving at the cockpit does not
-            // restart the stream that is already playing here.
-            state.liveState === 'streaming' && state.stage?.video
-              ? state.stage.video
-              : progressRing(pct),
-          ),
-        ),
+        /**
+         * THE SAME FRAME THE COCKPIT WILL SHOW — document 04's continuity rule.
+         *
+         * This screen used to draw its own `.phone.big` div and mount the cockpit's `<video>`
+         * inside it once the stream arrived, which meant a different element, a different shape and
+         * a hard cut between the two screens at the exact moment the sequence was supposed to pay
+         * off. `bringupStage` returns the one persistent element; appending it here MOVES it rather
+         * than rebuilding it, so nothing is remounted and the decoder never restarts.
+         *
+         * THE PROGRESS RING IS GONE, and it is the same deletion as the cockpit's indeterminate
+         * bar. `done / steps` is not a measurement of the wait: acquiring takes a second and
+         * installing takes minutes, so "60%" implied a proportion the console has no basis for.
+         * The frame's own state and the checklist beside it say exactly what is confirmed and what
+         * is still waiting, which is everything a percentage was pretending to summarise.
+         */
+        bringupStage(sess, device, steps),
         h('p', { class: 'caption', text: device ? `${deviceName(device)} · Android ${device.osVersion}${geometryText(device) ? ` · ${geometryText(device)}` : ''}` : 'no device yet' }),
       ),
 
@@ -2953,32 +3045,6 @@ function screenLaunching(id) {
   ];
 }
 
-/**
- * A ring, drawn as an SVG rather than as a spinner.
- *
- * The percentage is real — steps completed over steps that apply — so it is worth showing. A spinner
- * would say "something is happening" for up to a minute of cold boot without saying what.
- */
-function progressRing(pct) {
-  const r = 54;
-  const c = 2 * Math.PI * r;
-  const svg = (tag, attrs) => {
-    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-    return el;
-  };
-  const wrap = h('div', { class: 'ring' });
-  const s = svg('svg', { viewBox: '0 0 128 128', class: 'ring-svg' });
-  s.appendChild(svg('circle', { cx: 64, cy: 64, r, class: 'ring-track' }));
-  s.appendChild(svg('circle', {
-    cx: 64, cy: 64, r, class: 'ring-fill',
-    'stroke-dasharray': `${c}`, 'stroke-dashoffset': `${c * (1 - pct / 100)}`,
-    transform: 'rotate(-90 64 64)',
-  }));
-  wrap.appendChild(s);
-  wrap.appendChild(h('span', { class: 'ring-num tnum' }, String(pct), h('small', { text: '%' })));
-  return wrap;
-}
 
 async function cancelBringup(id) {
   closeLive();
@@ -3113,10 +3179,22 @@ function toolBtn(name, label, enabled, onclick, opts = {}) {
  * re-append the same node and repaint only the parts that actually changed: the toolbar's disabled
  * states, the overlay, and the caption. Moving a live `<video>` between parents keeps its stream.
  */
-function stagePanel(sess, live) {
-  const device = deviceById(sess.deviceId);
-  const caps = device?.capabilities || [];
-
+/**
+ * THE ONE CONTINUITY RULE — document 04.
+ *
+ * *"The stage element is never unmounted between bring-up and session. If it reloads, the illusion
+ * that you watched THIS device arrive is gone, and with it most of the value of the sequence."*
+ *
+ * So the frame is built ONCE, here, and both screens append the same element. Appending a node that
+ * already has a parent MOVES it — it is not recreated — so the device a person watched resolve out
+ * of blur on the bring-up screen is the identical DOM element, with the identical `<video>` and its
+ * identical decoder state, that they then drive in the cockpit.
+ *
+ * This used to be inlined in `stagePanel`, and the bring-up screen drew its own `.phone.big` div
+ * instead: a different element, a different shape, and a hard cut between the two screens at the
+ * exact moment the sequence was supposed to pay off.
+ */
+function ensureStage() {
   if (!state.stage) {
     /**
      * The video IS the frame's panel — it is passed into `buildFrame` rather than created by it.
@@ -3161,12 +3239,19 @@ function stagePanel(sess, live) {
     const kbd = h('span', { class: 'dev-kbd', text: 'keyboard → device' });
     const captionRow = h('div', { class: 'dev-caption' }, caption, kbd);
 
+    /**
+     * The build's tile — beat 05. Created once with the frame rather than per render, for the same
+     * reason as everything else in here: this element sits beside a `<video>` that must never be
+     * rebuilt, and a node created on a five-second poll is a node destroyed on a five-second poll.
+     */
+    const tile = h('div', { class: 'dev-tile', hidden: true });
+
     const root = h('div', { class: 'devpanel' },
       toolbar,
-      h('div', { class: 'dev-stage' }, screenWrap),
+      h('div', { class: 'dev-stage' }, screenWrap, tile),
     );
     state.stage = {
-      root, video, overlay, toolbar, caption, zoom: 1,
+      root, video, overlay, toolbar, caption, tile, zoom: 1,
       dom,
       // `frame` is the glass box: the inspector places its overlay against it, and it is the
       // element whose bounds are the device's own panel.
@@ -3180,8 +3265,16 @@ function stagePanel(sess, live) {
     };
     root.appendChild(captionRow);
   }
+  return state.stage;
+}
+
+function stagePanel(sess, live) {
+  const device = deviceById(sess.deviceId);
+  const caps = device?.capabilities || [];
+  ensureStage();
 
   const st = state.stage;
+  st.root.dataset.mode = 'session';
   paintToolbar(sess, live, caps);
   paintOverlay(sess, live, caps);
   paintFrame(device);
@@ -3540,15 +3633,31 @@ function paintOverlay(sess, live, caps) {
         h('p', { class: 'help', text: 'This session has no route to the data plane, so nothing is being negotiated. The device itself is held and WebDriver still works.' }),
       );
 
+    /**
+     * THE HANDSHAKE, AS TEXT — and the third invented percentage removed.
+     *
+     * This drew `progressRing(25 | 55 | 80)`: three hardcoded numbers standing in for socket
+     * stages that have no extent to be a fraction of. Nothing measures how far through a WebRTC
+     * negotiation you are — a candidate pair either forms or it does not — so "80%" was a picture
+     * of a quantity that does not exist, and it sat on the one surface whose entire value is that
+     * it does not do that.
+     *
+     * Document 04 beat 04 says how these belong: *"Sub-states (ICE, codec) read as a line of
+     * machine text under the step, not as motion."* A breathing mark says the page is alive and the
+     * words say what it is waiting for, which is the whole of what is known.
+     */
     case 'connecting':
     case 'authenticated':
     case 'negotiating':
       return show(
-        progressRing(state.liveState === 'connecting' ? 25 : state.liveState === 'authenticated' ? 55 : 80),
+        h('p', { class: 'row tight' },
+          h('span', { class: 'dot warn breathe' }),
+          h('span', { class: 'micro', text: 'Connecting the live view' })),
         h('p', { class: 'caption', text:
           state.liveState === 'connecting' ? 'Opening the data plane'
             : state.liveState === 'authenticated' ? 'Asking the device to stream'
             : 'Negotiating the media connection' }),
+        h('p', { class: 'mono meta', text: `state: ${state.liveState}` }),
       );
 
     /**

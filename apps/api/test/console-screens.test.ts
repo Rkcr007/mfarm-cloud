@@ -1928,3 +1928,146 @@ describe('the cockpit', () => {
       'expiresAt exists now; that explanation is a leftover');
   });
 });
+
+/* ================================== the bring-up choreography (document 04, stage 6) ============
+ *
+ * Six beats, each keyed to a CONFIRMED event. The tests are about which beat a given set of facts
+ * resolves to, because the failure mode of a choreography is animating ahead of the farm.
+ */
+describe('bring-up', () => {
+  /** A bring-up at a chosen point: which steps the control plane has confirmed. */
+  function at(opts: { device?: boolean; active?: boolean; live?: string; install?: string; launch?: string } = {}) {
+    const { session } = seed({ name: 'launching', id: 'sess-1' });
+    const s = {
+      ...session,
+      state: opts.active ? 'ACTIVE' : opts.device ? 'ALLOCATING' : 'QUEUED',
+      deviceId: opts.device ? 'dev-1' : null,
+    };
+    mod.state.sessions = [s];
+    mod.state.detail = { ...s, dataPlane: null, ice: null, fetchedAt: Date.now() };
+    mod.state.liveState = opts.live ?? 'idle';
+    mod.state.bringup = opts.install
+      ? {
+        appId: 'app-1',
+        install: { state: opts.install },
+        launchAfter: Boolean(opts.launch),
+        launch: opts.launch ? { state: opts.launch } : null,
+      }
+      : null;
+    return s;
+  }
+
+  const beatOf = () => {
+    const panel = findByClass(mod.SCREENS.launching(), 'devpanel');
+    return panel?.dataset?.beat ?? null;
+  };
+
+  test('nothing claimed is beat 0, and the frame is unresolved', () => {
+    at({});
+    const panel = findByClass(mod.SCREENS.launching(), 'devpanel');
+    assert.equal(panel.dataset.beat, '0');
+    assert.equal(panel.dataset.resolved, 'no',
+      'a device that has not been allocated is not yet a real object');
+  });
+
+  test('a claimed device resolves out of blur — beat 1', () => {
+    at({ device: true });
+    const panel = findByClass(mod.SCREENS.launching(), 'devpanel');
+    assert.equal(panel.dataset.beat, '1');
+    assert.equal(panel.dataset.resolved, 'yes');
+  });
+
+  test('ready is beat 2, attached is beat 3, streaming is beat 4', () => {
+    at({ device: true, active: true });
+    assert.equal(beatOf(), '2');
+
+    // `authenticated` is a real member of live.js's ATTACHED set. There is no `attached` state —
+    // ATTACHED is the SET of the five states that mean the socket is up.
+    at({ device: true, active: true, live: 'authenticated' });
+    assert.equal(beatOf(), '3');
+
+    at({ device: true, active: true, live: 'streaming' });
+    assert.equal(beatOf(), '4');
+  });
+
+  /**
+   * DEPTH LANDS AT THE SOCKET, NOT THE STREAM. It used to key off `data-state="live"`, so a device
+   * declaring no `screen-stream` never became a physical object at all — and one with a slow
+   * negotiation stayed flat while it was already attached and fully driveable.
+   */
+  test('a device that cannot stream still reaches the beat where depth lands', () => {
+    mod.state.devices[0].capabilities = ['app-install', 'webdriver', 'logcat'];
+    at({ device: true, active: true, live: 'authenticated' });
+    assert.equal(beatOf(), '3', 'the socket is what makes the session real, not the video');
+  });
+
+  test('an install in flight is beat 5, and an opened app is beat 6', () => {
+    at({ device: true, active: true, live: 'streaming', install: 'PENDING' });
+    assert.equal(beatOf(), '5');
+
+    at({ device: true, active: true, live: 'streaming', install: 'DONE', launch: 'DONE' });
+    assert.equal(beatOf(), '6');
+  });
+
+  /**
+   * THE TILE WAITS OUTSIDE THE FRAME UNTIL THE WORKER CONFIRMS — document 04's own fallback for
+   * having no byte progress, which is every worker we have.
+   */
+  test('the build tile waits while queued and lands on confirmation', () => {
+    at({ device: true, active: true, live: 'streaming', install: 'PENDING' });
+    let tile = findByClass(mod.SCREENS.launching(), 'dev-tile');
+    assert.equal(tile.hidden, false);
+    assert.equal(tile.dataset.state, 'active', 'queued: outside the frame, breathing');
+
+    at({ device: true, active: true, live: 'streaming', install: 'DONE' });
+    tile = findByClass(mod.SCREENS.launching(), 'dev-tile');
+    assert.equal(tile.dataset.state, 'done', 'it lands only when the worker has confirmed');
+  });
+
+  test('no build means no tile at all', () => {
+    at({ device: true, active: true, live: 'streaming' });
+    const tile = findByClass(mod.SCREENS.launching(), 'dev-tile');
+    assert.equal(tile.hidden, true);
+  });
+
+  /**
+   * THE CONTINUITY RULE. "If it reloads, the illusion that you watched THIS device arrive is gone,
+   * and with it most of the value of the sequence." The bring-up screen used to draw its own
+   * `.phone.big` div — a different element, a different shape, and a hard cut into the cockpit at
+   * the exact moment the sequence was supposed to pay off.
+   */
+  test('the bring-up frame is the identical element the cockpit shows', () => {
+    at({ device: true, active: true, live: 'streaming' });
+    mod.SCREENS.launching();
+    const duringBringup = mod.state.stage.root;
+    const video = mod.state.stage.video;
+
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.SCREENS.cockpit();
+    assert.equal(mod.state.stage.root, duringBringup, 'the same node, moved — never rebuilt');
+    assert.equal(mod.state.stage.video, video, 'so the decoder never restarts');
+    assert.equal(mod.state.stage.root.dataset.mode, 'session');
+  });
+
+  /**
+   * THE THIRD INVENTED PERCENTAGE. The stage drew a ring at `done / steps`, which is not a
+   * measurement of the wait — acquiring takes a second and installing takes minutes. The socket
+   * handshake drew one at a hardcoded 25/55/80 for stages that have no extent to be a fraction of.
+   */
+  test('nothing on this screen depicts a percentage', () => {
+    at({ device: true, active: true, live: 'negotiating' });
+    const tree = mod.SCREENS.launching();
+    assert.equal(findByClass(tree, 'ring'), null, 'the ring measured nothing');
+    assert.doesNotMatch(textOf(tree), /\d+%/, 'and no number stands in for one');
+  });
+
+  /** Document 04 beat 04: sub-states read as a line of machine text, not as motion. */
+  test('the handshake reports its sub-state as text', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.liveState = 'negotiating';
+    mod.state.stage = null;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Negotiating the media connection/);
+    assert.match(text, /state: negotiating/, 'the machine word, verbatim, for whoever needs it');
+  });
+});

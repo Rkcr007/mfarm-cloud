@@ -3009,3 +3009,43 @@ when the feature is broken. See issues 37 and 38.
 
     `attempts.test.ts` failed once in three full runs (`the usage endpoint reports both numbers`),
     which is the order-dependent family issue 43 records. Nothing here can reach metering.
+
+56. **STAGE 6 — THE BRING-UP CHOREOGRAPHY, AND THE THIRD INVENTED PERCENTAGE.** 2026-09-05.
+
+    **THE ONE CONTINUITY RULE, which the console was breaking.** Document 04: *"The stage element is
+    never unmounted between bring-up and session. If it reloads, the illusion that you watched THIS
+    device arrive is gone, and with it most of the value of the sequence."* The bring-up screen drew
+    its own `.phone.big` div — a rounded rectangle with a fixed 236×470 screen — and mounted the
+    cockpit's `<video>` inside it once a stream arrived. A different element, a different shape, and
+    a hard cut into the cockpit at the exact moment the sequence was supposed to pay off. The frame
+    is now built once in `ensureStage()` and both screens append the SAME node; appending moves an
+    element rather than recreating it, so the decoder never restarts. The old illustration and its
+    CSS are deleted rather than left as a second, parallel way to draw a device.
+
+    **SIX BEATS, EACH KEYED TO A CONFIRMED EVENT** — `data-beat` 0–6 on the frame, resolved from the
+    checklist the console already derives from session state, socket state and action rows. Nothing
+    is on a timer.
+
+    **BEAT 3 MOVED, and that is a fix rather than a port.** Depth used to land on
+    `data-state="live"` — the video — so a device declaring no `screen-stream` never became a
+    physical object at all, and one with a slow negotiation stayed flat while it was already
+    attached and fully driveable. The socket is what makes a session real (migration 017); the
+    video is a nicety on top of it.
+
+    **THE THIRD INVENTED PERCENTAGE.** After the cockpit's indeterminate bar (entry 55), two more:
+    the bring-up stage drew a ring at `done / steps`, and the socket handshake drew one at a
+    hardcoded **25 / 55 / 80**. Neither measures anything — acquiring takes a second and installing
+    takes minutes, and a WebRTC negotiation has no extent to be a fraction of. `progressRing` is
+    deleted. Its own comment claimed *"The percentage is real — steps completed over steps that
+    apply — so it is worth showing"*, which is issue 46's comments-as-rumour exactly: true about the
+    arithmetic, false about what the number was being read as.
+
+    **BEAT 5 SHIPS ITS FALLBACK, DELIBERATELY.** The document travels the build's tile into the
+    screen as bytes arrive and states its own fallback for having none: *"the tile waits outside the
+    frame and lands on confirmation"*. No worker reports install bytes, so the fallback IS the
+    design here — a travel animation with nothing to map travel to would be the bar again.
+
+    **AND `undefined` IN A HEADER.** `loadSessionDetail` stores `{ id, missing: true }` on a 404 and
+    `screenLaunching` accepted it as a session because the id matched, rendering "Session d946ed62 ·
+    undefined". The bring-up screen is the one people are SENT a link to, so that is the screen a
+    stale link lands on. It now names the session and says it is not visible.
