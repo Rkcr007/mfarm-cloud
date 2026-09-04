@@ -23,10 +23,11 @@
 
 import { ATTACHED, LiveSession, parseLogLine, parseHierarchy, nodeAt, selectorsFor } from '/live.js';
 import {
-  chromeFor, geometryText, hasChrome,
-  deviceName, deviceClass, capacityText, freeText as classFreeText, UNPROFILED,
+  geometryText, hasChrome,
+  deviceName, capacityText, freeText as classFreeText,
 } from '/profiles.js';
 import { iconSvg } from '/icons.js';
+import { frameFor, buildFrame, applyFrame, staticFrame } from '/frame.js';
 
 const $ = (id) => document.getElementById(id);
 const root = document.documentElement;
@@ -520,6 +521,25 @@ function btn(label, cls, onclick, opts = {}) {
     disabled: opts.disabled,
     title: opts.title || null,
   }, label, opts.kbd ? h('kbd', { text: opts.kbd }) : null);
+}
+
+/**
+ * A device drawn small — a card, a table row, a picker, a palette result.
+ *
+ * THE SAME COMPONENT AS THE COCKPIT, at a different width. That is the point of stage 3 rather than
+ * a nicety: a device is recognisable by its SHAPE before its name is read, and a shape is only
+ * recognisable if it is the same shape everywhere. A 720×1280 device is visibly stubbier than a
+ * 1080×2340 one at 24px, so somebody scanning a fleet list can see which panel they are about to
+ * get without reading a geometry string.
+ *
+ * `tiny` drops the cast shadow, the contact ellipse and the rails. Below about 56px those are three
+ * pixels of grey that make a row look dirty rather than deep — the aspect and the corner radius
+ * still carry every bit of the information.
+ */
+function deviceThumb(device, size = 44) {
+  const el = staticFrame(device, size);
+  if (size <= 56) el.dataset.scale = 'tiny';
+  return el;
 }
 
 function card(title, opts = {}, ...kids) {
@@ -1067,8 +1087,12 @@ function deviceCard(d) {
   return card(null, { class: 'stack' },
     h('div', { class: 'row between' },
       h('span', { class: 'row tight' },
-        h('span', { class: 'card-title', text: d.model || 'Device' }),
-        h('code', { class: 'caption', text: short(d.id) }),
+        // The device, at 34px. Its shape is the fastest thing on this card to read.
+        deviceThumb(d, 34),
+        h('span', { class: 'stack none' },
+          h('span', { class: 'card-title', text: deviceName(d) }),
+          h('code', { class: 'caption', text: short(d.id) }),
+        ),
       ),
       pill(st.label, st.tone, { live: d.state === 'READY' }),
     ),
@@ -1627,8 +1651,12 @@ function profileRow(p) {
     class: `pickrow${picked ? ' picked' : ''}`,
     onclick: () => { state.launch.profileKey = p.key; render(); },
   },
+    // A frame at 40px, drawn from a representative device in the class. Every device in a profile
+    // row shares a panel and a profile, which is exactly what the frame is derived from — so any of
+    // them draws the same shape, and the row shows you what you are choosing.
+    deviceThumb(p.devices[0], 40),
     h('span', { class: 'pick-main' },
-      h('span', { class: 'pick-title', text: p.model }),
+      h('span', { class: 'pick-title', text: deviceName(p.devices[0]) }),
       h('span', { class: 'pick-sub mono', text: `${p.platform} ${p.osVersion} · ${p.tier} · ${p.region}` }),
     ),
     h('span', { class: 'pick-side' },
@@ -2193,31 +2221,32 @@ function stagePanel(sess, live) {
   const caps = device?.capabilities || [];
 
   if (!state.stage) {
+    /**
+     * The video IS the frame's panel — it is passed into `buildFrame` rather than created by it.
+     *
+     * That is the continuity requirement, and it is the reason this element is created once here
+     * and never again: a `<video>` that is destroyed and recreated drops its stream, re-attaches
+     * `srcObject` and re-decodes. `render()` replaces the whole page every five seconds, so a
+     * rebuilt panel is a visible stutter twice a minute on the one surface where smoothness is the
+     * product. It also has to survive the transition from bring-up into the session, which is why
+     * `DeviceStage` must not unmount between the two.
+     *
+     * It keeps `dev-video` alongside `mf-panel`: `live.js` finds the tap layer through this
+     * element's parent, and the keyboard-routing checks match on that class.
+     */
     const video = h('video', {
-      id: 'device-video', class: 'dev-video',
+      id: 'device-video', class: 'dev-video mf-panel',
       autoplay: true, playsinline: true, tabindex: '0',
     });
+
+    const dom = buildFrame(video);
     const overlay = h('div', { class: 'dev-overlay' });
     // Local echo of your own taps. `pointer-events: none`, so it can never intercept a gesture.
+    // Inside the glass beside the video, because `live.js` reaches it as `video.parentElement`.
     const taps = h('div', { class: 'dev-taps' });
-    /**
-     * The punch-hole camera. DRAWN ON TOP OF THE DEVICE SCREEN, which reverses a rule this panel
-     * used to hold absolutely — see the comment on the keyboard hint below, which still holds for
-     * everything else.
-     *
-     * The reversal is deliberate (ADR-0017): a modern phone's camera IS in the display, so a body
-     * that puts it in the bezel is drawing a phone nobody makes. What makes it acceptable is that it
-     * is the ONLY thing allowed over the screen, it never takes a pointer event, and the chrome
-     * toggle in the toolbar removes it — so the status bar underneath it is always one click away.
-     * Anything else that wants to sit on the video does not get to cite this as precedent.
-     */
-    const cutout = h('div', { class: 'dev-cutout' });
-    const frame = h('div', { class: 'dev-frame' }, video, overlay, taps, cutout);
-    // The physical body. Buttons hang off it, outside the screen box, so they cost the device no
-    // pixels at all.
-    const buttons = h('div', { class: 'dev-buttons' });
-    const body = h('div', { class: 'dev-body' }, frame, buttons);
-    const screenWrap = h('div', { class: 'dev-fit' }, body);
+    dom.glass.append(overlay, taps);
+
+    const screenWrap = h('div', { class: 'dev-fit' }, dom.root);
     const toolbar = h('div', { class: 'devbar' });
 
     /**
@@ -2225,8 +2254,8 @@ function stagePanel(sess, live) {
      *
      * It was briefly drawn inside the bezel, and that was wrong twice over: it covered Android's
      * own navigation bar, and it sat exactly in the swipe-up gesture zone — so the one affordance
-     * added to explain input was standing on top of the input. Nothing overlays the device screen;
-     * the screen is the thing being tested and it has to be seen exactly as the device draws it.
+     * added to explain input was standing on top of the input. The punch-hole is the single
+     * exception to that rule and is narrow on purpose; this hint is not in its category.
      *
      * A sibling of the caption rather than a child, because the caption is written with
      * `textContent` on every paint and would wipe it out.
@@ -2240,12 +2269,17 @@ function stagePanel(sess, live) {
       h('div', { class: 'dev-stage' }, screenWrap),
     );
     state.stage = {
-      root, video, overlay, frame, body, buttons, cutout, toolbar, caption, zoom: 1,
+      root, video, overlay, toolbar, caption, zoom: 1,
+      dom,
+      // `frame` is the glass box: the inspector places its overlay against it, and it is the
+      // element whose bounds are the device's own panel.
+      frame: dom.glass,
       // Per-viewer, and remembered: someone comparing a screenshot against the device wants the
       // chrome gone, and wants it to stay gone on the next device they open. Wrapped because a
       // browser with site data blocked THROWS on read rather than returning null, and the panel
       // must still render for that viewer.
       chrome: readChromePref(),
+      sheen: readSheenPref(),
     };
     root.appendChild(captionRow);
   }
@@ -2262,47 +2296,48 @@ function stagePanel(sess, live) {
 }
 
 /**
- * Shape, chrome and zoom, written as CSS custom properties so resizing costs no layout thrash.
+ * Shape, chrome and state, written as CSS custom properties so resizing costs no layout thrash.
  *
- * GEOMETRY COMES FROM THE DEVICE, chrome comes from the profile, and the two are never mixed. The
- * live socket's `screen` wins over the registered one because it is the panel the stream is
- * actually being encoded from; the registered one is what a card has before a session exists.
+ * GEOMETRY COMES FROM THE DEVICE and the frame comes from the profile, and the two are never mixed.
+ * The live socket's `screen` wins over the registered one because it is the panel the stream is
+ * actually being encoded from; the registered one is what a card has before a session exists. If
+ * the two ever disagree the DEVICE is right — drawing a shape the device is not is the one thing a
+ * device-mirroring panel must never do.
+ *
+ * `frameFor` returns ONE SHAPE for all four cases, so there is no per-device branch left in here.
+ * Adding a profile row gives a new device a correct frame with no change to this function at all —
+ * which is the entire reason the resolver exists.
  */
 function paintFrame(device) {
   const st = state.stage;
-  const s = state.live?.screen || device?.screen;
-  const ratio = s?.width && s?.height ? s.width / s.height : 0.5625;
-  st.frame.style.setProperty('--dev-aspect', String(ratio));
-  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+  applyFrame(st.dom, frameFor(device, state.live?.screen), {
+    state: stageState(device),
+    zoom: st.zoom,
+    // Chrome off flattens the frame to a bare panel: one attribute, no re-layout of the video.
+    sheen: st.chrome ? st.sheen : 0,
+  });
 
-  const chrome = chromeFor(device);
-  st.frame.style.setProperty('--dev-radius', `${chrome.radiusPct}%`);
-  st.body.style.setProperty('--dev-bezel', `${chrome.bezelPx}px`);
-
-  // Hidden rather than absent when there is no cutout, so the element never has to be created or
-  // destroyed on a panel that is deliberately not rebuilt between polls.
-  if (chrome.cutout) {
-    st.cutout.style.setProperty('--cut-x', `${chrome.cutout.xPct}%`);
-    st.cutout.style.setProperty('--cut-y', `${chrome.cutout.yPct}%`);
-    st.cutout.style.setProperty('--cut-d', `${chrome.cutout.dPct}%`);
-  }
-  st.cutout.hidden = !chrome.cutout;
-
-  // Rebuilt only when the set of buttons actually changes — an unconditional rebuild would drop and
-  // recreate DOM on every poll, which is exactly what this panel exists to avoid.
-  const signature = chrome.buttons.map((b) => `${b.side}:${b.topPct}:${b.lenPct}`).join('|');
-  if (st.buttonSignature !== signature) {
-    st.buttonSignature = signature;
-    st.buttons.replaceChildren(...chrome.buttons.map((b) => h('span', {
-      class: `dev-btn-${b.side}`,
-      style: { top: `${b.topPct}%`, height: `${b.lenPct}%` },
-    })));
-  }
-
-  // One attribute drives every piece of chrome in CSS, so hiding it is a class flip and not a
-  // re-layout of the video.
-  st.root.dataset.chrome = st.chrome && hasChrome(device) ? 'on' : 'off';
+  st.dom.root.dataset.chrome = st.chrome ? 'on' : 'off';
+  st.root.dataset.chrome = st.chrome ? 'on' : 'off';
   st.root.dataset.hasChrome = hasChrome(device) ? 'yes' : 'no';
+}
+
+/**
+ * Which of the four panel states this device is in.
+ *
+ * DEPTH IS A STATE VARIABLE, so this is not cosmetic: the shadow is shallow until the data plane
+ * attaches and lands when it does, which is what makes the device visibly become physical at the
+ * moment it becomes real.
+ *
+ * `nosignal` is decided by the DEVICE'S DECLARATION, never by a failure to connect. A device
+ * without `screen-stream` is not broken and must not be drawn as though it were — input, logcat,
+ * install and WebDriver all still work on it, and the panel says so in words.
+ */
+function stageState(device) {
+  if (device && !(device.capabilities || []).includes('screen-stream')) return 'nosignal';
+  if (state.live?.state === ATTACHED) return 'live';
+  if (state.live) return 'waking';
+  return 'off';
 }
 
 /** Chrome preference, defaulting to shown, and never throwing on a browser that blocks site data. */
@@ -2311,6 +2346,24 @@ function readChromePref() {
     return localStorage.getItem('mfarm.chrome') !== 'off';
   } catch {
     return true;
+  }
+}
+
+/**
+ * The glass sheen, as a NUMBER the viewer can take to zero.
+ *
+ * It tints real pixels by 7% at the top edge, which is most of what makes the frame read as glass
+ * rather than as a hole cut in a card — and which is unacceptable to anyone doing visual-comparison
+ * work, where any tint over the framebuffer invalidates the comparison. A value rather than a
+ * boolean so it is one property write and no branch.
+ */
+function readSheenPref() {
+  try {
+    const raw = localStorage.getItem('mfarm.sheen');
+    const n = raw === null ? NaN : Number(raw);
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.07;
+  } catch {
+    return 0.07;
   }
 }
 
@@ -2333,7 +2386,9 @@ function setZoom(z) {
   const st = state.stage;
   if (!st) return;
   st.zoom = Math.min(2.5, Math.max(0.4, Number(z.toFixed(2))));
-  st.frame.style.setProperty('--dev-zoom', String(st.zoom));
+  // One property on the frame root; the six elements derive from it. No re-render, and no transform
+  // on the video — which would pull the decoded frame onto the chassis's compositor layer.
+  st.dom.root.style.setProperty('--f-zoom', String(st.zoom));
   paintToolbar(state.detail, true, deviceById(state.detail?.deviceId)?.capabilities || []);
 }
 
@@ -3837,11 +3892,18 @@ function commands() {
     if (caps.includes('screenshot')) list.push({ icon: 'camera', label: 'Take a screenshot', group: 'Do', run: () => void takeScreenshot() });
     if (caps.includes('logcat')) list.push({ icon: 'logcat', label: state.log.streaming ? 'Pause logcat' : 'Resume logcat', group: 'Do', run: () => toggleLogcat() });
   }
+  /**
+   * Device results carry a FRAME rather than an icon — the same component at its smallest size.
+   *
+   * 12px is small enough to sit inside a result row and large enough that the aspect ratio reads,
+   * which is all it has to do: it identifies WHICH device visually, beside a name that identifies
+   * which one verbally.
+   */
   for (const d of state.devices) {
     if (d.state === 'READY') {
-      list.push({ icon: 'launch', label: `Start ${deviceName(d)}`, note: classFreeText(state.devices, d), group: 'Do', run: () => startSession(d) });
+      list.push({ frame: d, label: `Start ${deviceName(d)}`, note: classFreeText(state.devices, d), group: 'Do', run: () => startSession(d) });
     }
-    list.push({ icon: 'devices', label: `Open ${deviceName(d)}`, note: geometryText(d), group: 'Go to', run: () => go(`#/devices/${d.id}`) });
+    list.push({ frame: d, label: `Open ${deviceName(d)}`, note: geometryText(d), group: 'Go to', run: () => go(`#/devices/${d.id}`) });
   }
   list.push({ icon: 'upload', label: 'Upload an APK', group: 'Do', run: () => { go('#/apps'); setTimeout(() => $('apk-input')?.click(), 60); } });
   list.push({
@@ -3913,7 +3975,7 @@ function renderPalette() {
           type: 'button',
           onclick: () => { closeOverlays(); c.run(); },
         },
-          h('span', { class: 'glyph' }, icon(c.icon, 14)),
+          h('span', { class: 'glyph' }, c.frame ? deviceThumb(c.frame, 12) : icon(c.icon, 14)),
           h('span', { class: 'cmd-label', text: c.label }),
           // The free count, or the geometry, inline on the result itself. 06's reason: the top
           // result is an ACTION, so Enter has to be a safe keystroke — and it is only safe if what

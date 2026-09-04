@@ -76,6 +76,13 @@ const FILES: Record<string, { file: string; type: string }> = {
    * after a build step could not be served from a fresh checkout.
    */
   '/icons.js': { file: 'icons.js', type: 'text/javascript; charset=utf-8' },
+  /**
+   * The device frame (ADR-0017), imported as a module by console.js.
+   *
+   * One component for every place a device appears — the cockpit stage, a card, a picker row, a
+   * palette result — so a device is recognisable by its SHAPE before its name is read.
+   */
+  '/frame.js': { file: 'frame.js', type: 'text/javascript; charset=utf-8' },
   // Device chrome (ADR-0016), also imported as a module by console.js.
   //
   // ITS ABSENCE HERE TOOK THE WHOLE CONSOLE DOWN IN PRODUCTION. This table is an allowlist, and a

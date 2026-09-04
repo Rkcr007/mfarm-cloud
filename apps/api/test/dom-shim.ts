@@ -165,6 +165,32 @@ export function countElements(node: unknown): number {
  * drawn". Used for the parts of the device panel that carry no text at all — a punch-hole and a side
  * button are pure geometry, and `textOf` sees nothing of either.
  */
+/**
+ * The first element carrying a class, depth-first. Null when there is none.
+ *
+ * `classesOf` answers "was this drawn at all", which is the right question for most of these tests
+ * and the wrong one whenever an element is built unconditionally and toggled with `hidden` — the
+ * frame's punch-hole is exactly that. "The element exists" and "this device has a camera" are two
+ * different facts, and only a handle on the node can tell them apart.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function findByClass(node: unknown, cls: string): any {
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const hit = findByClass(n, cls);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (!(node instanceof ShimElement)) return null;
+  if (typeof node.className === 'string' && node.className.split(/\s+/).includes(cls)) return node;
+  for (const child of node.children) {
+    const hit = findByClass(child, cls);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export function classesOf(node: unknown): string[] {
   if (Array.isArray(node)) return node.flatMap(classesOf);
   if (!(node instanceof ShimNode)) return [];

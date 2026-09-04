@@ -1061,105 +1061,60 @@ kbd {
 }
 .dev-fit { display: grid; place-items: center; }
 
-/* The physical body a profiled device is drawn in — ADR-0016.
-
-   THIS REVERSES WHAT USED TO BE HERE. The frame was deliberately "a thin bezel, not a phone
-   illustration ... no speaker grille, no camera dot, no chrome pretending to be hardware this farm
-   does not have", and that was right while every device was a nameless 720x1280 rectangle. Two of
-   them are now configured to reproduce a specific handset, panel and density and all, and a body
-   drawn to match is not pretence — it is the rest of the same fact, and it carries real information
-   a rectangle cannot: where the thumb falls, how much of the screen a real hand covers, what the
-   safe area actually is.
-
-   What survives the reversal, in full: an UNPROFILED device still gets the plain bezel, because
-   there is no handset to draw. `PLAIN_CHROME` in profiles.js is that case, and it is the ordinary
-   one — physical devices and the two original Cuttlefish devices all take it. */
-.dev-body {
-  position: relative;
-  display: block;
-  /* Hangs off the frame rather than wrapping it in padding: padding would change the box the video
-     is sized against, and the video's box has to stay exactly the device's panel. */
-  padding: 0;
-}
-
-.dev-frame {
-  position: relative;
-  /* Sized from the device's own reported panel, and from nothing else. `--dev-aspect` and
-     `--dev-zoom` are written by `paintFrame`; changing zoom is one property, not a re-render.
-     `--dev-radius` comes from the PROFILE, not the panel — it is the shape of the body, and the
-     plain fallback keeps the old near-square corner. */
-  aspect-ratio: var(--dev-aspect, 0.5625);
-  height: calc(min(68vh, 760px) * var(--dev-zoom, 1));
+/**
+ * THE COCKPIT'S FRAME IS THE SHARED COMPONENT NOW — see `frame.js` and the frame section at the end
+ * of this file. What used to live here was a second, parallel implementation: a bezel drawn with
+ * `box-shadow` spread, a cutout positioned as a percentage of the screen box, and side buttons that
+ * only this screen knew how to draw. All of it is gone, and only the SIZING is left below, because
+ * sizing is the one thing genuinely particular to a full-height stage.
+ *
+ * The reasoning that produced that frame survives intact and is worth keeping:
+ *
+ *   The panel was deliberately "a thin bezel, not a phone illustration ... no speaker grille, no
+ *   camera dot, no chrome pretending to be hardware this farm does not have", and that was right
+ *   while every device was a nameless 720x1280 rectangle. Devices are now configured to a specific
+ *   panel and density, and a body drawn to match is not pretence — it is the rest of the same
+ *   fact, and it carries information a rectangle cannot: where the thumb falls, how much of the
+ *   screen a real hand covers, what the safe area actually is.
+ *
+ *   What survives in full: an UNPROFILED device still gets a plain, cutout-less body, because there
+ *   is no handset to draw. That is the ORDINARY case on this farm, not an error state.
+ *
+ * THE STAGE SIZES BY HEIGHT, which is why this rule exists at all. `frame.js` derives every
+ * dimension from `--f-w`, the rendered panel WIDTH — right for a card, a table row and a palette
+ * result, all of which have a width to fill. A cockpit has a viewport height to fill instead, so
+ * the width is computed back from it through the device's own aspect ratio. One line, and the frame
+ * needs no second sizing mode.
+ */
+.dev-stage .mf-device {
+  --f-w: calc(min(68vh, 760px) * var(--f-aspect));
   max-width: 100%;
-  background: #000;
-  border-radius: var(--dev-radius, 10px);
-  /* The bezel, thickened for a device with a body and left thin for one without.
-
-     `--dev-bezel` is a LENGTH, not a percentage. box-shadow spread does not accept `%`, so a
-     percentage here is discarded silently and every device ends up on the same bezel — which is
-     exactly what happened the first time, and it is invisible until two devices are compared. */
-  box-shadow:
-    0 0 0 1px #2A2A2E,
-    0 0 0 var(--dev-bezel, 8px) #101012,
-    0 0 0 calc(var(--dev-bezel, 8px) + 1px) #2A2A2E,
-    0 24px 60px rgba(0, 0, 0, .6);
-  overflow: hidden;
-  transition: border-radius .12s ease;
 }
 
-/* Chrome off — every profile-driven flourish disappears and the panel is the plain bezel again.
-   One attribute, no re-layout of the video, which is the rule the whole panel is built on. */
-.devpanel[data-chrome="off"] .dev-cutout,
-.devpanel[data-chrome="off"] .dev-buttons { display: none; }
-.devpanel[data-chrome="off"] .dev-frame { border-radius: 10px; }
-
-/* -------------------------------------------------------------------- the punch-hole
-
-   THE ONLY THING THIS CONSOLE DRAWS OVER THE DEVICE SCREEN, and it is allowed for one reason: on a
-   modern phone the camera IS in the display, so putting it in the bezel would be drawing a device
-   nobody makes. Three constraints keep it honest, and any one of them going away should take the
-   cutout with it:
-
-     - `pointer-events: none` — it can never eat a tap meant for the device.
-     - The toolbar's chrome toggle removes it, so the status bar underneath is always one click away.
-     - Nothing else gets to sit on the video by citing this. The keyboard hint below is still
-       rendered outside the frame, for exactly the reasons written there. */
-.dev-cutout {
-  position: absolute;
-  left: var(--cut-x, 50%);
-  top: var(--cut-y, 2%);
-  width: var(--cut-d, 3.5%);
-  aspect-ratio: 1;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  background: #050506;
-  /* A hairline rim, so it reads as a lens rather than as a dead pixel on someone's stream. */
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16), 0 0 0 1px rgba(0, 0, 0, .8);
-  pointer-events: none;
-  z-index: 3;
+/**
+ * Chrome off — every profile-driven flourish disappears and the panel is a plain rounded box again.
+ * One attribute, no re-layout of the video, which is the rule the whole panel is built on.
+ *
+ * The sheen goes to zero through `--glass-sheen` rather than through this rule, because it is a
+ * value the viewer sets and not a state the console decides.
+ */
+.devpanel[data-chrome="off"] .mf-cutout,
+.devpanel[data-chrome="off"] .mf-rails,
+.devpanel[data-chrome="off"] .mf-edge,
+.devpanel[data-chrome="off"] .mf-contact { display: none; }
+.devpanel[data-chrome="off"] .mf-chassis {
+  padding: 6px;
+  background: #101012;
+  box-shadow: 0 0 0 1px #2A2A2E;
+  border-radius: 12px;
 }
-
-/* -------------------------------------------------------------------- side buttons
-
-   OUTSIDE the screen box, so they cost the device no pixels. Decorative — they are not wired to
-   anything, and the toolbar's Power and Volume controls are the ones that actually send. That is a
-   deliberate asymmetry: a drawn button that looked pressable and did nothing would be exactly the
-   thing this console refuses to ship, so these are drawn thin, flush and unhighlighted, and never
-   take a hover or a cursor. */
-.dev-buttons { position: absolute; inset: 0; pointer-events: none; }
-.dev-btn-left,
-.dev-btn-right {
-  position: absolute;
-  width: 3px;
-  border-radius: 2px;
-  background: linear-gradient(180deg, #2E2E33, #1A1A1D);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .6);
-}
-.dev-btn-left  { left: -12px; }
-.dev-btn-right { right: -12px; }
+.devpanel[data-chrome="off"] .mf-glass { border-radius: 8px; }
 
 .dev-video {
   width: 100%; height: 100%;
+  /* CONTAIN, NEVER COVER. The glass box already carries the device's exact aspect ratio, so the two
+     are equivalent in the ordinary case — but where they differ, `cover` crops the framebuffer, and
+     hiding pixels is precisely what a device-mirroring panel must never do. */
   object-fit: contain;
   display: block;
   background: #000;
@@ -1241,10 +1196,12 @@ kbd {
   .devpanel { grid-template-columns: 1fr; grid-template-areas: "stage" "bar" "caption"; }
   .devbar { flex-direction: row; flex-wrap: wrap; justify-content: center; }
   .devbar-sep { height: 22px; width: 1px; margin: 4px 5px; }
-  .dev-frame { height: calc(min(52vh, 560px) * var(--dev-zoom, 1)); }
+  /* The stage's height budget shrinks; `--f-zoom` is applied inside the frame, not here. */
+  .dev-stage .mf-device { --f-w: calc(min(52vh, 560px) * var(--f-aspect)); }
 }
 
-/* Screen-reader-only label. The rail is glyphs, and a glyph is not a name. */
+/* Screen-reader-only label. The rail is icons, and an icon is not a name — every one of them
+   is `aria-hidden`, so this span is the only thing a screen reader has to read. */
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 /* -------------------------------------------------------------------- progress ring */
@@ -1536,3 +1493,302 @@ kbd {
   border-color: var(--warn-line, rgba(232, 163, 14, .24));
   background: var(--warn-bg, rgba(232, 163, 14, .06));
 }
+
+/* ============================================================== the device frame ==============
+ *
+ * SIX NESTED ELEMENTS AND NO IMAGES. The frame is additive AROUND the panel box and never drawn
+ * over it: bezel is padding on the chassis, rails sit outside the chassis edge, the contact shadow
+ * is a sibling below. Exactly one element overlaps the panel — the punch-hole — and that one is
+ * physically accurate, because a real camera does occlude pixels and Android reserves the region.
+ *
+ * EVERY DIMENSION DERIVES FROM `--f-w`, the rendered panel width. The ratios `frame.js` writes are
+ * unitless, so one component serves a 12px palette result and a 600px cockpit stage from one set of
+ * numbers — and a corner radius that is right at one size is right at all of them.
+ *
+ * THE PERFORMANCE RULES, which are not stylistic. Rendering on this farm is software and frame rate
+ * is the proof the session is healthy, so compositing cost near the panel is a bug:
+ *
+ *   - No `backdrop-filter` anywhere near the stage. Not once.
+ *   - No animated `box-shadow` or `filter` while the stream is live. The two shadow states
+ *     cross-fade exactly once, on attach, and never again.
+ *   - `.mf-sheen` is a STATIC gradient, never a moving highlight.
+ *   - `.mf-panel` gets no transform, so the video layer keeps its own compositor layer. Zoom is
+ *     applied to the chassis instead.
+ */
+
+.mf-device {
+  --f-w: 300px;
+  --f-zoom: 1;
+  --f-aspect: .4615;
+  --f-bezel: .02;
+  --f-panel-r: .11;
+  --f-chassis-r: .13;
+  --f-edge-a: 1;
+  --f-edge-warm: 255, 246, 235;
+
+  /* Resolved once, so nothing below multiplies `--f-w` a second time. */
+  --f-pw: calc(var(--f-w) * var(--f-zoom));
+  --f-bezel-px: calc(var(--f-pw) * var(--f-bezel));
+
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.mf-chassis {
+  position: relative;
+  padding: var(--f-bezel-px);
+  border-radius: calc(var(--f-pw) * var(--f-chassis-r));
+  box-shadow: var(--e-device-flat);
+  /**
+   * THE ONE TRANSITION ON THIS ELEMENT, and it fires once per session.
+   *
+   * Depth is a STATE here, not styling: the shadow is shallow until the data plane attaches and
+   * lands when it does, so the device visibly becomes physical at the moment it becomes real. That
+   * is a transition between two confirmed states — the definition of legitimate motion in this
+   * system — and it is the only shadow in the console that ever moves.
+   */
+  transition: box-shadow var(--m-settle, 900ms) var(--ease-out);
+}
+
+/**
+ * The ceramic chassis fills. Three, because there are three kinds of object.
+ *
+ * A gradient rather than a flat fill, and this is the ONLY gradient in the console: the chrome is
+ * deliberately flat everywhere else so that the device — the one thing with material, temperature
+ * and depth — is where the eye lands.
+ */
+.mf-device[data-kind="virtual"] .mf-chassis {
+  background: linear-gradient(160deg, #2A2733 0%, #1A1822 38%, #131119 66%, #1E1B26 100%);
+}
+.mf-device[data-kind="physical"] .mf-chassis {
+  /* Warmer and darker. A real handset is a different object and reads as one. */
+  background: linear-gradient(160deg, #33302B 0%, #201E1B 40%, #161512 70%, #262320 100%);
+}
+.mf-device[data-kind="unprofiled"] .mf-chassis {
+  /* Neutral and matte. A deliberate industrial enclosure, not a failed phone — this is the
+     ORDINARY case for a farm whose devices are mostly unprofiled, and it must not read as broken. */
+  background: linear-gradient(160deg, #232326 0%, #1A1A1D 45%, #151517 100%);
+}
+
+/**
+ * The edge highlight: 1px of warm light along the top of the chassis, as if lit from above.
+ *
+ * Inset 2px so it traces the chassis rather than sitting on its outer boundary, where a browser's
+ * subpixel rounding would drop it on half the radii. Neutral rather than warm on the unprofiled
+ * body — a warm highlight implies a material, and we do not know what that device is made of.
+ */
+.mf-edge {
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 1px 0 rgba(var(--f-edge-warm), calc(.22 * var(--f-edge-a)));
+  border: 1px solid rgba(var(--f-edge-warm), calc(.06 * var(--f-edge-a)));
+}
+
+/* Rails hang OUTSIDE the chassis edge, so they cost the device no pixels at all. */
+.mf-rails { position: absolute; inset: 0; pointer-events: none; }
+.mf-rail {
+  position: absolute;
+  width: calc(var(--f-pw) * .009);
+  min-width: 1px;
+  background: linear-gradient(90deg, rgba(255, 250, 244, .10), rgba(0, 0, 0, .45));
+}
+.mf-rail[data-side="right"] { right: calc(var(--f-pw) * -.007); border-radius: 0 2px 2px 0; }
+.mf-rail[data-side="left"]  { left:  calc(var(--f-pw) * -.007); border-radius: 2px 0 0 2px; }
+.mf-device[data-rail="curved"]  .mf-rail { border-radius: 999px; }
+.mf-device[data-rail="squared"] .mf-rail { border-radius: 1px; }
+.mf-device[data-rail="none"]    .mf-rails { display: none; }
+
+/* The screen box. `overflow: hidden` is what makes the panel radius real rather than drawn on top. */
+.mf-glass {
+  position: relative;
+  width: var(--f-pw);
+  aspect-ratio: var(--f-aspect);
+  border-radius: calc(var(--f-pw) * var(--f-panel-r));
+  overflow: hidden;
+  background: #000;
+  /* Below the chassis in stacking order but above its background, without a transform — a
+     transform here would pull the video onto the chassis's compositor layer. */
+  isolation: isolate;
+}
+
+/**
+ * The panel: the framebuffer, and NOTHING ELSE IN HERE.
+ *
+ * No transform, ever. The video keeps its own compositor layer that way, and zoom is applied to
+ * `--f-zoom` on the frame instead — which resizes the box rather than scaling a decoded frame.
+ */
+.mf-panel {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+  border: 0;
+}
+
+/**
+ * The punch-hole. The ONE element allowed over the panel, and only because it is true: a real
+ * camera occludes pixels there and Android reserves the region.
+ *
+ * Centred and sized FROM GEOMETRY, so it cannot land on status-bar content. It never takes a
+ * pointer event, and the chrome toggle removes it — so the status bar underneath is always one
+ * click away. Nothing else that wants to sit on the video gets to cite this as precedent.
+ */
+.mf-cutout {
+  --f-cut-d: .037;
+  --f-cut-y: .030;
+  position: absolute;
+  left: 50%;
+  top: calc(var(--f-pw) * var(--f-cut-y));
+  width: calc(var(--f-pw) * var(--f-cut-d));
+  height: calc(var(--f-pw) * var(--f-cut-d));
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #000;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .06);
+  pointer-events: none;
+}
+
+/**
+ * The glass sheen — a STATIC gradient, never a moving highlight.
+ *
+ * It tints real pixels by 7% at the top edge, and that is the tradeoff: it is most of what makes
+ * the frame read as glass rather than as a hole cut in a card. `--glass-sheen` is a number rather
+ * than a boolean so a viewer doing visual-comparison work can take it to zero without a branch.
+ */
+.mf-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(202deg, rgba(255, 246, 235, 1) 0%, transparent 50%);
+  mix-blend-mode: screen;
+  opacity: var(--glass-sheen, .07);
+  pointer-events: none;
+}
+
+/**
+ * The contact shadow: an ellipse under the device, which is what makes it read as STANDING on the
+ * stage rather than floating over it.
+ *
+ * A sibling rather than a child, because inside the chassis it would be clipped by the corner
+ * radius and read as a vignette. Hidden at small sizes: a 3px blur under a 12px palette result is
+ * noise, not depth.
+ */
+.mf-contact {
+  width: calc(var(--f-pw) * .78);
+  height: calc(var(--f-pw) * .055);
+  margin-top: calc(var(--f-pw) * .02);
+  border-radius: 50%;
+  background: radial-gradient(50% 50% at 50% 50%, rgba(0, 0, 0, .55), transparent 72%);
+  opacity: 0;
+  transition: opacity var(--m-settle, 900ms) var(--ease-out);
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- the four panel states
+ *
+ * DEPTH IS ONE OF THE VARIABLES. The shadow is shallow until the data plane attaches, so the device
+ * becomes physical at the moment it becomes real — and that is the only shadow change in the whole
+ * product.
+ */
+
+/* OFF — glass reflects the room. Flat elevation, no contact shadow: nothing is standing here yet. */
+.mf-device[data-state="off"] .mf-glass::after,
+.mf-device[data-state="ended"] .mf-glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(202deg, rgba(214, 222, 238, .07), transparent 55%);
+  pointer-events: none;
+}
+
+/**
+ * WAKING — the snapshot is restoring, and this is THE ONLY PULSE IN THE FRAME SYSTEM.
+ *
+ * It is allowed because it is the one beat with no observable interior: the console cannot see
+ * inside a snapshot restore, so a bar that filled here would be a depiction of progress nobody
+ * reported. A pulse says "this is alive and we are waiting", which is exactly what is true. It runs
+ * on `--mf-pulse`, so `data-liveness="still"` and `prefers-reduced-motion` both stop it — and the
+ * step's own words still say what it is waiting for.
+ */
+@keyframes mf-wake { 0%, 100% { opacity: .16; } 50% { opacity: .42; } }
+
+.mf-device[data-state="waking"] .mf-glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(70% 50% at 50% 46%, var(--mf-accent, #755EB8), transparent 72%);
+  animation: mf-wake var(--mf-pulse, 2.2s) ease-in-out infinite;
+  pointer-events: none;
+}
+
+/**
+ * LIVE — full elevation lands, and real pixels are the only thing in the box.
+ *
+ * `::after` is deliberately absent in this state. Nothing overlays a live framebuffer except the
+ * punch-hole and the sheen, both of which are physically true of a phone.
+ */
+.mf-device[data-state="live"] .mf-chassis { box-shadow: var(--e-device); }
+.mf-device[data-state="live"] .mf-contact { opacity: 1; }
+
+/**
+ * NO SIGNAL — a sentence, never a black rectangle.
+ *
+ * The panel is not empty because something failed; it is empty because this device DECLARES no
+ * screen-stream, which is a property of the device rather than a fault. Input, logcat, install and
+ * WebDriver all still work, and the caller writes that sentence into the panel — the frame only
+ * makes room for it.
+ */
+.mf-device[data-state="nosignal"] .mf-glass {
+  background: var(--s-inset, #050506);
+  border: 1px dashed var(--b-dash, #303033);
+}
+.mf-device[data-state="nosignal"] .mf-sheen,
+.mf-device[data-state="nosignal"] .mf-cutout { display: none; }
+
+.mf-nosignal {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  align-content: center;
+  gap: 6px;
+  padding: 8%;
+  text-align: center;
+  color: var(--t-help, #787878);
+  font-size: 11.5px;
+  text-wrap: pretty;
+}
+.mf-nosignal strong { display: block; color: var(--t-secondary, #C4C4C4); font-size: 12.5px; }
+
+/**
+ * SMALL SIZES drop the depth entirely.
+ *
+ * A device drawn at 40px in a table row is an IDENTIFIER, not an object — a cast shadow and a
+ * contact ellipse at that scale are three pixels of grey mush that make the row look dirty. The
+ * shape and the aspect still carry every bit of the information: a stubby 720×1280 frame is
+ * recognisably not a 1080×2340 one at 24px.
+ */
+.mf-device[data-scale="tiny"] .mf-chassis { box-shadow: none; }
+.mf-device[data-scale="tiny"] .mf-contact,
+.mf-device[data-scale="tiny"] .mf-sheen,
+.mf-device[data-scale="tiny"] .mf-rails { display: none; }
+.mf-device[data-scale="tiny"] .mf-edge { inset: 1px; }
+
+/**
+ * A frame inside a row: a card header, a picker, a palette result.
+ *
+ * `align-self: center` rather than the flex default, because the frame is taller than the text
+ * beside it and a stretched frame would have its aspect ratio overridden by the row — which would
+ * draw a shape the device is not. The whole point of putting it here is that the shape is true.
+ */
+.row > .mf-device,
+.pickrow > .mf-device,
+.cmd .glyph > .mf-device { align-self: center; }
+.cmd .glyph { width: auto; }
+/* No gap between the name and the id underneath it — `.stack` adds one by default. */
+.stack.none { display: flex; flex-direction: column; gap: 0; }

@@ -20,11 +20,11 @@ process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, rm, mkdtemp } from 'node:fs/promises';
+import { readFile, readdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installDom, countElements, classesOf, textOf } from './dom-shim.ts';
+import { installDom, countElements, classesOf, textOf, findByClass } from './dom-shim.ts';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -46,22 +46,41 @@ let mod: any;
 
 before(async () => {
   /**
-   * `console.js` imports `/live.js` and `/profiles.js` — ABSOLUTE URL paths, which are correct in a
-   * browser (the origin resolves them) and unresolvable in Node, where `/live.js` means the
-   * filesystem root.
+   * The console's modules import each other by ABSOLUTE URL PATH — `/live.js`, `/profiles.js`,
+   * `/icons.js`, `/frame.js` — which is correct in a browser, where the origin resolves them, and
+   * unresolvable in Node, where `/live.js` means the filesystem root.
    *
-   * Rewritten to file URLs in a copy rather than changed at source: the absolute specifier is what
+   * Rewritten to file URLs in a COPY rather than changed at source: the absolute specifier is what
    * makes the console work with no bundler and no import map, and bending the shipped file to suit
-   * a test would be the tail wagging the dog.
+   * a test would be the tail wagging the dog. The copy goes to a temp directory and never into
+   * `public/`, which is served to the internet — see the note on `SHIMMED`.
    *
-   * Rewritten by PATTERN rather than one call per file, because the previous form silently did
-   * nothing for a specifier it did not name — the next browser module added to the console would
-   * have failed every screen test with a module-not-found that points at a temp directory.
+   * THE WHOLE GRAPH, NOT JUST THE ENTRY POINT. This used to rewrite `console.js` alone, which
+   * worked only while every browser module was a leaf. The first module to import another —
+   * `frame.js` importing `/profiles.js` — failed every screen test at once with a
+   * module-not-found pointing at the filesystem root, because the rewrite never reached it. Copying
+   * every module and rewriting each one costs a few milliseconds and cannot go stale: a file added
+   * to `public/` is picked up by being there.
+   *
+   * Subdirectories are skipped deliberately. `public/app/` is the React console's BUILD OUTPUT —
+   * a bundle, not a browser module this console imports, and not something to rewrite.
    */
-  const src = (await readFile(join(PUBLIC, 'console.js'), 'utf8'))
-    .replace(/from '\/([\w.-]+\.js)'/g, (_m, file) => `from ${JSON.stringify(pathToFileURL(join(PUBLIC, file)).href)}`);
-  SHIMMED = join(await mkdtemp(join(tmpdir(), 'mfarm-console-')), 'console.undertest.mjs');
-  await writeFile(SHIMMED, src);
+  const dir = await mkdtemp(join(tmpdir(), 'mfarm-console-'));
+  const modules = (await readdir(PUBLIC, { withFileTypes: true }))
+    .filter((e) => e.isFile() && e.name.endsWith('.js'))
+    .map((e) => e.name);
+
+  const rewrite = (src: string) => src.replace(
+    /from '\/([\w.-]+\.js)'/g,
+    (whole, file: string) => (modules.includes(file)
+      ? `from ${JSON.stringify(pathToFileURL(join(dir, file)).href)}`
+      : whole),
+  );
+
+  for (const name of modules) {
+    await writeFile(join(dir, name), rewrite(await readFile(join(PUBLIC, name), 'utf8')));
+  }
+  SHIMMED = join(dir, 'console.js');
 
   installDom();
   mod = await import(pathToFileURL(SHIMMED).href);
@@ -379,14 +398,39 @@ describe('real and virtual devices are told apart', () => {
     mod.state.deviceKind = 'real';
     const real = textOf(mod.SCREENS.devices());
     assert.match(real, /Pixel 9/);
-    assert.doesNotMatch(real, /cf_x86_64/, 'a virtual device must not survive the real filter');
+    assert.doesNotMatch(real, /Unprofiled device/, 'a virtual device must not survive the real filter');
 
     mod.state.deviceKind = 'virtual';
     const virtual = textOf(mod.SCREENS.devices());
-    assert.match(virtual, /cf_x86_64/);
+    // `dev-1` is an unprofiled Cuttlefish device, and "Unprofiled device" is what it is CALLED —
+    // see `deviceName`. It used to render as its raw model string, `cf_x86_64`, which names an
+    // implementation the reader did not choose and cannot act on.
+    assert.match(virtual, /Unprofiled device/);
     assert.doesNotMatch(virtual, /Pixel 9/);
 
     mod.state.deviceKind = 'all';
+  });
+
+  /**
+   * THE RAW STACK VOCABULARY NEVER APPEARS IN A NAME.
+   *
+   * A device is addressed by what it IS. `cf_x86_64` and `cuttlefish` are still shown — in the
+   * details table, as machine text, where the mono register itself tells the reader this came from
+   * the machine rather than from us. What they may never be is the device's name.
+   *
+   * The physical handset is the exception and is checked here too: `Pixel 9` is its OWN model
+   * number, and naming it accurately is the opposite of the counterfeiting ADR-0017 forbids.
+   */
+  test('a device is named by what it is, not by the stack it runs on', () => {
+    withPhone();
+    mod.state.deviceKind = 'all';
+    const text = textOf(mod.SCREENS.devices());
+
+    assert.doesNotMatch(text, /cf_x86_64/, 'the raw model is not a name');
+    assert.match(text, /Unprofiled device/, 'it is called what it is');
+    assert.match(text, /Pixel 9/, 'a real handset keeps its own model number');
+    // Still present, and still available to copy — placed, not banned.
+    assert.match(text, /cuttlefish/, 'the tier stays in the details table');
   });
 
   /**
@@ -771,7 +815,7 @@ describe('device profiles', () => {
     assert.doesNotMatch(text, /Screen/, 'an N-1 worker sends no screen; a "— × —" row is worse than none');
   });
 
-  test('the stage draws a body and a punch-hole for a profiled device', () => {
+  test('the stage draws a chassis and a punch-hole for a profiled device', () => {
     withProfiled();
     mod.state.route = { name: 'cockpit', id: 'sess-1' };
     // `state.detail`, which is the key the cockpit actually reads. It was `state.sessionDetail`
@@ -780,33 +824,53 @@ describe('device profiles', () => {
     // passed, because the two it made are true of every device.
     mod.state.detail = { ...mod.state.detail, deviceId: 'dev-3' };
     mod.state.stage = null;
-    const classes = classesOf(mod.SCREENS.cockpit());
-    assert.ok(classes.includes('dev-body'), 'the phone body');
-    assert.ok(classes.includes('dev-cutout'), 'the camera, which sits IN the display on this body');
+    const tree = mod.SCREENS.cockpit();
+    const classes = classesOf(tree);
+    assert.ok(classes.includes('mf-chassis'), 'the phone body');
+    assert.ok(classes.includes('mf-glass'), 'the screen box, which carries the panel radius');
+
     /**
-     * The SIDE BUTTONS, and this is the assertion that carries the test.
+     * THE RAILS ARE THE ASSERTION THAT CARRIES THIS TEST.
      *
-     * `dev-body` and `dev-cutout` are built once with the panel and exist for EVERY device, profiled
-     * or not — so asserting them proves the panel was built and nothing more. This one is different:
-     * a button only exists when `chromeFor` matched a real profile, so it is the only line here that
-     * fails if the device never resolves and the chrome silently falls back to plain.
+     * `mf-chassis`, `mf-glass` and `mf-cutout` are built once with the panel and exist for EVERY
+     * device, profiled or not — the cutout is merely `hidden` when there is none — so asserting
+     * them proves the frame was built and nothing more. A rail is different: `frameFor` returns an
+     * EMPTY rail list for the neutral chassis, so a rail element exists only when the resolver
+     * matched a real profile. It is the one line here that fails if the device never resolves and
+     * the frame silently falls back to unprofiled.
      *
-     * It is also the line that would have caught the crash. Buttons are the one piece of chrome
-     * written through `h()`, and `h()` writes styles as `Object.assign(node.style, value)` — a
+     * It is also the line that would have caught the old crash. Rails are the one piece of chrome
+     * built element-by-element, and `h()` writes styles as `Object.assign(node.style, value)` — a
      * string there spreads across the indices `0`, `1`, `2`… A real `CSSStyleDeclaration` throws on
      * that; the shim used to accept it. Both halves are fixed, and this reaches the code.
      */
-    assert.ok(classes.includes('dev-btn-right'), 'the volume and power keys down the right edge');
+    assert.ok(classes.includes('mf-rail'), 'the volume and power keys down the right edge');
+
+    // And the punch-hole is actually SHOWN, not merely present. `hidden` is how a frame with no
+    // cutout is drawn, so "the element exists" and "this device has a camera" are separate facts.
+    const cutout = findByClass(tree, 'mf-cutout');
+    assert.ok(cutout, 'the cutout element');
+    assert.equal(cutout.hidden, false, 'an X1 Pro has a punch-hole and it is drawn');
   });
 
-  test('an unprofiled device still renders — the plain bezel is the ordinary case', () => {
+  test('an unprofiled device still renders — the neutral chassis is the ordinary case', () => {
     // Two of this farm's four devices are deliberately unprofiled, every physical handset is, and an
     // N-1 worker profiles nothing. This path is the common one and must never look like an error.
     seed({ name: 'cockpit', id: 'sess-1' });
     mod.state.stage = null;
     const tree = mod.SCREENS.cockpit();
     assert.ok(countElements(tree) > 0);
-    assert.ok(classesOf(tree).includes('dev-frame'), 'the screen is still drawn');
+    assert.ok(classesOf(tree).includes('mf-glass'), 'the screen is still drawn');
+
+    /**
+     * AND IT HAS NO CUTOUT, which is the honest half rather than an omission.
+     *
+     * We do not know where this device's camera is, so drawing one would be inventing data — and
+     * the whole point of the neutral chassis is that it is honest about what the farm knows:
+     * geometry, and nothing more.
+     */
+    assert.equal(findByClass(tree, 'mf-cutout')?.hidden, true, 'no camera is invented');
+    assert.ok(!classesOf(tree).includes('mf-rail'), 'no side keys are invented either');
   });
 
   test('an unknown profile falls back instead of blanking the panel', () => {
@@ -815,6 +879,25 @@ describe('device profiles', () => {
     seed({ name: 'cockpit', id: 'sess-1' });
     mod.state.devices[0].profile = 'mfarm-x9-from-the-future';
     mod.state.stage = null;
-    assert.ok(classesOf(mod.SCREENS.cockpit()).includes('dev-frame'));
+    assert.ok(classesOf(mod.SCREENS.cockpit()).includes('mf-glass'));
+  });
+
+  /**
+   * The frame's SHAPE comes from the device's own pixels, never from the profile table.
+   *
+   * A 720×1280 device is visibly stubbier than a 1080×2340 one and it must be — screen shape is the
+   * reason somebody chose a device, so the frame is where that difference becomes visible before
+   * they start testing. This is the assertion that fails if the aspect is ever taken from the table
+   * instead, which would draw a shape the device is not.
+   */
+  test('the panel aspect is the device\'s reported geometry', () => {
+    withProfiled();
+    mod.state.route = { name: 'cockpit', id: 'sess-1' };
+    mod.state.detail = { ...mod.state.detail, deviceId: 'dev-3' };
+    mod.state.stage = null;
+    mod.SCREENS.cockpit();
+
+    const frame = mod.state.stage.dom.root;
+    assert.equal(frame.style['--f-aspect'], String(1080 / 2340));
   });
 });
