@@ -999,22 +999,6 @@ kbd {
   gap: 14px;
   min-height: 260px;
 }
-.phone {
-  background: #111113;
-  border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 5px;
-  padding: 7px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, .65);
-}
-.phone-screen {
-  width: 236px; height: 470px;
-  background: var(--s-inset, #050506);
-  border-radius: 3px;
-  display: grid; place-items: center;
-  padding: 20px;
-  text-align: center;
-}
-
 .toolgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 
 .vital { display: grid; gap: 5px; }
@@ -1147,17 +1131,11 @@ kbd {
    micro-label treatment is for states; shouting "FINANCE APP 4.18.2" misreads it as one. */
 .pill.plain { text-transform: none; letter-spacing: .01em; font-size: 11.5px; }
 
-/* The stage holds a statement, not a stream, so it is sized for the sentence rather than for a
-   1280×2856 device. A phone-shaped void would only advertise how much is missing. */
-.phone-screen { height: 330px; }
-
 /* ====================================================================== live view (ADR-0007)
    Everything below arrived with the live device view. The phone frame existed before it and held a
    paragraph explaining why there was no stream; it now has to hold a video, so it is sized from the
    device rather than from a sentence. */
 
-/* The frame grows, and the old `.phone-screen { height: 330px }` override above no longer applies to
-   it — `.big` is the sized-for-a-device variant and the plain one keeps its statement size. */
 /* ====================================================================== the device panel
    Modelled on a device-mirroring panel rather than on a picture of a phone: the screen is the
    subject, it scales to the space available, and the controls sit in a toolbar beside it instead of
@@ -1427,27 +1405,113 @@ kbd {
    is `aria-hidden`, so this span is the only thing a screen reader has to read. */
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-/* -------------------------------------------------------------------- progress ring */
-
-.ring { position: relative; display: grid; place-items: center; width: 128px; height: 128px; }
-.ring-svg { width: 128px; height: 128px; }
-.ring-track { fill: none; stroke: var(--b-btn, #2B2B2E); stroke-width: 6; }
-.ring-fill {
-  fill: none;
-  stroke: var(--mf-accent, #755EB8);
-  stroke-width: 6;
-  stroke-linecap: round;
-  transition: stroke-dashoffset .4s ease;
-}
-.ring-num {
-  position: absolute;
-  font-size: 30px;
-  color: var(--t-primary, #F1F1F1);
-}
-.ring-num small { font-size: 14px; color: var(--t-caption, #6A6A6A); margin-left: 2px; }
-.center { justify-items: center; text-align: center; }
-
 /* -------------------------------------------------------------------- bring-up screen */
+
+/* ============================================ the bring-up choreography (document 04, stage 6) ==
+ *
+ * SIX BEATS, EACH KEYED TO A CONFIRMED EVENT. Nothing here animates ahead of the farm: every
+ * transition below is between two states the control plane has actually reported, and the two beats
+ * whose interiors cannot be seen (the snapshot restore, the worker's install) BREATHE rather than
+ * fill, because there is nothing to fill from.
+ *
+ * The element these run on is the SAME frame the cockpit shows — document 04's one continuity
+ * rule. `data-mode` says which screen is currently holding it.
+ */
+
+/* The bring-up screen holds the frame without the session's toolbar or its caption row. */
+.devpanel[data-mode="bringup"] .devbar,
+.devpanel[data-mode="bringup"] .dev-caption { display: none; }
+.devpanel[data-mode="bringup"] .dev-stage {
+  background: none;
+  padding: 0;
+  overflow: visible;
+  position: relative;
+}
+.devpanel[data-mode="bringup"] .dev-stage .mf-device {
+  --f-w: calc(min(46vh, 420px) * var(--f-aspect));
+}
+
+/*
+ * BEAT 01 — the allocator claims a device: the chassis resolves out of blur.
+ *
+ * Shared with the queued cockpit above, which is the same fact wearing a different screen: a device
+ * that has not been allocated is not yet a real object, so it is not yet drawn as one.
+ */
+
+/*
+ * BEAT 03 — the data-plane socket opens and DEPTH LANDS. This is the beat where the device becomes
+ * a physical object, and it is the only shadow change in the product.
+ *
+ * KEYED TO THE SOCKET, NOT THE STREAM, and that is a correction. Depth used to land on
+ * `data-state="live"` — so a device declaring no `screen-stream` never became physical at all, and
+ * one with a slow negotiation stayed flat while it was already fully attached and driveable. The
+ * socket is what makes a session real (migration 017); the video is a nicety on top of it.
+ */
+.devpanel[data-beat] .mf-chassis {
+  transition: box-shadow var(--m-settle, 900ms) var(--ease-out);
+}
+.devpanel[data-beat] .mf-contact {
+  transition: opacity var(--m-settle, 900ms) var(--ease-out);
+}
+.devpanel[data-beat="3"] .mf-chassis,
+.devpanel[data-beat="4"] .mf-chassis,
+.devpanel[data-beat="5"] .mf-chassis,
+.devpanel[data-beat="6"] .mf-chassis { box-shadow: var(--e-device); }
+.devpanel[data-beat="3"] .mf-contact,
+.devpanel[data-beat="4"] .mf-contact,
+.devpanel[data-beat="5"] .mf-contact,
+.devpanel[data-beat="6"] .mf-contact { opacity: 1; }
+
+/*
+ * BEAT 04 — real pixels cross-fade up, and the glass sheen fades in with them. The panel's own
+ * `data-state` already switches the interior; this is only the timing.
+ */
+.devpanel[data-beat] .mf-glass > .mf-panel,
+.devpanel[data-beat] .mf-sheen {
+  transition: opacity var(--m-arrive, 700ms) var(--ease-out);
+}
+
+/*
+ * BEAT 05 — the build waits OUTSIDE the frame and lands on confirmation.
+ *
+ * Document 04 travels the tile down into the screen as bytes arrive, and states its own fallback
+ * for when there is no byte progress: the tile waits outside and lands when the worker confirms.
+ * No worker reports install bytes, so the fallback IS the design here — and it is the honest half,
+ * because a travel animation with nothing to map travel to is the bar all over again.
+ */
+.dev-tile {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translate(-50%, 0);
+  max-width: 80%;
+  padding: 6px 11px;
+  border-radius: var(--r-sm, 6px);
+  background: var(--s-chip, #191919);
+  border: 1px solid var(--warn-line, rgba(232, 163, 14, .24));
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: var(--warn, #E8A30E);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: transform var(--m-settle, 950ms) var(--ease-emphatic),
+              opacity var(--m-settle, 950ms) var(--ease-out);
+}
+/* Queued: outside the frame, breathing on the system loop. Nothing has been confirmed yet. */
+.dev-tile[data-state="active"] { animation: mf-breathe var(--mf-pulse, 2.2s) ease-in-out infinite; }
+/* Confirmed: it lands INSIDE the screen, once, and stops moving. */
+.dev-tile[data-state="done"] {
+  transform: translate(-50%, 26px);
+  border-color: var(--ok-line, rgba(111, 203, 99, .28));
+  color: var(--ok-text, #7FD873);
+  animation: none;
+}
+.dev-tile[data-state="failed"] {
+  border-color: var(--bad-line, rgba(224, 80, 95, .30));
+  color: var(--bad-text, #EE7C88);
+  animation: none;
+}
 
 .bringup { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
 .bringup-stage {
@@ -1587,10 +1651,6 @@ kbd {
 }
 .shot:hover { border-color: var(--mf-accent-line, rgba(117, 94, 184, .42)); }
 .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
-
-@media (max-width: 720px) {
-  .phone.big .phone-screen { width: 232px; height: 464px; }
-}
 
 /* ---------------------------------------------------------------- organisation */
 
