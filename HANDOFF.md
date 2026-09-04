@@ -2783,3 +2783,75 @@ when the feature is broken. See issues 37 and 38.
     has its decision (direction B) and needs `user_id` and `expires_at` on the sessions payload.
 
     `mfarm-lab` was stopped afterwards.
+
+51. **THE FLEET SURFACE — STAGE 7, SHIPPED AND VERIFIED.** 2026-09-04. Control plane `30f371b`,
+    PR #87. The change that actually makes the console look like the design.
+
+    **WHY IT WAS NEEDED, and it is a correction to entry 50 rather than a continuation.** Rakesh
+    looked at the deployed fleet and said it did not match the design. He was right, and the reason
+    matters: stages 1–4 are a SYSTEM layer — tokens, icons, one frame component, the words — applied
+    to the layouts that were already there. None of them moves an element. I described them
+    accurately and never said "the screens will look structurally the same", which is the sentence
+    that was missing.
+
+    **A HOLE IN THE PACKAGE'S OWN BUILD ORDER, found while answering him.** Document 05 — sign-in,
+    catalogue, device detail, apps, runs, health, organisation — has NO STAGE. The eight stages in
+    07 cover only "catalogue", buried inside stage 7. I had taken 07's build order as the complete
+    scope and had not opened 05 at all until that moment. Read all eight documents before
+    sequencing, not the five the build order points at.
+
+    **WHAT SHIPPED.** Devices, Sessions and Queue answered one question between them — can I get a
+    device right now, and if not, why not — with the free count on one page, the wait on another,
+    and who was holding what on a third. One `Fleet` route now, four lenses: Capacity, Catalogue,
+    Live, Waiting. One data source, one poll.
+
+    `#/devices`, `#/sessions` and `#/queue` each resolve onto the lens that used to be that page,
+    and `G D` / `G R` / `G Q` still work because they go through the same resolver. `parseHash` is
+    exported and takes its input so the redirect table is testable — a promise nothing can test is a
+    promise somebody tidies away. Live and Waiting SPLIT the existing screens rather than
+    reimplementing them.
+
+    `GET /v1/sessions` gained `expiresAt` and `holder`. "In use" tells somebody to go away; "in use
+    by priya, 12 minutes left" tells them whether to wait.
+
+    **THREE THINGS THE SCREENSHOT CAUGHT AFTER THE TESTS WERE GREEN:** the device frame in a table
+    row is a fourteen-pixel sliver that reads as a smudge (it earns its place on a card at 108px,
+    where the chassis and punch-hole are visible, and not at a row's height); the HOLDER column said
+    "Allocatable now", restating the pill one column to its left; and the capacity lens had a rail
+    whose queue card repeated the headline verbatim.
+
+    **AND ONE CORRECTNESS BUG.** A class with every device QUARANTINED offered "Join the queue". The
+    allocator only promotes onto a READY device, so that queue is never served — the button buys a
+    session that waits forever and looks entirely reasonable doing it. The launch picker has drawn
+    this busy-versus-unavailable distinction for months; the new surface missed it because the DATA
+    was carried across and the REASONING was not. Verified fixed on the live farm: the quarantined
+    class renders one button, "Full specification", and says why there is no queue.
+
+    A test also caught the catalogue's prose claiming the Pro had "live view, UI inspection and
+    screenshots" — capabilities the card's own intersection logic can contradict. No blurb names a
+    capability now.
+
+    **VERIFIED ON THE FARM:** `verify-console.sh` 22/22, including three new checks that the merged
+    routes still resolve in the DEPLOYED source (a hash router's redirects never reach the server,
+    so curl cannot observe them any other way); `verify-allocation.mjs` 4/4; `farm-check.sh` green;
+    and the console read at `farm.mfarm.dev` with the real five-device fleet — the two unprofiled
+    devices correctly collapsing into ONE catalogue card reading "2 of 2 free", which is the class
+    abstraction from ADR-0025 doing its job on real data.
+
+    **A PROCESS MISTAKE THAT COST A RELEASE CYCLE, and it is worth the space.** I merged #87 as
+    `3a06f7e`, then pushed a `deploy/verify-console.sh` tweak straight to `main` minutes later.
+    `ci.yml` sets `cancel-in-progress: true` on the ref, so that push CANCELLED `3a06f7e`'s CI run —
+    and `release.yml` only builds on `conclusion == 'success'`, so the Fleet commit got a skipped
+    Release and can never be deployed by its own sha. The way out was to deploy the later head,
+    which contained both. Branch and PR for everything, including docs and deploy scripts; and never
+    push to `main` while a merged commit is still waiting on its Release.
+
+    **STILL OPEN.** Launch keeps its nav item, though direction B says it should not — it is the only
+    place that can preinstall a build before handover, and no Fleet row offers that yet; removing it
+    first would delete a capability rather than relocate one. No ETA on the headline: `expiresAt`
+    exists now, but the soonest expiry is only an upper bound, since a holder can release early and
+    a queued session ahead of you takes the device first. Stage 5's rail still REMOVES two controls
+    when a capability is absent where 04 requires them struck through. Stages 6 and 8 unbuilt, and
+    the six screens in document 05 that have no stage.
+
+    `mfarm-lab` was stopped afterwards.
