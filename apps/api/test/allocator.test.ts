@@ -703,7 +703,7 @@ describe('allocating a device class', () => {
   /**
    * EVERY EXISTING CALLER IS UNCHANGED, which is what makes this migration safe to deploy ahead of
    * the console that uses it. The CLI and the WebDriver hub want any device they can drive and pass
-   * neither field; `matchProfile` defaults to false and the predicate collapses.
+   * neither field; `matchProfile` is false and the predicate collapses.
    */
   test('a caller that says nothing about class still gets any device', async () => {
     await resetFleet();
@@ -712,5 +712,36 @@ describe('allocating a device class', () => {
       orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish',
     });
     assert.ok(a.deviceId, 'the hub and the CLI allocate exactly what they allocated before');
+  });
+
+  /**
+   * THE EIGHT-ARGUMENT SIGNATURE STILL EXISTS, and this is the test for the deploy window rather
+   * than for a feature.
+   *
+   * `mfarm-deploy.sh` applies migrations and THEN restarts the API, so for a few seconds the OLD
+   * code serves against the NEW schema — and it calls `allocate_device` with eight arguments. The
+   * same shape is what a rollback looks like, permanently: the deploy script promises "rollback is
+   * this same command with an older sha" and states that migrations do not roll back, so a dropped
+   * signature turns a rollback into a farm that cannot allocate at all.
+   *
+   * Called as raw SQL rather than through `allocate()`, because `allocate()` passes ten arguments
+   * by construction and therefore cannot exercise the path this is about.
+   */
+  test('the previous eight-argument signature still allocates — the deploy window and rollback', async () => {
+    await resetFleet();
+    const [pro] = await seedProfiled('mfarm-x1-pro');
+
+    const row = await withTenant(orgA, async (c) => {
+      const { rows } = await c.query(
+        `SELECT o_device_id AS device_id, o_state AS state
+           FROM allocate_device($1, NULL, $2, 'android', 'cuttlefish',
+                                make_interval(mins => 30), '{}'::jsonb, '[]'::jsonb)`,
+        [orgA, REGION],
+      );
+      return rows[0];
+    });
+
+    assert.equal(row.state, 'ALLOCATING');
+    assert.equal(row.device_id, pro, 'the old signature still hands over a device');
   });
 });

@@ -68,18 +68,26 @@ BEGIN;
 DROP FUNCTION IF EXISTS allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb);
 
 CREATE FUNCTION allocate_device(
+  -- NO DEFAULTS ANYWHERE ON THIS SIGNATURE, and that is what makes the compatibility shim below
+  -- possible rather than a stylistic choice.
+  --
+  -- Postgres refuses a non-defaulted parameter after a defaulted one, so the two new ones could
+  -- only be non-defaulted if every earlier one was too. And they have to be non-defaulted, because
+  -- otherwise an eight-argument call would match BOTH this function and the shim, and Postgres
+  -- rejects that as "function is not unique". Ten arguments resolve here; eight resolve to the
+  -- shim; `allocator.ts` always passes ten.
   p_org           uuid,
   p_user          uuid,
   p_region        text,
   p_platform      text,
-  p_tier          text     DEFAULT NULL,
-  p_ttl           interval DEFAULT '30 minutes',
-  p_requested     jsonb    DEFAULT '{}'::jsonb,
+  p_tier          text,
+  p_ttl           interval,
+  p_requested     jsonb,
   -- Capabilities the device MUST declare, e.g. '["webdriver"]'. Matched with @>.
-  p_require_caps  jsonb    DEFAULT '[]'::jsonb,
+  p_require_caps  jsonb,
   -- The device class. Only consulted when p_match_profile is true — see the header.
-  p_profile       text     DEFAULT NULL,
-  p_match_profile boolean  DEFAULT false
+  p_profile       text,
+  p_match_profile boolean
 )
 RETURNS TABLE (o_session_id uuid, o_device_id uuid, o_fence bigint, o_state session_state)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -216,6 +224,43 @@ BEGIN
   RETURN v_promoted;
 END $$;
 
+-- ---------------------------------------------------------------- the old signature survives
+--
+-- WITHOUT THIS, BOTH THE DEPLOY WINDOW AND ROLLBACK ARE BROKEN, and neither is hypothetical.
+--
+-- `deploy/mfarm-deploy.sh` applies migrations and THEN restarts the API — correctly, and it says
+-- why: a half-applied migration must stay failed and visible rather than being retried, and if it
+-- fails the old code keeps serving the old schema. But that ordering means there is a window,
+-- seconds long, in which the OLD API is still serving against the NEW schema. It calls
+-- `allocate_device` with eight arguments. Dropping that signature makes every session allocation in
+-- that window fail with "function does not exist" — which on this farm is a WebDriver suite
+-- mid-run, not a theoretical request.
+--
+-- Rollback is the worse half. The deploy script's own header promises that "rollback is this same
+-- command with an older sha", and states that migrations do not roll back. Both are true, and
+-- together they mean a dropped signature turns a rollback into a farm that cannot allocate at all —
+-- the one situation in which somebody is already having a bad day.
+--
+-- So the eight-argument form stays, as a thin forwarder. It is SECURITY INVOKER (the default): it
+-- adds no new definer surface, and the definer function it calls carries the privilege exactly as
+-- it did before. Delete this the release after every caller passes ten arguments — which is a
+-- decision to take deliberately, once nothing can roll back past it, and not a tidy-up.
+CREATE OR REPLACE FUNCTION allocate_device(
+  p_org          uuid,
+  p_user         uuid,
+  p_region       text,
+  p_platform     text,
+  p_tier         text     DEFAULT NULL,
+  p_ttl          interval DEFAULT '30 minutes',
+  p_requested    jsonb    DEFAULT '{}'::jsonb,
+  p_require_caps jsonb    DEFAULT '[]'::jsonb
+)
+RETURNS TABLE (o_session_id uuid, o_device_id uuid, o_fence bigint, o_state session_state)
+LANGUAGE sql SET search_path = public AS $$
+  SELECT * FROM allocate_device(
+    p_org, p_user, p_region, p_platform, p_tier, p_ttl, p_requested, p_require_caps, NULL, false);
+$$;
+
 -- ---------------------------------------------------------------- re-assert the ACL and the owner
 --
 -- The dropped function took its OWNER and its ACL with it, and a REPLACEMENT DOES NOT INHERIT
@@ -235,6 +280,14 @@ REVOKE EXECUTE ON FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jso
 ALTER FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb,text,boolean)
   OWNER TO mfarm_definer;
 GRANT EXECUTE ON FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb,text,boolean)
+  TO mfarm_app;
+
+-- The shim gets the same treatment. It is not SECURITY DEFINER, so it grants no privilege of its
+-- own — but PUBLIC being able to call it would let anything that reaches the database reach the
+-- definer function behind it, which is the whole thing the revoke above is for.
+REVOKE EXECUTE ON FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb)
+  FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION allocate_device(uuid,uuid,text,text,text,interval,jsonb,jsonb)
   TO mfarm_app;
 
 COMMIT;
