@@ -108,7 +108,12 @@
     <!-- Farm status. A button, because it goes somewhere: Health. -->
     <button class="farmstat" id="farmstat" title="Open farm health">
       <span class="seg"><span class="dot ok live" id="fs-dot"></span><b id="fs-devices">—</b> ready</span>
-      <span class="seg">Queue <b id="fs-queue">—</b></span>
+      <!--
+        The queue segment carries the WHOLE phrase, not a number after a label. "Queue 0" makes the
+        reader translate a zero into "nobody is waiting" on every glance; the sentence does that
+        work once, here. `renderChrome` writes it.
+      -->
+      <span class="seg" id="fs-queue">—</span>
       <span class="seg" id="fs-holding">Holding <b id="fs-held">—</b></span>
     </button>
 

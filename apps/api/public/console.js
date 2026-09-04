@@ -182,6 +182,14 @@ export const state = {
   tick: null,
   palIndex: 0,
   error: null,
+  /**
+   * When the data on screen was last known to be true.
+   *
+   * Read only by the API-loss toast, and it is what turns "the connection is down" into something
+   * somebody can act on: a fleet page from forty seconds ago is worth trusting, one from twenty
+   * minutes ago is not, and the console has no business deciding that on the reader's behalf.
+   */
+  lastGoodAt: null,
 };
 
 /** Sessions that still hold a device. Anything else cannot be acted on. */
@@ -571,15 +579,50 @@ function timeline(items) {
  * "Success" tells nobody anything; "Install queued — waiting for the device worker · com.acme.finance"
  * tells them what to expect and how long it might take.
  */
-function toast(title, body, kind = '') {
+function toast(title, body, kind = '', opts = {}) {
   const box = $('toasts');
+
+  /**
+   * `key` REPLACES rather than stacks.
+   *
+   * Without it, a condition that re-reports — the API being unreachable, which is re-checked every
+   * five seconds — produces a column of identical toasts, and the third one pushes the first out of
+   * a box that holds three. A keyed toast is one toast whose body is rewritten in place, which is
+   * also what lets it be REMOVED when the condition clears.
+   */
+  if (opts.key) box.querySelector(`[data-toast-key="${opts.key}"]`)?.remove();
   while (box.children.length >= 3) box.firstElementChild.remove();
+
   const el = h('div', { class: `toast ${kind}`.trim() },
     h('p', { class: 't-title', text: title }),
     body ? h('p', { class: 't-body', text: body }) : null,
   );
+  if (opts.key) el.dataset.toastKey = opts.key;
+
+  /**
+   * SUCCESS AUTO-DISMISSES; A WARNING OR AN ERROR STAYS.
+   *
+   * A toast that says something went well has done its whole job in four seconds. A toast that says
+   * something is wrong has not: it is describing a condition that is still true, and taking it away
+   * on a timer leaves the reader looking at a page that appears fine. So the failing kinds get a
+   * dismiss control instead of a timer, and the caller can take them down when the condition
+   * actually resolves.
+   */
+  if (kind === 'warn' || kind === 'bad') {
+    el.append(h('button', {
+      class: 'toast-x', type: 'button', title: 'Dismiss',
+      onclick: () => el.remove(),
+    }, icon('x', 14)));
+  } else {
+    setTimeout(() => el.remove(), 4200);
+  }
   box.append(el);
-  setTimeout(() => el.remove(), 4200);
+  return el;
+}
+
+/** Take down a keyed toast, if it is up. Used when the condition it describes has cleared. */
+function clearToast(key) {
+  $('toasts').querySelector(`[data-toast-key="${key}"]`)?.remove();
 }
 
 /* ---------------------------------------------------------------------------- dialog */
@@ -807,6 +850,9 @@ async function refreshHeld(force = false) {
 async function refreshAll() {
   await Promise.all([refreshDevices(), refreshSessions(), refreshApps(), refreshActions(), refreshRuns()]);
   await refreshHeld();
+  // When the data on screen was last known to be true. The API-loss toast reads it to say how
+  // stale the page is, which is the only thing that makes "the connection is down" actionable.
+  state.lastGoodAt = Date.now();
 }
 
 /* ---------------------------------------------------------------------------- router */
@@ -876,10 +922,28 @@ function paintNavIcons() {
 function renderChrome() {
   const held = heldSession();
 
-  $('fs-devices').textContent = `${state.available}/${state.devices.length}`;
+  /**
+   * THE MOST-READ ELEMENT IN THE CONSOLE, and it used to be written in the shortest possible form
+   * rather than the clearest: `4/4 ready · Queue 0 · Holding fake-2`.
+   *
+   * Three problems, one per segment. `4/4` is a fraction with no units, so it is only legible to
+   * somebody who already knows what is being counted. `Queue 0` makes the reader translate a zero
+   * into "nobody is waiting" every time they glance at it, which is the work a label is supposed
+   * to do for them. And `fake-2` is a host-local id — the name of a slot on a machine, not the
+   * name of the device somebody is holding.
+   */
+  $('fs-devices').textContent = `${state.available} of ${state.devices.length}`;
   $('fs-dot').className = `dot ${state.available > 0 ? 'ok' : 'warn'} live`;
-  $('fs-queue').textContent = String(queuedSessions().length);
-  $('fs-held').textContent = held ? (held.device || short(held.deviceId)) : 'nothing';
+
+  const waiting = queuedSessions().length;
+  $('fs-queue').textContent = waiting === 0 ? 'nobody waiting'
+    : waiting === 1 ? '1 waiting'
+      : `${waiting} waiting`;
+
+  const heldDevice = held ? deviceById(held.deviceId) : null;
+  $('fs-held').textContent = held
+    ? (heldDevice ? deviceName(heldDevice) : held.device || short(held.deviceId))
+    : 'nothing';
   $('fs-holding').hidden = !held;
 
   // Nav highlight. The two detail routes keep their parent lit rather than lighting nothing.
@@ -965,7 +1029,9 @@ async function startSession(d) {
     if (session.deviceId) {
       toast('Session started', `${short(session.id)} on ${short(session.deviceId)} · ${String(session.state).toLowerCase()}`, 'ok');
     } else {
-      toast('Queued for a device', `Nothing is free on tier ${d.tier}. It starts automatically when one is.`, 'warn');
+      toast('Queued for a device',
+        `${capacityText(state.devices, d)} — so you are in line. It starts automatically when one frees up.`,
+        'warn');
     }
     await Promise.all([refreshDevices(), refreshSessions()]);
     await refreshHeld(true);
@@ -1157,13 +1223,25 @@ function deviceCard(d) {
       ),
     ] : h('div', { class: 'row tight' },
       d.state === 'READY'
-        ? btn(`Start a session on tier ${d.tier}`, 'primary', () => startSession(d))
+        ? btn(`Start ${deviceName(d)}`, 'primary', () => startSession(d))
         : null,
       btn('Details', 'ghost', () => go(`#/devices/${d.id}`)),
     ),
 
+    /**
+     * WHAT PRESSING THAT BUTTON ACTUALLY DOES, in the reader's terms.
+     *
+     * The sentence this replaces — "the allocator picks a ready device on this tier; it cannot be
+     * pinned to one" — is accurate and answers a question nobody asked. It names a component
+     * ("the allocator"), an internal grouping ("tier") and a capability the reader never expected
+     * to have ("pinned"), and it leaves out the one consequence they will actually meet: that
+     * pressing this when nothing is free puts them in a queue.
+     *
+     * Allocation is CLASS-ONLY and that fact stays — it is just stated as what will happen to you
+     * rather than as what the system is.
+     */
     d.state === 'READY' && !mine
-      ? h('p', { class: 'caption', text: 'The allocator picks a ready device on this tier; it cannot be pinned to one.' })
+      ? h('p', { class: 'caption', text: `The farm picks a free ${deviceName(d)}. If none is free when you press this, you will be queued.` })
       : null,
   );
 }
@@ -1301,7 +1379,7 @@ function askQuarantine(d) {
     maxlength: '500',
   });
   formDialog({
-    title: `Take ${d.model || 'this device'} out of service?`,
+    title: `Take ${deviceName(d)} out of service?`,
     lead: 'It leaves the allocation pool immediately, and any session on it ends. Getting it back '
       + 'needs a release and a passing health check.',
     fields: [
@@ -1364,7 +1442,13 @@ function quarantineCard(d) {
         + 'pool.' }),
       admin
         ? h('div', { class: 'row tight mt-lg' },
-            btn('Release quarantine', 'primary', () => askReleaseQuarantine(d)))
+            /**
+             * "Release quarantine" describes a state change the operator cannot actually make.
+             * Releasing does NOT return the device to the pool — it permits the host one restart
+             * and one health check, and only a passing check returns it. The old label promised
+             * the outcome; this one names the authorisation, which is the thing being granted.
+             */
+            btn('Authorise one recovery attempt', 'primary', () => askReleaseQuarantine(d)))
         // Said rather than silently absent: a member who cannot find the button should learn why
         // instead of concluding the console has none.
         : h('p', { class: 'caption mt-lg', text: 'Only an owner or an admin can release a quarantine.' }),
@@ -1426,7 +1510,7 @@ function screenDevice(id) {
   return [
     pageHead(
       [{ label: 'Farm' }, { label: 'Devices', to: '#/devices' }],
-      d.model || 'Device',
+      deviceName(d),
       d.quarantine?.reason || st.note,
       h('div', { class: 'row tight' },
         pill(st.label, st.tone, { live: d.state === 'READY' }),
@@ -1660,10 +1744,17 @@ function profileRow(p) {
       h('span', { class: 'pick-sub mono', text: `${p.platform} ${p.osVersion} · ${p.tier} · ${p.region}` }),
     ),
     h('span', { class: 'pick-side' },
+      /**
+       * A FRACTION, NOT A BARE COUNT.
+       *
+       * "3 free" answers "can I get one" and nothing else. "3 of 4" also answers "is this farm
+       * nearly full", which is the question behind it and the one that decides whether somebody
+       * starts now or waits — the denominator is not decoration.
+       */
       p.free
-        ? pill(`${p.free} free`, 'ok', { dot: false })
+        ? pill(`${p.free} of ${p.total} free`, 'ok', { dot: false })
         : p.coming
-          ? pill(`${p.coming} busy`, 'warn', { dot: false })
+          ? pill(`${p.coming} of ${p.total} busy`, 'warn', { dot: false })
           // Nothing free and nothing on its way back. Said in the strongest terms the row has,
           // because picking this profile queues a session that will never be served.
           : pill(`${p.total} unavailable`, 'bad', { dot: false }),
@@ -1755,7 +1846,7 @@ function screenLaunch() {
         ) : null,
       ),
 
-      card('Device', { aside: h('span', { class: 'caption', text: `${state.available} free` }) },
+      card('Device', { aside: h('span', { class: 'caption', text: `${state.available} of ${state.devices.length} free` }) },
         profiles.length
           ? h('div', { class: 'picklist' }, profiles.map(profileRow))
           : empty('No devices are registered.', 'A worker has to register a host before anything can be launched. Check Health.'),
@@ -1920,7 +2011,7 @@ function bringupSteps(sess) {
   const queued = sess?.state === 'QUEUED';
   steps.push(bringupStep('acquire', 'Acquiring a device from the farm',
     sess?.deviceId ? 'done' : (queued ? 'active' : 'active'),
-    queued ? queueNote() : (sess?.deviceId ? (device?.model || short(sess.deviceId)) : null)));
+    queued ? queueNote() : (sess?.deviceId ? (device ? deviceName(device) : short(sess.deviceId)) : null)));
 
   steps.push(bringupStep('ready', 'Device ready',
     sess?.state === 'ACTIVE' ? 'done' : (sess?.deviceId ? 'active' : 'pending'),
@@ -1968,11 +2059,29 @@ function bringupSteps(sess) {
   return steps;
 }
 
+/**
+ * What being queued actually means for the person reading it.
+ *
+ * "Queue 4" and "Position 4 of 6" are the same sentence in different clothes: both state a rank and
+ * leave the reader to work out whether they should keep the tab open. Three things answer that, and
+ * the wording below says all three — where you are, that the handover is automatic, and that this
+ * page moves on by itself.
+ *
+ * NO ETA, and its absence is deliberate rather than an omission. Producing one needs every current
+ * holder's `expiresAt`, and the sessions list does not return other tenants' lease times — so a
+ * number here would be invented, which is exactly the failure every sentence in this console is
+ * written to avoid. Position without an estimate still works. What would not work is neither.
+ */
 function queueNote() {
   const q = queuedSessions();
   const i = q.findIndex((s) => s.id === state.bringup?.sessionId);
-  if (i < 0) return 'Waiting for a device to free up';
-  return `Position ${i + 1} of ${q.length} in the queue`;
+  const place = i < 0 ? null
+    : i === 0 ? 'Next in line'
+      : i === 1 ? 'Second in line'
+        : `Number ${i + 1} in line`;
+  return place
+    ? `${place}. The farm hands over the moment a lease ends — this page moves on by itself.`
+    : 'Waiting for a device to free up. This page moves on by itself when one does.';
 }
 
 /**
@@ -2024,7 +2133,7 @@ function screenLaunching(id) {
   return [
     pageHead(
       [{ label: 'Farm' }, { label: 'Launch', to: '#/launch' }],
-      device ? device.model : 'Bringing up a device',
+      device ? `Bringing up ${deviceName(device)}` : 'Bringing up a device',
       sess ? `Session ${short(id)} · ${(SESSION_STATE[sess.state] || {}).label || sess.state}` : 'Asking the control plane for a device',
       h('div', { class: 'row tight' },
         btn('Cancel', 'ghost', () => cancelBringup(id)),
@@ -2045,11 +2154,11 @@ function screenLaunching(id) {
               : progressRing(pct),
           ),
         ),
-        h('p', { class: 'caption', text: device ? `${device.model} · Android ${device.osVersion} · ${device.tier}` : 'no device yet' }),
+        h('p', { class: 'caption', text: device ? `${deviceName(device)} · Android ${device.osVersion}${geometryText(device) ? ` · ${geometryText(device)}` : ''}` : 'no device yet' }),
       ),
 
       h('div', { class: 'bringup-steps' },
-        h('p', { class: 'micro', text: `Launching ${device ? device.model : 'a device'}` }),
+        h('p', { class: 'micro', text: `Launching ${device ? deviceName(device) : 'a device'}` }),
         h('ul', { class: 'steplist' }, steps.map((s) => h('li', { class: `step ${s.state}` },
           /**
            * The outcome mark. 01 maps these three to `check`, `x` and `minus`.
@@ -2290,7 +2399,7 @@ function stagePanel(sess, live) {
   paintFrame(device);
 
   st.caption.textContent = device
-    ? `${device.model}${screenOf(device)} · Android ${device.osVersion} · ${sess.region || 'lab'}`
+    ? `${deviceName(device)}${screenOf(device)} · Android ${device.osVersion} · ${sess.region || 'lab'}`
     : 'no device';
   return st.root;
 }
@@ -2494,16 +2603,37 @@ function paintOverlay(sess, live, caps) {
     return;
   }
 
+  /**
+   * A SESSION THAT ENDED SAYS WHO ENDED IT, WHEN, AND HOW LONG IT RAN.
+   *
+   * "Session ended" is the state, and the state is the least useful thing to tell somebody who is
+   * looking at a screen that has stopped: they can see it stopped. What they cannot see is whether
+   * they released it or the farm expired it, how much of their lease they used, and whether the
+   * device came back clean. Every one of those is a fact the API already returns.
+   *
+   * The end reason is rendered from `endReason` rather than assumed — a lease that expired and a
+   * device somebody released are different stories, and reading "released by you" about an expiry
+   * would be a small lie in the one place a person is trying to work out what happened.
+   */
   if (!live) {
     return show(
       h('p', { class: 'micro', text: 'Session ended' }),
-      h('p', { class: 'help', text: 'This device was released and restored to its clean snapshot.' }),
+      h('p', { class: 'help', text: endedSentence(sess) }),
     );
   }
+  /**
+   * NO LIVE VIEW IS A PROPERTY OF THE DEVICE, NOT A FAULT.
+   *
+   * This panel is otherwise identical to the ones above it that report a failure, so the words are
+   * the only thing that separates "this cannot happen here" from "this went wrong". Naming what
+   * DOES still work is the half that stops somebody abandoning a device that would have served
+   * them perfectly well.
+   */
   if (!canStream) {
     return show(
       h('p', { class: 'micro', text: 'No live view' }),
-      h('p', { class: 'help', text: 'This device does not declare screen-stream. WebDriver and installs still work.' }),
+      h('p', { class: 'help', text: 'This device declares no screen-stream. That is a property of the device, not a fault.' }),
+      h('p', { class: 'caption', text: 'Input, logcat, install and WebDriver still work.' }),
     );
   }
 
@@ -2519,7 +2649,8 @@ function paintOverlay(sess, live, caps) {
     case 'nostream':
       return show(
         h('p', { class: 'micro', text: 'No live view' }),
-        h('p', { class: 'help', text: state.liveDetail || 'This device tier does not negotiate a media stream.' }),
+        h('p', { class: 'help', text: state.liveDetail || 'This device declares no screen-stream. That is a property of the device, not a fault.' }),
+        h('p', { class: 'caption', text: 'Input, logcat, install and WebDriver still work.' }),
       );
     case 'failed':
     case 'unrouted':
@@ -2537,6 +2668,55 @@ function paintOverlay(sess, live, caps) {
             : 'Negotiating the media connection' }),
       );
   }
+}
+
+/**
+ * What happened to this session, in one sentence, from what the API actually reported.
+ *
+ * Three facts, and each is dropped rather than guessed when it is missing: who ended it, when, and
+ * how long it ran. The device's fate is stated only for a virtual device, because it is only true
+ * of one — a physical handset has no snapshot to be restored from, and telling somebody their
+ * borrowed phone was "reset from its clean snapshot" would be inventing a reset that never
+ * happened on the one kind of device where that matters most.
+ */
+function endedSentence(sess) {
+  const device = deviceById(sess?.deviceId);
+  /**
+   * KEYED ON THE REASONS THE CONTROL PLANE ACTUALLY WRITES, not on a plausible set.
+   *
+   * Every string below is a literal passed to `release()` in `allocator.ts`, `sessions.ts` and
+   * `webdriver.ts`, or set directly by a migration's sweep. A key that is merely likely — `expired`
+   * rather than `timeout` — silently falls through to the generic word, and the panel then explains
+   * nothing while looking as though it did.
+   *
+   * The unmapped case says "Ended" rather than printing the raw reason: a reader who meets
+   * `session_not_created` learns nothing from it, and it is on the session's details table anyway,
+   * as machine text, where it belongs.
+   */
+  const cause = {
+    client_request: 'Released by you',
+    webdriver_quit: 'Ended when your driver quit',
+    timeout: 'The lease ran out',
+    idle_timeout: 'Reclaimed by the farm after going idle',
+    device_quarantined: 'Ended because the device was taken out of service',
+    client_disconnect: 'Ended when the connection dropped',
+    no_capacity: 'Ended before it started — no device was free',
+    no_endpoint: 'Ended before it started — the device had no automation endpoint',
+    session_not_created: 'Ended before it started — the device refused the session',
+  }[sess?.endReason] || 'Ended';
+
+  const at = sess?.endedAt ? new Date(sess.endedAt) : null;
+  const clockAt = at && !Number.isNaN(at.getTime())
+    ? ` at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : '';
+  const ran = sess?.startedAt && sess?.endedAt ? `, after ${duration(sess.startedAt, sess.endedAt)}` : '';
+
+  // Virtual devices reset from a snapshot between tenants; a handset does not have one.
+  const fate = !device || isRealDevice(device)
+    ? 'The device is back in the pool.'
+    : 'The device was reset from its clean snapshot and is back in the pool.';
+
+  return `${cause}${clockAt}${ran}. ${fate}`;
 }
 
 /** ` · 720 × 1280`, or nothing at all when neither side has reported a panel size. */
@@ -2814,7 +2994,16 @@ function toolsCard(sess, live) {
                 btn('Uninstall', 'ghost', () => picked && runAction(picked, 'uninstall')),
                 btn('Open Apps', 'ghost', () => go('#/apps')),
               ),
-              h('p', { class: 'caption mt-sm', text: 'Every verb is queued and carried down on the worker’s next heartbeat — usually within 10 seconds.' }),
+              /**
+               * The second sentence is the one that earns its place.
+               *
+               * "You will see the outcome, not a progress bar" sets the expectation this console
+               * is built around: the control plane cannot dial a worker, so an app verb has
+               * exactly two reportable states — queued, and finished. A spinner between them would
+               * be depicting progress nobody reported, which is the failure mode every other
+               * sentence in this product is written to avoid.
+               */
+              h('p', { class: 'caption mt-sm', text: 'Each verb is queued and carried down on the worker’s next heartbeat, usually within 10 seconds. You will see the outcome, not a progress bar.' }),
               actionStatusStrip(),
             ],
     // Text goes down the WebRTC input channel as key events, so it needs no endpoint and no
@@ -2977,7 +3166,7 @@ function screenCockpit(id) {
 
     h('div', { class: 'card mb-gap' },
       h('div', { class: 'row' },
-        h('span', { class: 'secondary', text: `${device?.model || sess.device || short(sess.deviceId) || 'no device'} · ${sess.region || '—'}` }),
+        h('span', { class: 'secondary', text: `${device ? deviceName(device) : (sess.device || short(sess.deviceId) || 'no device')} · ${sess.region || '—'}` }),
         app ? pill(`${app.label || app.packageName} ${app.versionName || ''}`.trim(), 'warn plain', {
           dot: false,
           title: 'Session-only. Releasing restores the clean snapshot and removes it.',
@@ -3224,7 +3413,7 @@ function failureCard() {
   return card(null, { class: 'stack tight' },
     h('div', { class: 'row tight' }, h('span', { class: 'dot bad' }),
       h('span', { class: 'card-title bad-text', text: `${KIND_LABEL[f.kind] || f.kind} failed` })),
-    h('p', { class: 'help', text: `The worker could not ${f.kind} ${app?.packageName || short(f.appId)} on ${deviceById(f.deviceId)?.model || short(f.deviceId)}.` }),
+    h('p', { class: 'help', text: `The worker could not ${f.kind} ${app?.packageName || short(f.appId)} on ${deviceById(f.deviceId) ? deviceName(deviceById(f.deviceId)) : short(f.deviceId)}.` }),
     h('div', { class: 'inset stack tight' },
       h('p', { class: 'micro', text: 'Reason' }),
       // Straight from the worker, as text.
@@ -3371,8 +3560,8 @@ function runOutcome(run) {
   if (t.total === 0) {
     return h('span', {
       class: 'caption', text: 'Not reported',
-      title: 'No session in this run posted results. The farm cannot see assertions — add a '
-        + 'POST /v1/sessions/:id/result call to your afterEach.',
+      title: 'Your suite has not reported any outcomes. The farm does not run your tests and '
+        + 'cannot judge them — add a POST /v1/sessions/:id/result call to your afterEach.',
     });
   }
   return h('span', { class: 'row tight' },
@@ -3435,7 +3624,8 @@ function screenRuns() {
             ))),
           ))
         : empty('No runs yet.',
-            'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do.'),
+            'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do. '
+            + 'The farm groups sessions by it; it does not run your tests and cannot judge them.'),
     ),
     h('p', { class: 'caption mt-md',
       text: 'Pass and fail come from the suite, never from the farm — WebDriver has no concept of '
@@ -3826,7 +4016,7 @@ function screenHealth() {
                 return h('div', { class: 'buildrow' },
                   h('span', { class: 'row tight idc' },
                     h('span', { class: `dot ${st.tone} ${d.state === 'READY' ? 'live' : ''}`.trim() }),
-                    h('span', { class: 'secondary', text: d.model || short(d.id) }),
+                    h('span', { class: 'secondary', text: deviceName(d) }),
                     h('code', { class: 'caption', text: short(d.id) }),
                   ),
                   h('span', { class: 'caption', text: `${d.platform} ${d.osVersion} · ${d.tier} · ${d.region}` }),
@@ -3852,7 +4042,15 @@ function screenHealth() {
           // the only route that touches it — worker-authenticated and write-only. There is no read
           // endpoint for host state, so this says so instead of showing a dot that means nothing.
           h('p', { class: 'help', text: 'Worker heartbeat and host state are not readable from the console: the only heartbeat route is the workers’ own write path, and the API exposes no host read endpoint.' }),
-          h('p', { class: 'caption mt-sm', text: 'A host that stops heartbeating still shows here indirectly — its devices leave READY, so “Devices ready” drops.' }),
+          /**
+           * HOW TO RECOGNISE IT ANYWAY, which is the half that makes naming the blind spot useful.
+           *
+           * "Its devices leave READY" is true of a quarantine too, so on its own it does not tell
+           * anybody which of the two they are looking at. The distinguishing clause is that nobody
+           * quarantined them — a fleet losing devices with an empty quarantine history is a dead
+           * host, and that is a diagnosis somebody can act on from this screen.
+           */
+          h('p', { class: 'caption mt-sm', text: 'A dead host shows up indirectly, as devices leaving READY without anybody quarantining them.' }),
         ),
         activityCard(),
       ),
@@ -4635,14 +4833,34 @@ function startPoll() {
           && Date.now() - (state.detail.fetchedAt || 0) > 10_000) {
         await loadSessionDetail(state.route.id);
       }
+      if (state.error) clearToast('api-down');
       state.error = null;
+      state.lastGoodAt = Date.now();
       // Only rebuild the screen when the poll actually brought something new. The header counters
       // and every elapsed-time field are repainted by the one-second tick regardless, so a skipped
       // render leaves nothing stale — it just leaves the DOM alone.
       if (pollSignature() !== before) render();
     } catch (err) {
-      // A failed poll must not blank a working page or spam a toast every five seconds.
-      if (state.error !== err.message) { state.error = err.message; toast('Lost contact with the API', err.message, 'bad'); }
+      /**
+       * A FAILED POLL MUST NOT BLANK A WORKING PAGE. Never a skeleton, never an empty state — the
+       * console keeps its last-known data and says how old it is.
+       *
+       * The age is the half that makes this useful. "Connection lost" tells somebody something is
+       * wrong and leaves them unable to judge whether what is on screen is worth acting on; "from
+       * 40 seconds ago" lets them decide for themselves. The toast is KEYED, so it is rewritten in
+       * place every five seconds as that number grows rather than stacking, and it is removed the
+       * moment a poll succeeds.
+       */
+      state.error = err.message;
+      const stale = state.lastGoodAt ? ago(new Date(state.lastGoodAt).toISOString()) : null;
+      toast(
+        'Lost the connection to the farm',
+        stale
+          ? `Showing what we last knew, from ${stale}. Retrying.`
+          : 'Showing what we last knew. Retrying.',
+        'bad',
+        { key: 'api-down' },
+      );
     }
   }, 5000);
 }

@@ -486,7 +486,10 @@ describe('the device detail carries the quarantine gate', () => {
     });
     assert.match(t, /adb keeps dropping mid-session/);
     assert.match(t, /failed a health check/i, 'the source is what says where to look');
-    assert.match(t, /Release quarantine/);
+    // The button names the AUTHORISATION, not an outcome the operator cannot produce. "Release
+    // quarantine" promised a state change that releasing does not make — only a passing health
+    // check returns the device to the pool.
+    assert.match(t, /Authorise one recovery attempt/);
   });
 
   test('and the screen refuses to imply that releasing makes it available', () => {
@@ -507,14 +510,14 @@ describe('the device detail carries the quarantine gate', () => {
     });
     assert.match(t, /usb dropped/, 'what it is recovering FROM is the context for the wait');
     assert.match(t, /health check/i);
-    assert.doesNotMatch(t, /Release quarantine/,
+    assert.doesNotMatch(t, /Authorise one recovery attempt/,
       'there is nothing left to release — a second click must not be offered');
   });
 
   test('a healthy device offers the way IN, since §30 needs one', () => {
     const t = withDevice({ state: 'READY' });
     assert.match(t, /Quarantine device/);
-    assert.doesNotMatch(t, /Release quarantine/);
+    assert.doesNotMatch(t, /Authorise one recovery attempt/);
   });
 });
 
@@ -899,5 +902,126 @@ describe('device profiles', () => {
 
     const frame = mod.state.stage.dom.root;
     assert.equal(frame.style['--f-aspect'], String(1080 / 2340));
+  });
+});
+
+/**
+ * THE COPY RULES, asserted rather than reviewed.
+ *
+ * Copy is the part of a design that decays fastest, because every one of these sentences is one
+ * edit away from being replaced by something shorter that means something slightly different — and
+ * nothing in a code review reliably catches "this button now promises an outcome it cannot
+ * produce". These tests are the rules from the copy deck, in the places they apply.
+ */
+describe('the copy rules hold', () => {
+  /**
+   * THE ONE RULE UNDER ALL OF IT: a device is addressed by what it IS.
+   *
+   * Internal vocabulary — tier, cuttlefish, fence, host id, region code — belongs in a details
+   * panel or a copyable field, never in a button or a heading. It is not banned, it is PLACED: the
+   * mono register tells the reader a string came from the machine rather than from us, which is
+   * exactly why it can stay where it is genuinely useful.
+   */
+  test('no button or heading names the stack', () => {
+    seed({ name: 'devices' });
+    // Nobody is holding it, so the card offers the primary action rather than "View session".
+    mod.state.sessions = [];
+    mod.state.held = null;
+    const text = textOf(mod.SCREENS.devices());
+    assert.doesNotMatch(text, /on tier /i, 'a tier is not something a person chose');
+    assert.doesNotMatch(text, /Start a session on/i);
+    assert.match(text, /Start Unprofiled device/, 'the primary action names the device');
+  });
+
+  /**
+   * A CAPACITY LINE IS A FRACTION.
+   *
+   * "3 free" answers "can I get one" and stops. "3 of 4" also answers "is this farm nearly full",
+   * which is the question behind it and the one that decides whether somebody starts now or waits.
+   */
+  test('capacity is stated as a fraction, never a bare count', () => {
+    seed({ name: 'launch' });
+    const text = textOf(mod.SCREENS.launch());
+    assert.match(text, /\d+ of \d+ (free|busy)/, 'the denominator is not decoration');
+  });
+
+  /**
+   * NO LIVE VIEW IS A PROPERTY OF THE DEVICE, NOT A FAULT.
+   *
+   * This panel is otherwise identical to the ones reporting a real failure, so the words are the
+   * only thing separating "this cannot happen here" from "this went wrong" — and naming what still
+   * works is what stops somebody abandoning a device that would have served them fine.
+   */
+  test('a device with no screen-stream is not described as broken', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].capabilities = ['app-install', 'webdriver', 'logcat'];
+    mod.state.stage = null;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /property of the device, not a fault/);
+    assert.match(text, /Input, logcat, install and WebDriver still work/);
+    assert.doesNotMatch(text, /failed|error/i, 'nothing here went wrong');
+  });
+
+  /**
+   * BEING QUEUED SAYS THAT THE PAGE MOVES ON BY ITSELF.
+   *
+   * A rank alone — "Queue 4", "Position 4 of 6" — leaves the reader to work out whether they have
+   * to keep watching. And there is deliberately NO ETA: producing one needs every current holder's
+   * lease time, which the sessions list does not return, so a number here would be invented.
+   */
+  test('the queued state promises the handover and estimates nothing', () => {
+    seed({ name: 'launching', id: 'sess-q' });
+    mod.state.sessions = [{
+      id: 'sess-q', state: 'QUEUED', deviceId: null, region: 'lab',
+      createdAt: new Date().toISOString(), startedAt: null, expiresAt: null,
+      endedAt: null, endReason: null,
+    }];
+    mod.state.bringup = { sessionId: 'sess-q', appId: null, launchAfter: false, install: null, launch: null, error: null };
+    // `screenLaunching` reads `state.detail`, not the list — the list is what `queueNote` ranks
+    // against, so both are needed and they are two different reads.
+    mod.state.detail = { ...mod.state.sessions[0], fetchedAt: Date.now() };
+    const text = textOf(mod.SCREENS.launching('sess-q'));
+    assert.match(text, /moves on by itself/);
+    assert.doesNotMatch(text, /about \d+ minutes|estimated|ETA/i,
+      'the API does not report other tenants\' lease times, so any estimate here is invented');
+  });
+
+  /**
+   * A DESTRUCTIVE-ADJACENT BUTTON NAMES THE AUTHORISATION, NOT AN OUTCOME.
+   *
+   * Releasing a quarantine does not return the device to the pool; it permits one restart and one
+   * health check, and only a passing check puts it back. The green safety line has to survive too,
+   * because it is the last thing read before the click.
+   */
+  test('the quarantine gate promises only what it can deliver', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    mod.state.devices[0].state = 'QUARANTINED';
+    mod.state.devices[0].quarantine = { at: new Date().toISOString(), reason: 'frozen', source: 'health' };
+    const text = textOf(mod.SCREENS.device('dev-1'));
+    assert.match(text, /Authorise one recovery attempt/);
+    assert.match(text, /only a passing (health )?check/i, 'the safety property, immediately above the button');
+  });
+
+  /**
+   * A SESSION THAT ENDED SAYS WHO ENDED IT AND WHEN.
+   *
+   * "Session ended" is the state, and the state is the least useful thing to tell somebody looking
+   * at a screen that visibly stopped. The reasons are keyed on the literals the control plane
+   * actually writes — a merely plausible key falls through to the generic word while looking as
+   * though it explained something.
+   */
+  test('an ended session explains itself from real end reasons', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.sessions = [{
+      ...mod.state.sessions[0],
+      state: 'ENDED', endReason: 'client_request',
+      endedAt: new Date().toISOString(),
+      startedAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+    }];
+    mod.state.detail = { ...mod.state.sessions[0] };
+    mod.state.stage = null;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Released by you/);
+    assert.match(text, /back in the pool/);
   });
 });

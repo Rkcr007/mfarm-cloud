@@ -1792,3 +1792,21 @@ kbd {
 .cmd .glyph { width: auto; }
 /* No gap between the name and the id underneath it — `.stack` adds one by default. */
 .stack.none { display: flex; flex-direction: column; gap: 0; }
+
+/**
+ * The dismiss control on a warning or an error toast.
+ *
+ * Success toasts do not have one — they auto-dismiss in four seconds, having done their whole job.
+ * A toast describing a condition that is still true does not get a timer, so it needs a way out.
+ */
+.toast { position: relative; }
+.toast-x {
+  position: absolute;
+  top: 6px; right: 6px;
+  display: grid; place-items: center;
+  width: 20px; height: 20px;
+  border-radius: var(--r-sm, 6px);
+  color: var(--t-caption, #6A6A6A);
+}
+.toast-x:hover { background: var(--s-btn, #131315); color: var(--t-primary, #F1F1F1); }
+.toast .t-title, .toast .t-body { padding-right: 18px; }
