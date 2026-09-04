@@ -2712,12 +2712,47 @@ function icon(name, size = 16) {
  * button that looks available and does nothing is the thing this console refuses to ship.
  */
 function toolBtn(name, label, enabled, onclick, opts = {}) {
+  /**
+   * THE CAPABILITY GATE LIVES HERE, not at the call site — which is the whole of `RailControl`'s
+   * contract: a control "cannot be constructed in an enabled state without the capability".
+   *
+   * It used to live at the call sites, as `caps.includes('screenshot') ? toolBtn(…) : null`, and
+   * that had two failure modes rather than one. The control DISAPPEARED, so a person on a device
+   * without `screenshot` saw a rail with a gap in it and no way to learn why — the same lie by
+   * omission as filtering an absent capability out of the chip list, which this console has been
+   * careful never to do. And because the gate was a ternary at the call site, the next control
+   * added could simply forget it.
+   *
+   * `requires` + `declared` are passed instead, and the answer is computed once, here.
+   */
+  const missing = opts.requires && !(opts.declared || []).includes(opts.requires);
+  const live = Boolean(enabled) && !missing;
+
+  /**
+   * TWO KINDS OF UNAVAILABLE, and the tooltip is the only thing that separates them.
+   *
+   * A missing capability is a PERMANENT PROPERTY of the device — no amount of waiting produces a
+   * screenshot on a device that does not declare one — while a control waiting on the stream will
+   * come good in a moment. Rendering both as "dimmed" and saying nothing leaves the reader unable
+   * to tell "not yet" from "not ever", which is the distinction they most need.
+   */
+  const why = missing
+    ? `${label} — this device does not declare ${opts.requires}. That is a property of the device, not a fault.`
+    : enabled
+      ? label + (opts.kbd ? ` (${opts.kbd})` : '')
+      : `${label} — not available until the live view is connected.`;
+
   return h('button', {
-    class: `devbtn${opts.active ? ' on' : ''}`,
-    title: label + (opts.kbd ? ` (${opts.kbd})` : ''),
-    disabled: !enabled,
+    class: `devbtn${opts.active ? ' on' : ''}${missing ? ' undeclared' : ''}`,
+    title: why,
+    disabled: !live,
     onclick,
-  }, icon(name, 20), h('span', { class: 'sr', text: label }));
+  },
+    icon(name, 20),
+    // The rail is icons, and an icon is not a name. This span is the only thing a screen reader
+    // has to read, so it carries the REASON as well as the label when there is one.
+    h('span', { class: 'sr', text: why }),
+  );
 }
 
 /**
@@ -2978,13 +3013,17 @@ function paintToolbar(sess, live, caps) {
     toolBtn('home', 'Home', ctrl, press('home')),
     toolBtn('overview', 'Overview', ctrl, press('menu')),
     h('span', { class: 'devbar-sep' }),
-    caps.includes('screenshot')
-      ? toolBtn('camera', 'Screenshot', Boolean(live), () => void takeScreenshot(), { kbd: 'S' })
-      : null,
-    caps.includes('ui-hierarchy')
-      ? toolBtn('inspect', state.inspect.on ? 'Stop inspecting' : 'Inspect elements',
-          streaming, () => void toggleInspect(), { active: state.inspect.on })
-      : null,
+    /**
+     * VISIBLE AND INERT, never removed. A control the device cannot honour is drawn dashed and
+     * dimmed with a tooltip naming the capability, so the absence is explained by something you can
+     * SEE — document 04's rule, and the same reasoning that keeps an undeclared capability in the
+     * chip list rather than filtering it out.
+     */
+    toolBtn('camera', 'Screenshot', Boolean(live), () => void takeScreenshot(),
+      { kbd: 'S', requires: 'screenshot', declared: caps }),
+    toolBtn('inspect', state.inspect.on ? 'Stop inspecting' : 'Inspect elements',
+      streaming, () => void toggleInspect(),
+      { active: state.inspect.on, requires: 'ui-hierarchy', declared: caps }),
     toolBtn('refresh', 'Reconnect', Boolean(live), () => reconnectLive()),
     h('span', { class: 'devbar-sep' }),
     toolBtn('zoomin', 'Zoom in', streaming, () => setZoom(st.zoom + 0.15)),
@@ -2994,11 +3033,17 @@ function paintToolbar(sess, live, caps) {
      * Hide the phone body — and with it the punch-hole, which is the only thing this console draws
      * over the device screen.
      *
-     * OFFERED ONLY ON A DEVICE THAT HAS CHROME, because on the two unprofiled devices there is
-     * nothing to hide and a control that visibly does nothing is worse than no control. It is not
-     * gated on the stream: the body is drawn whether or not video has negotiated, so hiding it has
-     * to work in exactly the state where someone is squinting at a black rectangle wondering what
-     * is covering it.
+     * OFFERED ONLY ON A DEVICE THAT HAS CHROME, and this is NOT the rule two controls above being
+     * broken. The screenshot and inspector controls stay visible because a missing capability is a
+     * fact about the device the reader needs told — "why can I not screenshot this?" is a question
+     * somebody will otherwise ask the wrong person. There is no equivalent question here: an
+     * unprofiled device has no body to hide, so the control's absence explains nothing because
+     * there is nothing to explain. A struck-through "hide the body it does not have" would be
+     * noise dressed as honesty.
+     *
+     * It is not gated on the stream: the body is drawn whether or not video has negotiated, so
+     * hiding it has to work in exactly the state where someone is squinting at a black rectangle
+     * wondering what is covering it.
      */
     hasChrome(deviceById(sess?.deviceId))
       ? toolBtn('phone', st.chrome ? 'Hide device body' : 'Show device body',
