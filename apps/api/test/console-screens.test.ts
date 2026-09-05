@@ -2115,3 +2115,91 @@ describe('appearance', () => {
       'nothing in this product is conveyed by motion alone, and that is why it is safe to offer');
   });
 });
+
+/* ===================================================== apps and device naming (05 §04) ==========
+ */
+describe('apps', () => {
+  /**
+   * A BUILD THAT FAILED TO INSTALL SAID "NOT INSTALLED" AND OFFERED "INSTALL".
+   *
+   * The failure was on the page — in `failureCard`, deliberately scoped to the last thirty minutes
+   * so an old one does not sit at the top of Apps forever. The consequence nobody had noticed: after
+   * thirty minutes the failure vanished and the row beneath it looked exactly like a build nobody
+   * had ever tried. "Not installed" and "tried, and the worker refused it" are different facts.
+   */
+  test('a build whose install failed says so, and offers Retry', () => {
+    seed({ name: 'apps' });
+    mod.state.actions = [{
+      id: 'a-fail', kind: 'install', state: 'FAILED', appId: 'app-1', deviceId: 'dev-1',
+      sessionId: 'sess-1', error: 'INSTALL_FAILED_INSUFFICIENT_STORAGE',
+      // Well outside failureCard's thirty-minute window, which is the case that was invisible.
+      requestedAt: new Date(Date.now() - 4 * 3600_000).toISOString(),
+      finishedAt: new Date(Date.now() - 4 * 3600_000).toISOString(),
+    }];
+    const text = textOf(mod.SCREENS.apps());
+    assert.match(text, /Install failed/);
+    assert.match(text, /INSTALL_FAILED_INSUFFICIENT_STORAGE/, "the worker's own words, verbatim");
+    assert.match(text, /Retry/, 'a second attempt is not a first one');
+    assert.doesNotMatch(text, /Not installed/,
+      'a build that was tried and refused is not a build nobody has touched');
+  });
+
+  test('a build nobody has tried still reads as untried', () => {
+    seed({ name: 'apps' });
+    mod.state.actions = [];
+    const text = textOf(mod.SCREENS.apps());
+    assert.match(text, /Not installed/);
+    assert.doesNotMatch(text, /Install failed/);
+  });
+
+  /** Whether you hold a device decides whether every button below is live. */
+  test('the header says whether anything on the page can be acted on', () => {
+    seed({ name: 'apps' });
+    mod.state.sessions = [];
+    assert.match(textOf(mod.SCREENS.apps()), /hold a device/i);
+
+    const { device } = seed({ name: 'apps' });
+    assert.match(textOf(mod.SCREENS.apps()), /You are holding Unprofiled device/);
+
+    device.capabilities = device.capabilities.filter((c: string) => c !== 'app-install');
+    assert.match(textOf(mod.SCREENS.apps()), /does not declare app-install/,
+      'said once at the top, rather than discovered one disabled button at a time');
+  });
+});
+
+/**
+ * THE COPY DECK'S NAMING RULE, in the last places that were leaking an internal handle.
+ *
+ * `session.device` is the worker's LOCAL ID — `dd-cf-1`, `cf-2`. A device is addressed by WHAT IT
+ * IS; the local id belongs in a details panel or a copyable field. The top bar already resolved it
+ * correctly, which is why it took a screenshot of the SIDEBAR to notice "dd-cf-1" sitting under
+ * "YOUR SESSION" while "MFARM X1 Pro" sat above it in the header.
+ */
+describe('a device is named by what it is', () => {
+  test('the sessions table names the class, not the worker\'s handle', () => {
+    seed({ name: 'sessions' });
+    mod.state.sessions[0].device = 'dd-cf-1';
+    const text = textOf(mod.SCREENS.sessions());
+    assert.match(text, /Unprofiled device/);
+    assert.doesNotMatch(text, /dd-cf-1/, 'the local id is internal vocabulary');
+  });
+
+  test('the Apps hold strip does too', () => {
+    seed({ name: 'apps' });
+    mod.state.sessions[0].device = 'dd-cf-1';
+    const text = textOf(mod.SCREENS.apps());
+    assert.match(text, /Holding Unprofiled device/);
+    assert.doesNotMatch(text, /Holding dd-cf-1/);
+  });
+
+  /**
+   * And it falls back rather than going blank: a session whose device has since been evicted still
+   * has to say something, and the raw handle is more use than an em-dash.
+   */
+  test('a session whose device is gone falls back to the handle', () => {
+    seed({ name: 'sessions' });
+    mod.state.sessions[0].device = 'cf-gone';
+    mod.state.sessions[0].deviceId = 'evicted-1';
+    assert.match(textOf(mod.SCREENS.sessions()), /cf-gone/);
+  });
+});
