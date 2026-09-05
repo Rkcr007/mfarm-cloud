@@ -31,6 +31,16 @@ if (!KEY) {
 
 let pass = 0;
 let fail = 0;
+/**
+ * How many ALLOCATIONS were actually attempted — which is not the same as how many assertions
+ * passed, and the difference is the whole point of this counter.
+ *
+ * The first version of the empty-fleet guard tested `pass === 0 && fail === 0`. It never fired,
+ * because "fleet reachable: 5 devices, 0 READY" is itself a passing assertion — so on a farm with
+ * nothing free the script printed "1 passed, 0 failed", exited 0, and had verified precisely
+ * nothing about the allocator. A guard has to count the thing it is guarding.
+ */
+let attempted = 0;
 const ok = (m) => { console.log(`  \x1b[32m✓\x1b[0m ${m}`); pass += 1; };
 const bad = (m) => { console.log(`  \x1b[31m✗\x1b[0m ${m}`); fail += 1; };
 const say = (m) => console.log(`\n\x1b[1m${m}\x1b[0m`);
@@ -64,6 +74,7 @@ async function release(id) {
  * devices that have no profile", which is a class this farm genuinely has two of.
  */
 async function claim({ region, platform, tier, profile, matchProfile }) {
+  attempted += 1;
   const r = await api('/v1/sessions', {
     method: 'POST',
     body: JSON.stringify({ region, platform, tier, ttlMinutes: 1, profile, matchProfile }),
@@ -185,7 +196,7 @@ const main = async () => {
    * and "0 passed, 0 failed" would exit 0 and read as a green verification of an allocator nothing
    * touched.
    */
-  if (pass === 0 && fail === 0) {
+  if (attempted === 0) {
     console.log('\n\x1b[33mNothing was checked\x1b[0m — no device on this farm is READY, so no '
       + 'allocation could be attempted. Start the device host and run this again.');
     process.exit(2);
