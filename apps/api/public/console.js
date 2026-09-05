@@ -445,6 +445,30 @@ function clock(ms) {
   return hr > 0 ? `${hr}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+/**
+ * A LENGTH IN WORDS — "20 minutes", not "20:00".
+ *
+ * `clock()` is mm:ss and it is right where a number is TICKING: a lease counting down wants a
+ * stable, monospaced shape that changes every second. It is wrong in a sentence. "Released by you
+ * at 14:29, after 20:00" reads as two clock times, and the second one is a duration — a person has
+ * to stop and work out that 20:00 is twenty minutes rather than eight in the evening.
+ *
+ * Coarse on purpose, like `ago`. Nobody reading "how long did I hold that device" needs the
+ * seconds, and offering them invites the same misreading in a smaller way.
+ */
+function lengthInWords(from, to) {
+  if (!from) return '—';
+  const ms = (to ? new Date(to) : new Date()) - new Date(from);
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} seconds`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'}`;
+  const hr = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest ? `${hr}h ${rest}m` : `${hr} hour${hr === 1 ? '' : 's'}`;
+}
+
 function duration(from, to) {
   if (!from) return '—';
   return clock((to ? new Date(to) : new Date()) - new Date(from));
@@ -1782,11 +1806,15 @@ function fleetCapacity() {
               : d.state === 'QUARANTINED'
                 ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
                 : null,
-          // No Details button: the device's name IS the link now. A row with a single action reads
-          // as a decision; a row with two reads as a menu.
-          !mine && d.state !== 'READY' && d.state !== 'QUARANTINED'
-            ? btn('Details', 'tiny ghost', () => go(`#/devices/${d.id}`))
-            : null,
+          /**
+           * NO Details BUTTON AT ALL — the device's name is the link.
+           *
+           * The condition here used to keep one for the in-between states, which meant every in-use
+           * row carried two controls to the same destination: the name I had just made a link, and
+           * a button beside it. Found by clicking every control on the screen and reading where
+           * each one went. A row with one action reads as a decision; a row with two reads as a
+           * menu, which is what removing the button was for.
+           */
         )),
       );
     })),
@@ -4016,7 +4044,7 @@ function endedSentence(sess) {
   const clockAt = at && !Number.isNaN(at.getTime())
     ? ` at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
     : '';
-  const ran = sess?.startedAt && sess?.endedAt ? `, after ${duration(sess.startedAt, sess.endedAt)}` : '';
+  const ran = sess?.startedAt && sess?.endedAt ? `, after ${lengthInWords(sess.startedAt, sess.endedAt)}` : '';
 
   // Virtual devices reset from a snapshot between tenants; a handset does not have one.
   const fate = !device || isRealDevice(device)
@@ -4725,7 +4753,9 @@ function screenCockpit(id) {
         h('span', { class: 'spacer' }),
         live
           ? ticker('since', sess.startedAt || sess.createdAt, { prefix: 'running ', cls: 'caption' })
-          : h('span', { class: 'caption tnum', text: `ran ${duration(sess.startedAt || sess.createdAt, sess.endedAt)}` }),
+          // "ran 20 minutes", not "ran 20:00" — this sits beside a wall-clock time and the two
+          // were indistinguishable.
+          : h('span', { class: 'caption', text: `ran ${lengthInWords(sess.startedAt || sess.createdAt, sess.endedAt)}` }),
         copyrow(sess.id, 'Copy id'),
       ),
       live && sess.expiresAt ? h('div', { class: 'mt-md' }, leaseBlock(sess)) : null,
@@ -4922,7 +4952,7 @@ function holdStrip() {
               h('span', { class: 'secondary', text: ready.length ? `Not holding a device. ${ready.length} ready.` : 'Not holding a device, and none are ready.' })),
             h('p', { class: 'caption', text: 'Installing needs a live session — the build goes onto the device you are holding, and nowhere else.' }),
           ),
-          btn('Go to Devices', 'ghost', () => go('#/devices')),
+          btn('Go to the Fleet', 'ghost', () => go('#/fleet')),
         ),
   );
 }
@@ -5616,7 +5646,18 @@ function screenHealth() {
   const failures = state.actions.filter((a) => a.state === 'FAILED' && new Date(a.finishedAt || a.requestedAt) > dayAgo);
   const active = state.sessions.filter((s) => LIVE_SESSION_STATES.has(s.state)).length;
 
-  const stat = (label, value, tone, note) => card(null, { class: 'stat stack tight' },
+  /**
+   * A COUNT THAT IS BAD NEWS CARRIES THE BORDER — document 05 §06 draws the failed-actions card
+   * with a red edge and the other two plain.
+   *
+   * The dot alone put the severity inside the card, where it competes with the number; the edge
+   * puts it on the card, so a page of five stats says which one to read first from across the room.
+   * Only when the count is non-zero: a red border around "0 failed" would be the alarm that cries
+   * wolf, which is the thing this console keeps deleting.
+   */
+  const stat = (label, value, tone, note) => card(null, {
+    class: `stat stack tight${tone === 'bad' && value !== '0' ? ' stat-bad' : ''}`,
+  },
     h('p', { class: 'micro', text: label }),
     h('p', { class: 'row tight' }, h('span', { class: `dot ${tone || ''}`.trim() }), h('span', { class: 'val', text: value })),
     h('p', { class: 'caption', text: note }),
@@ -5661,7 +5702,16 @@ function screenHealth() {
         ),
       ),
       h('div', { class: 'rail' },
-        card('Worker', {},
+        /**
+         * NAMED AND MARKED — document 05 §06: *"Health's most valuable panel is the one that says
+         * what the console cannot see... Keeping this panel is the point. An observability page
+         * that implies it sees everything is worse than one that names its blind spot."*
+         *
+         * It was a plain card called "Worker", which reads as one more section. The design gives it
+         * the amber edge every other "read this" surface in the console has, and a title that says
+         * what it is for rather than what it is about.
+         */
+        card('What this page cannot see', { class: 'gate waiting' },
           // The heartbeat is the number this screen most wants, and POST /v1/workers/heartbeat is
           // the only route that touches it — worker-authenticated and write-only. There is no read
           // endpoint for host state, so this says so instead of showing a dot that means nothing.
@@ -6058,7 +6108,19 @@ function screenAgents() {
 
 async function inspectCode() {
   const code = state.pair.code.trim();
-  if (!code) return;
+  /**
+   * AN EMPTY FIELD GETS AN ANSWER, not silence.
+   *
+   * This returned early and said nothing: a person clicked Find machine with nothing typed and the
+   * console did not move, error, or hint. Found by clicking every control on every screen — no test
+   * covers "what happens when you press the button before filling the field", and it is the first
+   * thing a person actually does.
+   */
+  if (!code) {
+    state.pair.error = 'Type the code the agent window is showing, then press Find machine.';
+    render();
+    return;
+  }
   state.pair.busy = true;
   state.pair.error = null;
   state.pair.machine = null;

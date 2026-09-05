@@ -394,6 +394,11 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   margin-bottom: var(--mf-gap, 14px);
 }
 .card.gate.waiting .card-title { color: var(--warn, #E8A30E); }
+/* A card head rendered as a `micro` label rather than a title still needs the colour. */
+.card.gate.waiting > .card-head .micro { color: var(--warn, #E8A30E); }
+
+/* A stat whose number is bad news, marked on the edge rather than only by its dot. */
+.card.stat-bad { border-color: var(--bad-line, rgba(224, 80, 95, .30)); }
 .endstats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));

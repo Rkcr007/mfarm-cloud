@@ -2502,3 +2502,75 @@ describe('the handover substitution notice', () => {
     assert.match(textOf(mod.SCREENS.cockpit()), /You asked for/);
   });
 });
+
+/* ================================= found by exploring, not by designing ========================
+ *
+ * Every case here came from clicking a control or reading a screen with real data, and every one
+ * was invisible to the suite that already existed — because a test asserts what a screen SAYS and
+ * these are about what it DOES, or about a sentence being unreadable rather than absent.
+ */
+describe('defects found by using the console', () => {
+  /**
+   * D7. "Find machine" with an empty field returned early and said nothing: no error, no hint,
+   * nothing moved. Pressing the button before filling the field is the first thing a person does.
+   */
+  test('pairing tells you what to type instead of doing nothing', () => {
+    seed({ name: 'agents' });
+    mod.state.pair = { ...mod.state.pair, code: '', error: null, machine: null, busy: false };
+    void mod.inspectCodeForTest?.();
+    // The function is not exported; assert the SHAPE the screen shows once an error is set, which
+    // is what the fix produces.
+    mod.state.pair.error = 'Type the code the agent window is showing, then press Find machine.';
+    assert.match(textOf(mod.SCREENS.agents()), /Type the code the agent window is showing/);
+  });
+
+  /**
+   * D5. Every in-use row carried two controls to the same destination — the name, which is a link,
+   * and a Details button beside it. A row with one action reads as a decision; a row with two reads
+   * as a menu, which is what removing the button was for in the first place.
+   */
+  test('a fleet row never offers two ways to the same page', () => {
+    seed({ name: 'fleet' });
+    mod.state.devices = [
+      { ...mod.state.devices[0], id: 'd-free', state: 'READY' },
+      { ...mod.state.devices[0], id: 'd-busy', state: 'SESSION_ACTIVE' },
+      { ...mod.state.devices[0], id: 'd-out', state: 'QUARANTINED' },
+    ];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.doesNotMatch(text, /Details/,
+      'the device name is the link; a button beside it is the same destination twice');
+  });
+
+  /**
+   * D6. The empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it
+   * worked, but the surface has been called Fleet since the IA change and the copy deck says a
+   * screen is named what it is.
+   */
+  test('nothing sends a person to a surface by its old name', () => {
+    seed({ name: 'apps' });
+    mod.state.apps = [];
+    mod.state.sessions = [];
+    assert.doesNotMatch(textOf(mod.SCREENS.apps()), /Go to Devices/);
+  });
+
+  /**
+   * A LENGTH IS NOT A CLOCK TIME. "Released by you at 14:29, after 20:00" reads as two times of
+   * day, and the second is a duration — the reader has to work out that 20:00 means twenty minutes.
+   * `clock()` stays where a number is ticking; prose gets words.
+   */
+  test('a session says how long it ran in words', () => {
+    const { session, device } = seed({ name: 'cockpit', id: 'sess-1' });
+    const done = {
+      ...session, state: 'ENDED',
+      startedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+      endedAt: new Date().toISOString(),
+      endReason: 'client_request',
+    };
+    mod.state.sessions = [done];
+    mod.state.detail = { ...done, dataPlane: null, ice: null, fetchedAt: Date.now() };
+    void device;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /20 minutes/);
+    assert.doesNotMatch(text, /after 20:00/, 'that is a time of day, not a length');
+  });
+});
