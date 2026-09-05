@@ -3373,3 +3373,63 @@ when the feature is broken. See issues 37 and 38.
 
     Suite: 1374 tests across every workspace. One unidentified failure in five full runs, name not
     captured, three clean runs after it — recorded in `docs/DEFECTS.md` rather than called resolved.
+
+65. **"THE ONLY PART THAT WAS EVER WRONG" WAS THE WRONG PART.** 2026-09-05. Control plane
+    `c5f0af5` → `dc7299c`.
+
+    Entry 64 ends: *"`deploy/farm-up.test.mjs` now asserts the ORDER of the guard against the source
+    line, which is the only part that was ever wrong."* It was not. **The D13 fix did not work, and
+    a watched boot was the only thing in the system capable of saying so.**
+
+    **WHAT THE BOOT SAID.** Lab started, checkout moved to `c5f0af5`, rebooted.
+    `mfarm-farm.service`: failed 13:11:42 → 13:11:43, `status=1/FAILURE`. The same one-second exit
+    on the same `BACKUP_BUCKET` message as before the fix, now with the fix in it.
+
+    **WHY.** The guard read `CONTROL_PLANE_URL` out of `$ENV_FILE` — `deploy/.env`. That file has
+    never contained the key. `install-worker-service.sh:79` writes it to
+    `deploy/.state/worker.env`, which is the **worker unit's `EnvironmentFile`**: a different file,
+    read by a different process, for a different unit. On the lab it holds
+    `CONTROL_PLANE_URL=https://34-100-138-213.sslip.io`. The guard read the right variable from the
+    wrong file, so on the only machine it exists for it always saw empty and fell through to the
+    control plane's backup policy.
+
+    **THE TEST AGREED WITH THE BUG.** It asserted the guard appeared on a line below
+    `. "$ENV_FILE"`. That is a true statement about the text of the script, it stayed true, and it
+    is compatible with the variable being absent from every file on the machine. Entry 64 called
+    the ordering "the only part that was ever wrong" — the ordering was the part that was *right*.
+    Guard and test were built on one premise nobody checked against the box, so they confirmed each
+    other. This is [[mfarm-false-premise-controls]] with a test attached, and the test made it
+    worse: it converted an unverified claim into a green one.
+
+    **THE FIX IS A FUNCTION, BECAUSE A GUARD YOU CANNOT EXECUTE HAS ONLY BEEN REVIEWED.**
+    `deploy/lib/host-role.sh` takes the deploy directory and the kvm node as arguments, so a test on
+    a laptop with no `/dev/kvm` can put the lab's real file shape behind it and watch it decide.
+    Eight tests run it. Proved non-vacuous with a negative control: the shipped logic answers "not a
+    device host" on that fixture; the new logic answers "device host". Loopback is rejected **by
+    value**, so a single-host farm keeps its own control plane — not by the absence of `worker.env`,
+    because reasoning from a file's absence is what produced the first fix.
+
+    **AFTER `dc7299c`:** `active (exited)`, `status=0/SUCCESS` at 13:22:09, printing
+    `==> Device host … a control plane at https://34-100-138-213.sslip.io that is not here`. First
+    clean boot of that unit since 3 September. `verify-live.sh`: 3 devices READY, screen-stream
+    declared, `farm.mfarm.dev` serving, coturn answering. `verify-console.sh` 62/62.
+
+    **TWO THINGS THE LAB WINDOW FOUND THAT NOBODY WAS LOOKING FOR.**
+
+    **D18 — RELEASED IS NOT DEPLOYED.** The farm was serving
+    `ghcr.io/rkcr007/mfarm-api:886cb47` while `main` was two merges further on. PR #102's D14 and D8
+    merged at 11:28 and released at 11:34, and the farm went on serving the previous image until I
+    deployed at 13:08 — ninety minutes in which `docs/DEFECTS.md` claimed they were "in the deployed
+    build". Found by reading `docker ps` for an unrelated reason. The console's build badge reports
+    what IS serving; nothing anywhere reports what SHOULD be.
+
+    **D19 — THE CHECKOUTS ON BOTH BOXES HAD DRIFTED.** `mfarm-cp` was on a **detached HEAD at
+    `886cb47`** — a state a memory explicitly records as fixed. `mfarm-lab` was **66 commits
+    behind**, on PR #81. That one is not cosmetic: the lab's boot unit and worker unit both
+    `ExecStart` out of that working tree, so the farm had been running agent code from 66 commits
+    ago while the control plane ran today's.
+
+    **AND THE DISCIPLINE THAT ACTUALLY CAUGHT THIS**, which is worth more than the fix: D13 was
+    written down as *"reasoned and unit-tested, not watched boot — needs one lab start to confirm"*
+    instead of being filed with the other fixes. Had it been recorded as fixed, the boot unit would
+    have stayed dead and green.
