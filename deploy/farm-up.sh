@@ -137,28 +137,19 @@ set -a; . "$ENV_FILE"; set +a
 # ---------------------------------------------------------------- a device host stops here
 #
 # SINCE THE SPLIT (ADR-0006) THIS SCRIPT RUNS ON TWO KINDS OF MACHINE, and only one of them owns a
-# control plane. The check for that already existed — at section 5, four sections too late.
+# control plane. The check for that already existed — at section 5, four sections too late — so the
+# device host's boot unit died right here, on a backup policy that is not its decision to have.
 #
-# The consequence, found on 2026-09-05: `mfarm-farm.service` on the DEVICE HOST had failed on every
-# boot since 3 September, exiting in one second on "BACKUP_BUCKET is empty". That guard is correct
-# and belongs to the control plane's backups; the device host has no control plane and no backups to
-# have a policy about. It was dying on a decision that is not its to make.
-#
-# NOTHING SURFACED IT, which is the part worth fixing rather than just the exit code: the devices
-# come up anyway because `mfarm-worker.service` is a separate unit that boots them, so a permanently
-# failing boot unit looked exactly like a working farm. My own note that "both VMs come back to a
-# working 2-device farm on a plain `instances start`" stayed true in its symptom and false in its
-# mechanism for two days.
-#
-# `/dev/kvm` is the same discriminator section 5 uses, so there is one definition of "which machine
-# is this" rather than two that can disagree.
-#
-# AFTER the env file is sourced, and that is not a detail: the first version of this sat above the
-# `.` and read `CONTROL_PLANE_URL` before anything had defined it, so it could never fire. A guard
-# placed where it cannot see its own subject is the same defect it was written to fix.
-if [ -e /dev/kvm ] && [ -n "${CONTROL_PLANE_URL:-}" ]; then
+# THE DECISION ITSELF LIVES IN deploy/lib/host-role.sh, and why it is a function in another file is
+# written there at length. The short version, because it cost two fixes: the first guard read
+# CONTROL_PLANE_URL out of "$ENV_FILE", which has never contained it — the worker's URL is written
+# to deploy/.state/worker.env by install-worker-service.sh. Its test asserted the guard's line
+# number rather than its behaviour, so guard and test were wrong in the same direction and agreed
+# with each other. Only a watched boot disagreed.
+. "$DEPLOY_DIR/lib/host-role.sh"
+if mfarm_is_device_host "$DEPLOY_DIR"; then
   say "Device host"
-  note "this machine has /dev/kvm and a remote CONTROL_PLANE_URL, so it runs devices, not a control plane"
+  note "this machine has /dev/kvm, and a control plane at $(mfarm_control_plane_url "$DEPLOY_DIR") that is not here"
   note "the worker unit (deploy/install-worker-service.sh) owns the devices on this host"
   note "nothing here needs BACKUP_BUCKET: the backups belong to the machine holding the database"
   exit 0
