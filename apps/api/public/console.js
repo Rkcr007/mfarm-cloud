@@ -1191,7 +1191,13 @@ function setNavToggleIcon(collapsed) {
 
 /* ---------------------------------------------------------------------------- page header */
 
-function pageHead(crumbs, title, sub, actions) {
+/**
+ * `subNode` is for a subtitle that has to be MARKED UP rather than said flatly — the Fleet's
+ * headline sets its waiting clause apart, because the half that changes what you do next should not
+ * read like the half that does not. Every other screen passes a plain `sub` and gets a plain
+ * paragraph; a screen may pass one or the other, never both.
+ */
+function pageHead(crumbs, title, sub, actions, subNode) {
   return h('div', null,
     crumbs?.length ? h('p', { class: 'crumb' }, crumbs.map((c, i) => [
       i ? ' / ' : null,
@@ -1199,7 +1205,7 @@ function pageHead(crumbs, title, sub, actions) {
     ])) : null,
     h('div', { class: 'page-head' },
       h('h1', { class: 'page-title', text: title }),
-      sub ? h('p', { class: 'page-sub', text: sub }) : null,
+      subNode || (sub ? h('p', { class: 'page-sub', text: sub }) : null),
       actions ? [h('span', { class: 'spacer' }), actions] : null,
     ),
   );
@@ -1554,7 +1560,9 @@ function fleetHeadline() {
   const waiting = queuedSessions().length;
   const held = state.sessions.filter((x) => LIVE_SESSION_STATES.has(x.state) && x.deviceId).length;
 
-  if (!state.devices.length) return 'No devices are registered. Start a worker and one appears within a heartbeat.';
+  if (!state.devices.length) {
+    return { capacity: 'No devices are registered. Start a worker and one appears within a heartbeat.', queue: '', waiting: 0 };
+  }
 
   const capacity = free === 0
     ? 'Every device is in use.'
@@ -1571,7 +1579,7 @@ function fleetHeadline() {
     ? (held ? 'Nobody is waiting.' : '')
     : `${waiting === 1 ? 'One person is' : `${waiting} people are`} waiting — the farm hands over the moment a lease ends.`;
 
-  return `${capacity} ${queue}`.trim();
+  return { capacity, queue, waiting };
 }
 
 /** `you`, a colleague's email, a CI run, or nothing — in that order of usefulness. */
@@ -1597,6 +1605,65 @@ function sessionHolding(deviceId) {
  * ordering IS the answer to the page's question, so it is not configurable and there is no sort
  * control: a table you have to sort before it tells you anything has not told you anything.
  */
+/**
+ * "THE ONLY FREE DEVICE IS NOT THE ONE YOU WANTED" — document 03's substitution notice.
+ *
+ * The one moment the Fleet surface exists to make honest, and the last piece of it to be built. It
+ * fires on a narrow, checkable condition:
+ *
+ *   1. something IS free, so there is a real choice to describe;
+ *   2. the class you have been working on is NOT free;
+ *   3. the free device is a different SHAPE, not merely a different name.
+ *
+ * THE THIRD CLAUSE IS THE ONE THAT MATTERS. Two classes with the same geometry are interchangeable
+ * for the thing this warns about — a layout that will not match — so warning about them would be
+ * noise, and noise here trains people to dismiss the notice that is real (ADR-0016: geometry is why
+ * somebody picked a device).
+ *
+ * WHAT "THE ONE YOU WANTED" MEANS, precisely: the class of the most recent session this org
+ * opened. Not a preference anybody typed — inferring intent from a stored setting nobody set would
+ * be worse than saying nothing. If the org has never run a session there is no expectation to
+ * violate, and this returns null.
+ *
+ * NO ETA, for the reason `fleetHeadline` and the queue card both give. The design's mockup reads
+ * "in about 12 minutes"; its own CONFIRM note says that line needs lease-expiry-derived ETA and
+ * that "without it the copy becomes 'next free when a lease ends'". We do not have it, so it does.
+ */
+function substitutionNotice() {
+  const free = state.devices.filter((d) => d.state === 'READY');
+  if (!free.length) return null;
+
+  // The class most recently worked on, from the newest session that named a device.
+  const recent = state.sessions.find((x) => x.deviceId);
+  const wanted = recent ? deviceById(recent.deviceId) : null;
+  if (!wanted) return null;
+
+  const wantedClass = deviceClass(wanted);
+  if (free.some((d) => deviceClass(d) === wantedClass)) return null;
+
+  // A different NAME is not a warning; a different SHAPE is.
+  const sameShape = (a, b) => a?.screen?.width === b?.screen?.width
+    && a?.screen?.height === b?.screen?.height;
+  const different = free.filter((d) => !sameShape(d, wanted));
+  if (!different.length) return null;
+
+  const alt = different[0];
+  const shape = geometryText(alt) ? `a ${alt.screen.width} \u00d7 ${alt.screen.height} screen` : 'a different screen';
+
+  return h('section', { class: 'card gate waiting mt-gap' },
+    h('p', { class: 'card-title', text: 'The only free device is not the one you wanted' }),
+    h('p', { class: 'help' },
+      `${deviceName(alt)} has ${shape} \u2014 a different shape from the ${deviceName(wanted)} you `
+      + 'have been testing on. Starting it is fine, but layout will not match.'),
+    h('div', { class: 'row tight mt-lg' },
+      btn(`Queue for ${deviceName(wanted)}`, 'primary', () => startSession(wanted)),
+      btn(`Start ${deviceName(alt)} anyway`, 'ghost', () => startSession(alt))),
+    h('p', { class: 'caption mt-md', text:
+      'Queueing hands you the class you asked for the moment a lease ends \u2014 there is no estimate '
+      + 'here, because the soonest expiry is only an upper bound.' }),
+  );
+}
+
 function fleetCapacity() {
   const rank = (d) => (d.state === 'READY' ? 0 : BUSY_STATES.has(d.state) ? 1 : 2);
   const rows = [...state.devices].sort((a, b) =>
@@ -1623,15 +1690,31 @@ function fleetCapacity() {
 
       return h('tr', null,
         /**
-         * NAME AND ID, no frame.
+         * NAME, ID — AND THE FRAME, which I removed once and was wrong to.
          *
-         * Stage 3's rule is that a device should be recognisable by its SHAPE before its name is
-         * read, and it earns its place on a card, a picker row and a palette result. Not here: at a
-         * table row's height the frame is a fourteen-pixel sliver that reads as a dark smudge, and
-         * the SCREEN column beside it already states the geometry in words. A component used where
-         * it cannot do its job is decoration.
+         * Entry 51 took the thumbnail out of this table with a reason that was true about the
+         * SIZE I had given it: at 14px a device frame is a dark smudge and the SCREEN column beside
+         * it already states the geometry in words. But document 03's fleet mockup has a frame on
+         * every row, and the answer to "too small to read" is a taller row, not an absent
+         * component. It is what makes this table read as a rack of devices rather than as a
+         * spreadsheet about devices — and a 720x1280 row is visibly stubbier than a 1080x2340 one,
+         * which is a fact you can see before you have read anything.
          */
-        h('td', null, h('div', { class: 'row tight' },
+        /**
+         * THE NAME IS THE LINK, so the row can carry ONE button — document 03's fleet rows have
+         * exactly one, and the second was costing more than it bought. "Details" sat on every row
+         * including the three that already had the action you actually wanted, so the column read
+         * as two choices where there was really one plus a footnote.
+         *
+         * The whole name block is the target rather than the text alone: a 40px-tall row with a
+         * device drawn in it is a much easier thing to hit than eleven characters of it.
+         */
+        h('td', null, h('button', {
+          class: 'row tight fleet-open', type: 'button',
+          title: `Open ${deviceName(d)}`,
+          onclick: () => go(`#/devices/${d.id}`),
+        },
+          deviceThumb(d, 40),
           h('span', { class: 'stack none' },
             h('span', { class: 'fleet-name', text: deviceName(d) }),
             h('code', { class: 'caption', text: short(d.id) }),
@@ -1644,7 +1727,13 @@ function fleetCapacity() {
         h('td', null, geometryText(d)
           ? h('span', { class: 'stack none' },
               h('code', { class: 'caption', text: `${d.screen.width} × ${d.screen.height}` }),
-              h('span', { class: 'micro', text: widthDp(d) }))
+              // DENSITY AND WIDTH, both. They answer different questions: dpi is what an asset is
+              // rasterised for, dp is the number a layout bug is expressed in. Document 03 shows
+              // the pair; this column used to show only the second.
+              h('span', { class: 'caption mono', text: [
+                d.screen.density ? `${d.screen.density}dpi` : null,
+                widthDp(d).replace(' dp', 'dp'),
+              ].filter(Boolean).join(' \u00b7 ') }))
           : h('span', { class: 'caption', text: 'not reported' })),
 
         h('td', null, h('span', { class: 'stack none' },
@@ -1685,7 +1774,11 @@ function fleetCapacity() {
               : d.state === 'QUARANTINED'
                 ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
                 : null,
-          btn('Details', 'tiny ghost', () => go(`#/devices/${d.id}`)),
+          // No Details button: the device's name IS the link now. A row with a single action reads
+          // as a decision; a row with two reads as a menu.
+          !mine && d.state !== 'READY' && d.state !== 'QUARANTINED'
+            ? btn('Details', 'tiny ghost', () => go(`#/devices/${d.id}`))
+            : null,
         )),
       );
     })),
@@ -1819,7 +1912,23 @@ function screenFleet() {
   const counts = { live, waiting };
 
   return [
-    pageHead([{ label: 'Farm' }], 'Fleet', fleetHeadline()),
+    /**
+     * THE HEADLINE IS A NODE, NOT A STRING — document 03 sets the waiting clause apart in amber.
+     *
+     * It was one flat sentence, and the half that changes what you do next ("two people are
+     * waiting") read exactly like the half that does not ("every device is in use"). Emphasis here
+     * is not decoration: it is the difference between a fact and a fact you have to act on. The
+     * WORDS still carry it on their own, so nothing is conveyed by colour alone.
+     */
+    pageHead([{ label: 'Farm' }], 'Fleet', null, null, (() => {
+      const hl = fleetHeadline();
+      return h('p', { class: 'page-sub' },
+        hl.capacity,
+        hl.queue ? ' ' : null,
+        hl.queue
+          ? h('span', { class: hl.waiting ? 'warn-text' : '', text: hl.queue })
+          : null);
+    })()),
 
     h('div', { class: 'row tight mb-gap lensrow' }, LENSES.map(([key, label]) => h('button', {
       class: `lens${lens === key ? ' on' : ''}`,
@@ -1838,7 +1947,7 @@ function screenFleet() {
           // available / Nobody is waiting" — which the headline four lines above already said, in
           // the same words. Two panels stating one fact is exactly the duplication this surface was
           // built to remove, and the queue has its own lens.
-          : fleetCapacity(),
+          : [fleetCapacity(), substitutionNotice()],
   ];
 }
 
@@ -5414,6 +5523,21 @@ function commands() {
     }
     list.push({ frame: d, label: `Open ${deviceName(d)}`, note: geometryText(d), group: 'Go to', run: () => go(`#/devices/${d.id}`) });
   }
+  /**
+   * LAUNCH LIVES HERE NOW, not in the nav — document 06: the palette is *"the fastest path to
+   * everything, and the reason Launch does not need to be a route"*.
+   *
+   * The nav item is gone, the ROUTE is not. Typing a device name already offers to start it, and
+   * that covers the ordinary case; what it does not cover is the one thing the Launch screen
+   * uniquely does — choose a build so it is installed BEFORE you arrive at the cockpit. Deleting
+   * the nav item without relocating that would have removed a capability rather than moved it,
+   * which is the objection that kept the item for three weeks.
+   */
+  list.push({
+    icon: 'launch', label: 'Start a device with a build installed', group: 'Do',
+    note: 'picks the class and the APK, then hands you the cockpit',
+    run: () => go('#/launch'),
+  });
   list.push({ icon: 'upload', label: 'Upload an APK', group: 'Do', run: () => { go('#/apps'); setTimeout(() => $('apk-input')?.click(), 60); } });
   list.push({
     icon: 'copy', label: 'Copy the WebDriver URL', group: 'Do',

@@ -3211,3 +3211,52 @@ when the feature is broken. See issues 37 and 38.
     The lesson worth keeping is about the DIAGNOSIS, not the bug. "Order-dependent" was a guess
     written down once and then quoted for weeks, including by me, in a memory file. Nobody had run
     the file alone in a loop — which takes four minutes and would have falsified it immediately.
+
+61. **THE FLEET, AGAINST THE PICTURE INSTEAD OF AGAINST MY OWN LIST.** 2026-09-05.
+
+    Rakesh looked at the deployed console and said the overall UI had not changed — that a few
+    things had, not the whole. He was right, and the reason is the entry: **I had been checking the
+    design package off against my own list of stages rather than against the mockups in it.** Eight
+    stages "complete" and I had never once rendered document 03's Fleet frame beside the live one.
+
+    Doing that takes four minutes with headless Chrome and a `file://` URL. It found:
+
+    | document 03 | what shipped |
+    |---|---|
+    | a device frame on every row | no frame — removed in entry 51 as "a fourteen-pixel sliver" |
+    | four nav items under FARM, three under ORGANISATION | five under FARM, a lone OPERATIONS group, and Launch |
+    | `Open cockpit`, primary, in the session card | `Cockpit`, ghost |
+    | the waiting clause set apart in amber | one flat grey sentence |
+    | `450dpi · 384dp` | `450DPI · 384 DP` — `.micro` uppercases |
+    | one button per row | the action **and** a Details button on every row |
+    | a substitution notice under the table | nothing |
+
+    **THE THUMBNAIL REMOVAL WAS THE INSTRUCTIVE ONE.** Entry 51's reasoning was sound about the size
+    I had given it — at 14px a device frame is a dark smudge. The conclusion did not follow. The
+    answer to "too small to read" is a taller row, and at 40px with one hairline on the chassis the
+    silhouette reads: a 720×1280 row is visibly stubbier than a 1080×2340 one, which is a fact you
+    can see before you have read anything. It is what makes the table a rack of devices rather than
+    a spreadsheet about devices.
+
+    **THE SUBSTITUTION NOTICE IS BUILT**, and it was the one piece document 03 calls the reason for
+    a single Fleet surface. Three clauses, all required: something is free, the class you have been
+    working on is not, and the free device is a different SHAPE. The third is what keeps it honest —
+    two classes with the same geometry are interchangeable for a layout that will not match, so
+    warning about them is the noise that teaches people to dismiss the notice that is real. No ETA,
+    because the document's own CONFIRM note says that line needs lease-expiry data we do not have.
+
+    **LAUNCH IS OUT OF THE NAV, and its capability moved rather than died.** Document 06 says the
+    palette is *"the reason Launch does not need to be a route"*. The objection that kept the item
+    for three weeks was real — nothing else can preinstall a build before handover — so the palette
+    now carries "Start a device with a build installed" and the `#/launch` route still works.
+
+    **TWO FIXTURE BUGS FOUND WRITING THE TESTS, both worth the space.** `seed()` did not reset
+    `state.lens`, so a test rendering `#/fleet` inherited whichever lens the previous test left and
+    asserted against the CATALOGUE while believing it was looking at the capacity table. And my
+    substitution fixture spread one device into both slots, so they were the same shape and the
+    notice correctly stayed silent — which looks exactly like the feature being broken. A fixture
+    that cannot produce the condition proves nothing about the code that detects it.
+
+    And the suite failed one test on two consecutive runs, in two different files, because of the
+    fleet I had seeded locally for the screenshots. Second time today; it is in
+    [[mfarm-seeding-breaks-the-suite]] and I still walked into it.

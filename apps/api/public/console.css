@@ -433,6 +433,25 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
               transform var(--m-arrive, 700ms) var(--ease-emphatic);
 }
 
+/*
+ * The fleet row's name block, which is the row's link. A button, so it is reachable by keyboard and
+ * announced as an action — styled back down to look like the text it replaced, because a row of
+ * four buttons that look like buttons is a toolbar, not a table.
+ */
+.fleet-open {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--r-sm, 6px);
+}
+.fleet-open:hover .fleet-name { color: var(--mf-accent-text, var(--accent-text)); }
+.fleet-open:focus-visible { outline: 2px solid var(--b-focus); outline-offset: 3px; }
+
 /* Key/value row. */
 .kv { display: grid; grid-template-columns: minmax(96px, 34%) 1fr; }
 .kv dt, .kv dd {
@@ -2113,8 +2132,17 @@ kbd {
  * decision the full-size frame makes with a gradient, taken with the one tool that survives at this
  * scale.
  */
+/*
+ * A HAIRLINE, so the silhouette reads at 40px.
+ *
+ * The tiny scale drops the shadow, the contact ellipse and the rails — correct, they are three
+ * pixels of grey that make a row look dirty. But with all of them gone the chassis was a flat fill
+ * against a dark table and the thumbnails read as black rectangles: the SHAPE, which is the entire
+ * reason the frame is in the row at all, was the thing that disappeared. One border restores it and
+ * costs nothing.
+ */
 .mf-device[data-scale="tiny"] .mf-chassis {
-  box-shadow: none;
+  box-shadow: 0 0 0 1px rgba(235, 238, 245, .10);
   background: #34323C;
 }
 .mf-device[data-scale="tiny"][data-kind="physical"] .mf-chassis { background: #3A3630; }

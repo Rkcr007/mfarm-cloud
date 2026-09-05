@@ -171,6 +171,14 @@ function seed(route: { name: string; id?: string | null }) {
     // place a stale fixture would look like a passing assertion.
     deviceDetail: null,
     quarantineLog: null,
+    /**
+     * The Fleet's lens, which `parseHash` always sets and this fixture did not — so a test rendering
+     * `#/fleet` inherited whichever lens the PREVIOUS test had left in module state, and quietly
+     * asserted against the catalogue while believing it was looking at the capacity table. Same
+     * shape as `deviceDetail` above: view state that navigation owns has to be reset by the fixture
+     * that skips navigation.
+     */
+    lens: 'capacity',
     error: null,
   });
   return { device, session };
@@ -2201,5 +2209,129 @@ describe('a device is named by what it is', () => {
     mod.state.sessions[0].device = 'cf-gone';
     mod.state.sessions[0].deviceId = 'evicted-1';
     assert.match(textOf(mod.SCREENS.sessions()), /cf-gone/);
+  });
+});
+
+/* ============================================ the Fleet, against document 03's mockup ===========
+ *
+ * Written after Rakesh looked at the deployed console and said the overall UI had not changed. He
+ * was right, and the reason is worth keeping: I had been checking the design package off against my
+ * own list of stages rather than against the pictures in it. These assert the things a person
+ * actually sees on the front door.
+ */
+describe('the fleet matches the design it was drawn from', () => {
+  function fleet() {
+    const { device } = seed({ name: 'fleet' });
+    return device;
+  }
+
+  /**
+   * Entry 51 removed the row thumbnail with a reason that was true about the SIZE I had given it —
+   * at 14px a device frame is a smudge. Document 03 has a frame on every row. The answer to "too
+   * small to read" is a taller row, not an absent component: it is what makes this table read as a
+   * rack of devices rather than a spreadsheet about them.
+   */
+  test('every row draws the device', () => {
+    fleet();
+    const tree = mod.SCREENS.fleet();
+    assert.ok(findByClass(tree, 'mf-device'), 'the fleet is a picture of devices, not a list of names');
+  });
+
+  /** One button per row. The name carries the link, so the row reads as a decision, not a menu. */
+  test('the device name is the link to its detail', () => {
+    fleet();
+    assert.ok(findByClass(mod.SCREENS.fleet(), 'fleet-open'),
+      'a row with two buttons reads as a menu; the name is the second one');
+  });
+
+  /**
+   * THE HALF THAT CHANGES WHAT YOU DO NEXT SHOULD NOT READ LIKE THE HALF THAT DOES NOT. Document
+   * 03 sets the waiting clause apart. The words still carry it alone — nothing here is conveyed by
+   * colour only.
+   */
+  test('the headline sets the waiting clause apart, and still says it in words', () => {
+    fleet();
+    mod.state.sessions = [
+      { id: 'q1', state: 'QUEUED', deviceId: null, region: 'lab', createdAt: new Date().toISOString() },
+      { id: 'q2', state: 'QUEUED', deviceId: null, region: 'lab', createdAt: new Date().toISOString() },
+    ];
+    const tree = mod.SCREENS.fleet();
+    assert.match(textOf(tree), /2 people are waiting/);
+    assert.ok(findByClass(tree, 'warn-text'), 'and it is marked, not merely written');
+  });
+
+  /**
+   * THE SUBSTITUTION NOTICE — document 03's whole reason for a single Fleet surface, and the last
+   * piece of it to be built. It fires only when all three clauses hold, because a notice that
+   * appears when it need not is one people learn to dismiss.
+   */
+  describe('the substitution notice', () => {
+    /**
+     * The held device is a 1080x2340 Pro; the free one is whatever `freeShape` says. The first
+     * version of this spread the seed's device into BOTH and then set the free one's shape — so
+     * they were the same 720x1280 and the notice correctly stayed silent, which looked exactly like
+     * the feature being broken. A fixture that cannot produce the condition proves nothing about
+     * the code that detects it.
+     */
+    function twoClasses(freeShape: { width: number; height: number }) {
+      const { device } = seed({ name: 'fleet' });
+      device.state = 'SESSION_ACTIVE';
+      device.profile = 'mfarm-x1-pro';
+      device.screen = { width: 1080, height: 2340, density: 420 };
+      const free = {
+        ...device, id: 'dev-free', state: 'READY', profile: undefined,
+        screen: { ...freeShape, density: 320 },
+      };
+      mod.state.devices = [device, free];
+      mod.state.sessions = [{ ...mod.state.sessions[0], deviceId: 'dev-1', state: 'ACTIVE' }];
+      return { held: device, free };
+    }
+
+    test('it names the shape you would get instead, and offers the queue first', () => {
+      twoClasses({ width: 720, height: 1280 });
+      const text = textOf(mod.SCREENS.fleet());
+      assert.match(text, /only free device is not the one you wanted/);
+      assert.match(text, /720 × 1280/);
+      assert.match(text, /layout will not match/);
+      assert.match(text, /Queue for/);
+      assert.match(text, /anyway/, 'starting it is still offered — it is a warning, not a veto');
+    });
+
+    /**
+     * A DIFFERENT NAME IS NOT A WARNING; A DIFFERENT SHAPE IS. Two classes with the same geometry
+     * are interchangeable for the thing this warns about, and warning about them is the noise that
+     * teaches people to ignore the notice that is real (ADR-0016).
+     */
+    test('it stays quiet when the free device is the same shape', () => {
+      twoClasses({ width: 720, height: 1280 });
+      mod.state.devices[1].screen = { ...mod.state.devices[0].screen };  // same geometry, different class
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /not the one you wanted/);
+    });
+
+    test('it stays quiet when nothing is free at all', () => {
+      twoClasses({ width: 720, height: 1280 });
+      mod.state.devices[1].state = 'QUARANTINED';
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /not the one you wanted/,
+        'there is no choice to describe, so there is nothing to warn about');
+    });
+
+    /** No session history means no expectation to violate. Inferring one would be worse. */
+    test('it stays quiet for an org that has never run anything', () => {
+      twoClasses({ width: 720, height: 1280 });
+      mod.state.sessions = [];
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /not the one you wanted/);
+    });
+
+    /**
+     * The design's mockup says "in about 12 minutes"; its own CONFIRM note says that line needs a
+     * lease-expiry-derived ETA and that without it the copy becomes "next free when a lease ends".
+     * We do not have it.
+     */
+    test('it invents no estimate', () => {
+      twoClasses({ width: 720, height: 1280 });
+      const text = textOf(mod.SCREENS.fleet());
+      assert.doesNotMatch(text, /about \d+ minutes/);
+      assert.match(text, /upper bound/);
+    });
   });
 });
