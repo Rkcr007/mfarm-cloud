@@ -33,6 +33,7 @@ written.
 | D11 | S3 | Cockpit (ended) | The device rail renders every control on an ended session. They are disabled, which is right for a capability gap (stage 5) but not for this: document 04 S4 says "the live view and controls are gone", because none of them will ever work again for this session. | exploratory session |
 | D18 | **S2** | Deploy | A merged, CI-green, released commit is not on the farm until someone runs `mfarm-deploy.sh`, and nothing reports the gap. PR #102's fixes were released at 11:34 and served at 13:08, discovered only by reading `docker ps` for another reason. The console's build badge shows what IS serving; nothing shows what SHOULD be. | reading the running image |
 | D19 | S3 | Deploy | Both boxes' git checkouts drift silently from `main` and nothing notices. `mfarm-cp` was on a **detached HEAD at 886cb47**; `mfarm-lab` was **66 commits behind**, on PR #81. The lab's checkout is not decorative — the worker unit and the boot unit both execute from it, so the farm was running agent code from 66 commits ago. | starting the lab |
+| D20 | S4 | Deploy | `mfarm-farm.service` on the lab still declares `Environment=CF_INSTANCES=2`, and the farm runs **four** devices from `CF_INSTANCES=4` in `deploy/.state/worker.env`. Since the D13 fix the device host exits before `farm-up.sh` reads that variable, so the unit's value is now inert as well as wrong — a declaration that contradicts the running system and no longer does anything. | reading the unit while verifying D13 |
 
 ## Fixed, awaiting verification on the farm
 
@@ -105,6 +106,11 @@ boot was the point: **the fix did not work, and only the boot said so.**
 - **The farm came back around it**: `verify-live.sh` reports the control plane at `c5f0af5`, public
   HTTPS on `farm.mfarm.dev`, **3 devices READY** declaring screen-stream, coturn answering.
 - **`verify-console.sh` 62/62** against the live console.
+- **The fleet is four devices, not two.** `CF_INSTANCES=4` with
+  `CF_PROFILES=cf-3=mfarm-x1-pro,cf-4=mfarm-x1`, and all four came back READY on their own. The
+  count read 3 mid-window and 4 at the end, which was a cold boot finishing rather than a leak —
+  checked against `adb devices` on the host (`6520`–`6523`), not inferred from the API. The boot
+  unit still says two; see D20.
 
 One thing the new lib is deliberately built to survive: it rejects a loopback control plane **by
 value**, not by the absence of `worker.env`. Relying on a file's absence is the shape of reasoning
