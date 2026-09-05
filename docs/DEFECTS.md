@@ -21,9 +21,7 @@ written.
 
 | # | Sev | Area | What | Found |
 |---|---|---|---|---|
-| D1 | S3 | Health | Per-device rows show a state pill; document 05 §06 shows the last health-check outcome and its age ("check passed 4m ago"). `GET /v1/devices` carries neither the last attempt's outcome nor its time, so this needs either a lateral join onto `device_reset_attempts` in the list projection or N per-device reads. | design comparison |
-| D2 | S3 | Device detail | `Screen` reads "not reported" on every physical handset. The worker registers no `screen` for real devices, so the design's geometry row is empty on exactly the device class the frame system was drawn around. Worker-side. | farm screenshot |
-| D4 | S3 | Fleet | The headline says "the farm hands over the moment a lease ends" and never an ETA. Document 03 wants "the next X1 Pro frees in about 12 minutes"; its own CONFIRM note says that needs lease-expiry-derived data, which exists (`expiresAt`) but is only an upper bound. | design comparison |
+| D2 | S3 | Device detail | **The stated cause was wrong — see below.** `Screen` reads "not reported" on the farm's SM-S918B. The agent has read a handset's panel with `wm size` / `wm density` since `c00114f` (2026-08-24), `physical.ts` falls back to a real geometry so the field can never be empty, and `agent.ts` sends `info.screen` for every tier — the two Cuttlefish devices arrive through that same line. The handset's row has simply not been written since its host last beat on **2026-08-29**, eight days before this was recorded. **Closing it needs the handset plugged into a host running a current agent** — hardware, not code. | farm screenshot |
 | D18 | **S2** | Deploy | A merged, CI-green, released commit is not on the farm until someone runs `mfarm-deploy.sh`, and nothing reports the gap. PR #102's fixes were released at 11:34 and served at 13:08, discovered only by reading `docker ps` for another reason. The console's build badge shows what IS serving; nothing shows what SHOULD be. | reading the running image |
 | D19 | S3 | Deploy | Both boxes' git checkouts drift silently from `main` and nothing notices. `mfarm-cp` was on a **detached HEAD at 886cb47**; `mfarm-lab` was **66 commits behind**, on PR #81. The lab's checkout is not decorative — the worker unit and the boot unit both execute from it, so the farm was running agent code from 66 commits ago. | starting the lab |
 | D20 | S4 | Deploy | `mfarm-farm.service` on the lab still declares `Environment=CF_INSTANCES=2`, and the farm runs **four** devices from `CF_INSTANCES=4` in `deploy/.state/worker.env`. Since the D13 fix the device host exits before `farm-up.sh` reads that variable, so the unit's value is now inert as well as wrong — a declaration that contradicts the running system and no longer does anything. | reading the unit while verifying D13 |
@@ -32,6 +30,8 @@ written.
 
 | # | Sev | What | How it was found |
 |---|---|---|---|
+| D1 | S3 | Health showed a state pill and nothing else per device. `GET /v1/devices` now carries `lastResetAt`, and each row says what the farm last confirmed and when — "reset confirmed 4m ago", "check failed 2d ago", "host stopped beating 90s ago", or "no check recorded". **Not** the lateral join onto `device_reset_attempts` this file proposed: that table holds only timed-out and escalated resets, so a healthy device has no rows in it and the join would have reported nothing for most of the fleet. | design comparison |
+| D4 | S3 | The Fleet headline never gave an ETA. It does now, derived from the soonest live `expiresAt` — and it says **"frees in at most 12 minutes"** rather than document 03's "in about 12 minutes". The bound is an upper one (a holder can release early; somebody ahead of you takes the device first), and "at most" is the claim the data actually supports. | design comparison |
 | D5 | S3 | Fleet rows carried a `Details` button beside a device name that links to the same page — two controls, one destination, on every in-use row. The name is the only link now. | clicking every control |
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
@@ -58,6 +58,25 @@ a negative control: reverted to the previous console, 16 of the 20 fail. The fou
 way are the "must not offer" guards — an empty library, a busy row, a host-sourced quarantine, a
 member without the admin route — which are absence assertions and correctly hold in both
 directions.
+
+### D2 is the one that was not a defect
+
+Recorded as "the worker registers no `screen` for real devices". It does, and has since twelve days
+before the note was written. Three hops were read and all three carry it — `discovery.ts` reads the
+panel, `physical.ts` supplies a fallback so the field is never empty, `agent.ts` sends
+`info.screen` for every tier — and the API's upsert stores it with `screen = EXCLUDED.screen`. The
+live proof is on the farm: both Cuttlefish devices report geometry through that same line.
+
+`apps/api/test/device-health-fields.test.ts` now registers a handset with a panel through the real
+route and asserts it comes back out of the tenant list. **That test passes against unmodified
+code**, which is the point — it is the guard that was missing, not a fix.
+
+What is actually true: the handset's row has not been written since `2026-08-29 01:32`, because its
+host last beat at `01:30` that morning. `SELECT last_heartbeat_at` said so in one query, and nothing
+in the console contradicts it — device detail already shows "Host last seen". The row is eight days
+stale and will correct itself the moment a current agent registers that phone.
+
+---
 
 ## Closed
 

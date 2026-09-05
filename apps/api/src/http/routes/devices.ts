@@ -34,7 +34,7 @@ export async function deviceRoutes(app: FastifyInstance) {
       const rows = await withTenant(orgId, async (c) => {
         const { rows } = await c.query(
           `SELECT id, region, platform, tier, model, os_version, state, capabilities,
-                  profile, screen, abis,
+                  profile, screen, abis, last_reset_at,
                   reset_attempts, reset_escalated_at, reset_escalation_reason,
                   quarantined_at, quarantine_reason, quarantine_source,
                   recovery_started_at, recovery_from_reason,
@@ -61,6 +61,24 @@ export async function deviceRoutes(app: FastifyInstance) {
           ...(r.profile ? { profile: r.profile } : {}),
           ...(r.screen ? { screen: r.screen } : {}),
           ...(r.abis ? { abis: r.abis } : {}),
+          /**
+           * WHEN THE FARM LAST CONFIRMED THIS DEVICE WAS GOOD — D1, and the Health page's per-device
+           * line (document 05 §06: "check passed 4m ago").
+           *
+           * A COLUMN, NOT THE LATERAL JOIN THE DEFECT ASKED FOR. `docs/DEFECTS.md` proposed joining
+           * `device_reset_attempts`, and that table is the wrong source: migration 032 writes to it
+           * only when a reset has been outstanding too long or has been escalated, so its outcomes
+           * are `timed-out | succeeded | escalated` and a HEALTHY device has no rows in it at all.
+           * Joining it would have produced "no check recorded" for every device that has never had a
+           * problem, which is the exact inverse of the truth.
+           *
+           * `last_reset_at` is the fact the design is reaching for. It is stamped by both paths that
+           * end with the farm saying this device is fit to hand over: the worker confirming a
+           * snapshot restore, and `complete_recovery` when a released quarantine passes its health
+           * check (migration 035). Device DETAIL has always shown it as "Last reset"; it was absent
+           * from the list for no reason beyond nobody needing it there yet.
+           */
+          ...(r.last_reset_at ? { lastResetAt: r.last_reset_at } : {}),
           /**
            * THE ESCALATED CONDITION (migration 032), and it is a CONDITION rather than a state:
            * the device still reads `CLEANING`, because that is what "not allocatable" means here
