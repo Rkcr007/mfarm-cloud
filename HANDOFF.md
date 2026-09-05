@@ -3171,3 +3171,43 @@ when the feature is broken. See issues 37 and 38.
     the LOCAL database for the render measurement were still there, and those suites count rows. The
     next run was clean, because the suites delete on setup. Seeding the dev database breaks the
     suite until it self-cleans, and the failure looks like a real regression in the allocator.
+
+60. **THE FLAKE WAS A REAL BILLING BUG, AND IT WAS NEVER ABOUT TEST ORDER.** 2026-09-05.
+
+    Issue 43 and my own notes have recorded `attempts.test.ts` as an ORDER-DEPENDENT flake for
+    weeks — "fails in a full run, passes in isolation, reproduces on `main`". Every part of that
+    description was wrong except the last.
+
+    Run in ISOLATION, eight times, it fails about one run in four. There is no ordering involved.
+
+    **THE CAUSE IS TWO CLOCKS.** `session_attempts.started_at` and `metering_events.occurred_at` are
+    written by **Postgres's** `now()`. `GET /v1/account/usage` bounded its window with
+    `to = new Date()` — the **API server's** clock. Measured on this machine, the database's clock
+    runs **1–2ms ahead**. A row written moments ago therefore has `started_at > to`, falls outside
+    `started_at < $2`, and is not counted.
+
+    The test asks for usage microseconds after creating a session, which is precisely the window the
+    bug lives in — so it lost the race about a quarter of the time. Across two machines the skew can
+    be tens of milliseconds or worse, and this is a count **used to bill**: a tenant who starts a
+    session and immediately opens their usage page can be told it did not happen. They would
+    refresh, see the right number, and never report it.
+
+    **THE FIX IS AN OPEN UPPER BOUND.** Absent an explicit `to`, there is now no upper bound at all
+    — "up to now" means "everything so far", and the honest way to express that is to not compare
+    against a clock. `counts`, `deviceReliability` and `usage` take `Date | null` and guard with
+    `($2::timestamptz IS NULL OR ...)`. An explicit `to` from a caller is still honoured exactly;
+    that one is their clock and their intent. `window.to` reports `null` rather than inventing a
+    timestamp — no consumer outside the tests reads it.
+
+    **A DETERMINISTIC TEST REPLACES A STATISTICAL ONE.** Racing a 2ms skew is not a test. The new
+    one stamps an attempt five seconds into the future — the same relationship a leading database
+    clock produces, at a size that cannot be lost in noise — and requires it to be counted. Verified
+    both ways: it fails against the old code every time, and passes against the new one. A second
+    test holds the other half, that an explicit bound still excludes what falls after it.
+
+    **BEFORE: 1 failing run in 4, in isolation. AFTER: 8/8 clean in isolation, and three consecutive
+    full-suite runs at 807/807.**
+
+    The lesson worth keeping is about the DIAGNOSIS, not the bug. "Order-dependent" was a guess
+    written down once and then quoted for weeks, including by me, in a memory file. Nobody had run
+    the file alone in a loop — which takes four minutes and would have falsified it immediately.

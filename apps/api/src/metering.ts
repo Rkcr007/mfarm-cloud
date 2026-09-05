@@ -68,12 +68,21 @@ export async function ingest(hostId: string, events: MeterEvent[]): Promise<Inge
 }
 
 /** Usage rollup for a billing period. */
-export async function usage(orgId: string, from: Date, to: Date) {
+/**
+ * `to` MAY BE NULL, AND NULL MEANS "NO UPPER BOUND".
+ *
+ * Not a default of `new Date()`. Every timestamp compared here is written by Postgres's `now()`,
+ * and a bound computed from the API server's clock is a DIFFERENT clock — routinely a millisecond
+ * or two behind, and free to be far worse across two machines. A row written just now then falls
+ * outside its own window and is silently not counted. See the note on `GET /account/usage`.
+ */
+export async function usage(orgId: string, from: Date, to: Date | null) {
   return withSystem(async (c) => {
     const { rows } = await c.query(
       `SELECT kind, sum(quantity)::float8 AS total
          FROM metering_events
-        WHERE org_id = $1 AND occurred_at >= $2 AND occurred_at < $3
+        WHERE org_id = $1 AND occurred_at >= $2
+          AND ($3::timestamptz IS NULL OR occurred_at < $3)
         GROUP BY kind`,
       [orgId, from, to],
     );

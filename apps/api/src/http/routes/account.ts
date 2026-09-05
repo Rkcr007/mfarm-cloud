@@ -106,13 +106,35 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
    *
    * The window defaults to the last 30 days and is clamped rather than validated into an error —
    * the same choice `GET /sessions` makes about `limit`, for the same reason.
+   *
+   * ------------------------------------------------------- WHY THE UPPER BOUND IS OPEN BY DEFAULT
+   *
+   * `to` used to default to `new Date()` — THE API SERVER'S CLOCK — while every timestamp it is
+   * compared against is written by POSTGRES's `now()`. Those are two different clocks, and the
+   * database's is routinely a few milliseconds ahead: measured at +1 to +2ms against a container on
+   * the same laptop, and free to be far worse across two machines.
+   *
+   * The consequence is a silent under-report. A row written 2ms ago has `started_at > to`, falls
+   * outside `started_at < $2`, and is simply not counted — so somebody who starts a session and
+   * immediately opens their usage page can be told it did not happen. It is not a rounding error in
+   * a total; it is a row missing from a count that is used to bill.
+   *
+   * Found as a 1-in-4 test flake that had been blamed on suite ordering for weeks: the test asks
+   * for usage microseconds after creating the session, which is the exact window this bug lives in.
+   * A real caller hits it rarely and would never report it — they would refresh, and it would be
+   * right the second time.
+   *
+   * So: absent an explicit `to`, there is NO UPPER BOUND. "Up to now" means "everything so far",
+   * and the honest way to express that is to not compare against a clock at all. An explicit `to`
+   * from the caller is still honoured exactly — that one is their clock and their intent.
    */
   app.get<{ Querystring: { from?: string; to?: string } }>('/account/usage', async (req) => {
     const { orgId } = requireTenant(req);
 
-    const to = parseWhen(req.query.to) ?? new Date();
-    const from = parseWhen(req.query.from) ?? new Date(to.getTime() - 30 * 24 * 3600_000);
-    if (from >= to) throw badRequest('`from` must be earlier than `to`.');
+    const to = parseWhen(req.query.to);
+    const from = parseWhen(req.query.from)
+      ?? new Date((to ?? new Date()).getTime() - 30 * 24 * 3600_000);
+    if (to && from >= to) throw badRequest('`from` must be earlier than `to`.');
 
     const [consumed, counted, devices] = await Promise.all([
       usage(orgId, from, to),
@@ -121,7 +143,9 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
     ]);
 
     return {
-      window: { from, to },
+      // `to: null` is the honest report of an open upper bound — a timestamp here would be this
+      // server's clock again, presented as though it had bounded the query.
+      window: { from, to: to ?? null },
       usage: consumed,
       attempts: counted,
       // "How often does a particular device fail" — the §2 question, per device, over this window.
