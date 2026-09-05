@@ -2614,3 +2614,296 @@ describe('starting a device shows it arriving', () => {
       'it says it is reporting events, which is what makes it worth watching rather than skipping');
   });
 });
+
+/**
+ * THE UI DEFECTS FOUND BY USING THE CONSOLE — D3, D9, D10, D11, D15, D16, D17.
+ *
+ * Every test here RENDERS THE SCREEN and asks the tree what it drew. That is deliberate and it is
+ * the lesson from the D13 fix that shipped green and dead: a test which asserts a property of the
+ * source text — a line number, a string being present in a file — can stay true while the thing it
+ * describes does nothing. Where a fix genuinely lives in CSS the rule is asserted against the
+ * stylesheet, but only alongside the DOM assertion that the element it styles is actually drawn.
+ */
+describe('the UI defects found by using the console', () => {
+  /**
+   * COMMENTS STRIPPED, and the first run of this file is why.
+   *
+   * `.dev-tile`'s new rule carries a comment explaining why `top: 6px` was the wrong anchor — and
+   * an assertion that the stylesheet no longer says `top: 6px` matched that sentence. A test that
+   * reads a file cannot tell an explanation from a declaration unless it is made to.
+   */
+  const css = async () => (await readFile(join(PUBLIC, 'console.css'), 'utf8'))
+    .replace(/\/\*[\s\S]*?\*\//g, ' ');
+
+  /* ------------------------------------------------------------------ D3 */
+
+  /**
+   * D3. Preinstall existed only behind `#/launch`. A person on the Fleet, looking at the device
+   * they wanted, had to leave the surface where they were choosing and re-choose the same class
+   * from a picker before they could name a build.
+   */
+  describe('a build can be chosen where the device is chosen', () => {
+    test('a free fleet row offers it', () => {
+      seed({ name: 'fleet' });
+      // The seeded session HOLDS the seeded device, so that row shows "Open cockpit" and never a
+      // Start at all. Nothing is offered on a device you are already using.
+      mod.state.sessions = [];
+      mod.state.held = null;
+      assert.match(textOf(mod.SCREENS.fleet()), /With a build/,
+        'the row you are looking at is where the choice is made');
+    });
+
+    test('the catalogue card offers it — that page exists to choose on', () => {
+      seed({ name: 'fleet' });
+      mod.state.sessions = [];
+      mod.state.held = null;
+      mod.state.lens = 'catalogue';
+      assert.match(textOf(mod.SCREENS.fleet()), /With a build/);
+    });
+
+    test('device detail offers it', () => {
+      const { device } = seed({ name: 'device', id: 'dev-1' });
+      mod.state.sessions = [];
+      mod.state.held = null;
+      mod.state.deviceDetail = { ...device, fetchedAt: Date.now() };
+      assert.match(textOf(mod.SCREENS.device()), /Start with a build/);
+    });
+
+    /**
+     * AND NOT WHEN THERE IS NOTHING TO INSTALL. A build picker for an empty library is a control
+     * whose premise is false — the same defect family as "Join the queue" on a class nothing will
+     * ever free (entry 51).
+     */
+    test('an empty library is offered no build picker at all', () => {
+      seed({ name: 'fleet' });
+      mod.state.sessions = [];
+      mod.state.held = null;
+      mod.state.apps = [];
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /With a build/);
+    });
+
+    /** Nor on a device somebody else is holding: it would queue a session against a busy device. */
+    test('a busy row is not offered one', () => {
+      seed({ name: 'fleet' });
+      mod.state.sessions = [];
+      mod.state.held = null;
+      mod.state.devices = [{ ...mod.state.devices[0], state: 'SESSION_ACTIVE' }];
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /With a build/);
+    });
+  });
+
+  /* ------------------------------------------------------------------ D9 */
+
+  /**
+   * D9. Health named a device whose check had failed and offered no way to reach it — the reader
+   * had to memorise a short id, go to the Fleet, and find it again.
+   */
+  describe('health can be acted on', () => {
+    test('the device name opens the device, as it does on the Fleet', () => {
+      seed({ name: 'health' });
+      const open = findByClass(mod.SCREENS.health(), 'fleet-open');
+      assert.ok(open, 'the name is not a control at all');
+      assert.match(textOf(open), /cf_x86_64|Unprofiled/,
+        'the control is the name block, not something beside it');
+    });
+
+    test('a quarantined device an admin can recover says so', () => {
+      seed({ name: 'health' });
+      mod.state.devices = [{
+        ...mod.state.devices[0], state: 'QUARANTINED',
+        quarantine: { reason: 'adb keeps dropping', at: new Date().toISOString(), source: 'operator' },
+      }];
+      assert.match(textOf(mod.SCREENS.health()), /Recover/);
+    });
+
+    /**
+     * AND NOT ON A HOST-SOURCED ONE — entry 54's defect. That device returns on its own when its
+     * host beats again; authorising a recovery asks the host that is not answering.
+     */
+    test('a host-sourced quarantine is offered no recovery here', () => {
+      seed({ name: 'health' });
+      mod.state.devices = [{
+        ...mod.state.devices[0], state: 'QUARANTINED',
+        quarantine: { reason: 'its host stopped beating', at: new Date().toISOString(), source: 'host' },
+      }];
+      assert.doesNotMatch(textOf(mod.SCREENS.health()), /Recover/);
+    });
+
+    test('a member is not offered an admin-only route', () => {
+      seed({ name: 'health' });
+      mod.state.me = { ...mod.state.me, role: 'member' };
+      mod.state.devices = [{
+        ...mod.state.devices[0], state: 'QUARANTINED',
+        quarantine: { reason: 'adb keeps dropping', at: new Date().toISOString(), source: 'operator' },
+      }];
+      assert.doesNotMatch(textOf(mod.SCREENS.health()), /Recover/);
+    });
+  });
+
+  /* ----------------------------------------------------------------- D17 */
+
+  /**
+   * D17. Two unprofiled devices render as two identical rows. They ARE two devices of one kind, so
+   * nothing is invented here — the id is the only distinguishing fact the farm has, and the fix is
+   * to stop styling it as an afterthought on exactly the rows where it is the answer.
+   */
+  describe('two devices of one kind can be told apart', () => {
+    test('a shared name promotes the id on those rows', () => {
+      seed({ name: 'fleet' });
+      mod.state.devices = [
+        { ...mod.state.devices[0], id: 'aaaaaaaa-1', profile: null, model: null },
+        { ...mod.state.devices[0], id: 'bbbbbbbb-2', profile: null, model: null },
+      ];
+      const tree = mod.SCREENS.fleet();
+      assert.ok(findByClass(tree, 'shared'), 'nothing marks the id as the distinguishing fact');
+      const text = textOf(tree);
+      assert.match(text, /aaaaaaaa/);
+      assert.match(text, /bbbbbbbb/, 'both ids are readable, or the row still cannot be identified');
+    });
+
+    test('a device whose name is unique keeps the quiet caption', () => {
+      seed({ name: 'fleet' });
+      mod.state.devices = [{ ...mod.state.devices[0], id: 'aaaaaaaa-1', profile: null, model: null }];
+      assert.equal(findByClass(mod.SCREENS.fleet(), 'shared'), null,
+        'emphasis on every row means nothing when it appears');
+    });
+  });
+
+  /* ------------------------------------------------------------- D10, D11 */
+
+  /**
+   * D10 and D11 are one screen: document 04 S4. "The frame stays, dimmed and dark, at flat
+   * elevation… The live view and controls are gone; what the session produced is kept."
+   */
+  describe('an ended session settles instead of pretending', () => {
+    const ended = () => {
+      const { session } = seed({ name: 'cockpit', id: 'sess-1' });
+      const done = {
+        ...session, state: 'ENDED',
+        startedAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+        endedAt: new Date().toISOString(), endReason: 'client_request',
+      };
+      mod.state.sessions = [done];
+      mod.state.detail = { ...done, dataPlane: null, ice: null, fetchedAt: Date.now() };
+      return mod.SCREENS.cockpit();
+    };
+
+    test('D11 — the device controls are gone, not disabled', () => {
+      const tree = ended();
+      const bar = findByClass(tree, 'devbar');
+      assert.ok(bar, 'the rail element is still there — it is emptied, not deleted');
+      assert.equal(bar.children.length, 0,
+        'none of these can ever work again for this session, so none of them is offered');
+    });
+
+    test('D10 — the accounting sits beside the frame, not under it', () => {
+      const tree = ended();
+      const wrap = findByClass(tree, 'endedwrap');
+      assert.ok(wrap, 'the stage and the numbers are still stacked');
+      assert.ok(findByClass(wrap, 'devpanel'), 'the frame stays — it is the device you gave back');
+      assert.ok(findByClass(wrap, 'endstats'), 'the numbers are what the page is now about');
+    });
+
+    test('the stage knows it is an ended session', () => {
+      const tree = ended();
+      assert.equal(findByClass(tree, 'devpanel').dataset.mode, 'ended');
+    });
+
+    /** QUEUED IS NOT ENDED — the mistake `paintOverlay` already had to be corrected for. */
+    test('a queued session is not treated as a finished one', () => {
+      const { session } = seed({ name: 'cockpit', id: 'sess-1' });
+      const q = { ...session, state: 'QUEUED', deviceId: null, startedAt: null };
+      mod.state.sessions = [q];
+      mod.state.detail = { ...q, dataPlane: null, ice: null, fetchedAt: Date.now() };
+      const tree = mod.SCREENS.cockpit();
+      assert.notEqual(findByClass(tree, 'devpanel').dataset.mode, 'ended');
+      assert.equal(findByClass(tree, 'endedwrap'), null);
+    });
+
+    test('the frame flattens and dims rather than being replaced', async () => {
+      const sheet = await css();
+      assert.match(sheet, /\.devpanel\[data-mode="ended"\][^{]*\.mf-chassis\s*{[^}]*--e-device-flat/,
+        'document 04 asks for flat elevation');
+      assert.match(sheet, /\.devpanel\[data-mode="ended"\][^{]*\.devbar\s*{[^}]*display:\s*none/);
+    });
+  });
+
+  /* ------------------------------------------------------------------ D15 */
+
+  /**
+   * D15. The tile was positioned against the STAGE, whose height is the viewport's — so how far the
+   * frame's top edge sat below it varied, and on a tall screen the tile overlapped the bezel it was
+   * meant to be waiting above.
+   */
+  describe('the build waits outside the frame', () => {
+    test('the tile is anchored to the frame, not to the stage', () => {
+      seed({ name: 'launching', id: 'sess-1' });
+      mod.state.bringup = {
+        sessionId: 'sess-1', appId: 'app-1', launchAfter: true,
+        install: { id: 'a2', state: 'PENDING', appId: 'app-1' },
+        launch: null, error: null, startedAt: Date.now(),
+      };
+      const fit = findByClass(mod.SCREENS.launching(), 'dev-fit');
+      assert.ok(fit, 'the frame wrapper is gone');
+      assert.ok(
+        fit.children.some((c: { className?: string }) =>
+          String(c.className || '').split(/\s+/).includes('dev-tile')),
+        'the tile is a sibling of the frame again, so "above the frame" is a guess about layout',
+      );
+    });
+
+    test('and it is positioned from the frame edge in both states', async () => {
+      const sheet = await css();
+      assert.match(sheet, /\.dev-tile\s*{[^}]*bottom:\s*100%/,
+        'the waiting position is measured from the frame');
+      assert.doesNotMatch(sheet, /\.dev-tile\s*{[^}]*\btop:\s*6px/,
+        'the stage-relative position is what overlapped the bezel');
+      assert.match(sheet, /\.dev-tile\[data-state="done"\]\s*{[^}]*translate\(-50%,\s*calc\(100%/,
+        'the landing travel is measured from the same edge it waited above');
+    });
+
+    /** And the cockpit does not inherit it — beat 06 settles into the session layout. */
+    test('the tile does not follow the element into the cockpit', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      const tile = findByClass(mod.SCREENS.cockpit(), 'dev-tile');
+      assert.ok(tile, 'the element is persistent — it is hidden, not removed');
+      assert.equal(tile.hidden, true);
+    });
+  });
+
+  /* ------------------------------------------------------------------ D16 */
+
+  /**
+   * D16. Document 04: "Steps 5 and 6 are different, and look different… There is nothing to fill,
+   * so these beats breathe — the amber mark pulses on the 2.2s system loop."
+   */
+  describe('the two beats the worker answers for breathe', () => {
+    test('install and launch are marked as confirm beats; the first four are not', () => {
+      seed({ name: 'launching', id: 'sess-1' });
+      mod.state.bringup = {
+        sessionId: 'sess-1', appId: 'app-1', launchAfter: true,
+        install: { id: 'a2', state: 'PENDING', appId: 'app-1' },
+        launch: null, error: null, startedAt: Date.now(),
+      };
+      const classes = classesOf(mod.SCREENS.launching());
+      assert.ok(classes.includes('confirm'),
+        'nothing distinguishes the beats a worker answers for from the ones the control plane sees');
+      const steps = classesOf(mod.SCREENS.launching()).filter((c: string) => c === 'confirm');
+      assert.ok(steps.length <= 2, 'only steps 5 and 6 are answered by the worker');
+    });
+
+    test('the mark is amber and breathes, and does not spin', async () => {
+      const sheet = await css();
+      const rule = sheet.match(/\.step\.confirm\.active \.step-mark\s*{[^}]*}/)?.[0];
+      assert.ok(rule, 'the confirm beats have no mark of their own');
+      assert.match(rule, /--warn/, 'document 04 says amber');
+      assert.match(rule, /mf-breathe/, 'and says breathe — a pulse has no extent, so it cannot read as 40% done');
+      assert.doesNotMatch(rule, /stepspin/, 'a spin depicts travel toward a destination');
+    });
+
+    test('reduced motion keeps the colour and drops the pulse', async () => {
+      const sheet = await css();
+      assert.match(sheet, /prefers-reduced-motion[^}]*}[\s\S]{0,400}?\.step\.confirm\.active \.step-mark\s*{[^}]*animation:\s*none/);
+    });
+  });
+});
