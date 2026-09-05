@@ -1293,7 +1293,25 @@ async function startSession(d) {
     await Promise.all([refreshDevices(), refreshSessions()]);
     await refreshHeld(true);
     render();
-    if (session.deviceId) go(`#/sessions/${session.id}`);
+
+    /**
+     * THE BRING-UP SCREEN, ALWAYS — not the cockpit.
+     *
+     * This jumped straight to `#/sessions/<id>` whenever the allocator came back with a device, and
+     * that is most of the time on a farm whose devices are already booted. The consequence, found by
+     * watching a real Start on the lab: the six-beat choreography played only when a request QUEUED
+     * or when somebody used `#/launch`. On a warm farm nobody ever saw the device arrive — the
+     * animation was correct and unseen.
+     *
+     * A QUEUED SESSION LANDS HERE TOO, and always did. That is the same screen doing the same job:
+     * beat 0 is the unresolved frame, and it firms up when the allocator hands one over.
+     *
+     * IT IS NOT A DELAY. `watchBringup` moves to the cockpit the moment the last beat lands, so on
+     * an instant allocation this is a second or two of watching a device resolve out of blur, wake,
+     * and take on depth — which is the thing the sequence is for. On a cold device or a handset it
+     * is the difference between a progress screen and a blank one.
+     */
+    go(`#/launch/${session.id}`);
   } catch (err) {
     toast('Could not start a session', err.message, 'bad');
   }
@@ -6766,6 +6784,26 @@ async function boot() {
   $('who-email').textContent = me.user.email;
   $('who-avatar').textContent = (me.user.email || '?').slice(0, 1).toUpperCase();
   $('who-avatar').title = `${me.user.email} · ${me.org.name} · ${me.role}`;
+
+  /**
+   * WHICH ORG THIS IS, said out loud.
+   *
+   * Everything on every screen belongs to one tenant, and until now the only place that named it
+   * was the avatar's tooltip. A person in two orgs sees their sessions and builds "disappear" when
+   * the login picks the other one — which is what happened during the exploratory pass, for an hour,
+   * to somebody who knew the system.
+   *
+   * The count is included ONLY when there is more than one, because "Acme" is the answer and
+   * "Acme · 1 of 1" is noise. Where there are several it is the whole point.
+   */
+  const orgs = me.orgs || [];
+  $('who-org').textContent = orgs.length > 1
+    ? `${me.org.name} · 1 of ${orgs.length} orgs`
+    : me.org.name;
+  $('who-org').title = orgs.length > 1
+    ? `You belong to ${orgs.length} organisations: ${orgs.map((o) => o.name).join(', ')}. `
+      + 'Everything on this console belongs to the one named here. Sign out and back in to change it.'
+    : `${me.role} of ${me.org.name}`;
   $('palette-kbd').textContent = navigator.platform?.startsWith('Mac') ? '⌘K' : 'Ctrl K';
   void showBuild();
 

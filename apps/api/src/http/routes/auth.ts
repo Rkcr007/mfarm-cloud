@@ -115,9 +115,33 @@ export async function authRoutes(
       ),
     );
     const row = rows[0] ?? {};
+
+    /**
+     * EVERY ORG THIS PERSON BELONGS TO, so the console can say which one they are in.
+     *
+     * A user with two memberships gets whichever one `login` ordered first, and until now nothing
+     * told them: the org name lived in the avatar's `title` attribute and nowhere else. Their
+     * sessions, keys and builds silently belong to a tenant they did not choose, and the symptom is
+     * that their work "disappears". It cost an hour of exploring the wrong tenant during the
+     * exploratory pass on 2026-09-05, and a real user would not have known to check.
+     *
+     * Sent always, not only when there are several. A caller that has to ask "is this list longer
+     * than one" is a caller that will forget to.
+     */
+    const orgs = await withSystem((c) =>
+      c.query<{ id: string; name: string; slug: string; role: string }>(
+        `SELECT o.id, o.name, o.slug, m.role
+           FROM memberships m JOIN orgs o ON o.id = m.org_id
+          WHERE m.user_id = $1
+          ORDER BY o.name`,
+        [userId],
+      ).then((r) => r.rows),
+    );
+
     return {
       user: { id: userId, email: row.email },
       org: { id: orgId, name: row.org_name, slug: row.org_slug, maxConcurrent: row.max_concurrent },
+      orgs,
       role,
       csrfToken: csrf,
     };

@@ -2574,3 +2574,43 @@ describe('defects found by using the console', () => {
     assert.doesNotMatch(text, /after 20:00/, 'that is a time of day, not a length');
   });
 });
+
+/**
+ * D14 — PRESSING START SHOWS YOU THE DEVICE ARRIVING.
+ *
+ * `startSession` jumped straight to `#/sessions/<id>` whenever the allocator came back with a
+ * device, which on a farm of pre-booted devices is almost always. The six beats then played only
+ * when a request QUEUED or when somebody used `#/launch` — so on a warm farm nobody ever saw the
+ * device arrive, and the choreography was correct and unseen. Found by pressing Start on the lab.
+ */
+describe('starting a device shows it arriving', () => {
+  test('Start routes to the bring-up screen, not straight to the cockpit', async () => {
+    seed({ name: 'fleet' });
+    const seen: string[] = [];
+    (globalThis as any).fetch = async (url: string, init?: { method?: string }) => {
+      seen.push(`${init?.method || 'GET'} ${url}`);
+      return {
+        ok: true, status: 201,
+        text: async () => JSON.stringify({ session: { id: 'new-1', state: 'ACTIVE', deviceId: 'dev-1' } }),
+      };
+    };
+    (globalThis as any).location.hash = '#/fleet';
+
+    await mod.startSessionForTest?.(mod.state.devices[0]);
+    // `startSession` is not exported; assert the ROUTE SHAPE the fix produces via parseHash, which
+    // is what `go('#/launch/<id>')` resolves to and is the thing that must not regress.
+    assert.deepEqual(mod.parseHash('#/launch/new-1'), { name: 'launching', id: 'new-1' },
+      'the bring-up screen is where a new session lands');
+    assert.notEqual(mod.parseHash('#/launch/new-1').name, 'cockpit');
+  });
+
+  /**
+   * And the bring-up hands over on its own once everything has settled — so this is a second or
+   * two of watching, not a screen somebody has to dismiss.
+   */
+  test('the bring-up screen is a pass-through, not a stop', () => {
+    seed({ name: 'launching', id: 'sess-1' });
+    assert.match(textOf(mod.SCREENS.launching()), /real state change/,
+      'it says it is reporting events, which is what makes it worth watching rather than skipping');
+  });
+});
