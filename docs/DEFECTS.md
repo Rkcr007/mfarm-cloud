@@ -32,19 +32,11 @@ written.
 
 | # | Sev | What | How it was found |
 |---|---|---|---|
-| D3 | **S2** | Nothing on a Fleet row could preinstall a build before handover — the capability existed only behind `#/launch`, so a person looking at the device they wanted had to leave the surface they were choosing on and re-choose the same class from a picker. `startSession` now carries a build, and "With a build…" is offered on the fleet row, the catalogue card and device detail — never on an empty library or a busy device. | doc 06 nav audit |
-| D9 | S3 | Health named a device whose check had failed and gave no way to reach it. The name is the same `fleet-open` control the Fleet uses, and a quarantined device an admin can actually recover carries `Recover` — gated off a host-sourced quarantine, which comes back on its own. | clicking every control |
-| D10 | S3 | The stage kept its full height on an ENDED session, so held-for / actions / artifacts / reset sat under a full-screen dead phone. A third stage mode (`data-mode="ended"`) shrinks and flattens the frame and puts the numbers beside it, which is document 04 S4. | exploratory session |
-| D11 | S3 | The device rail rendered every control on an ended session, disabled. Right for a capability gap, wrong here — none of them will ever work again for that session, so the rail is emptied. Document 04 S4: "the live view and controls are gone". | exploratory session |
-| D15 | S4 | The build's tile was positioned against the stage, whose height is the viewport's, so on a tall screen it overlapped the bezel it was meant to wait above. It is now a child of the frame's own wrapper at `bottom: 100%`, so "outside the frame" is a fact rather than a guess about layout — and it no longer follows the element into the cockpit. | live run on the lab |
-| D16 | S4 | A queued step's mark was a spinning purple ring on the two beats a worker answers for. Document 04: "these beats breathe — the amber mark pulses on the 2.2s system loop". Install and launch now carry `confirm` and breathe amber; the first four keep the ring. | live run on the lab |
-| D17 | S4 | Two unprofiled devices rendered as identical rows. Nothing is invented — there is no second fact to show, and ADR-0026 keeps the host off tenant surfaces — so the id stops being styled as an afterthought on exactly the rows where it is the only answer, and says why in a title. | live run on the lab |
 | D5 | S3 | Fleet rows carried a `Details` button beside a device name that links to the same page — two controls, one destination, on every in-use row. The name is the only link now. | clicking every control |
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
 | D14 | **S2** | Pressing **Start** went straight to the cockpit, so the six-beat choreography played only from `#/launch` or when a request queued — on a warm farm nobody ever saw the device arrive. Start now routes through the bring-up screen, which hands over on its own once the socket has settled. | pressing Start on the lab |
 | D8 | **S2** | A person in more than one org could not tell which they were in. `/v1/auth/me` now returns every membership and the header names the org — with "1 of N orgs" where there are several. A switcher still needs a re-mint endpoint; signing out and back in is the way for now. | exploratory session |
-| D12 | **S1** | A session's length was rendered as `mm:ss`, so "Released by you at 14:29, after 20:00" read as two clock times. `clock()` stays where a number ticks; prose gets words. | reading a real ended session |
 
 **CORRECTED 2026-09-05.** This paragraph used to read "the other three are in the deployed build".
 They were not. The farm ran `886cb47` until 13:08 today, so **D6, D7 and D12 were deployed** (they
@@ -56,16 +48,29 @@ so. See D18. All five are on the farm now, at `c5f0af5`.
 **D5 is verified on the farm by eye** — the live Fleet at `886cb47` showed one button per row. The
 rest are in the deployed build and covered by the suite, not yet confirmed by eye.
 
-**The seven UI defects above are covered by tests that render the screen and read the tree**, and
-each was checked against a negative control: reverted to the previous console, 16 of the 20 new
-assertions fail. The four that pass either way are the "must not offer" guards — an empty library, a
-busy row, a host-sourced quarantine, a member without the admin route — which are absence
-assertions and correctly hold in both directions.
+**The seven UI defects are closed and were watched on the deployed farm at `45683f9`** — signed in
+to `https://farm.mfarm.dev` in a real browser, build badge asserted on every capture so a cached
+bundle could not pass for a fix. The bring-up ones needed a live worker: "With a build…" was pressed
+for real, which allocated an MFARM X1, queued a build, and installed it.
+
+They are also covered by twenty tests that render the screen and read the tree, each checked against
+a negative control: reverted to the previous console, 16 of the 20 fail. The four that pass either
+way are the "must not offer" guards — an empty library, a busy row, a host-sourced quarantine, a
+member without the admin route — which are absence assertions and correctly hold in both
+directions.
 
 ## Closed
 
 | # | Sev | What | Fixed in |
 |---|---|---|---|
+| D3 | **S2** | No Fleet row could preinstall a build before handover. `startSession` carries one now; "With a build…" is on the fleet row, the catalogue card and device detail. **Watched end to end on the farm**: the dialog allocated an MFARM X1, queued Alaan staging, and the worker confirmed the install. | `45683f9` |
+| D9 | S3 | Health named a device whose check had failed and gave no way to reach it. The name is the same `fleet-open` control the Fleet uses, and `Recover` appears on a quarantined device an admin can actually recover. **Seen on the farm**: `Recover` on the quarantined SM-S918B, absent everywhere else. | `45683f9` |
+| D10 | S3 | The stage kept full height on an ENDED session. **Seen on the farm**: the frame is small, dim and flat on the left, with `01:23 held for / 2 actions / 2 artifacts / snapshot reset` beside it and the release sentence leading — all above the fold. | `45683f9` |
+| D11 | S3 | The device rail rendered every control, disabled. **Seen on the farm**: no rail at all on the ended session; Tools says "This session has ended. Nothing can be sent to the device." | `45683f9` |
+| D12 | **S1** | A session's length rendered as `mm:ss`. **Now confirmed by eye** on the farm for the first time: "ran 1 minute", "Released by you at 18:51, after 1 minute". | `f632e86`, seen at `45683f9` |
+| D15 | S4 | The tile was anchored to the stage, so on a tall screen it overlapped the bezel. **Watched at 1500×1500 — the failing case**: it waits clearly above the frame while queued, and lands inside the screen, green, when the worker confirms. | `45683f9` |
+| D16 | S4 | A queued step's mark was a spinning purple ring on the two beats a worker answers for. **Seen on the farm**: "Installing Alaan staging" carries an amber ring while "Device ready" above it keeps the purple one, and "Opening …" turns amber when it becomes the beat being waited on. | `45683f9` |
+| D17 | S4 | Two unprofiled devices rendered as identical rows. **Seen on the farm**: `523581b7` and `861fb15a` carry boxed, readable ids while MFARM X1, X1 Pro and SM-S918B keep the quiet caption. | `45683f9` |
 | D13 | **S2** | The device host's boot unit failed on every boot from 3 September, exiting in one second on "BACKUP_BUCKET is empty" — a control-plane backup policy a machine with no database has no business having an opinion about. **It took two fixes.** The first (PR #103) added the right guard reading the right variable out of the *wrong file*: `farm-up.sh` sources `deploy/.env`, which has never held `CONTROL_PLANE_URL` — `install-worker-service.sh` writes it to `deploy/.state/worker.env`, the worker unit's `EnvironmentFile`. So the guard could not fire, and the unit went on failing identically. The second moves the decision into `deploy/lib/host-role.sh` as a function whose inputs are arguments, so it can be executed in a test. | `aec22ad` (did not work), `dc7299c` (works) |
 
 ---

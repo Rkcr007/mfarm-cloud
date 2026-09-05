@@ -3502,3 +3502,53 @@ when the feature is broken. See issues 37 and 38.
     `progressRing` grep in `verify-console.sh` that matched the comment describing its own deletion,
     and as entry 65's line-number assertion: **a test that reads text will eventually read prose
     about the bug and call it the bug.**
+
+67. **THE SEVEN, WATCHED ON THE FARM — INCLUDING THE TWO THAT ONLY EXIST WHILE A WORKER IS BEING
+    WAITED ON.** 2026-09-05. Console `45683f9`.
+
+    Deployed and verified in one window. Signed in to `https://farm.mfarm.dev` in a real browser as
+    the farm's own `admin@mfarm.local` (the account `farm-up.sh` provisions; password in
+    `deploy/.state/console_password`), with the build badge asserted on every capture — a
+    screenshot that cannot name its own build proves nothing, and a cached bundle looks exactly
+    like a fix that landed.
+
+    **D3, D9, D10, D11, D12, D15, D16, D17 all closed.** The static ones were read off the page.
+    The two that could not be: D15 and D16 exist only while a worker is being waited on, which no
+    fixture and no static route produces — so "With a build…" was pressed for real, the dialog
+    allocated an MFARM X1, queued Alaan staging, and the worker confirmed the install about twelve
+    seconds later. That single run verified D3 end to end and both bring-up defects at once.
+
+    **The tall viewport was the point for D15.** Captured at 1500×1500 deliberately: the tile's
+    overlap was viewport-dependent and a short window was the case that always looked fine. It
+    waits clearly above the frame while queued, and lands inside the screen, green, on
+    confirmation. **D16 is visible as two different marks in one list** — "Installing Alaan
+    staging" amber while "Device ready" above it keeps the purple ring, then "Opening …" turning
+    amber as it becomes the beat being waited on. Document 04's "steps 5 and 6 are different, and
+    look different", which is the sort of claim only a photograph settles.
+
+    **D12 was confirmed by eye for the first time** on the way past — "ran 1 minute", "Released by
+    you at 18:51, after 1 minute". It shipped in `f632e86` and had been suite-covered only.
+
+    **TWO THINGS THE HARNESS GOT WRONG FIRST, both of which produced a plausible artefact.**
+
+    Injecting the session cookie into headless Chrome gave three screenshots of the SIGN-IN PAGE.
+    They were real PNGs of the right size and would have been filed as evidence by anybody who did
+    not open them. The cause: `curl`'s cookie jar writes an HttpOnly cookie with a `#HttpOnly_`
+    prefix on the domain, and the parser skipped every line starting with `#` as a comment. Filling
+    the login form is what the harness does now — it exercises the real path and has no cookie
+    plumbing to get wrong. **The general form: a capture that succeeded is not a capture of the
+    thing you asked for.** Same family as [[mfarm-unused-asset-looks-fine]].
+
+    And the CSS assertion in the new tests failed against the FIXED stylesheet, because
+    `/\.dev-tile\s*{[^}]*top:\s*6px/` matched the COMMENT explaining why `top: 6px` was the wrong
+    anchor. A regex over a file cannot tell an explanation from a declaration. The helper strips
+    comments now. Third instance of this exact shape: entry 65's line-number assertion, the
+    `progressRing` grep in `verify-console.sh` that matched the comment describing its own
+    deletion, and this.
+
+    **Left behind, deliberately:** the session created for the verification (`1c2e67f0`) was not
+    released. Cookie-authenticated `DELETE` needs a CSRF token the script did not carry, and by
+    then the lab was stopped — firing a reset at a host that no longer exists is worse than letting
+    the 30-minute lease expire, which the control-plane reaper handles on its own.
+
+    **Not D1, D2 or D4**, which need data the API and worker do not send. Lab up ~35 minutes, stopped.
