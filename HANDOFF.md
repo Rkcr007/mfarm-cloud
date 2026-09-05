@@ -3301,3 +3301,40 @@ when the feature is broken. See issues 37 and 38.
 
     The SQL comment cost a TS1005 on a line of prose, from a backtick inside a template literal.
     Third time; it is in [[mfarm-sql-comment-backticks]] and I still wrote it.
+
+63. **THE UI REVAMP, VERIFIED ON REAL HARDWARE — AND WHAT USING IT FOUND.** 2026-09-05. Control
+    plane `886cb47`, lab up for 14 minutes.
+
+    Rakesh asked for an exploratory pass with a user's eye, then a real bring-up. Both were worth
+    more than the assertions that preceded them.
+
+    **CLICKING EVERY CONTROL ON EVERY SCREEN** found four defects no test could see, because they
+    are about what a control DOES rather than what a screen says: a session's length rendered as
+    `mm:ss` so "Released by you at 14:29, after 20:00" read as two clock times (S1); "Find machine"
+    with an empty field returning in silence (S2); every in-use fleet row carrying two controls to
+    one destination; and an empty state pointing at a surface by its pre-IA name.
+
+    **AND ONE THAT COST ME AN HOUR.** I explored against the wrong tenant without noticing, because
+    a person in more than one org cannot tell which they are in — the org name is in the avatar's
+    `title` and nowhere else. Their sessions, keys and apps silently belong to an org they did not
+    choose. That is D8 and it is the most user-visible gap in the register.
+
+    **ON REAL HARDWARE, the choreography works.** A live Cuttlefish device streams into the frame at
+    1080x2340 / 50fps / 35ms, the punch-hole over its own reserved status-bar region. A full Launch
+    ran acquire → ready → attach → stream → install → open, the worker confirming the install in
+    about 8 seconds, and the beat cleared on handover. The build's tile waited outside the frame
+    exactly as document 04's no-byte-progress fallback says.
+
+    **THE CHOREOGRAPHY IS ALSO ALMOST UNREACHABLE**, which is the finding that matters. Pressing
+    Start on a Fleet row goes STRAIGHT to the cockpit — `startSession` jumps as soon as a device
+    comes back — so the six beats only play from `#/launch` or when the request queues. On a warm
+    farm, which is the normal state, nobody ever watches the device arrive. That is D14 and it is
+    the gap between "the animation is correct" and "the animation is seen".
+
+    **THE LAB'S BOOT SELF-HEAL HAS BEEN DEAD SINCE 3 SEPTEMBER.** `mfarm-farm.service` exits in one
+    second on every boot: a preflight refuses to continue while `BACKUP_BUCKET` is empty. The guard
+    is right and the consequence is invisible — devices recover anyway because `mfarm-worker.service`
+    is a separate unit. My own memory that "both VMs come back to a working 2-device farm on a plain
+    `instances start`" had been stale for two days and I quoted it while starting the lab.
+
+    `docs/DEFECTS.md` now holds all seventeen, with severity by what each costs a person.
