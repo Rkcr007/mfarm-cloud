@@ -129,9 +129,17 @@
     -->
     <span class="caption tnum" id="build" title="build">—</span>
 
+    <!--
+      THE ORG IS VISIBLE, not a tooltip. A person with two memberships gets whichever one the login
+      ordered first, and everything they do belongs to it — so it is named beside them rather than
+      hidden in a `title` nobody hovers. See `whoBlock` in console.js.
+    -->
     <div class="who">
       <span class="avatar" id="who-avatar">—</span>
-      <span id="who-email" class="secondary"></span>
+      <span class="stack none">
+        <span id="who-email" class="secondary"></span>
+        <span id="who-org" class="caption"></span>
+      </span>
       <button class="link" id="signout">Sign out</button>
     </div>
   </header>

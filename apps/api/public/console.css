@@ -883,6 +883,9 @@ kbd {
 .avatar.sq { border-radius: 2px; }
 
 .who { display: flex; align-items: center; gap: 9px; font-size: 11.5px; }
+/* Two lines where one used to be: who, and which tenant their work belongs to. */
+.who .stack { line-height: 1.25; }
+#who-org { color: var(--t-caption, #6A6A6A); white-space: nowrap; }
 .link { color: var(--t-label, #8A8A8A); font-size: 11.5px; }
 .link:hover { color: var(--t-primary, #F1F1F1); }
 

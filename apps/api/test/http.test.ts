@@ -9,6 +9,7 @@ process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { hashPassword } from '../src/users.ts';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/http/server.ts';
@@ -657,6 +658,53 @@ describe('device detail says when the farm last heard from the host, and never n
     const res = await app.inject({ method: 'GET', url: `/v1/devices/${id}`, headers: auth(keyA) });
     assert.equal(res.statusCode, 404);
     await withSystem((c) => c.query('UPDATE devices SET org_id = NULL WHERE id = $1', [id]));
+  });
+});
+
+/**
+ * D8 — WHICH TENANT AM I IN, AND HOW WOULD I KNOW.
+ *
+ * A user with two memberships gets whichever org `login` ordered first, and everything they do
+ * belongs to it. Until this, the only place the console named it was the avatar's `title`. The
+ * symptom is that a person's sessions and builds "disappear" — which happened during the
+ * exploratory pass on 2026-09-05, for an hour, to somebody who knew the system.
+ */
+describe('a person can tell which organisation they are in', () => {
+  test('auth/me lists every org the user belongs to', async () => {
+    const email = `two-orgs-${randomUUID()}@mfarm.local`;
+    const password = 'a-long-enough-password';
+    await withSystem(async (c) => {
+      const u = (await c.query(
+        'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id',
+        [email, await hashPassword(password)],
+      )).rows[0].id;
+      for (const org of [orgA, orgB]) {
+        await c.query(`INSERT INTO memberships (org_id, user_id, role) VALUES ($1, $2, 'admin')
+                       ON CONFLICT (org_id, user_id) DO NOTHING`, [org, u]);
+      }
+    });
+
+    const login = await app.inject({
+      method: 'POST', url: '/v1/auth/login',
+      payload: { email, password },
+    });
+    assert.equal(login.statusCode, 200, login.body);
+    const cookie = String(login.headers['set-cookie']).split(';')[0];
+
+    const me = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: { cookie } });
+    assert.equal(me.statusCode, 200, me.body);
+    const body = me.json();
+
+    assert.ok(Array.isArray(body.orgs), 'the list is always sent, so no caller has to ask for it');
+    assert.equal(body.orgs.length, 2, 'both memberships');
+    assert.ok(body.orgs.some((o: { id: string }) => o.id === body.org.id),
+      'the org they are actually in is one of them');
+    // The console reads this to say "1 of 2 orgs" rather than leaving the number to a tooltip.
+    for (const o of body.orgs) {
+      assert.ok(o.name && o.slug && o.role, 'each is nameable, addressable and says the role');
+    }
+
+    await withSystem((c) => c.query('DELETE FROM users WHERE lower(email) = lower($1)', [email]));
   });
 });
 
