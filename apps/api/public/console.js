@@ -96,10 +96,13 @@ export const state = {
    * `GET /devices/:id` — the DETAIL read, which is a strictly larger row than the list's.
    *
    * The device screen used to draw from `state.devices`, the 5s fleet poll, and that is where its
-   * "Last reset" row came from: the list projection has never carried `last_reset_at`, so the field
+   * "Last reset" row came from: the list projection did not carry `last_reset_at`, so the field
    * read "not reported" on every device in the fleet, forever, and looked exactly like a farm that
-   * had never reset anything. `hostLastSeenAt` and `resetAttempts` are list-absent for the same
-   * reason — a fleet poll should not carry what only one screen reads.
+   * had never reset anything.
+   *
+   * `last_reset_at` IS IN THE LIST NOW — Health needs it per device (D1), which makes it a fleet
+   * fact rather than a one-screen one. `hostLastSeenAt` and `resetAttempts` stay list-absent for
+   * the original reason: a fleet poll should not carry what only one screen reads.
    *
    * The poll row stays the FALLBACK, so the screen paints immediately on navigation and fills in
    * rather than showing a skeleton over facts it already has.
@@ -1686,6 +1689,42 @@ const LENSES = [
  * cannot get a device needs to know that before they read anything else, and somebody who can will
  * find out by the button being there.
  */
+/**
+ * WHEN THE NEXT DEVICE IS GUARANTEED FREE — D4, and the whole difference is the word "guaranteed".
+ *
+ * Document 03 wants "the next X1 Pro frees in about 12 minutes" and its own CONFIRM note says the
+ * line "needs lease-expiry-derived ETA". The data is there — every live session carries `expiresAt`
+ * — and the reason this stayed unbuilt is that the soonest expiry is an UPPER BOUND on two counts:
+ * a holder can release early, and a queued session ahead of you takes the device first.
+ *
+ * Both objections are about "about". Neither touches the statement the bound actually supports:
+ * this device WILL be free by then, because the reaper enforces the lease. So the sentence says
+ * "in at most 12 minutes" rather than "in about 12 minutes" — a fact instead of an estimate, and
+ * the reader can tell the difference between a promise and a guess.
+ *
+ * IT IS ABOUT THE DEVICE, NOT ABOUT YOUR WAIT, which is the design's framing too. Saying "you get
+ * one in 12 minutes" would be false with anybody ahead of you; saying when the device frees is true
+ * whoever ends up with it, and the queue length is stated one clause earlier.
+ */
+function nextGuaranteedFree() {
+  const now = Date.now();
+  let best = null;
+  for (const s of state.sessions) {
+    if (!LIVE_SESSION_STATES.has(s.state) || !s.deviceId || !s.expiresAt) continue;
+    const at = new Date(s.expiresAt).getTime();
+    // A lease already past its expiry is one the reaper has not swept yet. Rendering it as "in 0
+    // seconds" would put a countdown on the page that has already finished.
+    if (!Number.isFinite(at) || at <= now) continue;
+    if (!best || at < best.at) best = { at, deviceId: s.deviceId };
+  }
+  if (!best) return null;
+  const device = deviceById(best.deviceId);
+  return {
+    name: device ? deviceName(device) : 'device',
+    inWords: lengthInWords(new Date(now).toISOString(), new Date(best.at).toISOString()),
+  };
+}
+
 function fleetHeadline() {
   const free = state.devices.filter((d) => d.state === 'READY').length;
   const waiting = queuedSessions().length;
@@ -1700,15 +1739,20 @@ function fleetHeadline() {
     : `${free} of ${state.devices.length} device${state.devices.length === 1 ? '' : 's'} free.`;
 
   /**
-   * NO ETA, and its absence is deliberate. Producing "the next one frees in about 12 minutes" needs
-   * every current holder's lease, and while the sessions list now returns `expiresAt`, the soonest
-   * expiry is only an upper bound on the wait: a holder can release early, and a queued session
-   * ahead of you takes the device first. Stating a number we cannot stand behind is the one thing
-   * this console does not do — so it says what IS true, which is that the handover is automatic.
+   * THE ETA, ONLY WHERE IT ANSWERS SOMETHING. With a device free the question is not "when" — it is
+   * already "now" — so the bound is computed for a full farm and for nothing else.
    */
+  const eta = free === 0 ? nextGuaranteedFree() : null;
+  const frees = eta
+    ? `the next ${eta.name} frees in at most ${eta.inWords}.`
+    // The design's own fallback, for a farm whose held sessions carry no lease to derive from.
+    : 'the farm hands over the moment a lease ends.';
+
   const queue = waiting === 0
-    ? (held ? 'Nobody is waiting.' : '')
-    : `${waiting === 1 ? 'One person is' : `${waiting} people are`} waiting — the farm hands over the moment a lease ends.`;
+    // Worth saying on a full farm: "nobody is waiting" plus a bound is the difference between
+    // "come back later" and a number somebody can decide on.
+    ? (held ? (eta ? `Nobody is waiting — ${frees}` : 'Nobody is waiting.') : '')
+    : `${waiting === 1 ? 'One person is' : `${waiting} people are`} waiting — ${frees}`;
 
   return { capacity, queue, waiting };
 }
@@ -2618,11 +2662,11 @@ function screenDevice(id) {
   /**
    * THE DETAIL READ FIRST, THE POLL ROW AS A FALLBACK.
    *
-   * `state.devices` comes from `GET /v1/devices`, whose projection has never carried
-   * `last_reset_at` — so this screen's "Last reset" row read "not reported" on every device in the
-   * fleet for as long as it has existed, and looked like a farm that had never reset anything
-   * rather than like a field the list does not send. `hostLastSeenAt` and `resetAttempts` are
-   * absent from the list for the same reason and would have arrived the same way.
+   * `state.devices` comes from `GET /v1/devices`, whose projection did not carry `last_reset_at` —
+   * so this screen's "Last reset" row read "not reported" on every device in the fleet for as long
+   * as it had existed, and looked like a farm that had never reset anything rather than like a
+   * field the list does not send. That one is in the list now (D1); `hostLastSeenAt` and
+   * `resetAttempts` are still detail-only and would have arrived the same way.
    *
    * Merged rather than swapped, so navigation paints the name, the state and the quarantine reason
    * from the poll immediately and the four detail-only fields fill in a moment later. A skeleton
@@ -5881,6 +5925,44 @@ function screenQueueBody() {
 
 /* ---------------------------------------------------------------------------- screen: health */
 
+/**
+ * WHAT THE FARM LAST CONFIRMED ABOUT THIS DEVICE, AND WHEN — D1, and document 05 §06's per-device
+ * line: "MFARM X1 Pro · check passed 4m ago", "SM-S918B · check failed 2d ago".
+ *
+ * THE WORDS ARE NOT THE DESIGN'S, AND THAT IS THE POINT. "Check passed" would overclaim: this farm
+ * runs a health check in exactly one place — `complete_recovery`, when a released quarantine is
+ * asked to prove itself (migration 035) — and not on a periodic sweep of healthy devices. What it
+ * DOES record for every device is `last_reset_at`, stamped both by that passing check and by a
+ * worker confirming a snapshot restore. Both mean the same thing to a reader of this page: the last
+ * moment the farm was willing to hand this device to somebody. So the age is the design's, and the
+ * verb is the one the farm can stand behind.
+ *
+ * THE FAILING SIDE IS THE DESIGN'S, VERBATIM, because there it is exactly true: a device carrying
+ * `quarantine.source === 'health'` failed a check, and that is what the row says.
+ *
+ * "No check recorded" is a real answer and not a gap. A device registered and never reset — the
+ * handset whose host stopped beating on 2026-08-29 is one — has nothing to report, and saying so is
+ * more use than a dash.
+ */
+function lastCheck(d) {
+  if (d.quarantine?.at && d.quarantine.source === 'health') {
+    return { text: `check failed ${ago(d.quarantine.at)}`, tone: 'bad' };
+  }
+  // Quarantined by a host or an operator is not a failed check, and calling it one would send
+  // somebody to look at a device that is fine — the same mistake the fleet already had to unlearn.
+  if (d.quarantine?.at) {
+    return {
+      text: `${d.quarantine.source === 'host' ? 'host stopped beating' : 'taken out of service'} ${ago(d.quarantine.at)}`,
+      tone: 'bad',
+    };
+  }
+  if (d.resetEscalation?.at) {
+    return { text: `reset gave up ${ago(d.resetEscalation.at)}`, tone: 'bad' };
+  }
+  if (d.lastResetAt) return { text: `reset confirmed ${ago(d.lastResetAt)}`, tone: 'ok' };
+  return { text: 'no check recorded', tone: '' };
+}
+
 function screenHealth() {
   const byState = {};
   for (const d of state.devices) byState[d.state] = (byState[d.state] || 0) + 1;
@@ -5942,6 +6024,16 @@ function screenHealth() {
                   ),
                   h('span', { class: 'caption', text: `${d.platform} ${d.osVersion} · ${d.tier} · ${d.region}` }),
                   h('span', { class: 'spacer' }),
+                  /**
+                   * D1 — THE OUTCOME AND ITS AGE, which is what document 05 §06 puts on this row and
+                   * the one thing a state pill cannot carry. "Available" says a device can be
+                   * handed over; it does not say whether the farm has confirmed that in the last
+                   * four minutes or has not heard from it since August.
+                   */
+                  (() => {
+                    const c = lastCheck(d);
+                    return h('span', { class: `caption${c.tone === 'bad' ? ' bad-text' : c.tone === 'ok' ? ' ok-text' : ''}`, text: c.text });
+                  })(),
                   /**
                    * AND THE ONE ACTION THIS PAGE CAN HONESTLY OFFER — with both of its gates.
                    *

@@ -2907,3 +2907,138 @@ describe('the UI defects found by using the console', () => {
     });
   });
 });
+
+/**
+ * D1 AND D4 — the two that needed data before they needed pixels.
+ *
+ * Both render the screen and read the tree. D2 is not here and is not a console defect: the agent
+ * has read and sent a handset's panel since 2026-08-24, which `device-health-fields.test.ts` proves
+ * end to end through the real registration route.
+ */
+describe('the two defects that were waiting on data', () => {
+  /* ------------------------------------------------------------------ D1 */
+
+  /**
+   * Document 05 §06 puts an outcome and an age on every Health row. A state pill cannot carry
+   * either: "Available" says a device CAN be handed over, not whether the farm confirmed that four
+   * minutes ago or has not heard from it since August.
+   */
+  describe('Health says what the farm last confirmed, and when', () => {
+    const health = (device: Record<string, unknown>) => {
+      seed({ name: 'health' });
+      mod.state.devices = [{ ...mod.state.devices[0], ...device }];
+      return textOf(mod.SCREENS.health());
+    };
+
+    test('a confirmed device says so, with its age', () => {
+      const t = health({ state: 'READY', lastResetAt: new Date(Date.now() - 4 * 60_000).toISOString() });
+      assert.match(t, /reset confirmed/);
+      assert.match(t, /4m ago|3m ago|5m ago/, 'the age is the half a state pill cannot carry');
+    });
+
+    /** The design's own words, and here they are exactly true. */
+    test('a device quarantined BY a health check says the check failed', () => {
+      const t = health({
+        state: 'QUARANTINED',
+        quarantine: { at: new Date(Date.now() - 2 * 86_400_000).toISOString(), reason: 'adb keeps dropping', source: 'health' },
+      });
+      assert.match(t, /check failed/);
+    });
+
+    /**
+     * AND A HOST QUARANTINE IS NOT A FAILED CHECK. Calling it one sends somebody to look at a phone
+     * that is fine — the mistake the Fleet already had to unlearn once (entry 54).
+     */
+    test('a host-sourced quarantine is never called a failed check', () => {
+      const t = health({
+        state: 'QUARANTINED',
+        quarantine: { at: new Date(Date.now() - 90_000).toISOString(), reason: 'no heartbeat for 90s', source: 'host' },
+      });
+      assert.doesNotMatch(t, /check failed/, 'the device is fine; its host is not');
+      assert.match(t, /host stopped beating/);
+    });
+
+    /** A real answer, not a gap — the farm's own handset is in exactly this state. */
+    test('a device the farm has never confirmed says so', () => {
+      const t = health({ state: 'READY', lastResetAt: undefined });
+      assert.match(t, /no check recorded/);
+    });
+  });
+
+  /* ------------------------------------------------------------------ D4 */
+
+  /**
+   * Document 03 wants "the next X1 Pro frees in about 12 minutes" and its CONFIRM note says it
+   * needs lease-derived data. The data was always there; what was missing was a form of words the
+   * data supports. `expiresAt` is an upper bound — a holder can release early, and somebody ahead
+   * of you takes the device first — so the line says AT MOST, which is a fact, rather than ABOUT,
+   * which would be a guess.
+   */
+  describe('the Fleet says when the next device is guaranteed free', () => {
+    /**
+     * A FULL FARM WITH SOMEBODY IN LINE, which is the design's own scenario. `waiting` is a
+     * parameter because the queue clause is where the sentence lives: with nobody waiting the
+     * headline has always said "Nobody is waiting." and had no lease mechanics to explain.
+     */
+    const fullFarm = (expiresInMs: number | null, waiting = 1) => {
+      seed({ name: 'fleet' });
+      mod.state.devices = [{ ...mod.state.devices[0], id: 'dev-1', state: 'SESSION_ACTIVE' }];
+      mod.state.available = 0;
+      mod.state.sessions = [
+        {
+          ...mod.state.sessions[0],
+          state: 'ACTIVE',
+          deviceId: 'dev-1',
+          expiresAt: expiresInMs === null ? null : new Date(Date.now() + expiresInMs).toISOString(),
+        },
+        ...(waiting
+          ? [{ ...mod.state.sessions[0], id: 'q-1', state: 'QUEUED', deviceId: null, expiresAt: null }]
+          : []),
+      ];
+      return textOf(mod.SCREENS.fleet());
+    };
+
+    test('it names the class and the bound', () => {
+      const t = fullFarm(12 * 60_000);
+      assert.match(t, /frees in at most/);
+      assert.match(t, /12 minutes|11 minutes|13 minutes/);
+    });
+
+    /** The word carries the whole claim. "About" is an estimate this console cannot stand behind. */
+    test('it says at most, never about', () => {
+      assert.doesNotMatch(fullFarm(12 * 60_000), /frees in about/);
+    });
+
+    test('a held session with no lease falls back to the design\'s own wording', () => {
+      const t = fullFarm(null);
+      assert.doesNotMatch(t, /at most/);
+      assert.match(t, /hands over the moment a lease ends/);
+    });
+
+    /**
+     * A lease already past its expiry is one the reaper has not swept yet. Rendering it would put a
+     * countdown on the page that has already finished.
+     */
+    test('an expired lease is not counted as an upcoming one', () => {
+      const t = fullFarm(-60_000);
+      assert.doesNotMatch(t, /at most/);
+    });
+
+    /** With a device free the question is not "when" — it is already "now". */
+    test('a farm with something free is given no ETA', () => {
+      seed({ name: 'fleet' });
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /at most/);
+    });
+
+    /**
+     * A full farm with nobody in line still gets the bound. "Nobody is waiting" alone tells a
+     * reader to come back later; with a number they can decide whether to wait or take another
+     * class — which is the question the Fleet exists to answer.
+     */
+    test('a full farm with nobody waiting still gets the bound', () => {
+      const t = fullFarm(12 * 60_000, 0);
+      assert.match(t, /Nobody is waiting/);
+      assert.match(t, /frees in at most/);
+    });
+  });
+});

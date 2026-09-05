@@ -3552,3 +3552,65 @@ when the feature is broken. See issues 37 and 38.
     the 30-minute lease expire, which the control-plane reaper handles on its own.
 
     **Not D1, D2 or D4**, which need data the API and worker do not send. Lab up ~35 minutes, stopped.
+
+68. **D1 AND D4 BUILT; D2 WAS NOT A DEFECT.** 2026-09-05/06. Control plane `08fa8a0` → this change.
+
+    The three that were "waiting on data". Two of them genuinely were. The third was waiting on
+    somebody checking.
+
+    **D1 — WHAT THE FARM LAST CONFIRMED, AND WHEN.** Document 05 §06 puts an outcome and an age on
+    every Health row; the list projection carried neither, so a row could only repeat its own state
+    pill. `GET /v1/devices` now sends `lastResetAt` and the page says "reset confirmed 4m ago",
+    "check failed 2d ago", "host stopped beating 90s ago", or "no check recorded".
+
+    **AND NOT THE JOIN THE DEFECT ASKED FOR**, which is the part worth keeping. `docs/DEFECTS.md`
+    proposed a lateral join onto `device_reset_attempts`. That table is written by migration 032
+    only when a reset has been outstanding too long or has been escalated — outcomes
+    `timed-out | succeeded | escalated` — so **a healthy device has no rows in it at all**. The join
+    would have answered "nothing recorded" for exactly the devices that are fine, on most of the
+    fleet, and it would have looked like a working feature. `last_reset_at` is the column that means
+    what the design is reaching for: stamped both by a worker confirming a snapshot restore and by
+    `complete_recovery` when a released quarantine passes its check. There is a test whose whole job
+    is to assert the attempt ledger is EMPTY for a confirmed device, so the join cannot come back.
+
+    The words are not the design's and that is deliberate. "Check passed" would overclaim: this farm
+    runs a health check in one place only — the recovery gate — not on a sweep of healthy devices.
+    The failing side IS the design's verbatim, because there it is exactly true.
+
+    **D4 — "AT MOST", NOT "ABOUT".** Document 03 wants "the next X1 Pro frees in about 12 minutes"
+    and its CONFIRM note says it needs lease-derived data. The data was always there. What was
+    missing was a form of words the data supports: `expiresAt` is an UPPER bound, because a holder
+    can release early and because somebody ahead of you takes the device first. Both objections are
+    about the word "about". Neither touches what the bound does support — the device WILL be free by
+    then, since the reaper enforces the lease. So the line reads "frees in at most 12 minutes": a
+    fact rather than an estimate, and about the DEVICE rather than about your wait.
+
+    **D2 — THE CLAIM WAS FALSE, AND IT TOOK FOUR READS AND ONE QUERY.**
+
+    It said "the worker registers no `screen` for real devices". The agent has read a handset's
+    panel with `wm size` / `wm density` since `c00114f`, **2026-08-24 — twelve days before the
+    defect was written down**. `physical.ts` falls back to a real geometry when that read fails, so
+    the field cannot be empty. `agent.ts` sends `info.screen` for every tier, on the same line the
+    two Cuttlefish devices arrive through. The API upsert stores it and re-asserts it. And
+    `physical.test.ts:99` has been asserting the backend reports a usable geometry the whole time.
+
+    The contradiction that had to be resolved before calling it stale: the row was CREATED
+    2026-08-27, after the screen code landed, and still has NULL screen. One query settled it —
+    `last_heartbeat_at` for that device's host is `2026-08-29 01:30`, and the device row's
+    `updated_at` is `01:32` the same morning. **The host has been silent for eight days**; nothing
+    with the current agent has ever registered that phone. Most likely it ran an older published
+    agent, which is [[mfarm-released-is-not-deployed]] wearing a third hat.
+
+    So D2 stays open and is NOT a code change. What it needed was the guard nobody had written:
+    `device-health-fields.test.ts` registers a handset with a panel through the real route and
+    asserts it comes back out of the tenant list. **That test passes against unmodified code** — it
+    is a guard, not a fix, and saying so is the difference between closing a defect and hiding one.
+    Closing it for real needs the handset plugged into a host running a current agent.
+
+    **THE SHAPE TO REMEMBER**: a defect register decays exactly like a memory or a comment does. Two
+    of these three entries named a cause, and one of the two causes was wrong. Grep the VERB before
+    building against the noun — [[mfarm-spec-docs-overstate]] said this about specs, and it is just
+    as true of a bug list I wrote myself yesterday.
+
+    Suite 1415 green, typecheck clean. Typecheck caught two implicit `any`s in the new test helpers
+    that `node --test` had happily stripped and run — step 3 of the definition of done, doing its job.
