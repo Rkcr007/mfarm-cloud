@@ -23,14 +23,7 @@ written.
 |---|---|---|---|---|
 | D1 | S3 | Health | Per-device rows show a state pill; document 05 §06 shows the last health-check outcome and its age ("check passed 4m ago"). `GET /v1/devices` carries neither the last attempt's outcome nor its time, so this needs either a lateral join onto `device_reset_attempts` in the list projection or N per-device reads. | design comparison |
 | D2 | S3 | Device detail | `Screen` reads "not reported" on every physical handset. The worker registers no `screen` for real devices, so the design's geometry row is empty on exactly the device class the frame system was drawn around. Worker-side. | farm screenshot |
-| D3 | S2 | Fleet / Launch | Nothing on a Fleet row can preinstall a build before handover. The capability exists only on `#/launch`, now reachable from the command palette but not from the surface where a person is choosing a device. | doc 06 nav audit |
 | D4 | S3 | Fleet | The headline says "the farm hands over the moment a lease ends" and never an ETA. Document 03 wants "the next X1 Pro frees in about 12 minutes"; its own CONFIRM note says that needs lease-expiry-derived data, which exists (`expiresAt`) but is only an upper bound. | design comparison |
-| D9 | S3 | Health | Zero actionable controls on the page. A device whose check failed is named and cannot be opened from the row it is named in. | clicking every control |
-| D10 | S3 | Cockpit (ended) | The stage keeps its full height on an ENDED session, so the accounting below it — held for, actions, artifacts, reset — sits under a full-screen dead phone and is never seen without scrolling. Document 04 S4 puts the numbers beside the frame. | exploratory session |
-| D15 | S4 | Bring-up | The build's tile sits half over the frame's top edge rather than clearly above it. Document 04 beat 05 has it outside the device until the worker confirms. | live run on the lab |
-| D16 | S4 | Bring-up | A queued step's mark is a purple ring; document 04 says the two CONFIRM beats "breathe amber". The words are right, the mark is the wrong colour and shape. | live run on the lab |
-| D17 | S4 | Fleet | Two unprofiled devices render as two identical "Unprofiled device" rows, distinguishable only by the short id. Honest — they are two devices — but nothing helps you tell them apart. | live run on the lab |
-| D11 | S3 | Cockpit (ended) | The device rail renders every control on an ended session. They are disabled, which is right for a capability gap (stage 5) but not for this: document 04 S4 says "the live view and controls are gone", because none of them will ever work again for this session. | exploratory session |
 | D18 | **S2** | Deploy | A merged, CI-green, released commit is not on the farm until someone runs `mfarm-deploy.sh`, and nothing reports the gap. PR #102's fixes were released at 11:34 and served at 13:08, discovered only by reading `docker ps` for another reason. The console's build badge shows what IS serving; nothing shows what SHOULD be. | reading the running image |
 | D19 | S3 | Deploy | Both boxes' git checkouts drift silently from `main` and nothing notices. `mfarm-cp` was on a **detached HEAD at 886cb47**; `mfarm-lab` was **66 commits behind**, on PR #81. The lab's checkout is not decorative — the worker unit and the boot unit both execute from it, so the farm was running agent code from 66 commits ago. | starting the lab |
 | D20 | S4 | Deploy | `mfarm-farm.service` on the lab still declares `Environment=CF_INSTANCES=2`, and the farm runs **four** devices from `CF_INSTANCES=4` in `deploy/.state/worker.env`. Since the D13 fix the device host exits before `farm-up.sh` reads that variable, so the unit's value is now inert as well as wrong — a declaration that contradicts the running system and no longer does anything. | reading the unit while verifying D13 |
@@ -39,6 +32,13 @@ written.
 
 | # | Sev | What | How it was found |
 |---|---|---|---|
+| D3 | **S2** | Nothing on a Fleet row could preinstall a build before handover — the capability existed only behind `#/launch`, so a person looking at the device they wanted had to leave the surface they were choosing on and re-choose the same class from a picker. `startSession` now carries a build, and "With a build…" is offered on the fleet row, the catalogue card and device detail — never on an empty library or a busy device. | doc 06 nav audit |
+| D9 | S3 | Health named a device whose check had failed and gave no way to reach it. The name is the same `fleet-open` control the Fleet uses, and a quarantined device an admin can actually recover carries `Recover` — gated off a host-sourced quarantine, which comes back on its own. | clicking every control |
+| D10 | S3 | The stage kept its full height on an ENDED session, so held-for / actions / artifacts / reset sat under a full-screen dead phone. A third stage mode (`data-mode="ended"`) shrinks and flattens the frame and puts the numbers beside it, which is document 04 S4. | exploratory session |
+| D11 | S3 | The device rail rendered every control on an ended session, disabled. Right for a capability gap, wrong here — none of them will ever work again for that session, so the rail is emptied. Document 04 S4: "the live view and controls are gone". | exploratory session |
+| D15 | S4 | The build's tile was positioned against the stage, whose height is the viewport's, so on a tall screen it overlapped the bezel it was meant to wait above. It is now a child of the frame's own wrapper at `bottom: 100%`, so "outside the frame" is a fact rather than a guess about layout — and it no longer follows the element into the cockpit. | live run on the lab |
+| D16 | S4 | A queued step's mark was a spinning purple ring on the two beats a worker answers for. Document 04: "these beats breathe — the amber mark pulses on the 2.2s system loop". Install and launch now carry `confirm` and breathe amber; the first four keep the ring. | live run on the lab |
+| D17 | S4 | Two unprofiled devices rendered as identical rows. Nothing is invented — there is no second fact to show, and ADR-0026 keeps the host off tenant surfaces — so the id stops being styled as an afterthought on exactly the rows where it is the only answer, and says why in a title. | live run on the lab |
 | D5 | S3 | Fleet rows carried a `Details` button beside a device name that links to the same page — two controls, one destination, on every in-use row. The name is the only link now. | clicking every control |
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
@@ -55,6 +55,12 @@ so. See D18. All five are on the farm now, at `c5f0af5`.
 
 **D5 is verified on the farm by eye** — the live Fleet at `886cb47` showed one button per row. The
 rest are in the deployed build and covered by the suite, not yet confirmed by eye.
+
+**The seven UI defects above are covered by tests that render the screen and read the tree**, and
+each was checked against a negative control: reverted to the previous console, 16 of the 20 new
+assertions fail. The four that pass either way are the "must not offer" guards — an empty library, a
+busy row, a host-sourced quarantine, a member without the admin route — which are absence
+assertions and correctly hold in both directions.
 
 ## Closed
 

@@ -3433,3 +3433,72 @@ when the feature is broken. See issues 37 and 38.
     written down as *"reasoned and unit-tested, not watched boot — needs one lab start to confirm"*
     instead of being filed with the other fixes. Had it been recorded as fixed, the boot unit would
     have stayed dead and green.
+
+66. **THE SEVEN UI DEFECTS, AND A TEST FILE WRITTEN AGAINST THE LESSON FROM ENTRY 65.** 2026-09-05.
+    Console `db8f2fa` → this change.
+
+    All seven of the console-only defects in `docs/DEFECTS.md`, implemented in
+    `apps/api/public/console.js` and `console.css`. Not D1, D2 or D4: those need data the API and
+    the worker do not send — the last health-check outcome and its age, `screen` on a physical
+    handset, and a lease-derived ETA — and building the UI for absent data is how a console starts
+    depicting things nobody reported.
+
+    **THE CONSOLE PEOPLE USE IS THE VANILLA ONE**, checked before a line was written rather than
+    assumed. `https://farm.mfarm.dev/` loads `/console.js`; `apps/console/` is a React app whose
+    build output is served at `/app/` and is not what the Fleet, the cockpit or the bring-up screen
+    render from. Asking the deployed page what it LOADED is [[mfarm-unused-asset-looks-fine]], and
+    it would have been an easy day's work in the wrong file.
+
+    **D3 (S2) — THE BUILD, FROM WHERE THE DEVICE IS CHOSEN.** Preinstall lived only behind
+    `#/launch`, so somebody on the Fleet looking at the device they wanted had to leave the surface
+    they were choosing on and re-pick the same class from a picker. `startSession` takes a build
+    now, and sets `state.bringup` BEFORE navigating — after would race `watchBringup`, which treats
+    a missing bringup as "somebody followed a link" and rejoins with `appId: null`, silently
+    dropping the build on exactly the fast path this was added for. Offered on the fleet row, the
+    catalogue card and device detail; never on an empty library and never on a busy device.
+
+    **D9 — HEALTH NAMED A DEVICE AND GAVE NO WAY TO REACH IT.** The name is now the same
+    `fleet-open` control the Fleet uses. `Recover` carries both of its gates: admin, because the
+    route is admin-only and a member would get a 403; and NOT on a host-sourced quarantine, which is
+    entry 54's defect — that device returns on its own, and authorising a recovery asks the host
+    that is not answering.
+
+    **D10 and D11 — the ended cockpit**, which is one screen and document 04 S4. A third stage mode:
+    the rail is EMPTIED rather than disabled (none of it will ever work again for that session,
+    which is a different thing from a capability the device lacks), the frame shrinks, flattens and
+    dims instead of being replaced, and the four numbers move beside it. QUEUED is explicitly not
+    ENDED — the same conflation `paintOverlay` already had to be corrected for.
+
+    **D15 — the tile was anchored to the wrong box.** `top: 6px` measured from the STAGE, whose
+    height is the viewport's, so how far the frame's top edge sat below it varied: roomy on a short
+    screen, about twenty pixels on a tall one, at which point the tile overlapped the bezel it was
+    waiting above. It is a child of `.dev-fit` now at `bottom: 100%`, so "outside the frame" is a
+    fact in every viewport and the landing travel is measured from the same edge. Also found while
+    in there: the tile never got hidden on handover, so the cockpit could inherit it.
+
+    **D16 — the two beats a worker answers for.** Document 04: *"Steps 5 and 6 are different, and
+    look different… There is nothing to fill, so these beats breathe — the amber mark pulses on the
+    2.2s system loop. A filling bar here would be the one lie that discredits the other five."* They
+    were a spinning purple ring, which is a depiction of travel toward a destination on the two
+    steps where nothing is travelling and the wait is longest.
+
+    **D17 — two unprofiled devices.** NOTHING IS INVENTED, because there is nothing to invent: no
+    serial, no instance number, and ADR-0026 keeps the host off tenant surfaces deliberately. The id
+    IS the distinguishing fact, so it stops being styled as caption grey — the console's word for
+    "you may skip this" — on exactly the rows where it is the whole answer, and the title says why.
+    Rows whose name is unique keep the quiet caption, or the emphasis would mean nothing.
+
+    **AND THE TESTS, WHICH ARE THE POINT.** Twenty new assertions, every one of them rendering the
+    screen and reading the tree rather than reading the source. Then the thing entry 65 says to do:
+    **a negative control**. Reverted `console.js` and `console.css` to `main`, ran the same file, and
+    16 of the 20 fail. The four that pass either way are absence assertions — an empty library, a
+    busy row, a host-sourced quarantine, a member without the admin route — which correctly hold in
+    both directions and are worth having for the day somebody removes a gate.
+
+    That control also caught a bad test while it was being written. `assert.doesNotMatch(sheet,
+    /\.dev-tile\s*{[^}]*top:\s*6px/)` failed against the FIXED stylesheet, because the rule's new
+    comment explains why `top: 6px` was the wrong anchor — and a regex over a file cannot tell an
+    explanation from a declaration. The helper strips comments now. It is the same shape as the
+    `progressRing` grep in `verify-console.sh` that matched the comment describing its own deletion,
+    and as entry 65's line-number assertion: **a test that reads text will eventually read prose
+    about the bug and call it the bug.**

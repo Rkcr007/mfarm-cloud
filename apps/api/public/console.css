@@ -382,6 +382,12 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 
 /* What the session left behind. Four numbers, tabular, no card chrome between them. */
 .card.ended { margin-top: var(--mf-gap, 14px); }
+/*
+ * The sentence that makes the numbers mean something — document 04 S4 leads S4 with it. It used to
+ * be rendered over the panel, which stopped being tenable when the ended stage settled to a third
+ * of its height: a paragraph about who released the session does not go inside a 300px phone.
+ */
+.card.ended .ended-lead { margin-bottom: 12px; }
 
 /*
  * The waiting block borrows the gate's shape and not its colour. `.gate` is the red tint that says
@@ -1335,7 +1341,8 @@ kbd {
   overflow: auto;
   padding: 12px;
 }
-.dev-fit { display: grid; place-items: center; }
+/* Positioned, because the build's tile anchors to this box — see `.dev-tile` and D15. */
+.dev-fit { display: grid; place-items: center; position: relative; }
 
 /**
  * THE COCKPIT'S FRAME IS THE SHARED COMPONENT NOW — see `frame.js` and the frame section at the end
@@ -1511,6 +1518,60 @@ kbd {
  * rule. `data-mode` says which screen is currently holding it.
  */
 
+/*
+ * ---------------------------------------------------------------- the ended session (D10, D11)
+ *
+ * Document 04 S4: "The frame stays, dimmed and dark, at flat elevation. It is the same element it
+ * has been since bring-up. Keeping it — rather than replacing the stage with an empty card — is
+ * what makes the ended session read as a device you gave back instead of a page that expired."
+ *
+ * So the frame is not removed and not replaced. It shrinks, flattens, dims, loses its rail, and
+ * moves over to make room for the numbers that are now the content of the page.
+ */
+
+/* D11 — the rail is gone, so the panel is one column instead of two. */
+.devpanel[data-mode="ended"] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "stage" "caption";
+  min-height: 0;
+}
+.devpanel[data-mode="ended"] .devbar { display: none; }
+
+/*
+ * D10 — the stage stops claiming the viewport.
+ *
+ * `min(68vh, 760px)` is the live cockpit's budget and it is correct there: the device is what you
+ * are working in. An ended session has nothing to work in, and at full height the four numbers
+ * beside it were below the fold on any laptop.
+ */
+.devpanel[data-mode="ended"] .dev-stage .mf-device {
+  --f-w: calc(min(38vh, 320px) * var(--f-aspect));
+}
+.devpanel[data-mode="ended"] .dev-stage { padding: 8px; }
+
+/* Dimmed and dark, at flat elevation — the three words the document uses, as three declarations. */
+.devpanel[data-mode="ended"] .dev-fit { opacity: .78; }
+.devpanel[data-mode="ended"] .mf-chassis { box-shadow: var(--e-device-flat); }
+.devpanel[data-mode="ended"] .mf-contact { opacity: 0; }
+
+/*
+ * The frame and the accounting share a row. `auto` for the stage so it takes only the width its
+ * own frame needs, and the numbers take the rest — the reverse would stretch a phone.
+ */
+.endedwrap {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(240px, 1fr);
+  gap: var(--mf-gap, 14px);
+  align-items: start;
+}
+/* Its margin is the gap now, and a grid gap plus a card margin is two gaps. */
+.endedwrap .card.ended { margin-top: 0; }
+
+/* One column before the two would start squeezing the frame rather than the text. */
+@media (max-width: 900px) {
+  .endedwrap { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* The bring-up screen holds the frame without the session's toolbar or its caption row. */
 .devpanel[data-mode="bringup"] .devbar,
 .devpanel[data-mode="bringup"] .dev-caption { display: none; }
@@ -1642,7 +1703,15 @@ kbd {
  */
 .dev-tile {
   position: absolute;
-  top: 6px;
+  /*
+   * D15 — ABOVE THE FRAME, MEASURED FROM THE FRAME.
+   *
+   * `top: 6px` measured from the STAGE, whose height is the viewport's and not the device's, so on
+   * a tall screen the frame's top edge rose to meet the tile and the two overlapped. `bottom: 100%`
+   * is the frame's own top edge, so the clearance below is a constant in every viewport.
+   */
+  bottom: 100%;
+  margin-bottom: 12px;
   left: 50%;
   transform: translate(-50%, 0);
   max-width: 80%;
@@ -1661,9 +1730,15 @@ kbd {
 }
 /* Queued: outside the frame, breathing on the system loop. Nothing has been confirmed yet. */
 .dev-tile[data-state="active"] { animation: mf-breathe var(--mf-pulse, 2.2s) ease-in-out infinite; }
-/* Confirmed: it lands INSIDE the screen, once, and stops moving. */
+/*
+ * Confirmed: it lands INSIDE the screen, once, and stops moving.
+ *
+ * Its own height carries it back past the edge it was waiting above; the constant is how far into
+ * the glass it settles. Measured from the same edge as the waiting position, so the travel is the
+ * gap the reader was looking at rather than a number tuned against one screen size.
+ */
 .dev-tile[data-state="done"] {
-  transform: translate(-50%, 26px);
+  transform: translate(-50%, calc(100% + 38px));
   border-color: var(--ok-line, rgba(111, 203, 99, .28));
   color: var(--ok-text, #7FD873);
   animation: none;
@@ -1715,8 +1790,32 @@ kbd {
 .step.active .step-label { color: var(--t-primary, #F1F1F1); }
 .step.skipped { opacity: .55; }
 
+/*
+ * D16 — THE TWO BEATS THE WORKER ANSWERS FOR BREATHE, AND THEY BREATHE AMBER.
+ *
+ * Document 04: "Steps 5 and 6 are different, and look different… There is nothing to fill, so these
+ * beats breathe — the amber mark pulses on the 2.2s system loop and the note says exactly what is
+ * being waited on. A filling bar here would be the one lie that discredits the other five."
+ *
+ * The ring above SPINS, and a spin is the thing this rule exists to forbid one step further along:
+ * it depicts motion toward a destination on the two steps where nothing is moving and the wait is
+ * longest. Amber because it is the console's colour for "not yet, and that is expected" — the same
+ * value the queued build's tile and the waiting gate already use. The gap in the ring goes with the
+ * spin: a breathing mark is a whole circle changing weight, not a partial one holding still.
+ */
+.step.confirm.active .step-mark {
+  border-color: var(--warn, #E8A30E);
+  border-right-color: var(--warn, #E8A30E);
+  color: var(--warn, #E8A30E);
+  animation: mf-breathe var(--mf-pulse, 2.2s) ease-in-out infinite;
+}
+
 @keyframes stepspin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .step.active .step-mark { animation: none; border-right-color: var(--mf-accent, #755EB8); } }
+@media (prefers-reduced-motion: reduce) {
+  .step.active .step-mark { animation: none; border-right-color: var(--mf-accent, #755EB8); }
+  /* Still amber, still whole — it simply stops pulsing. The colour carries the state on its own. */
+  .step.confirm.active .step-mark { animation: none; border-right-color: var(--warn, #E8A30E); }
+}
 
 /* -------------------------------------------------------------------- launch picker */
 
@@ -2356,6 +2455,27 @@ kbd {
 .fleet-table .stack.none { gap: 2px; }
 .fleet-name { font: var(--ty-display-md); font-family: var(--f-display); letter-spacing: var(--tr-display-md); color: var(--t-primary, #F1F1F1); }
 .fleet-table .rowactions { white-space: nowrap; }
+/*
+ * D17 — THE ID, WHERE THE ID IS THE ONLY DIFFERENCE.
+ *
+ * Two devices of one class carry the same name, the same geometry and the same capabilities, so on
+ * those rows the short id is not incidental machine text — it is the entire answer to "which one is
+ * this". It stays mono and it stays small, because it IS machine text; what it stops being is
+ * caption grey, which is the console's word for "you may skip this".
+ *
+ * Only on the rows that need it. A unique name keeps the quiet caption, so the emphasis means
+ * something when it appears rather than being a style every row wears.
+ */
+.fleet-id.shared {
+  color: var(--t-body, #D4D4D4);
+  background: var(--s-inset, #050506);
+  border: 1px solid var(--b-row, #151517);
+  border-radius: var(--r-sm, 6px);
+  padding: 0 5px;
+  font-size: 11px;
+  letter-spacing: .02em;
+  align-self: start;
+}
 /* The device thumbnail sets the row height; without this the frame stretches to fill the cell and
    its aspect ratio — the one thing it exists to show — becomes whatever the row is. */
 .fleet-table .mf-device { align-self: center; }

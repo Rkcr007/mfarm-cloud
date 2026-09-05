@@ -1269,7 +1269,19 @@ function pageHead(crumbs, title, sub, actions, subNode) {
  * device on the tier and quietly break the same promise in the one case that looks hardest to
  * notice.
  */
-async function startSession(d) {
+/**
+ * Start a session on a device class, optionally with a build already chosen.
+ *
+ * THE BUILD IS THE SECOND ARGUMENT, and adding it is D3. Preinstall existed only behind `#/launch`
+ * — so a person standing on the Fleet, looking at the device they want, had to leave the surface
+ * where they were choosing, re-choose the same class from a picker, and only then name a build.
+ * The capability was one route away from every place anyone actually decides.
+ *
+ * `requireCapabilities` is asked for ONLY when a build is coming, and that is the same rule
+ * `startLaunch` follows: demanding `app-install` unconditionally would make a device that can
+ * stream but not sideload unschedulable for somebody who only wants to look at it.
+ */
+async function startSession(d, { appId = null, launchAfter = false } = {}) {
   try {
     const { session } = await api('/v1/sessions', {
       method: 'POST',
@@ -1279,6 +1291,7 @@ async function startSession(d) {
         tier: d.tier,
         profile: d.profile ?? null,
         matchProfile: true,
+        ...(appId ? { requireCapabilities: ['app-install'] } : {}),
       },
     });
     // 202 with no device is a real answer, not a failure: the session is queued and the reaper
@@ -1290,6 +1303,22 @@ async function startSession(d) {
         `${capacityText(state.devices, d)} — so you are in line. It starts automatically when one frees up.`,
         'warn');
     }
+    /**
+     * THE BRING-UP STATE IS SET BEFORE NAVIGATING, not after, because `watchBringup` treats a
+     * missing `state.bringup` as "somebody followed a link to a session already in flight" and
+     * rejoins it with `appId: null`. Setting it afterwards would race that rejoin and silently drop
+     * the build on exactly the fast path this was added for.
+     */
+    state.bringup = {
+      sessionId: session.id,
+      appId,
+      launchAfter: Boolean(appId) && launchAfter,
+      install: null,
+      launch: null,
+      error: null,
+      startedAt: Date.now(),
+    };
+
     await Promise.all([refreshDevices(), refreshSessions()]);
     await refreshHeld(true);
     render();
@@ -1315,6 +1344,58 @@ async function startSession(d) {
   } catch (err) {
     toast('Could not start a session', err.message, 'bad');
   }
+}
+
+/**
+ * "Start with a build" — D3, offered where a person is CHOOSING a device.
+ *
+ * A DIALOG RATHER THAN A SECOND PICKER SCREEN. `#/launch` asks two questions in sequence: which
+ * class, then which build. On the Fleet the first question is already answered — the reader is
+ * looking at the device — so the only thing left to ask is the second one, and a full screen to ask
+ * it would send somebody away from the surface that already had what they wanted.
+ *
+ * OFFERED ONLY WHERE IT CAN WORK, which is the rule this console keeps relearning: no builds in the
+ * library means no dialog, because a picker with nothing in it is a control on a false premise. The
+ * caller checks `state.apps.length` before drawing the button at all.
+ *
+ * IT IS NOT THE ROW'S SECOND ROUTE TO ONE PLACE. D5 removed a `Details` button that went where the
+ * device's name already went; this is a different ACTION, not a duplicate destination, and the two
+ * are only superficially "a second control on the row".
+ */
+function startWithBuild(d) {
+  const apps = state.apps;
+  if (!apps.length) return;
+
+  const pick = h('select', { class: 'field' }, apps.map((a) => h('option', {
+    value: a.id,
+    selected: state.launch.appId === a.id,
+    text: `${a.label || a.packageName} ${a.versionName || ''}`.trim(),
+  })));
+  const after = h('input', { type: 'checkbox', checked: state.launch.launchAfterInstall });
+
+  formDialog({
+    title: `Start ${deviceName(d)} with a build`,
+    lead: 'The farm allocates the device, then the build is queued for the worker’s next heartbeat. You will watch both on the bring-up screen.',
+    fields: [
+      h('label', { class: 'stack tight' }, h('span', { class: 'micro', text: 'Build' }), pick),
+      h('label', { class: 'row tight' }, after,
+        h('span', { class: 'secondary', text: 'Open it once the worker confirms the install' })),
+      /**
+       * SAID BEFORE IT HAPPENS, not discovered afterwards. Asking for a build narrows the
+       * allocation to devices declaring `app-install`, so a farm whose only free device cannot
+       * sideload will queue this request where a plain Start would have handed a device over.
+       */
+      h('p', { class: 'caption', text: 'A build needs a device that declares app-install, so this asks for a narrower device than Start alone. If none is free you will be queued.' }),
+    ],
+    submit: 'Start with this build',
+    onSubmit: async () => {
+      // Remembered for the next one: the launch screen reads the same two values, and somebody
+      // installing the same build twice should not re-pick it twice.
+      state.launch.appId = pick.value;
+      state.launch.launchAfterInstall = after.checked;
+      await startSession(d, { appId: pick.value, launchAfter: after.checked });
+    },
+  });
 }
 
 /**
@@ -1724,6 +1805,24 @@ function fleetCapacity() {
       'Start a worker and it appears here within a heartbeat.'));
   }
 
+  /**
+   * D17 — WHICH OF THE TWO IS THIS?
+   *
+   * Two unprofiled Cuttlefish devices are genuinely interchangeable to the allocator and render as
+   * two identical rows: same name, same geometry, same everything the farm knows. That is honest —
+   * they ARE two devices of one kind — but a person looking at a row and asking "is this the one I
+   * quarantined" had nothing to answer with except eight characters of id set in caption grey,
+   * sized and coloured to be ignored.
+   *
+   * NOTHING IS INVENTED HERE. There is no second fact to show: no serial, no instance number, no
+   * host (ADR-0026 keeps that off tenant surfaces deliberately). The id IS the distinguishing fact,
+   * so the fix is to stop styling it as an afterthought on the rows where it is doing the work —
+   * and to say why it matters, in a title, on exactly those rows. A device whose name is unique
+   * keeps the quiet caption, because there the id is genuinely incidental.
+   */
+  const twins = new Map();
+  for (const d of rows) twins.set(deviceName(d), (twins.get(deviceName(d)) || 0) + 1);
+
   return card(null, { class: 'flat' }, h('table', { class: 'table fleet-table' },
     h('thead', null, h('tr', null,
       h('th', { text: 'Device' }),
@@ -1765,10 +1864,19 @@ function fleetCapacity() {
           onclick: () => go(`#/devices/${d.id}`),
         },
           deviceThumb(d, 40),
-          h('span', { class: 'stack none' },
-            h('span', { class: 'fleet-name', text: deviceName(d) }),
-            h('code', { class: 'caption', text: short(d.id) }),
-          ),
+          (() => {
+            const shared = (twins.get(deviceName(d)) || 0) > 1;
+            return h('span', { class: 'stack none' },
+              h('span', { class: 'fleet-name', text: deviceName(d) }),
+              h('code', {
+                class: shared ? 'fleet-id shared' : 'caption',
+                text: short(d.id),
+                title: shared
+                  ? `${twins.get(deviceName(d))} devices share this name. The id is what tells them apart.`
+                  : null,
+              }),
+            );
+          })(),
           isRealDevice(d) ? h('span', { class: 'kindtag real', text: 'REAL' }) : null,
         )),
 
@@ -1824,6 +1932,16 @@ function fleetCapacity() {
               : d.state === 'QUARANTINED'
                 ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
                 : null,
+          /**
+           * D3 — THE BUILD, FROM THE ROW YOU ARE ALREADY LOOKING AT.
+           *
+           * Only on a free device this org does not already hold, and only when the library has
+           * something to install: a build picker for an empty library is a control whose premise is
+           * false, and one on a busy row would queue a session against a device somebody else has.
+           */
+          !mine && d.state === 'READY' && state.apps.length
+            ? btn('With a build…', 'tiny ghost', () => startWithBuild(d))
+            : null,
           /**
            * NO Details BUTTON AT ALL — the device's name is the link.
            *
@@ -1977,6 +2095,11 @@ function fleetCatalogue() {
               ? `Join queue \u00b7 ${queuedSessions().length} ahead`
               : 'Join queue', 'ghost', () => startSession(d))
             : null,
+        // D3 again, on the surface whose whole job is choosing: this card is where somebody picks a
+        // screen size, and "with the build I am testing" is part of that choice, not a later step.
+        free && state.apps.length
+          ? btn('With a build…', 'ghost', () => startWithBuild(d))
+          : null,
         btn('Full specification', 'ghost', () => go(`#/devices/${d.id}`)),
       ),
 
@@ -2536,6 +2659,9 @@ function screenDevice(id) {
       h('div', { class: 'row tight' },
         pill(st.label, st.tone, { live: inPool, title: st.note }),
         inPool ? btn('Start session', 'primary', () => startSession(d)) : null,
+        inPool && state.apps.length
+          ? btn('Start with a build…', 'ghost', () => startWithBuild(d))
+          : null,
       ),
     ),
     /**
@@ -3065,8 +3191,20 @@ async function queueBringupAction(b, kind) {
   if (seen) b[kind] = seen;
 }
 
-function bringupStep(key, label, st, note) {
-  return { key, label, state: st, note };
+/**
+ * `confirm` MARKS THE TWO BEATS THE WORKER ANSWERS FOR — document 04, and D16.
+ *
+ * "Steps 5 and 6 are different, and look different… The worker reports an outcome, never a start,
+ * and its heartbeat is up to ten seconds away. There is nothing to fill, so these beats breathe —
+ * the amber mark pulses on the 2.2s system loop and the note says exactly what is being waited on."
+ *
+ * The first four are transitions the CONTROL PLANE observes and can report as they happen; install
+ * and launch are jobs handed to a machine that will answer when it answers. A spinning ring says
+ * "something is turning"; nothing is turning, and on the two steps where the wait is longest that
+ * was the closest thing on the screen to a progress animation with nothing behind it.
+ */
+function bringupStep(key, label, st, note, confirm = false) {
+  return { key, label, state: st, note, confirm };
 }
 
 /**
@@ -3198,13 +3336,15 @@ function bringupSteps(sess) {
     const ins = b.install;
     steps.push(bringupStep('install', `Installing ${app?.label || app?.packageName || 'the build'}`,
       ins?.state === 'DONE' ? 'done' : ins?.state === 'FAILED' ? 'failed' : ins ? 'active' : 'pending',
-      ins?.state === 'FAILED' ? ins.error : ins ? 'Queued for the worker’s next heartbeat' : null));
+      ins?.state === 'FAILED' ? ins.error : ins ? 'Queued for the worker’s next heartbeat' : null,
+      true));
 
     if (b.launchAfter) {
       const la = b.launch;
       steps.push(bringupStep('launch', `Opening ${app?.packageName || 'the app'}`,
         la?.state === 'DONE' ? 'done' : la?.state === 'FAILED' ? 'failed' : la ? 'active' : 'pending',
-        la?.state === 'FAILED' ? la.error : null));
+        la?.state === 'FAILED' ? la.error : null,
+        true));
     }
   }
   return steps;
@@ -3331,7 +3471,7 @@ function screenLaunching(id) {
 
       h('div', { class: 'bringup-steps' },
         h('p', { class: 'micro', text: `Launching ${device ? deviceName(device) : 'a device'}` }),
-        h('ul', { class: 'steplist' }, steps.map((s) => h('li', { class: `step ${s.state}` },
+        h('ul', { class: 'steplist' }, steps.map((s) => h('li', { class: `step ${s.state}${s.confirm ? ' confirm' : ''}` },
           /**
            * The outcome mark. 01 maps these three to `check`, `x` and `minus`.
            *
@@ -3548,7 +3688,6 @@ function ensureStage() {
     const taps = h('div', { class: 'dev-taps' });
     dom.glass.append(overlay, taps);
 
-    const screenWrap = h('div', { class: 'dev-fit' }, dom.root);
     const toolbar = h('div', { class: 'devbar' });
 
     /**
@@ -3571,11 +3710,26 @@ function ensureStage() {
      * reason as everything else in here: this element sits beside a `<video>` that must never be
      * rebuilt, and a node created on a five-second poll is a node destroyed on a five-second poll.
      */
+    /**
+     * D15 — IT IS A CHILD OF THE FRAME'S WRAPPER, and that is what makes "outside the frame" true.
+     *
+     * It used to be a sibling of `.dev-fit`, positioned `top: 6px` against the STAGE. The stage is
+     * a flexible box and the frame is centred in it, so how far the frame's top edge sat below the
+     * stage's depended on the viewport: roomy on a short screen, and on a tall one only about
+     * twenty pixels — at which point a tile six pixels down overlapped the bezel it was supposed to
+     * be waiting above. Seen on the lab, where it read as half-attached to the device.
+     *
+     * Anchored to `.dev-fit` — whose box IS the frame's box — `bottom: 100%` means "above the
+     * frame" in every viewport, and the landing travel is measured from the same edge. Document 04
+     * beat 05 is unambiguous that the two positions are outside and inside: "the tile waits outside
+     * the frame — it does not enter until the worker confirms".
+     */
     const tile = h('div', { class: 'dev-tile', hidden: true });
+    const screenWrap = h('div', { class: 'dev-fit' }, dom.root, tile);
 
     const root = h('div', { class: 'devpanel' },
       toolbar,
-      h('div', { class: 'dev-stage' }, screenWrap, tile),
+      h('div', { class: 'dev-stage' }, screenWrap),
     );
     state.stage = {
       root, video, overlay, toolbar, caption, tile, zoom: 1,
@@ -3601,7 +3755,23 @@ function stagePanel(sess, live) {
   ensureStage();
 
   const st = state.stage;
-  st.root.dataset.mode = 'session';
+  /**
+   * A THIRD MODE, AND IT IS NOT COSMETIC — document 04 S4, and D10/D11.
+   *
+   * `session` and `bringup` were the only two, so a finished session was drawn exactly like a
+   * running one: a full-height stage under a rail of controls, with the accounting — held for,
+   * actions, artifacts, reset — pushed below the fold underneath a full-screen dead phone. The
+   * design puts those numbers BESIDE the frame, and it says why: "the frame stays, dimmed and dark,
+   * at flat elevation… keeping it is what makes the ended session read as a device you gave back
+   * instead of a page that expired."
+   *
+   * QUEUED IS NOT ENDED. It has its own unresolved-frame treatment through `data-resolved`, and
+   * conflating the two is the mistake `paintOverlay` above already had to be corrected for — a
+   * person waiting in line was told their session had ended. The condition is the same one
+   * `endedSummary` uses, deliberately, so the two cannot disagree about which sessions are over.
+   */
+  const ended = !live && sess.state !== 'QUEUED';
+  st.root.dataset.mode = ended ? 'ended' : 'session';
   /**
    * THE BEAT DOES NOT FOLLOW THE ELEMENT INTO THE COCKPIT.
    *
@@ -3612,6 +3782,15 @@ function stagePanel(sess, live) {
    * finished arriving.
    */
   delete st.root.dataset.beat;
+  /**
+   * AND NEITHER DOES THE TILE FOLLOW THE ELEMENT IN, for the same reason as the beat above it.
+   *
+   * `bringupStage` unhides the build's tile and nothing hid it again, so the element the cockpit
+   * takes over could arrive still carrying the label from beat 05. Document 04's beat 06 settles
+   * "the whole composition into the session layout", and a tile pinned above the frame is not part
+   * of that layout — the installed build is already named by the chip in the header.
+   */
+  st.tile.hidden = true;
   paintToolbar(sess, live, caps);
   paintOverlay(sess, live, caps);
   paintFrame(device);
@@ -3745,6 +3924,21 @@ function setZoom(z) {
 function paintToolbar(sess, live, caps) {
   const st = state.stage;
   if (!st) return;
+  /**
+   * D11 — GONE, NOT DISABLED, and the distinction is the whole point.
+   *
+   * Every control below is drawn "visible and inert" when the device cannot honour it, and that is
+   * right for a CAPABILITY gap: a struck-through Screenshot answers "why can I not screenshot
+   * this?" with something the reader can see. It is wrong here. None of these will ever work again
+   * for this session, whatever the device can do — the session is over — so a rail of eleven dimmed
+   * buttons offers a menu of things that cannot happen and invites somebody to hunt for the reason
+   * they are greyed out. Document 04 S4 is explicit: "the live view and controls are gone".
+   *
+   * Emptied rather than left stale, because the toolbar is a persistent element like everything
+   * else on this stage: a rail painted for the last live session would otherwise survive into the
+   * ended one.
+   */
+  if (!live && sess?.state !== 'QUEUED') { st.toolbar.replaceChildren(); return; }
   const streaming = state.liveState === 'streaming';
   const attached = ATTACHED.has(state.liveState);
   /**
@@ -3898,11 +4092,20 @@ function paintOverlay(sess, live, caps) {
   }
   st.root.dataset.resolved = 'yes';
 
+  /**
+   * THE SENTENCE MOVED OUT OF THE GLASS — D10's other half.
+   *
+   * It used to be rendered here, over the panel, and that was survivable while the ended stage was
+   * full height. It is not now: the frame settles to about a third of that, and a paragraph
+   * explaining who released the session and how long it ran does not belong inside a 300px-wide
+   * phone whatever the height. Document 04 S4 draws it BESIDE the frame, with the numbers, and
+   * `endedSummary` renders it there.
+   *
+   * The panel keeps the two words that label what you are looking at, which is all a dark screen
+   * needs — the frame is a memento at this point, not a surface carrying an explanation.
+   */
   if (!live) {
-    return show(
-      h('p', { class: 'micro', text: 'Session ended' }),
-      h('p', { class: 'help', text: endedSentence(sess) }),
-    );
+    return show(h('p', { class: 'micro', text: 'Session ended' }));
   }
   /**
    * NO LIVE VIEW IS A PROPERTY OF THE DEVICE, NOT A FAULT.
@@ -4461,6 +4664,16 @@ function endedSummary(sess, live) {
     h('span', { class: 'endstat-l', text: label }));
 
   return h('section', { class: 'card ended' },
+    /**
+     * WHO ENDED IT, WHEN, AND HOW LONG IT RAN — document 04 S4's own copy, and it leads.
+     *
+     * "Session ended" is the state, and the state is the least useful thing to tell somebody
+     * looking at a screen that has stopped: they can see it stopped. What they cannot see is
+     * whether they released it or the farm expired it, how much of the lease they used, and whether
+     * the device came back clean. It reads over the numbers rather than under them because it is
+     * the sentence that makes them mean something.
+     */
+    h('p', { class: 'help ended-lead', text: endedSentence(sess) }),
     h('div', { class: 'endstats' },
       stat(duration(sess.startedAt || sess.createdAt, sess.endedAt), 'held for'),
       stat(String(acts.length), acts.length === 1 ? 'action' : 'actions'),
@@ -4786,8 +4999,19 @@ function screenCockpit(id) {
       h('div', { class: 'content' },
         queuedNote(sess),
         state.acceptedHandover === sess.id ? null : handoverNotice(sess),
-        stagePanel(sess, live),
-        endedSummary(sess, live),
+        /**
+         * D10 — THE STAGE AND THE ACCOUNTING, SIDE BY SIDE ON AN ENDED SESSION.
+         *
+         * Sequenced one under the other for a live session, which is right: there the stage is the
+         * thing and nothing competes with it. On an ended one the numbers ARE the content and the
+         * frame is the memento, so the two share a row and both are above the fold — which is what
+         * document 04 S4 draws.
+         */
+        (() => {
+          const stage = stagePanel(sess, live);
+          const summary = endedSummary(sess, live);
+          return summary ? h('div', { class: 'endedwrap' }, stage, summary) : stage;
+        })(),
         logcatDock(sess, live),
         card('Actions on this session', { aside: h('span', { class: 'caption', text: `${acts.length} total` }) },
           acts.length
@@ -5697,13 +5921,45 @@ function screenHealth() {
             ? h('div', null, state.devices.map((d) => {
                 const st = DEVICE_STATE[d.state] || { label: d.state, tone: '' };
                 return h('div', { class: 'buildrow' },
-                  h('span', { class: 'row tight idc' },
+                  /**
+                   * D9 — THE NAME IS A LINK HERE TOO.
+                   *
+                   * This page named a device whose health check had failed and then offered no way
+                   * to reach it: the reader had to memorise a short id, go to the Fleet, and find
+                   * it again. The Fleet solved this by making the whole name block the target
+                   * (`fleet-open`), and there is no reason for the operator's page to be the one
+                   * surface where a named device is not openable — so it is the same control, not
+                   * a second design.
+                   */
+                  h('button', {
+                    class: 'row tight idc fleet-open', type: 'button',
+                    title: `Open ${deviceName(d)}`,
+                    onclick: () => go(`#/devices/${d.id}`),
+                  },
                     h('span', { class: `dot ${st.tone} ${d.state === 'READY' ? 'live' : ''}`.trim() }),
                     h('span', { class: 'secondary', text: deviceName(d) }),
                     h('code', { class: 'caption', text: short(d.id) }),
                   ),
                   h('span', { class: 'caption', text: `${d.platform} ${d.osVersion} · ${d.tier} · ${d.region}` }),
                   h('span', { class: 'spacer' }),
+                  /**
+                   * AND THE ONE ACTION THIS PAGE CAN HONESTLY OFFER — with both of its gates.
+                   *
+                   * ADMIN, because `release-quarantine` is an admin route: a member pressing this
+                   * gets a 403, which is a control offered on a premise that is false for them.
+                   * Device detail has always gated it this way; the Fleet row does not, and that is
+                   * a separate row to fix rather than a pattern to copy.
+                   *
+                   * NOT ON A HOST-SOURCED QUARANTINE, which is entry 54's defect and the reason
+                   * this is a condition and not a button. That device comes back on its own when
+                   * its host beats again; authorising a recovery asks the host that is not
+                   * answering, and migration 035's timeout then re-quarantines it with a new
+                   * reason. Device detail draws the whole nuanced panel for that case, so this row
+                   * sends nobody down a path it cannot explain in one word.
+                   */
+                  d.state === 'QUARANTINED' && d.quarantine?.source !== 'host' && isOrgAdmin()
+                    ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
+                    : null,
                   pill(st.label, st.tone, { dot: false }),
                 );
               }))
