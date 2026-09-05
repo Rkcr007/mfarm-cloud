@@ -1976,19 +1976,41 @@ describe('bring-up', () => {
     return panel?.dataset?.beat ?? null;
   };
 
-  test('nothing claimed is beat 0, and the frame is unresolved', () => {
+  /**
+   * The BEAT carries the unresolved state on this screen. `data-resolved` belongs to the cockpit's
+   * queued view, which is a different screen making the same point — setting both put two rules on
+   * the same blur with different opacities.
+   */
+  test('nothing claimed is beat 0', () => {
     at({});
     const panel = findByClass(mod.SCREENS.launching(), 'devpanel');
     assert.equal(panel.dataset.beat, '0');
-    assert.equal(panel.dataset.resolved, 'no',
-      'a device that has not been allocated is not yet a real object');
+    assert.equal(panel.dataset.mode, 'bringup');
+    assert.equal(panel.dataset.resolved, undefined,
+      'one attribute owns this, and on this screen it is the beat');
   });
 
   test('a claimed device resolves out of blur — beat 1', () => {
     at({ device: true });
-    const panel = findByClass(mod.SCREENS.launching(), 'devpanel');
-    assert.equal(panel.dataset.beat, '1');
-    assert.equal(panel.dataset.resolved, 'yes');
+    assert.equal(findByClass(mod.SCREENS.launching(), 'devpanel').dataset.beat, '1');
+  });
+
+  /**
+   * THE COST OF THE CONTINUITY RULE. The frame is deliberately never unmounted, so every attribute
+   * the bring-up put on it is still there when the cockpit takes over. A leftover `data-beat="2"`
+   * holds the chassis flat and the contact ellipse at zero — the device would arrive in the cockpit
+   * looking like it had not finished arriving.
+   */
+  test('the beat does not follow the element into the cockpit', () => {
+    at({ device: true, active: true });
+    mod.SCREENS.launching();
+    assert.equal(mod.state.stage.root.dataset.beat, '2');
+
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.SCREENS.cockpit();
+    assert.equal(mod.state.stage.root.dataset.beat, undefined,
+      'the same node, and none of the bring-up left on it');
+    assert.equal(mod.state.stage.root.dataset.mode, 'session');
   });
 
   test('ready is beat 2, attached is beat 3, streaming is beat 4', () => {

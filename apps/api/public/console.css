@@ -1516,44 +1516,112 @@ kbd {
   --f-w: calc(min(46vh, 420px) * var(--f-aspect));
 }
 
-/*
- * BEAT 01 — the allocator claims a device: the chassis resolves out of blur.
+/* ---------------------------------------------------------------- the six beats
  *
- * Shared with the queued cockpit above, which is the same fact wearing a different screen: a device
- * that has not been allocated is not yet a real object, so it is not yet drawn as one.
+ * DRIVEN ENTIRELY BY `data-beat`, and scoped to the bring-up screen. The cockpit shows the same
+ * element with everything already arrived, so none of this applies there — the frame carries its
+ * final appearance the moment `data-mode` becomes `session`, and the transition between the two is
+ * beat 06's settle.
+ *
+ * The previous version declared transitions for beats 02, 04 and 06 and never changed the
+ * properties they were watching, so three of the six did nothing at all. A transition with no state
+ * change is a comment that looks like code.
  */
 
 /*
- * BEAT 03 — the data-plane socket opens and DEPTH LANDS. This is the beat where the device becomes
- * a physical object, and it is the only shadow change in the product.
- *
- * KEYED TO THE SOCKET, NOT THE STREAM, and that is a correction. Depth used to land on
- * `data-state="live"` — so a device declaring no `screen-stream` never became physical at all, and
- * one with a slow negotiation stayed flat while it was already fully attached and driveable. The
- * socket is what makes a session real (migration 017); the video is a nicety on top of it.
+ * BEAT 01 — the allocator claims one: the chassis resolves out of blur.
+ * `opacity .06 → 1, scale .955 → 1, blur 9px → 0`. The screen stays off and the shadow stays flat:
+ * a device that exists is not yet a device that is awake.
  */
-.devpanel[data-beat] .mf-chassis {
-  transition: box-shadow var(--m-settle, 900ms) var(--ease-out);
+.devpanel[data-mode="bringup"] .dev-fit {
+  transition: filter var(--m-arrive, 700ms) var(--ease-emphatic),
+              opacity var(--m-arrive, 700ms) var(--ease-emphatic),
+              transform var(--m-arrive, 700ms) var(--ease-emphatic);
 }
-.devpanel[data-beat] .mf-contact {
-  transition: opacity var(--m-settle, 900ms) var(--ease-out);
+.devpanel[data-mode="bringup"][data-beat="0"] .dev-fit {
+  filter: blur(9px);
+  opacity: .06;
+  transform: scale(.955);
 }
-.devpanel[data-beat="3"] .mf-chassis,
-.devpanel[data-beat="4"] .mf-chassis,
-.devpanel[data-beat="5"] .mf-chassis,
-.devpanel[data-beat="6"] .mf-chassis { box-shadow: var(--e-device); }
-.devpanel[data-beat="3"] .mf-contact,
-.devpanel[data-beat="4"] .mf-contact,
-.devpanel[data-beat="5"] .mf-contact,
-.devpanel[data-beat="6"] .mf-contact { opacity: 1; }
 
 /*
- * BEAT 04 — real pixels cross-fade up, and the glass sheen fades in with them. The panel's own
- * `data-state` already switches the interior; this is only the timing.
+ * BEAT 02 — the clean snapshot is restored: the screen wakes.
+ *
+ * A centred cool glow RAMPS UP behind the glass. The design tracks the glow's radius to
+ * snapshot-restore progress where that exists and says plainly what to do where it does not — "the
+ * wake glow pulses instead of tracking" — and no worker reports restore progress, so it ramps in
+ * and then breathes on the system loop. Both gates stop the breathing; the glow itself stays, so a
+ * viewer with motion off still sees a woken screen rather than a dead one.
  */
-.devpanel[data-beat] .mf-glass > .mf-panel,
-.devpanel[data-beat] .mf-sheen {
+@keyframes mf-wake-in { from { opacity: 0; } to { opacity: 1; } }
+.devpanel[data-mode="bringup"] .mf-glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: radial-gradient(62% 44% at 50% 46%, var(--mf-accent, #755EB8), transparent 70%);
   transition: opacity var(--m-arrive, 700ms) var(--ease-out);
+}
+.devpanel[data-mode="bringup"][data-beat="2"] .mf-glass::before,
+.devpanel[data-mode="bringup"][data-beat="3"] .mf-glass::before {
+  opacity: .34;
+  animation: mf-wake var(--mf-pulse, 2.2s) ease-in-out infinite;
+}
+
+/*
+ * BEAT 03 — the data-plane socket opens and DEPTH LANDS. The beat where the device stops being a
+ * picture and becomes an object, and the only shadow change in the product.
+ *
+ * KEYED TO THE SOCKET, NOT THE STREAM. Depth used to land on `data-state="live"`, so a device that
+ * declares no `screen-stream` never became physical at all, and one with a slow negotiation stayed
+ * flat while it was already attached and driveable (migration 017: the socket is what makes a
+ * session real).
+ */
+.devpanel[data-beat] .mf-chassis { transition: box-shadow var(--m-settle, 900ms) var(--ease-out); }
+.devpanel[data-beat] .mf-contact { transition: opacity var(--m-settle, 900ms) var(--ease-out); }
+.devpanel[data-beat="0"] .mf-chassis,
+.devpanel[data-beat="1"] .mf-chassis,
+.devpanel[data-beat="2"] .mf-chassis { box-shadow: var(--e-device-flat); }
+.devpanel[data-beat="0"] .mf-contact,
+.devpanel[data-beat="1"] .mf-contact,
+.devpanel[data-beat="2"] .mf-contact { opacity: 0; }
+
+/*
+ * BEAT 04 — the stream negotiates: real pixels cross-fade up OVER the wake glow, and the glass
+ * sheen fades in with them.
+ *
+ * The glow going out as the pixels come in is the cross-fade — the wake light was standing in for a
+ * screen, and now there is one. Sub-states read as machine text under the step, never as motion.
+ */
+.devpanel[data-mode="bringup"] .mf-glass > .mf-panel,
+.devpanel[data-mode="bringup"] .mf-sheen {
+  transition: opacity 800ms var(--ease-out);
+}
+.devpanel[data-mode="bringup"]:not([data-beat="4"]):not([data-beat="5"]):not([data-beat="6"]) .mf-glass > .mf-panel,
+.devpanel[data-mode="bringup"]:not([data-beat="4"]):not([data-beat="5"]):not([data-beat="6"]) .mf-sheen {
+  opacity: 0;
+}
+.devpanel[data-mode="bringup"][data-beat="4"] .mf-glass::before,
+.devpanel[data-mode="bringup"][data-beat="5"] .mf-glass::before,
+.devpanel[data-mode="bringup"][data-beat="6"] .mf-glass::before {
+  opacity: 0;
+  animation: none;
+}
+
+/*
+ * BEAT 06 — the app is open. NOTHING IS DRAWN: the app appearing IS the animation, and it arrives
+ * in the framebuffer on its own. What moves is the composition, settling into the layout the
+ * cockpit will hold it in.
+ *
+ * A scale, not a position: the frame's place on the page is the bring-up screen's grid and the
+ * cockpit's is its own, and animating between two layouts would need both on screen at once. This
+ * is the settle the design asks for — the device arriving at rest — and the handover to the cockpit
+ * is then a mode change on an element that is already still.
+ */
+.devpanel[data-mode="bringup"][data-beat="6"] .dev-fit {
+  transform: scale(1.015);
+  transition: transform var(--m-settle, 900ms) var(--ease-out);
 }
 
 /*

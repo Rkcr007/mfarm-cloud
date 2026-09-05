@@ -3068,7 +3068,10 @@ function bringupStage(sess, device, steps) {
   st.root.dataset.mode = 'bringup';
   const beat = bringupBeat(sess, steps);
   st.root.dataset.beat = String(beat);
-  st.root.dataset.resolved = beat === 0 ? 'no' : 'yes';
+  // `data-resolved` belongs to the COCKPIT's queued state, which is a different screen making the
+  // same point. Setting both here meant two rules fighting over the same blur with different
+  // opacities, and the loser was whichever the cascade happened to put second.
+  delete st.root.dataset.resolved;
 
   // The panel interior follows the same rules it does in the cockpit — `stageState` already knows
   // about a device that declares no stream, and beat 4 is exactly its `live`.
@@ -3543,6 +3546,16 @@ function stagePanel(sess, live) {
 
   const st = state.stage;
   st.root.dataset.mode = 'session';
+  /**
+   * THE BEAT DOES NOT FOLLOW THE ELEMENT INTO THE COCKPIT.
+   *
+   * This is the cost of the continuity rule: the frame is deliberately never unmounted, so every
+   * attribute the bring-up screen put on it is still there when the cockpit takes it over. A
+   * leftover `data-beat="2"` would hold the chassis flat and the contact ellipse at zero on a
+   * session that is fully attached — the device would arrive in the cockpit looking like it had not
+   * finished arriving.
+   */
+  delete st.root.dataset.beat;
   paintToolbar(sess, live, caps);
   paintOverlay(sess, live, caps);
   paintFrame(device);
