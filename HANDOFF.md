@@ -3142,3 +3142,32 @@ when the feature is broken. See issues 37 and 38.
     NOT exported, got `undefined`, and reported a scroll position nothing had disturbed. A sentinel
     `data-` attribute on the first row is what caught it — without something proving the render
     happened, the measurement was of nothing.
+
+59. **DOCUMENT 05 CLOSED — APPS, AND A NAME THE COPY PASS MISSED SIX TIMES.** 2026-09-05.
+
+    Auditing §04–§06 against the running console found §05 (Runs) and §06 (Health, organisation)
+    already satisfied: the runs disclaimer, Health's "what this page cannot see" panel, the
+    shown-once key rendered inline rather than as a modal, and Team's "there is no email on this
+    farm" are all there. Recording that rather than re-deriving it next time.
+
+    **A BUILD THAT FAILED TO INSTALL SAID "NOT INSTALLED" AND OFFERED "INSTALL".** The failure WAS
+    on the page — in `failureCard`, deliberately scoped to the last thirty minutes so an old one
+    does not sit at the top of Apps forever. The consequence nobody had followed through: after
+    thirty minutes the failure vanished and the row beneath it looked exactly like a build nobody
+    had ever tried. "Not installed" and "tried, and the worker refused it" are different facts, and
+    only one of them tells you to read the error before pressing the button again. The row is the
+    right home for it because the row is per-build and survives; the card is per-event and should
+    not. The button now reads **Retry**.
+
+    **AND THE COPY DECK'S NAMING RULE WAS BEING BROKEN IN SIX PLACES.** `session.device` is the
+    WORKER'S LOCAL ID — `dd-cf-1`, `cf-2` — and it was going into the sidebar, the Apps hold strip,
+    the sessions table, a toast and the bring-up title. The top bar resolved it correctly, which is
+    exactly why it took a screenshot to notice: "MFARM X1 Pro" in the header and "dd-cf-1" under
+    "YOUR SESSION" in the sidebar, on the same screen, at the same time. One `deviceLabel()` now,
+    including the call site that was already right, so it cannot drift from the ones that were not.
+
+    **A HAZARD WORTH RECORDING.** The full suite failed 8 tests across `reaper`, the idle WebDriver
+    sweep and `allocating a device class` — because the 40 devices and 12 sessions I had seeded into
+    the LOCAL database for the render measurement were still there, and those suites count rows. The
+    next run was clean, because the suites delete on setup. Seeding the dev database breaks the
+    suite until it self-cleans, and the failure looks like a real regression in the allocator.

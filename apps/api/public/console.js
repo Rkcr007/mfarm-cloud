@@ -444,6 +444,25 @@ function duration(from, to) {
 
 const short = (id) => (id ? String(id).slice(0, 8) : '—');
 
+/**
+ * WHAT A SESSION'S DEVICE IS CALLED — the copy deck's naming rule, applied to the last places that
+ * were still leaking an internal name.
+ *
+ * `session.device` is the worker's LOCAL ID: `dd-cf-1`, `cf-2`, `scale-7`. It is a real handle and
+ * it belongs in a details panel or a copyable field, but the copy deck is explicit that a device is
+ * addressed by WHAT IT IS — and six places were putting the local id in a heading, a sidebar and a
+ * toast. The top bar already did this correctly, which is exactly why it took a screenshot of the
+ * SIDEBAR to notice that "dd-cf-1" was sitting under "YOUR SESSION" while "MFARM X1 Pro" sat above
+ * it in the header.
+ *
+ * Falls back to the local id rather than to nothing: a session whose device has since been evicted
+ * still has to say something, and the raw handle is more use than an em-dash.
+ */
+function deviceLabel(sess) {
+  const d = sess?.deviceId ? deviceById(sess.deviceId) : null;
+  return d ? deviceName(d) : (sess?.device || short(sess?.deviceId));
+}
+
 /* ---------------------------------------------------------------------------- live counters */
 
 /**
@@ -1070,10 +1089,9 @@ function renderChrome() {
     : waiting === 1 ? '1 waiting'
       : `${waiting} waiting`;
 
-  const heldDevice = held ? deviceById(held.deviceId) : null;
-  $('fs-held').textContent = held
-    ? (heldDevice ? deviceName(heldDevice) : held.device || short(held.deviceId))
-    : 'nothing';
+  // The one place that already resolved the name correctly, now through the shared helper so it
+  // cannot drift from the six that did not.
+  $('fs-held').textContent = held ? deviceLabel(held) : 'nothing';
   $('fs-holding').hidden = !held;
 
   // Nav highlight. The two detail routes keep their parent lit rather than lighting nothing.
@@ -1090,11 +1108,11 @@ function renderChrome() {
   sideCard.hidden = !held;
   stub.hidden = !held;
   if (held) {
-    $('sc-device').textContent = held.device || short(held.deviceId);
+    $('sc-device').textContent = deviceLabel(held);
     const l = lease(state.held?.id === held.id ? state.held : null);
     const text = l ? `lease ${clock(l.ms)} left` : `${(SESSION_STATE[held.state]?.label || held.state).toLowerCase()}`;
     $('sc-lease').textContent = text;
-    stub.title = `${held.device || short(held.deviceId)} · ${text}`;
+    stub.title = `${deviceLabel(held)} · ${text}`;
   }
 }
 
@@ -1250,7 +1268,7 @@ async function startSession(d) {
  * the button that deletes the build someone just installed, and the word "release" does not say so.
  */
 function askRelease(sess) {
-  const name = sess.device || short(sess.deviceId);
+  const name = deviceLabel(sess);
   confirmDialog({
     title: `Release ${name}?`,
     lead: 'The device will be restored to its clean snapshot.',
@@ -1320,7 +1338,7 @@ async function runAction(app, kind) {
   }
 
   if (action.state === 'DONE') {
-    toast(`${KIND_LABEL[kind]} completed`, `${app.packageName} ${app.versionName || ''} · ${held.device || short(held.deviceId)}`.replace(/\s+/g, ' '), 'ok');
+    toast(`${KIND_LABEL[kind]} completed`, `${app.packageName} ${app.versionName || ''} · ${deviceLabel(held)}`.replace(/\s+/g, ' '), 'ok');
   } else if (action.state === 'FAILED') {
     toast(`${KIND_LABEL[kind]} failed`, action.error || 'The worker reported no reason.', 'bad');
   } else {
@@ -4577,7 +4595,7 @@ function holdStrip() {
       ? h('div', { class: 'row between' },
           h('div', { class: 'stack tight' },
             h('p', { class: 'row tight' }, h('span', { class: 'dot ok live' }),
-              h('span', { class: 'secondary', text: `Holding ${held.device || short(held.deviceId)} · session ${short(held.id)}` })),
+              h('span', { class: 'secondary', text: `Holding ${deviceLabel(held)} · session ${short(held.id)}` })),
             h('p', { class: 'caption', text: 'An app lives on a device only while you hold it. Releasing restores the clean snapshot, which is what makes the next session trustworthy — and what removes your build.' }),
           ),
           h('div', { class: 'row tight' },
@@ -4596,11 +4614,43 @@ function holdStrip() {
   );
 }
 
+function appsSubtitle() {
+  const n = state.apps.length;
+  const builds = `${n} build${n === 1 ? '' : 's'}`;
+  const held = heldSession();
+  if (!held) {
+    return `${builds}. Installs live only inside a session, so hold a device before any of these can go anywhere.`;
+  }
+  const device = deviceById(held.deviceId);
+  if (device && !(device.capabilities || []).includes('app-install')) {
+    // Said here rather than discovered one disabled button at a time.
+    return `${builds}. You are holding ${deviceLabel(held)}, which does not declare app-install — the API will refuse install, launch and uninstall on it.`;
+  }
+  return `${builds}. You are holding ${deviceLabel(held)}, so any of these can be installed now.`;
+}
+
 function buildRow(a) {
   const held = heldSession();
   const device = held ? deviceById(held.deviceId) : null;
   const canInstall = (device?.capabilities || []).includes('app-install');
   const on = held && installedOn(held.id)?.id === a.id;
+
+  /**
+   * A BUILD THAT FAILED TO INSTALL SAID "NOT INSTALLED" AND OFFERED "INSTALL" — document 05 §04's
+   * third row, which is the one that carries information the other two do not.
+   *
+   * The failure was on the page, in `failureCard`, and that card is deliberately scoped to the last
+   * thirty minutes so a failure from last Tuesday does not sit at the top of Apps forever. The
+   * consequence nobody had noticed: after thirty minutes the failure vanished entirely and the row
+   * beneath it looked exactly like a build nobody had ever tried. "Not installed" and "tried, and
+   * the worker refused it" are different facts, and only one of them tells you to read the error
+   * before pressing the button again.
+   *
+   * The ROW is the right home for it because the row is per-build and survives; the card is
+   * per-event and should not.
+   */
+  const lastForBuild = state.actions.find((x) => x.appId === a.id && x.kind === 'install');
+  const failed = lastForBuild?.state === 'FAILED' ? lastForBuild : null;
 
   return h('div', { class: 'buildrow' },
     h('div', { class: 'idc stack tight' },
@@ -4610,14 +4660,25 @@ function buildRow(a) {
     ),
     h('span', { class: 'caption', text: ago(a.createdAt) }),
     on
-      ? h('span', { class: 'row tight' }, h('span', { class: 'dot ok' }), h('span', { class: 'ok-text', text: `Installed · ${held.device || short(held.deviceId)}` }))
-      : h('span', { class: 'caption', text: 'Not installed' }),
+      ? h('span', { class: 'row tight' }, h('span', { class: 'dot ok' }), h('span', { class: 'ok-text', text: `Installed · ${deviceLabel(held)}` }))
+      : failed
+        ? h('span', { class: 'stack tight' },
+            h('span', { class: 'row tight' },
+              h('span', { class: 'dot bad' }),
+              h('span', { class: 'bad-text', text: `Install failed ${ago(failed.finishedAt || failed.requestedAt)}` })),
+            // The worker's own words, rendered as TEXT — this string came off a device via adb and
+            // is the most attacker-influenced value on the page.
+            failed.error ? h('span', { class: 'caption', text: failed.error }) : null)
+        : h('span', { class: 'caption', text: 'Not installed' }),
     h('span', { class: 'spacer' }),
     h('div', { class: 'rowactions' },
       on
         ? [btn('Launch', 'primary', () => runAction(a, 'launch'), { disabled: !canInstall }),
            btn('Uninstall', 'ghost', () => runAction(a, 'uninstall'), { disabled: !canInstall })]
-        : btn('Install', 'primary', () => runAction(a, 'install'), {
+        // "Retry", not "Install", when the last attempt failed: the label is the difference between
+        // a first try and a second one, and a person who has read the error deserves a button that
+        // acknowledges they have.
+        : btn(failed ? 'Retry' : 'Install', 'primary', () => runAction(a, 'install'), {
             disabled: !held || !canInstall,
             title: !held ? 'Hold a device first' : !canInstall ? 'This device does not declare app-install' : '',
           }),
@@ -4672,7 +4733,12 @@ function lifecycleCard() {
 
 function screenApps() {
   return [
-    pageHead([{ label: 'Farm' }], 'Apps', 'Builds live on the farm; installs live only inside a session.'),
+    /**
+     * The sub names the ACTIONABLE fact — document 05 §04 heads this screen "4 builds · you are
+     * holding MFARM X1 Pro, so any of these can be installed now". Whether you are holding a device
+     * decides whether every button below is live, so it is the first thing worth saying.
+     */
+    pageHead([{ label: 'Farm' }], 'Apps', appsSubtitle()),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
         holdStrip(),
@@ -4735,7 +4801,7 @@ function screenSessionsBody() {
                 h('td', null, s.run
                   ? btn(s.run.runId, 'tiny ghost', () => go(`#/runs/${encodeURIComponent(s.run.runId)}`))
                   : h('span', { class: 'caption', text: '—' })),
-                h('td', { text: s.device || short(s.deviceId) }),
+                h('td', { text: deviceLabel(s) }),
                 h('td', { text: s.region || '—' }),
                 h('td', { class: 'caption', text: s.startedAt ? ago(s.startedAt) : ago(s.createdAt), title: when(s.startedAt || s.createdAt) }),
                 h('td', null, s.startedAt && !s.endedAt
