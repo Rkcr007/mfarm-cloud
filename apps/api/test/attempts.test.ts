@@ -415,6 +415,68 @@ describe('what must not have changed', () => {
     assert.ok(body.deviceReliability.some((d: { deviceId: string }) => d.deviceId === deviceId));
   });
 
+  /**
+   * TWO CLOCKS, AND THE WINDOW USED TO BE BOUNDED BY THE WRONG ONE.
+   *
+   * `started_at` is written by Postgres's `now()`. The usage window's upper bound used to be
+   * `new Date()` — the API SERVER's clock. Those differ: measured at +1 to +2ms against a container
+   * on the same laptop, and free to be far worse across two machines. A row written moments ago
+   * then sits past `to` and is silently not counted.
+   *
+   * This is what "the order-dependent flake" in `attempts.test.ts` actually was, for weeks. The
+   * test above asks for usage microseconds after creating the session, which is exactly the window
+   * the bug lived in — so it failed about one run in four, in isolation, with no ordering involved
+   * at all. A real caller would refresh and see the right number, and never report it.
+   *
+   * DETERMINISTIC WHERE THE SYMPTOM WAS STATISTICAL. Rather than racing a 2ms skew, this stamps a
+   * row five seconds into the future — the same relationship a leading database clock produces, at
+   * a size that cannot be lost in noise. Against the old code it fails every time; against an open
+   * upper bound it passes every time.
+   */
+  test('a row stamped ahead of the API server\'s clock is still counted', async () => {
+    await reset();
+    const created = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(apiKey),
+      payload: { region: REGION, platform: 'android' },
+    });
+    const { id: sessionId } = created.json().session;
+
+    await withSystem((c) => c.query(
+      `UPDATE session_attempts SET started_at = now() + interval '5 seconds' WHERE session_id = $1`,
+      [sessionId],
+    ));
+
+    const res = await app.inject({ method: 'GET', url: '/v1/account/usage', headers: auth(apiKey) });
+    assert.equal(res.statusCode, 200, res.body);
+    const body = res.json();
+    assert.equal(body.attempts.userAttempts, 1,
+      'the attempt exists; only the API server\'s clock disagreed about when "now" was');
+    assert.equal(body.window.to, null,
+      '"up to now" is reported as an open bound, not as this server\'s idea of the time');
+  });
+
+  /** An explicit `to` is the caller's clock and their intent, and is still honoured exactly. */
+  test('an explicit upper bound still excludes what falls after it', async () => {
+    await reset();
+    const created = await app.inject({
+      method: 'POST', url: '/v1/sessions', headers: auth(apiKey),
+      payload: { region: REGION, platform: 'android' },
+    });
+    const { id: sessionId } = created.json().session;
+    await withSystem((c) => c.query(
+      `UPDATE session_attempts SET started_at = now() + interval '1 hour' WHERE session_id = $1`,
+      [sessionId],
+    ));
+
+    const to = new Date(Date.now() + 60_000).toISOString();
+    const res = await app.inject({
+      method: 'GET', url: `/v1/account/usage?to=${encodeURIComponent(to)}`, headers: auth(apiKey),
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().attempts.userAttempts, 0,
+      'an hour from now is outside a window that ends in a minute');
+  });
+
   test('another org sees none of it', async () => {
     await reset();
     await app.inject({

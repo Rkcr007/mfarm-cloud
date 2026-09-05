@@ -113,7 +113,15 @@ export interface AttemptCounts {
  * one org's consumption, and computing them on the system pool would make a query that forgot an
  * org clause report the whole fleet's to whoever asked.
  */
-export async function counts(orgId: string, from: Date, to: Date): Promise<AttemptCounts> {
+/**
+ * `to` MAY BE NULL, AND NULL MEANS "NO UPPER BOUND".
+ *
+ * Not a default of `new Date()`. Every timestamp compared here is written by Postgres's `now()`,
+ * and a bound computed from the API server's clock is a DIFFERENT clock — routinely a millisecond
+ * or two behind, and free to be far worse across two machines. A row written just now then falls
+ * outside its own window and is silently not counted. See the note on `GET /account/usage`.
+ */
+export async function counts(orgId: string, from: Date, to: Date | null): Promise<AttemptCounts> {
   return withTenant(orgId, async (c) => {
     const { rows } = await c.query(
       `SELECT count(*) FILTER (WHERE origin = 'user')                     AS user_attempts,
@@ -121,7 +129,7 @@ export async function counts(orgId: string, from: Date, to: Date): Promise<Attem
               count(*) FILTER (WHERE outcome = 'device-failure')          AS device_failures,
               count(*) FILTER (WHERE outcome = 'succeeded')               AS successful_attempts
          FROM session_attempts
-        WHERE started_at >= $1 AND started_at < $2`,
+        WHERE started_at >= $1 AND ($2::timestamptz IS NULL OR started_at < $2)`,
       [from, to],
     );
     return {
@@ -147,7 +155,7 @@ export interface DeviceReliability {
  * the same hardware belongs to the operator surfaces on the system pool (`metrics.ts`).
  */
 export async function deviceReliability(
-  orgId: string, from: Date, to: Date, limit = 50,
+  orgId: string, from: Date, to: Date | null, limit = 50,
 ): Promise<DeviceReliability[]> {
   return withTenant(orgId, async (c) => {
     const { rows } = await c.query(
@@ -156,7 +164,8 @@ export async function deviceReliability(
               count(*) FILTER (WHERE outcome IN ('device-failure',
                                                  'infrastructure-failure')) AS failures
          FROM session_attempts
-        WHERE device_id IS NOT NULL AND started_at >= $1 AND started_at < $2
+        WHERE device_id IS NOT NULL AND started_at >= $1
+          AND ($2::timestamptz IS NULL OR started_at < $2)
         GROUP BY device_id
         ORDER BY failures DESC, attempts DESC
         LIMIT $3`,
