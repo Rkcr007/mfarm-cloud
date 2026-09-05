@@ -31,6 +31,8 @@ written.
 | D16 | S4 | Bring-up | A queued step's mark is a purple ring; document 04 says the two CONFIRM beats "breathe amber". The words are right, the mark is the wrong colour and shape. | live run on the lab |
 | D17 | S4 | Fleet | Two unprofiled devices render as two identical "Unprofiled device" rows, distinguishable only by the short id. Honest — they are two devices — but nothing helps you tell them apart. | live run on the lab |
 | D11 | S3 | Cockpit (ended) | The device rail renders every control on an ended session. They are disabled, which is right for a capability gap (stage 5) but not for this: document 04 S4 says "the live view and controls are gone", because none of them will ever work again for this session. | exploratory session |
+| D18 | **S2** | Deploy | A merged, CI-green, released commit is not on the farm until someone runs `mfarm-deploy.sh`, and nothing reports the gap. PR #102's fixes were released at 11:34 and served at 13:08, discovered only by reading `docker ps` for another reason. The console's build badge shows what IS serving; nothing shows what SHOULD be. | reading the running image |
+| D19 | S3 | Deploy | Both boxes' git checkouts drift silently from `main` and nothing notices. `mfarm-cp` was on a **detached HEAD at 886cb47**; `mfarm-lab` was **66 commits behind**, on PR #81. The lab's checkout is not decorative — the worker unit and the boot unit both execute from it, so the farm was running agent code from 66 commits ago. | starting the lab |
 
 ## Fixed, awaiting verification on the farm
 
@@ -40,17 +42,24 @@ written.
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
 | D14 | **S2** | Pressing **Start** went straight to the cockpit, so the six-beat choreography played only from `#/launch` or when a request queued — on a warm farm nobody ever saw the device arrive. Start now routes through the bring-up screen, which hands over on its own once the socket has settled. | pressing Start on the lab |
-| D13 | **S2** | The device host's boot unit failed on every boot from 3 to 5 September, exiting in one second on "BACKUP_BUCKET is empty" — a control-plane backup policy a machine with no database has no business having an opinion about. `farm-up.sh` now detects a device host (has `/dev/kvm`, has a remote `CONTROL_PLANE_URL`) and stops before the control-plane work. **Needs verifying on the lab next time it is up** — the fix is reasoned and unit-tested, not yet watched boot. | starting the lab |
 | D8 | **S2** | A person in more than one org could not tell which they were in. `/v1/auth/me` now returns every membership and the header names the org — with "1 of N orgs" where there are several. A switcher still needs a re-mint endpoint; signing out and back in is the way for now. | exploratory session |
 | D12 | **S1** | A session's length was rendered as `mm:ss`, so "Released by you at 14:29, after 20:00" read as two clock times. `clock()` stays where a number ticks; prose gets words. | reading a real ended session |
 
-**D5 is verified on the farm** — the live Fleet at `886cb47` shows one button per row. The other three
-are in the deployed build and verified by the suite, not yet by eye on the farm.
+**CORRECTED 2026-09-05.** This paragraph used to read "the other three are in the deployed build".
+They were not. The farm ran `886cb47` until 13:08 today, so **D6, D7 and D12 were deployed** (they
+came in `f632e86`, under PR #101) and **D14 and D8 were not** — they merged as PR #102 at 11:28,
+released at 11:34, and then sat in the registry for ninety minutes while the farm went on serving
+the previous image. "Merged" and "released" had been read as "deployed"; nothing in the chain says
+so. See D18. All five are on the farm now, at `c5f0af5`.
+
+**D5 is verified on the farm by eye** — the live Fleet at `886cb47` showed one button per row. The
+rest are in the deployed build and covered by the suite, not yet confirmed by eye.
 
 ## Closed
 
 | # | Sev | What | Fixed in |
 |---|---|---|---|
+| D13 | **S2** | The device host's boot unit failed on every boot from 3 September, exiting in one second on "BACKUP_BUCKET is empty" — a control-plane backup policy a machine with no database has no business having an opinion about. **It took two fixes.** The first (PR #103) added the right guard reading the right variable out of the *wrong file*: `farm-up.sh` sources `deploy/.env`, which has never held `CONTROL_PLANE_URL` — `install-worker-service.sh` writes it to `deploy/.state/worker.env`, the worker unit's `EnvironmentFile`. So the guard could not fire, and the unit went on failing identically. The second moves the decision into `deploy/lib/host-role.sh` as a function whose inputs are arguments, so it can be executed in a test. | `aec22ad` (did not work), `dc7299c` (works) |
 
 ---
 
@@ -77,6 +86,35 @@ and the release path were all instrumented for both.
 
 ---
 
+## Watched on hardware, 2026-09-05 (second lab window)
+
+Started to settle D13, which had been recorded as "reasoned and unit-tested, not watched boot". The
+boot was the point: **the fix did not work, and only the boot said so.**
+
+- **The bug reproduced on the VM at `c5f0af5`** — `mfarm-farm.service` failed 13:11:42 → 13:11:43,
+  `status=1/FAILURE`, on the shipped fix. Same one-second exit as before it.
+- **The cause**: the guard read `CONTROL_PLANE_URL` after sourcing `deploy/.env`; the lab's
+  `deploy/.env` has no such key (its real keys are Postgres, backup, port and Grafana settings) and
+  the value lives in `deploy/.state/worker.env` — `CONTROL_PLANE_URL=https://34-100-138-213.sslip.io`.
+- **The test could not have caught it.** It asserted the guard's line number was below the
+  `. "$ENV_FILE"` line. That is a true statement about the text of the script and says nothing about
+  whether the variable is in the file. Guard and test were wrong in the same direction.
+- **After `dc7299c`: `active (exited)`, `status=0/SUCCESS`** at 13:22:09, printing
+  `==> Device host / this machine has /dev/kvm, and a control plane at … that is not here`. First
+  clean boot of that unit since 3 September.
+- **The farm came back around it**: `verify-live.sh` reports the control plane at `c5f0af5`, public
+  HTTPS on `farm.mfarm.dev`, **3 devices READY** declaring screen-stream, coturn answering.
+- **`verify-console.sh` 62/62** against the live console.
+
+One thing the new lib is deliberately built to survive: it rejects a loopback control plane **by
+value**, not by the absence of `worker.env`. Relying on a file's absence is the shape of reasoning
+that produced the first fix.
+
+Not checked in this window: D14, D8 and D12 by eye. They reached the farm at 13:08 today and are
+covered by the suite only.
+
+---
+
 ## Suite health
 
 The order-dependent `attempts.test.ts` flake is **fixed** — it was a real billing bug (the usage
@@ -84,4 +122,5 @@ window bounded by the API server's clock rather than the database's), not test o
 
 One unidentified failure in five full runs on 2026-09-05, name not captured, three clean runs after
 it. Recorded rather than called resolved: an intermittent failure nobody has seen twice is not the
-same as one that has gone.
+same as one that has gone. A sixth full run, later the same day on `dc7299c`, was clean — which
+raises the clean count and settles nothing, for the same reason.

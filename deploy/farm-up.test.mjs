@@ -1,54 +1,112 @@
 /**
- * `farm-up.sh` RUNS ON TWO KINDS OF MACHINE, and only one of them owns a control plane.
+ * WHICH MACHINE IS THIS, and does the answer survive being executed?
  *
- * WHY THIS FILE EXISTS. The device host's boot unit failed on every boot from 3 to 5 September,
- * exiting in one second on "BACKUP_BUCKET is empty" — a control-plane backup policy that a machine
- * with no database has no business having an opinion about. Nothing surfaced it, because the
- * devices come up anyway from a separate worker unit, so a permanently failing boot unit looked
- * exactly like a working farm.
+ * WHY THIS FILE WAS REWRITTEN. Its first version asserted that the device-host guard appeared on a
+ * LINE BELOW `. "$ENV_FILE"`. That was true, stayed true, and meant nothing: the variable the guard
+ * reads — CONTROL_PLANE_URL — is not in that env file and never has been. install-worker-service.sh
+ * writes it to deploy/.state/worker.env, the WORKER unit's EnvironmentFile. So the guard could not
+ * fire on the only machine it exists for, the boot unit went on failing on every boot, and a green
+ * test said the fix had landed. It was verified by reading, which is what a line-order assertion
+ * is, and the lab disagreed the moment anyone watched a boot.
  *
- * It is tested by READING THE SCRIPT rather than by running it: running it starts Postgres, mints
- * secrets and boots Cuttlefish. What can be checked cheaply is the thing that was actually wrong —
- * the ORDER of the guard against the load of the variable it reads.
+ * So these tests RUN the decision. deploy/lib/host-role.sh takes the deploy directory and the kvm
+ * node as arguments precisely so a test can put real files behind it on a machine with no /dev/kvm.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const script = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'farm-up.sh'), 'utf8');
-const lines = script.split('\n');
-const lineOf = (re) => lines.findIndex((l) => re.test(l));
+const here = dirname(fileURLToPath(import.meta.url));
+const lib = join(here, 'lib', 'host-role.sh');
 
-describe('farm-up.sh knows which machine it is on', () => {
-  test('a device host is detected and stops before the control-plane work', () => {
-    const guard = lineOf(/^if \[ -e \/dev\/kvm \] && \[ -n "\$\{CONTROL_PLANE_URL:-\}" \]/);
-    assert.ok(guard > 0, 'the device-host guard is gone');
+/** A deploy/ directory: always an .env, and a worker.env only when a worker was installed. */
+function deployDir({ workerEnv = null, env = 'POSTGRES_USER=mfarm\nBACKUP_BUCKET=\n' } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'mfarm-role-'));
+  writeFileSync(join(dir, '.env'), env);
+  if (workerEnv !== null) {
+    mkdirSync(join(dir, '.state'), { recursive: true });
+    writeFileSync(join(dir, '.state', 'worker.env'), workerEnv);
+  }
+  return dir;
+}
 
+/** A file standing in for /dev/kvm, or a path that does not exist. */
+function kvmNode(dir, present) {
+  const p = join(dir, 'kvm');
+  if (present) writeFileSync(p, '');
+  return p;
+}
+
+function isDeviceHost(dir, { kvm = true, exported = null } = {}) {
+  const out = execFileSync('bash', ['-c',
+    `set -euo pipefail; . "$1"; if mfarm_is_device_host "$2" "$3"; then echo yes; else echo no; fi`,
+    'bash', lib, dir, kvmNode(dir, kvm),
+  ], { encoding: 'utf8', env: exported === null ? process.env : { ...process.env, CONTROL_PLANE_URL: exported } });
+  return out.trim() === 'yes';
+}
+
+describe('a device host is the machine whose control plane is somewhere else', () => {
+  /**
+   * THE DEFECT THIS FILE EXISTS FOR, as a test. The lab's deploy/.env has no CONTROL_PLANE_URL —
+   * these are its real keys — and its worker.env has the real value. The shipped guard read only
+   * the first file and answered "not a device host" on a device host.
+   */
+  test('the URL is found in worker.env, which is where it is actually written', () => {
+    const dir = deployDir({
+      env: 'POSTGRES_USER=mfarm\nPOSTGRES_PASSWORD=x\nAPP_DB_PASSWORD=y\nAPI_PORT=3000\n',
+      workerEnv: 'REGION=lab\nCONTROL_PLANE_URL=https://34-100-138-213.sslip.io\nCF_INSTANCES=2\n',
+    });
+    assert.equal(isDeviceHost(dir), true,
+      'the lab is a device host; a guard that reads only deploy/.env cannot see that');
+  });
+
+  test('a single-host farm keeps its control plane — loopback is not somewhere else', () => {
+    for (const url of ['http://127.0.0.1:3000', 'http://localhost:3000', 'http://[::1]:3000']) {
+      const dir = deployDir({ workerEnv: `CONTROL_PLANE_URL=${url}\n` });
+      assert.equal(isDeviceHost(dir), false, `${url} is this machine, so it still owns the backups`);
+    }
+  });
+
+  test('a machine with no worker installed is not a device host', () => {
+    assert.equal(isDeviceHost(deployDir()), false);
+  });
+
+  test('a control plane has no /dev/kvm, whatever any file says', () => {
+    const dir = deployDir({ workerEnv: 'CONTROL_PLANE_URL=https://farm.mfarm.dev\n' });
+    assert.equal(isDeviceHost(dir, { kvm: false }), false);
+  });
+
+  test('an exported CONTROL_PLANE_URL overrides the file, so a human can force it from a shell', () => {
+    const dir = deployDir({ workerEnv: 'CONTROL_PLANE_URL=http://127.0.0.1:3000\n' });
+    assert.equal(isDeviceHost(dir, { exported: 'https://farm.mfarm.dev' }), true);
+  });
+
+  test('a repeated key resolves the way systemd EnvironmentFile resolves it — last wins', () => {
+    const dir = deployDir({
+      workerEnv: 'CONTROL_PLANE_URL=http://127.0.0.1:3000\nCONTROL_PLANE_URL=https://farm.mfarm.dev\n',
+    });
+    assert.equal(isDeviceHost(dir), true);
+  });
+});
+
+describe('farm-up.sh asks before it decides anything for a control plane', () => {
+  const script = readFileSync(join(here, 'farm-up.sh'), 'utf8');
+  const lines = script.split('\n');
+  const lineOf = (re) => lines.findIndex((l) => re.test(l));
+
+  test('the device-host exit comes before the backup policy it used to die on', () => {
+    const guard = lineOf(/^if mfarm_is_device_host /);
     const backup = lineOf(/BACKUP_BUCKET:-\}" \] \|\| die/);
+    assert.ok(guard > 0, 'the device-host guard is gone');
     assert.ok(backup > 0, 'the backup preflight is gone');
     assert.ok(guard < backup,
-      'a device host must stop BEFORE the control plane\'s backup policy, which is not its decision');
+      "a device host must stop BEFORE the control plane's backup policy, which is not its decision");
   });
 
-  /**
-   * THE MISTAKE THIS ALMOST SHIPPED AS. The first version of the guard sat above `. "$ENV_FILE"`
-   * and read `CONTROL_PLANE_URL` before anything had defined it, so it could never fire — a guard
-   * placed where it cannot see its own subject is the same defect it was written to fix.
-   */
-  test('the guard reads a variable the env file has already defined', () => {
-    const sourced = lineOf(/^set -a; \. "\$ENV_FILE"; set \+a/);
-    const guard = lineOf(/^if \[ -e \/dev\/kvm \] && \[ -n "\$\{CONTROL_PLANE_URL:-\}" \]/);
-    assert.ok(sourced > 0, 'the env file is no longer sourced here');
-    assert.ok(sourced < guard,
-      'CONTROL_PLANE_URL comes from the env file; a guard above the source line always sees empty');
-  });
-
-  /**
-   * And the control-plane host keeps ITS exit, which is the mirror of this one. Two machines, two
-   * early exits, one discriminator — `/dev/kvm` — so they cannot disagree about which is which.
-   */
   test('the control-plane host still has its own early exit', () => {
     assert.match(script, /if \[ ! -e \/dev\/kvm \]/,
       'a machine with no kvm must still stop before trying to boot devices');
