@@ -27,7 +27,6 @@ written.
 | D4 | S3 | Fleet | The headline says "the farm hands over the moment a lease ends" and never an ETA. Document 03 wants "the next X1 Pro frees in about 12 minutes"; its own CONFIRM note says that needs lease-expiry-derived data, which exists (`expiresAt`) but is only an upper bound. | design comparison |
 | D9 | S3 | Health | Zero actionable controls on the page. A device whose check failed is named and cannot be opened from the row it is named in. | clicking every control |
 | D10 | S3 | Cockpit (ended) | The stage keeps its full height on an ENDED session, so the accounting below it — held for, actions, artifacts, reset — sits under a full-screen dead phone and is never seen without scrolling. Document 04 S4 puts the numbers beside the frame. | exploratory session |
-| D13 | **S2** | Lab VM boot | `mfarm-farm.service` — "MFARM farm bring-up (control plane, devices, worker, Appium)" — has failed on **every boot since 3 September**, exiting in one second. The cause is a preflight refusing to continue while `BACKUP_BUCKET` is empty in `deploy/.env`. The guard is right; the consequence is that the farm's boot self-heal is dead and nothing says so. The devices recover anyway only because `mfarm-worker.service` is a separate unit. My own note that "both VMs come back to a working 2-device farm on a plain `instances start`" has been stale for two days. | starting the lab |
 | D15 | S4 | Bring-up | The build's tile sits half over the frame's top edge rather than clearly above it. Document 04 beat 05 has it outside the device until the worker confirms. | live run on the lab |
 | D16 | S4 | Bring-up | A queued step's mark is a purple ring; document 04 says the two CONFIRM beats "breathe amber". The words are right, the mark is the wrong colour and shape. | live run on the lab |
 | D17 | S4 | Fleet | Two unprofiled devices render as two identical "Unprofiled device" rows, distinguishable only by the short id. Honest — they are two devices — but nothing helps you tell them apart. | live run on the lab |
@@ -41,6 +40,7 @@ written.
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
 | D14 | **S2** | Pressing **Start** went straight to the cockpit, so the six-beat choreography played only from `#/launch` or when a request queued — on a warm farm nobody ever saw the device arrive. Start now routes through the bring-up screen, which hands over on its own once the socket has settled. | pressing Start on the lab |
+| D13 | **S2** | The device host's boot unit failed on every boot from 3 to 5 September, exiting in one second on "BACKUP_BUCKET is empty" — a control-plane backup policy a machine with no database has no business having an opinion about. `farm-up.sh` now detects a device host (has `/dev/kvm`, has a remote `CONTROL_PLANE_URL`) and stops before the control-plane work. **Needs verifying on the lab next time it is up** — the fix is reasoned and unit-tested, not yet watched boot. | starting the lab |
 | D8 | **S2** | A person in more than one org could not tell which they were in. `/v1/auth/me` now returns every membership and the header names the org — with "1 of N orgs" where there are several. A switcher still needs a re-mint endpoint; signing out and back in is the way for now. | exploratory session |
 | D12 | **S1** | A session's length was rendered as `mm:ss`, so "Released by you at 14:29, after 20:00" read as two clock times. `clock()` stays where a number ticks; prose gets words. | reading a real ended session |
 
@@ -74,3 +74,14 @@ Lab started for 14 minutes at `886cb47`. Everything below was watched, not infer
 
 **No exceptions and no failed requests** across the whole session — the launch flow, the cockpit,
 and the release path were all instrumented for both.
+
+---
+
+## Suite health
+
+The order-dependent `attempts.test.ts` flake is **fixed** — it was a real billing bug (the usage
+window bounded by the API server's clock rather than the database's), not test ordering.
+
+One unidentified failure in five full runs on 2026-09-05, name not captured, three clean runs after
+it. Recorded rather than called resolved: an intermittent failure nobody has seen twice is not the
+same as one that has gone.

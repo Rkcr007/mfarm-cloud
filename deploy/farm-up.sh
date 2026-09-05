@@ -104,6 +104,7 @@ note "ok"
 # the public key at registration, so a compromised worker can verify session tokens and never mint
 # one.
 say "Secrets"
+
 mkdir -p "$SECRETS_DIR" "$STATE_DIR" && chmod 700 "$SECRETS_DIR" "$STATE_DIR"
 
 if [ ! -f "$SECRETS_DIR/session_signing_key.pem" ]; then
@@ -132,6 +133,37 @@ if [ ! -f "$ENV_FILE" ]; then
   note "wrote $ENV_FILE with generated passwords"
 fi
 set -a; . "$ENV_FILE"; set +a
+
+# ---------------------------------------------------------------- a device host stops here
+#
+# SINCE THE SPLIT (ADR-0006) THIS SCRIPT RUNS ON TWO KINDS OF MACHINE, and only one of them owns a
+# control plane. The check for that already existed — at section 5, four sections too late.
+#
+# The consequence, found on 2026-09-05: `mfarm-farm.service` on the DEVICE HOST had failed on every
+# boot since 3 September, exiting in one second on "BACKUP_BUCKET is empty". That guard is correct
+# and belongs to the control plane's backups; the device host has no control plane and no backups to
+# have a policy about. It was dying on a decision that is not its to make.
+#
+# NOTHING SURFACED IT, which is the part worth fixing rather than just the exit code: the devices
+# come up anyway because `mfarm-worker.service` is a separate unit that boots them, so a permanently
+# failing boot unit looked exactly like a working farm. My own note that "both VMs come back to a
+# working 2-device farm on a plain `instances start`" stayed true in its symptom and false in its
+# mechanism for two days.
+#
+# `/dev/kvm` is the same discriminator section 5 uses, so there is one definition of "which machine
+# is this" rather than two that can disagree.
+#
+# AFTER the env file is sourced, and that is not a detail: the first version of this sat above the
+# `.` and read `CONTROL_PLANE_URL` before anything had defined it, so it could never fire. A guard
+# placed where it cannot see its own subject is the same defect it was written to fix.
+if [ -e /dev/kvm ] && [ -n "${CONTROL_PLANE_URL:-}" ]; then
+  say "Device host"
+  note "this machine has /dev/kvm and a remote CONTROL_PLANE_URL, so it runs devices, not a control plane"
+  note "the worker unit (deploy/install-worker-service.sh) owns the devices on this host"
+  note "nothing here needs BACKUP_BUCKET: the backups belong to the machine holding the database"
+  exit 0
+fi
+
 [ -n "${POSTGRES_PASSWORD:-}" ] || die "POSTGRES_PASSWORD is empty in $ENV_FILE"
 [ -n "${APP_DB_PASSWORD:-}" ]   || die "APP_DB_PASSWORD is empty in $ENV_FILE"
 # Checked HERE rather than left to compose's `:?`, which fails somewhere inside `up` with a message

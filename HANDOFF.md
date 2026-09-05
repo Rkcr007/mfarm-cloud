@@ -3338,3 +3338,38 @@ when the feature is broken. See issues 37 and 38.
     `instances start`" had been stale for two days and I quoted it while starting the lab.
 
     `docs/DEFECTS.md` now holds all seventeen, with severity by what each costs a person.
+
+64. **THE TWO S2s, AND A GUARD I ALMOST SHIPPED BLIND FOR THE FOURTH TIME.** 2026-09-05.
+    Control plane `2390d7f`.
+
+    **D14 — PRESSING START WENT STRAIGHT TO THE COCKPIT.** `startSession` jumped to
+    `#/sessions/<id>` the moment the allocator returned a device, which on a farm of pre-booted
+    devices is almost always. So every one of the six beats played only from `#/launch` or when a
+    request queued: on a warm farm nobody ever saw the device arrive. The animation was correct and
+    unseen, which is the whole distance between building a thing and shipping it. Start now routes
+    through the bring-up screen, and it is not a delay — `bringupDone` hands over the moment the
+    session is ACTIVE and the socket has settled.
+
+    **D8 — WHICH TENANT AM I IN.** The org name lived in the avatar's `title` and nowhere else, so a
+    person with two memberships had their sessions, keys and builds silently belong to a tenant they
+    did not choose. `/v1/auth/me` now returns every membership — always, not only when there are
+    several, because a caller who has to ask "is this longer than one" will forget to — and the
+    header names the org with "1 of N orgs" where a choice is being made for them.
+
+    **D13 — THE DEVICE HOST'S BOOT UNIT.** It failed on every boot from 3 to 5 September, exiting in
+    one second on "BACKUP_BUCKET is empty" — a control-plane backup policy that a machine with no
+    database has no business having an opinion about. The check for "which machine is this" already
+    existed in `farm-up.sh`, four sections too late. It now runs early, and a device host stops
+    before the control-plane work entirely.
+
+    **AND THE FOURTH TIME TODAY I WROTE A GUARD THAT COULD NOT SEE ITS OWN SUBJECT.** The first
+    version of that check sat ABOVE `. "$ENV_FILE"` and read `CONTROL_PLANE_URL` before anything had
+    defined it — so it would have been dead code protecting against dead code. Caught by asking
+    where the variable comes from before committing. The other three today: a grep for
+    `progressRing` matching the comment explaining its deletion; a theme test slicing the stylesheet
+    and reporting eighteen correct rules as violations; and an empty-fleet guard counting passing
+    assertions instead of attempted allocations. `deploy/farm-up.test.mjs` now asserts the ORDER of
+    the guard against the source line, which is the only part that was ever wrong.
+
+    Suite: 1374 tests across every workspace. One unidentified failure in five full runs, name not
+    captured, three clean runs after it — recorded in `docs/DEFECTS.md` rather than called resolved.
