@@ -3260,3 +3260,44 @@ when the feature is broken. See issues 37 and 38.
     And the suite failed one test on two consecutive runs, in two different files, because of the
     fleet I had seeded locally for the screenshots. Second time today; it is in
     [[mfarm-seeding-breaks-the-suite]] and I still walked into it.
+
+62. **THE ANIMATION WAS MOSTLY FAKE, AND DOCUMENT 08 HAD A PANEL WITH NO DATA BEHIND IT.**
+    2026-09-05.
+
+    Rakesh: the screenshot inside the frame does not matter — the device that spawns fills it. What
+    matters is the FRAMES AND THE ANIMATION, the multiple states of a device coming up, in sync with
+    the steps, so it feels like a real device arriving.
+
+    **THREE OF THE SIX BEATS DID NOTHING.** They had a `transition` declared for a property and no
+    rule that ever changed it: beat 02's wake glow, beat 04's cross-fade, beat 06's settle. A
+    transition with nothing to transition reads as correct code and moves nothing, and no static
+    screenshot can see it — I had only ever taken static screenshots.
+
+    Fixed by making every beat a real state change on `data-beat`, and VERIFIED by stepping the
+    beats on the real element and capturing a frame **260ms into each transition**, where a settled
+    frame would look identical whether or not anything moved. `theme.test.ts` now asserts each beat
+    changes a property, which is the failure with no other symptom.
+
+    **AND THE BEAT FOLLOWED THE ELEMENT INTO THE COCKPIT** — the cost of the continuity rule.
+    Because the frame is deliberately never unmounted, a leftover `data-beat="2"` held the chassis
+    flat and the contact ellipse at zero on a fully attached session: the device arrived in the
+    cockpit looking like it had not finished arriving.
+
+    **DOCUMENT 08's HANDOVER PANEL IS BUILT.** *"You asked for an X1 Pro. You have an unprofiled
+    device."* It is the other half of the substitution story — the Fleet's notice fires BEFORE you
+    start, when you still have a choice; this fires after, when a session already holds the wrong
+    class. It needed an API field: `constraints->>'profile'`, which migration 006 already stores so
+    `promote_queued` can re-apply it, now returned as `requestedProfile`.
+
+    **AND IT IS HONEST ABOUT WHEN IT CAN FIRE.** Since ADR-0025 the console always constrains, so a
+    console-started session cannot land here — the allocator queues rather than substituting. What
+    can: a session started by the CLI or a WebDriver suite that named a class and accepted a
+    substitute, then opened in the console. `matchedProfile` gates the whole panel, because a caller
+    that named no class asked for nothing in particular and cannot have been disappointed.
+
+    Also checked: **document 02's geometry table matches `frame.js` exactly** — all four kinds,
+    every ratio, chassis radius derived rather than picked. That is the one document I built from
+    the prose and got right, because the prose WAS the numbers.
+
+    The SQL comment cost a TS1005 on a line of prose, from a backtick inside a template literal.
+    Third time; it is in [[mfarm-sql-comment-backticks]] and I still wrote it.

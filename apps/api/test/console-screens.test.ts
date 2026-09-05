@@ -2425,3 +2425,80 @@ describe("document 06's primitive rules", () => {
     assert.doesNotMatch(textOf(pill), /ago|left/, 'the age sits beside the pill, not in it');
   });
 });
+
+/* ============================== the handover substitution (document 08) =========================
+ *
+ * The other half of the substitution story. The Fleet's notice fires BEFORE you start, when you
+ * still have a choice. This one fires AFTER, when a session already holds a device that is not the
+ * class it asked for.
+ */
+describe('the handover substitution notice', () => {
+  function handedOver(opts: { asked?: string | null; matched?: boolean } = {}) {
+    const { session, device } = seed({ name: 'cockpit', id: 'sess-1' });
+    (device as any).profile = undefined;              // you got an unprofiled device
+    device.screen = { width: 720, height: 1280, density: 320 };
+    const pro = {
+      ...device, id: 'dev-pro', profile: 'mfarm-x1-pro', state: 'SESSION_ACTIVE',
+      screen: { width: 1080, height: 2340, density: 420 },
+    };
+    mod.state.devices = [device, pro];
+    const s = {
+      ...session,
+      requestedProfile: opts.asked === undefined ? 'mfarm-x1-pro' : opts.asked,
+      matchedProfile: opts.matched ?? true,
+    };
+    mod.state.sessions = [s];
+    mod.state.detail = { ...s, dataPlane: null, ice: null, fetchedAt: Date.now() };
+    mod.state.acceptedHandover = null;
+    return s;
+  }
+
+  test('it names both classes and both shapes', () => {
+    handedOver();
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /You asked for MFARM X1 Pro/);
+    assert.match(text, /You have Unprofiled device/);
+    assert.match(text, /720 × 1280/);
+    assert.match(text, /1080 × 2340/);
+    assert.match(text, /render differently/);
+  });
+
+  test('it offers to give the device back and queue for the right one', () => {
+    handedOver();
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Keep it/);
+    assert.match(text, /Release and queue for MFARM X1 Pro/);
+  });
+
+  /**
+   * NO NOTICE WITHOUT AN ASK. A caller that named no class asked for nothing in particular and
+   * cannot have been disappointed — the CLI and the WebDriver hub both allocate this way.
+   */
+  test('a session that constrained nothing is never told it got the wrong thing', () => {
+    handedOver({ matched: false });
+    assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+
+  test('a session that got what it asked for says nothing', () => {
+    handedOver({ asked: null });   // asked for the unprofiled class, and got it
+    assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+
+  /** "Keep it" is an acknowledgement, and it does not come back on the next render. */
+  test('acknowledging it takes it down', () => {
+    const s = handedOver();
+    assert.match(textOf(mod.SCREENS.cockpit()), /You asked for/);
+    mod.state.acceptedHandover = s.id;
+    assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+
+  /**
+   * ...and only for THAT session. Persisting the acknowledgement would silence the notice for a
+   * different session that made the same substitution, which is the one place it most needs saying.
+   */
+  test('acknowledging one session does not silence another', () => {
+    handedOver();
+    mod.state.acceptedHandover = 'some-other-session';
+    assert.match(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+});

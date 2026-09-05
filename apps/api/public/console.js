@@ -115,6 +115,14 @@ export const state = {
   detail: null,
   /** The build the cockpit's tool picker has selected, kept across re-renders. */
   pickedApp: null,
+  /**
+   * The session whose handover substitution the person has acknowledged.
+   *
+   * Per-session and in memory only: "I know, keep it" is a fact about this session and this sitting.
+   * Persisting it would silence the notice for a DIFFERENT session that made the same substitution,
+   * which is the one place it most needs to be said.
+   */
+  acceptedHandover: null,
   route: { name: 'devices', id: null },
 
   /**
@@ -3252,6 +3260,8 @@ function screenLaunching(id) {
       ),
     ),
 
+    state.acceptedHandover === id ? null : handoverNotice(sess),
+
     h('div', { class: 'bringup' },
       h('div', { class: 'bringup-stage' },
         /**
@@ -4266,6 +4276,73 @@ function capturesCard() {
  * bars", but "no bar without a number behind it".
  */
 /**
+ * "YOU ASKED FOR AN X1 PRO. YOU HAVE AN UNPROFILED DEVICE." — document 08's handover panel.
+ *
+ * The other half of the substitution story. The Fleet's notice fires BEFORE you start, when the
+ * only free device is the wrong shape and you still have a choice; this one fires AFTER, when a
+ * session already holds a device that is not the class it asked for.
+ *
+ * WHEN IT CAN ACTUALLY HAPPEN, because a panel that cannot appear is worse than no panel. Since
+ * ADR-0025 the console always constrains, so a console-started session cannot land here — the
+ * allocator queues instead of substituting. What CAN: a session started by the CLI, a WebDriver
+ * suite, or any caller that named a class and accepted a substitute, then opened in the console.
+ * The data is `constraints->>'profile'`, which the API now returns as `requestedProfile`.
+ *
+ * NO NOTICE WITHOUT AN ASK. A caller that named no class asked for nothing in particular and
+ * cannot have been disappointed, so `matchedProfile` gates the whole thing.
+ */
+function handoverNotice(sess) {
+  if (!sess?.matchedProfile || !sess.deviceId) return null;
+  const got = deviceById(sess.deviceId);
+  if (!got) return null;
+
+  const asked = sess.requestedProfile ?? null;
+  const gotClass = got.profile ?? null;
+  if (asked === gotClass) return null;
+
+  // Name the class that was asked for, from any device that is in it — the profile id alone
+  // ("mfarm-x1-pro") is an internal handle and the copy deck forbids it in prose.
+  const exemplar = state.devices.find((d) => (d.profile ?? null) === asked);
+  const askedName = exemplar ? deviceName(exemplar) : (asked || 'an unprofiled device');
+
+  const gotShape = geometryText(got) ? `${got.screen.width} \u00d7 ${got.screen.height}` : 'a different screen';
+  const askedShape = exemplar && geometryText(exemplar)
+    ? `${exemplar.screen.width} \u00d7 ${exemplar.screen.height}` : null;
+
+  return h('section', { class: 'card gate waiting' },
+    h('p', { class: 'card-title', text: `You asked for ${askedName}. You have ${deviceName(got)}.` }),
+    h('p', { class: 'help' },
+      'Its screen is ', h('code', { text: gotShape }),
+      askedShape ? [', not ', h('code', { text: askedShape })] : null,
+      '. Everything works, but any layout you are testing will render differently.'),
+    h('div', { class: 'row tight mt-lg' },
+      // "Keep it" dismisses nothing — the session is already yours. It acknowledges, and the
+      // acknowledgement is per-session so it does not come back on the next render.
+      btn('Keep it', 'ghost', () => { state.acceptedHandover = sess.id; render(); }),
+      btn(`Release and queue for ${askedName}`, 'primary', () => releaseAndRequeue(sess, exemplar)),
+    ),
+  );
+}
+
+/**
+ * Give the wrong device back and ask again for the right class.
+ *
+ * TWO CALLS, IN THIS ORDER, and the order is the whole of it: release first, so the device this
+ * person is not using goes back to the pool where somebody else can have it, and only then queue.
+ * Queueing first would hold two devices' worth of capacity for one person.
+ */
+async function releaseAndRequeue(sess, exemplar) {
+  try {
+    await api(`/v1/sessions/${encodeURIComponent(sess.id)}`, { method: 'DELETE' });
+    await refreshAll();
+    if (exemplar) startSession(exemplar);
+    else toast('Released', 'The class you asked for is not in this fleet any more.', 'warn');
+  } catch (e) {
+    toast('Could not release the device', e.message, 'bad');
+  }
+}
+
+/**
  * WAITING, EXPLAINED — document 04's queued state.
  *
  * Beside the frame rather than on it: the frame is deliberately unresolved here, and a blur applies
@@ -4660,6 +4737,7 @@ function screenCockpit(id) {
     h('div', { class: 'split' },
       h('div', { class: 'content' },
         queuedNote(sess),
+        state.acceptedHandover === sess.id ? null : handoverNotice(sess),
         stagePanel(sess, live),
         endedSummary(sess, live),
         logcatDock(sess, live),
