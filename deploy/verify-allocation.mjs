@@ -155,8 +155,18 @@ const main = async () => {
   //
   // The CLI and the WebDriver hub name no class. They must allocate exactly what they always did,
   // which is what makes the migration safe to deploy ahead of a console that uses it.
+  //
+  // GUARDED LIKE THE TWO ABOVE IT, and it was not. Both class checks skip when their class has
+  // nothing free; this one reached for `ready[0]` unconditionally and threw
+  // "Cannot read properties of undefined (reading 'region')" the first time it met a farm with
+  // every device out of the pool — which is the ordinary state of this farm whenever the device
+  // host is stopped, i.e. most of the time it is not being paid for.
+  //
+  // A verification script that crashes on a legitimate fleet state teaches people to ignore it.
   say('A caller that names no class (the CLI and the hub)');
-  {
+  if (!ready.length) {
+    console.log('  \x1b[33m·\x1b[0m nothing is READY on this farm; skipping the unchanged-caller check');
+  } else {
     let id = null;
     try {
       const d = ready[0];
@@ -168,6 +178,17 @@ const main = async () => {
     } finally {
       await release(id);
     }
+  }
+
+  /**
+   * A RUN THAT ASSERTED NOTHING IS NOT A PASS. With every device quarantined all three checks skip,
+   * and "0 passed, 0 failed" would exit 0 and read as a green verification of an allocator nothing
+   * touched.
+   */
+  if (pass === 0 && fail === 0) {
+    console.log('\n\x1b[33mNothing was checked\x1b[0m — no device on this farm is READY, so no '
+      + 'allocation could be attempted. Start the device host and run this again.');
+    process.exit(2);
   }
 
   say(`${pass} passed, ${fail} failed`);
