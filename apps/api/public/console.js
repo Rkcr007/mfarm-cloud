@@ -1823,7 +1823,21 @@ function fleetCatalogue() {
     return freeA - freeB || rank(a[1][0]) - rank(b[1][0]) || deviceName(a[1][0]).localeCompare(deviceName(b[1][0]));
   });
 
-  return h('div', { class: 'catgrid' }, groups.map(([, members]) => {
+  /**
+   * PHYSICAL HANDSETS GET A STRIP, NOT A CARD — document 05 §02 puts them in a full-width row under
+   * the grid rather than beside the virtual classes.
+   *
+   * The reason is that they are different IN KIND, not merely a fourth product: they cannot be
+   * reset from a snapshot (only apps are cleared between sessions), they are named by their own
+   * model number rather than an MFARM class, and there is generally one of each. A peer card
+   * invites the comparison "which of these four should I pick", and for a handset that is the wrong
+   * question — you take the handset because it is that phone, or you do not.
+   */
+  const physical = groups.filter(([, m]) => isRealDevice(m[0]));
+  const virtual = groups.filter(([, m]) => !isRealDevice(m[0]));
+
+  return [
+    h('div', { class: 'catgrid' }, virtual.map(([, members]) => {
     const d = members[0];
     const free = members.filter((x) => x.state === 'READY').length;
     // COMING BACK vs NEVER COMING BACK. A device somebody else is using frees up on its own; a
@@ -1845,11 +1859,23 @@ function fleetCatalogue() {
         h('span', { class: `caption${free ? '' : ' warn-text'}`, text: `${free} of ${members.length} free` }),
       ),
 
-      h('div', { class: 'row tight' },
-        deviceThumb(d, 108),
-        h('span', { class: 'stack tight' },
+      /**
+       * THE DEVICE IS THE HERO, on the right, at full card height — document 05 §02. It was a 108px
+       * thumbnail tucked beside the title, which makes the card a text block with a picture in it;
+       * the design makes it a product card, where the shape is the first thing read and the specs
+       * explain it. On a page whose whole job is "choose a screen size", the screen should be the
+       * largest thing on the card.
+       *
+       * And when the class has nothing free, the panel says so INSIDE the glass rather than in a
+       * caption below — the panel is what is unavailable.
+       */
+      h('div', { class: 'cat-body' },
+        h('div', { class: 'stack tight' },
           h('span', { class: 'card-title', text: deviceName(d) }),
           h('p', { class: 'help cat-blurb', text: blurb }),
+        ),
+        h('div', { class: 'cat-hero' },
+          staticFrame(d, 230, 'off', free ? null : 'all in use'),
         ),
       ),
 
@@ -1880,11 +1906,22 @@ function fleetCatalogue() {
        * anyway, because it only asked whether anything was FREE — the same "busy versus
        * unavailable" distinction the launch picker already makes, missed one screen over.
        */
+      /**
+       * SHORT LABELS, because the card already says the name — document 05 §02 has "Start one" and
+       * "Join queue · 2 ahead". Repeating "MFARM X1 Pro" in a button eighteen pixels under a
+       * heading that says "MFARM X1 Pro" is words the reader has to check rather than read.
+       *
+       * The QUEUE LENGTH is on the button, though, and it is the one number that changes the
+       * decision: "join a queue" and "join a queue with four people in it" are different offers.
+       * Counted from the sessions already waiting, not invented.
+       */
       h('div', { class: 'row tight' },
         free
-          ? btn(`Start ${deviceName(d)}`, 'primary', () => startSession(d))
+          ? btn('Start one', 'primary', () => startSession(d))
           : coming
-            ? btn(`Join the queue for ${deviceName(d)}`, 'ghost', () => startSession(d))
+            ? btn(queuedSessions().length
+              ? `Join queue \u00b7 ${queuedSessions().length} ahead`
+              : 'Join queue', 'ghost', () => startSession(d))
             : null,
         btn('Full specification', 'ghost', () => go(`#/devices/${d.id}`)),
       ),
@@ -1895,7 +1932,46 @@ function fleetCatalogue() {
             ? 'Out of the pool. Nothing is queued for it, because a queue here would never be served.'
             : 'Every device in this class is out of the pool. A queue here would never be served.' }),
     );
-  }));
+    })),
+
+    physical.length ? physicalStrip(physical) : null,
+  ];
+}
+
+/**
+ * The handsets, summarised in one row — document 05 §02.
+ *
+ * States the two things that make a real phone different from a class, both of which are facts
+ * about the hardware rather than opinions: it cannot be snapshot-reset, and it is named by its own
+ * model number. The count and the names come from the fleet, so a farm with none of them shows
+ * nothing at all rather than an empty section explaining an absence.
+ */
+function physicalStrip(groups) {
+  const all = groups.flatMap(([, m]) => m);
+  const free = all.filter((d) => d.state === 'READY');
+  const names = [...new Set(all.map((d) => deviceName(d)))];
+
+  return card(null, { class: 'phystrip mt-gap' },
+    h('div', { class: 'row tight' },
+      staticFrame(all[0], 92),
+      h('div', { class: 'stack tight' },
+        h('div', { class: 'row tight' },
+          h('span', { class: 'card-title', text: 'Physical handsets' }),
+          h('span', { class: 'kindtag real', text: `${all.length} in the farm` })),
+        h('p', { class: 'help cat-blurb' },
+          'Real phones plugged into a real machine. They cannot be reset from a snapshot \u2014 only '
+          + 'apps are cleared between sessions \u2014 and they are named by their own model number, '
+          + 'not an MFARM class. ',
+          // The specific ones, and their state, because "we have handsets" is not actionable and
+          // "one SM-S918B, out of the pool" is.
+          h('span', { class: 'secondary', text: names.join(', ') }),
+          free.length ? `, ${free.length} free.` : ', all out of the pool.'),
+      ),
+      h('span', { class: 'spacer' }),
+      btn(free.length ? 'Start one' : 'See it', free.length ? 'primary' : 'ghost',
+        () => (free.length ? startSession(free[0]) : go(`#/devices/${all[0].id}`))),
+    ),
+  );
 }
 
 /**
@@ -3751,8 +3827,19 @@ function paintOverlay(sess, live, caps) {
    */
   if (!canStream) {
     return show(
-      h('p', { class: 'micro', text: 'No live view' }),
-      h('p', { class: 'help', text: 'This device declares no screen-stream. That is a property of the device, not a fault.' }),
+      // Amber, not grey: document 04 marks this state. It is not a fault, but it IS the reason the
+      // panel is empty, and a grey line reads as a caption rather than as the answer.
+      h('p', { class: 'micro warn-text', text: 'No live view' }),
+      /**
+       * `screen-stream` IS STRUCK WHERE IT IS NAMED, exactly as the capability chips on device
+       * detail are struck and for the same reason: the strike is what makes "declares no" a thing
+       * you can see rather than a sentence you have to parse. Three surfaces now use one visual for
+       * one fact — the chip, the rail control, and this.
+       */
+      h('p', { class: 'help' },
+        'This device declares no ',
+        h('s', { class: 'mono', text: 'screen-stream' }),
+        '. That is a property of the device, not a fault.'),
       /**
        * NAMED IN FULL, because the half-list was doing the opposite of its job. It read "Input,
        * logcat, install and WebDriver still work" and left out keyboard and launch — so a person
@@ -3760,8 +3847,11 @@ function paintOverlay(sess, live, caps) {
        * device actually has. Document 04 S2 heads this "Everything else works" for that reason: the
        * point is not that some things work, it is that only the three needing pixels do not.
        */
-      h('p', { class: 'micro mt-sm', text: 'Everything else works' }),
-      h('p', { class: 'caption', text: 'Input, keyboard, install, launch, logcat and WebDriver are all live. Screenshot, zoom and fullscreen are struck through in the rail because they need the stream.' }),
+      // A panel, not two more lines of the same paragraph — document 04 gives this its own box,
+      // because it is the half that decides whether the device is worth keeping.
+      h('div', { class: 'worksbox' },
+        h('p', { class: 'worksbox-h', text: 'Everything else works' }),
+        h('p', { class: 'caption', text: 'Input, keyboard, install, launch, logcat and WebDriver are all live. Screenshot, zoom and fullscreen are struck through in the rail because they need the stream.' })),
     );
   }
 
@@ -4235,6 +4325,9 @@ function endedSummary(sess, live) {
   );
 }
 
+/** What a finished action is called, in the tense it finished in. */
+const OUTCOME_VERB = { install: 'Installed', launch: 'Launched', uninstall: 'Uninstalled' };
+
 function actionStatusStrip() {
   const a = state.action;
   if (!a) return null;
@@ -4277,8 +4370,10 @@ function actionStatusStrip() {
           : null,
       ]
       : [
+        // The past-tense verb is the headline — "Installed", "Launched" — with the machine detail
+        // underneath. Document 04's outcome block leads with what happened, not with who said so.
         h('p', { class: a.state === 'FAILED' ? 'meta bad-text' : 'meta ok-text',
-          text: a.error || (a.state === 'DONE' ? 'Confirmed by the worker.' : '') }),
+          text: a.error || (a.state === 'DONE' ? `${OUTCOME_VERB[a.kind] || 'Done'}` : '') }),
         h('p', { class: 'meta tnum', text: [
           a.finishedAt ? new Date(a.finishedAt).toLocaleTimeString() : null,
           gap !== null ? `${gap.toFixed(1)}s after queueing` : null,

@@ -1196,7 +1196,10 @@ describe('the fleet', () => {
     mod.state.devices = [{ ...mod.state.devices[0], profile: 'mfarm-x1-pro', state: 'SESSION_ACTIVE' }];
     const text = textOf(mod.SCREENS.fleet());
     assert.match(text, /0 of 1 free/);
-    assert.match(text, /Join the queue/);
+    // "Join queue", not "Join the queue for MFARM X1 Pro" — document 05 §02 keeps the label short
+    // because the card names the device eighteen pixels above the button, and puts the QUEUE
+    // LENGTH on it instead, which is the number that changes the decision.
+    assert.match(text, /Join queue/);
   });
 
   /**
@@ -1824,7 +1827,10 @@ describe('the cockpit', () => {
         finishedAt: new Date(t0 + 8200).toISOString(),
       };
       const text = textOf(mod.SCREENS.cockpit());
-      assert.match(text, /Confirmed by the worker/);
+      // The outcome leads with the past-tense VERB — document 04's block is headed "Installed",
+      // with the machine detail beneath it. "Confirmed by the worker" said who reported rather than
+      // what happened.
+      assert.match(text, /Installed/);
       assert.match(text, /8\.2s after queueing/);
     });
 
@@ -2276,7 +2282,7 @@ describe('the fleet matches the design it was drawn from', () => {
     function twoClasses(freeShape: { width: number; height: number }) {
       const { device } = seed({ name: 'fleet' });
       device.state = 'SESSION_ACTIVE';
-      device.profile = 'mfarm-x1-pro';
+      (device as any).profile = 'mfarm-x1-pro';
       device.screen = { width: 1080, height: 2340, density: 420 };
       const free = {
         ...device, id: 'dev-free', state: 'READY', profile: undefined,

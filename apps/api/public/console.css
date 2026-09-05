@@ -399,7 +399,17 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 14px 20px;
 }
-.endstat { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/*
+ * EACH NUMBER IN ITS OWN BOX — document 04 S4. They were a flat grid, which reads as one paragraph
+ * of four numbers; boxed, each is a separate answer to a separate question, which is what they are.
+ */
+.endstat {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--b-card, #1F1F22);
+  border-radius: var(--r-md, 9px);
+  background: var(--s-inset, #050506);
+}
 .endstat-v {
   font-family: var(--f-mono);
   font-size: 17px;
@@ -409,6 +419,30 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   text-overflow: ellipsis;
 }
 .endstat-l { font-size: 10.5px; color: var(--t-caption, #6A6A6A); }
+
+/*
+ * "Everything else works" — document 04 S2 gives this its own box, because it is the half that
+ * decides whether a stream-less device is worth keeping. Amber like the state above it: not a
+ * fault, but the reason the panel is empty.
+ */
+.worksbox {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border-radius: var(--r-sm, 6px);
+  background: var(--warn-bg, rgba(232, 163, 14, .06));
+  border: 1px solid var(--warn-line, rgba(232, 163, 14, .24));
+  text-align: left;
+  max-width: 40ch;
+}
+.worksbox-h {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--warn, #E8A30E);
+  margin-bottom: 5px;
+}
+/* The struck capability, wherever it is NAMED in prose — one visual for one fact, the same as the
+   chip on device detail and the control in the rail. */
+.dev-overlay s, .help s { text-decoration-thickness: 1px; color: #8A8A8A; }
 
 /*
  * THE QUEUED FRAME IS PRESENT BUT UNRESOLVED — document 04. It has not been allocated, so it is
@@ -2245,3 +2279,39 @@ kbd {
 .catgrid { display: grid; gap: var(--mf-gap, 16px); grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
 .cat-card { gap: var(--mf-gap, 16px); }
 .cat-blurb { max-width: 46ch; text-wrap: pretty; }
+
+/*
+ * The catalogue card as a PRODUCT card — document 05 §02. Text on the left, the device at full
+ * card height on the right. On a page whose whole job is "choose a screen size", the screen is the
+ * largest thing on the card and two classes are told apart by silhouette before a word is read.
+ */
+.cat-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: start;
+}
+.cat-hero { display: grid; place-items: start center; }
+/* The handsets' row: full width under the grid, so they read as a different kind rather than a
+   fourth product to choose between. */
+.phystrip .cat-blurb { max-width: 72ch; }
+/* Below the two-column breakpoint the frame would squeeze the prose to a ribbon, so it steps out. */
+@media (max-width: 900px) {
+  .cat-body { grid-template-columns: minmax(0, 1fr); }
+  .cat-hero { display: none; }
+}
+
+/* A line inside the glass, for a panel that is not streaming — see `staticFrame`'s `note`. */
+.mf-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  margin: 0;
+  padding: 8%;
+  text-align: center;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: #787878;
+  pointer-events: none;
+}
