@@ -3647,3 +3647,61 @@ when the feature is broken. See issues 37 and 38.
     for the route, not a missing token.
 
     Lab up ~25 minutes, farm left at 4 READY + 1 quarantined, lab stopped.
+
+70. **AN EXPLORATORY PASS OVER THE WHOLE CONSOLE — FIVE DEFECTS, AND ONE OF THEM IS THE FARM.**
+    2026-09-06. Console `034b1dd`.
+
+    Rakesh asked for exploratory testing after the integration, on the reasonable suspicion that
+    nine changes across three layers verified in isolation might not hold together. **They did.**
+    Every one of D1, D3, D4, D9, D10, D11, D15, D16 and D17 behaved on a live farm, in both themes,
+    with **zero console exceptions and zero failed requests across every surface**. The full
+    journey — Fleet → "With a build…" → bring-up → cockpit → install → launch → release → ended —
+    ran end to end with the app visibly on screen at 50fps.
+
+    What the pass found was five defects that had nothing to do with the integration, which is what
+    exploratory testing is for.
+
+    **D21 (S2) — an escalated device is invisible and unrecoverable in the console.**
+    `resetEscalation` has been on both API projections since migration 032. The console renders it
+    in exactly ONE place: the Health line I added yesterday for D1. Not on the device's own page —
+    the page a person opens to act on it. And `clear-reset-escalation` has **no UI at all**;
+    recovering MFARM X1 twice today needed `curl`. Yesterday's feature is currently the only thing
+    in the product that can see this state.
+
+    **D22 (S2) — the Fleet's "Live" lens lists ended sessions.** 50 of 50 rows read ENDED, under a
+    tab whose badge counts only live ones — so the tab shows no number above a full table.
+    `screenSessionsBody()` renders all of `state.sessions`; nothing filters to the states the badge
+    is computed from. Two numbers on one screen derived from different sets.
+
+    **D23 (S2) — the cockpit's default log filter hides everything.** "This app" matched **0 of 270
+    lines** on a session where the build was installed, launched and visibly on screen. Every tag on
+    this device class is a system one — `adbd`, `logd`, `WifiService` — and there is no
+    `ActivityManager` line at all, which is precisely the fallback `visibleLog`'s own comment says
+    the name-match relies on: *"catches the framework's own lines about the app (`ActivityManager`,
+    `JobInfo`, install and launch)"*. It does not, here. [[mfarm-comments-as-rumour]] again, and the
+    comment is one I wrote.
+
+    **D24 (S3) — releasing leaves a live rail on screen for ~7–12 seconds.** `releaseSession`
+    refreshes `devices` and `sessions` and calls `render()` immediately, but never `state.detail` —
+    and `screenCockpit` PREFERS `state.detail`. So the confirm actively repaints a stale live
+    cockpit: fourteen enabled controls aimed at a device that is being wiped. Measured across a
+    fresh session: `mode=session` at t+2s and t+7s, `mode=ended` at t+12s, when the poll's 10s
+    staleness rule finally re-reads the detail.
+
+    **D25 (S4) — "after 7 seconds" beside "00:06 held for"** on one card, because `lengthInWords`
+    rounds and `clock` floors.
+
+    **AND THE FARM ONE, which is the most serious.** `cf-4` burned two full reset budgets in thirty
+    minutes. The worker log has the cause: Appium for cf-4 exited at `19:51:23`, the agent logged
+    `incident on cf-4: appium-failure` and announced it would drain the device — and **no
+    `resetting cf-4` line appears in that window at all**. The control plane offered a reset three
+    times, the worker never performed one, and migration 032 escalated the device out of the pool.
+    Two recovery mechanisms fighting: the agent withdraws a device because its AUTOMATION server is
+    unhealthy, the control plane escalates it because its RESET did not happen. A reset is a
+    `cvd`/adb operation with nothing to do with Appium — a device that cannot take a WebDriver
+    session can still be restored, and should be.
+
+    **THE INSTRUMENTATION IS WHY THIS PASS WAS WORTH RUNNING.** Console exceptions, page exceptions
+    and every response ≥400 were collected for the whole session and printed whether or not
+    anything looked wrong. That is what makes "zero errors" a finding rather than an absence of
+    looking — and it is what let me state plainly that the integration held, instead of hedging.

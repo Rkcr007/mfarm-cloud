@@ -25,6 +25,11 @@ written.
 | D18 | **S2** | Deploy | A merged, CI-green, released commit is not on the farm until someone runs `mfarm-deploy.sh`, and nothing reports the gap. PR #102's fixes were released at 11:34 and served at 13:08, discovered only by reading `docker ps` for another reason. The console's build badge shows what IS serving; nothing shows what SHOULD be. | reading the running image |
 | D19 | S3 | Deploy | Both boxes' git checkouts drift silently from `main` and nothing notices. `mfarm-cp` was on a **detached HEAD at 886cb47**; `mfarm-lab` was **66 commits behind**, on PR #81. The lab's checkout is not decorative — the worker unit and the boot unit both execute from it, so the farm was running agent code from 66 commits ago. | starting the lab |
 | D20 | S4 | Deploy | `mfarm-farm.service` on the lab still declares `Environment=CF_INSTANCES=2`, and the farm runs **four** devices from `CF_INSTANCES=4` in `deploy/.state/worker.env`. Since the D13 fix the device host exits before `farm-up.sh` reads that variable, so the unit's value is now inert as well as wrong — a declaration that contradicts the running system and no longer does anything. | reading the unit while verifying D13 |
+| D21 | **S2** | Device detail | A device whose reset budget is exhausted is **invisible and unrecoverable in the console**. `resetEscalation` has been on both API projections since migration 032; the console renders it in exactly one place — the Health line added for D1 — and nowhere on the device's own page, which is the page you open to act on it. `POST /devices/:id/clear-reset-escalation` exists and has **no UI at all**: recovering MFARM X1 during this session needed `curl`. The device sits in CLEANING, out of the pool, and nothing on screen says it will not come back on its own. | exploratory session |
+| D22 | **S2** | Fleet / Live | The **Live** lens lists ended sessions — 50 of 50 rows read `ENDED` — while the lens's own badge counts only live ones, so the tab shows no number above a full table. `screenSessionsBody()` renders every session in `state.sessions`; nothing filters to the live states the badge is computed from. | exploratory session |
+| D23 | **S2** | Cockpit / logcat | The default log scope hides everything. On a session where the build was installed, launched and visibly on screen, **"This app" matched 0 of 270 lines** — the pane read "0 / 260 lines · 260 hidden". Every tag on this device class is a system one (`adbd`, `logd`, `WifiService`, `SatelliteController`); there is no `ActivityManager` line at all, which is the fallback `visibleLog`'s comment says the name-match relies on. "Everything" shows 261/261, so the workaround is on the page — but the default is the broken one. | exploratory session |
+| D24 | S3 | Cockpit | For **~7–12 seconds after confirming Release & reset**, the cockpit keeps rendering a live session with a full 14-button rail — Power, Home, Screenshot, Install — against a device that is being wiped. `releaseSession` refreshes `devices` and `sessions` and calls `render()` immediately, but never `state.detail`, and `screenCockpit` prefers `state.detail`. The poll corrects it only once the detail is >10s stale. Measured: `mode=session` at t+2s and t+7s, `mode=ended` at t+12s. | exploratory session |
+| D25 | S4 | Cockpit (ended) | The ended card states one fact as two numbers: the lead reads "after 7 seconds" beside a stat reading "00:06 held for". `lengthInWords` rounds and `clock` floors, so a 6.5s session disagrees with itself on the same card. | exploratory session |
 
 ## Fixed, awaiting verification on the farm
 
@@ -56,6 +61,28 @@ a negative control: reverted to the previous console, 16 of the 20 fail. The fou
 way are the "must not offer" guards — an empty library, a busy row, a host-sourced quarantine, a
 member without the admin route — which are absence assertions and correctly hold in both
 directions.
+
+### Not a console defect: cf-4's reset escalates whenever Appium restarts
+
+Found while exploring, and the more serious finding of the session. **MFARM X1 (`cf-4`) burned two
+full reset budgets in thirty minutes** — timed out at 19:56 and 20:00, escalated at 20:03, having
+already escalated at 19:34.
+
+The worker log gives the cause. At `19:51:23` Appium for cf-4 exited after 759s; the agent logged
+`incident on cf-4: appium-failure`, began `restart 1/5` and announced *"Withdrawing by draining in
+60000ms unless it recovers first."* **No `resetting cf-4` line appears anywhere in that window** —
+so the control plane offered a reset three times, the worker never carried it out, and migration
+032's budget did exactly what it is designed to do to a device that will not reset.
+
+The two recovery mechanisms are fighting: the agent withdraws a device because its AUTOMATION server
+is unhealthy, and the control plane escalates it because its RESET did not happen. A reset is a
+`cvd`/adb operation and has nothing to do with Appium — a device that cannot take a WebDriver
+session can still be restored to a clean snapshot, and should be.
+
+The visible consequence is D21: the device leaves the pool, the console shows RESTORING forever, and
+only `curl` gets it back.
+
+---
 
 ### What D1 caught on its first day
 
