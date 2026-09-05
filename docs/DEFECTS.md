@@ -30,8 +30,6 @@ written.
 
 | # | Sev | What | How it was found |
 |---|---|---|---|
-| D1 | S3 | Health showed a state pill and nothing else per device. `GET /v1/devices` now carries `lastResetAt`, and each row says what the farm last confirmed and when — "reset confirmed 4m ago", "check failed 2d ago", "host stopped beating 90s ago", or "no check recorded". **Not** the lateral join onto `device_reset_attempts` this file proposed: that table holds only timed-out and escalated resets, so a healthy device has no rows in it and the join would have reported nothing for most of the fleet. | design comparison |
-| D4 | S3 | The Fleet headline never gave an ETA. It does now, derived from the soonest live `expiresAt` — and it says **"frees in at most 12 minutes"** rather than document 03's "in about 12 minutes". The bound is an upper one (a holder can release early; somebody ahead of you takes the device first), and "at most" is the claim the data actually supports. | design comparison |
 | D5 | S3 | Fleet rows carried a `Details` button beside a device name that links to the same page — two controls, one destination, on every in-use row. The name is the only link now. | clicking every control |
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
@@ -59,6 +57,17 @@ way are the "must not offer" guards — an empty library, a busy row, a host-sou
 member without the admin route — which are absence assertions and correctly hold in both
 directions.
 
+### What D1 caught on its first day
+
+The X1 read **"reset gave up 12m ago"** in red while its state pill said `RESTORING`. That was real:
+a session left un-released when the lab was stopped mid-reset had exhausted its budget (migration
+032). The pill said the device was busy restoring; only the new line said the restore had given up
+twelve minutes earlier. Cleared with `clear-reset-escalation`, and the device came back READY within
+80 seconds — which is exactly the gap between "not allocatable" and "not allocatable and nobody is
+coming", and the reason the design puts an outcome on this row.
+
+---
+
 ### D2 is the one that was not a defect
 
 Recorded as "the worker registers no `screen` for real devices". It does, and has since twelve days
@@ -82,6 +91,8 @@ stale and will correct itself the moment a current agent registers that phone.
 
 | # | Sev | What | Fixed in |
 |---|---|---|---|
+| D1 | S3 | Health showed a state pill and nothing else per device. `GET /v1/devices` carries `lastResetAt` now and each row says what the farm last confirmed and when. **Watched on the farm at `0141e8e`**: "reset gave up 12m ago" in red on an X1 whose pill said RESTORING, "reset confirmed 6h ago" on the X1 Pro, "reset confirmed 9d ago" on the handset. Deliberately NOT the `device_reset_attempts` join this file proposed — that table holds only timed-out and escalated resets, so a healthy device has no rows and the join would have said "nothing recorded" for most of the fleet. | design comparison |
+| D4 | S3 | The Fleet headline never gave an ETA. **Watched on the farm at `0141e8e`** with the farm full and one session queued: *"Every device is in use. One person is waiting — the next Unprofiled device frees in at most 25 minutes."* "At most" rather than document 03's "about", because `expiresAt` is an upper bound — a holder can release early, and somebody ahead takes the device first — and the bound is what the data supports. | design comparison |
 | D3 | **S2** | No Fleet row could preinstall a build before handover. `startSession` carries one now; "With a build…" is on the fleet row, the catalogue card and device detail. **Watched end to end on the farm**: the dialog allocated an MFARM X1, queued Alaan staging, and the worker confirmed the install. | `45683f9` |
 | D9 | S3 | Health named a device whose check had failed and gave no way to reach it. The name is the same `fleet-open` control the Fleet uses, and `Recover` appears on a quarantined device an admin can actually recover. **Seen on the farm**: `Recover` on the quarantined SM-S918B, absent everywhere else. | `45683f9` |
 | D10 | S3 | The stage kept full height on an ENDED session. **Seen on the farm**: the frame is small, dim and flat on the left, with `01:23 held for / 2 actions / 2 artifacts / snapshot reset` beside it and the release sentence leading — all above the fold. | `45683f9` |

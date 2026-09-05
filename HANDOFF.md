@@ -3614,3 +3614,36 @@ when the feature is broken. See issues 37 and 38.
 
     Suite 1415 green, typecheck clean. Typecheck caught two implicit `any`s in the new test helpers
     that `node --test` had happily stripped and run — step 3 of the definition of done, doing its job.
+
+69. **D1 AND D4 WATCHED, AND D1 CAUGHT SOMETHING ON ITS FIRST DAY.** 2026-09-06. Console `0141e8e`.
+
+    **D4, with the farm deliberately filled.** Four sessions taken through the API until
+    `available` hit 0, one of which queued — the design's own scenario. The headline read: *"Every
+    device is in use. One person is waiting — the next Unprofiled device frees in at most 25
+    minutes."* Document 03's structure, its amber emphasis on the waiting clause, and "at most"
+    where it says "about".
+
+    **D1, and the row that earned the feature.** The Health page showed MFARM X1 as
+    **`RESTORING` — "reset gave up 12m ago"**, in red. That was not a fixture. The session I left
+    un-released at the end of entry 67, on a lab I then stopped mid-reset, had exhausted its reset
+    budget (migration 032). **The state pill said the device was busy restoring; only the new line
+    said the restore had given up twelve minutes earlier.** That gap — between "not allocatable"
+    and "not allocatable and nobody is coming" — is the whole reason document 05 §06 puts an
+    outcome on the row, and it took one deploy to demonstrate it on a real device.
+
+    Cleared with `clear-reset-escalation` and the X1 was READY in 80 seconds. Which also closes the
+    loose end entry 67 recorded: letting that lease expire was the cheap choice at the time, and it
+    cost a device an escalation. **A session on a host you are about to stop is worth releasing
+    before you stop it**, even when the reaper would eventually cope.
+
+    The handset read "reset confirmed 9d ago" — D2's staleness, rendered on the page, without
+    anybody having to run a query.
+
+    **TWO AUTH SHAPES, LEARNED BY GETTING THEM WRONG.** `DELETE /v1/sessions/:id` takes a tenant API
+    key on `authorization: Bearer` and needs no CSRF; `POST /v1/devices/:id/clear-reset-escalation`
+    is an ADMIN USER route and refuses an API key outright — "This endpoint requires a signed-in
+    user session". Cookie plus `x-mfarm-csrf`, from the login response's `csrfToken`. Entry 67's
+    un-released session was a CSRF failure on the first of those two; it was the wrong credential
+    for the route, not a missing token.
+
+    Lab up ~25 minutes, farm left at 4 READY + 1 quarantined, lab stopped.
