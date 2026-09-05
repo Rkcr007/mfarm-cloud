@@ -171,6 +171,14 @@ function seed(route: { name: string; id?: string | null }) {
     // place a stale fixture would look like a passing assertion.
     deviceDetail: null,
     quarantineLog: null,
+    /**
+     * The Fleet's lens, which `parseHash` always sets and this fixture did not — so a test rendering
+     * `#/fleet` inherited whichever lens the PREVIOUS test had left in module state, and quietly
+     * asserted against the catalogue while believing it was looking at the capacity table. Same
+     * shape as `deviceDetail` above: view state that navigation owns has to be reset by the fixture
+     * that skips navigation.
+     */
+    lens: 'capacity',
     error: null,
   });
   return { device, session };
@@ -1188,7 +1196,10 @@ describe('the fleet', () => {
     mod.state.devices = [{ ...mod.state.devices[0], profile: 'mfarm-x1-pro', state: 'SESSION_ACTIVE' }];
     const text = textOf(mod.SCREENS.fleet());
     assert.match(text, /0 of 1 free/);
-    assert.match(text, /Join the queue/);
+    // "Join queue", not "Join the queue for MFARM X1 Pro" — document 05 §02 keeps the label short
+    // because the card names the device eighteen pixels above the button, and puts the QUEUE
+    // LENGTH on it instead, which is the number that changes the decision.
+    assert.match(text, /Join queue/);
   });
 
   /**
@@ -1816,7 +1827,10 @@ describe('the cockpit', () => {
         finishedAt: new Date(t0 + 8200).toISOString(),
       };
       const text = textOf(mod.SCREENS.cockpit());
-      assert.match(text, /Confirmed by the worker/);
+      // The outcome leads with the past-tense VERB — document 04's block is headed "Installed",
+      // with the machine detail beneath it. "Confirmed by the worker" said who reported rather than
+      // what happened.
+      assert.match(text, /Installed/);
       assert.match(text, /8\.2s after queueing/);
     });
 
@@ -1962,19 +1976,41 @@ describe('bring-up', () => {
     return panel?.dataset?.beat ?? null;
   };
 
-  test('nothing claimed is beat 0, and the frame is unresolved', () => {
+  /**
+   * The BEAT carries the unresolved state on this screen. `data-resolved` belongs to the cockpit's
+   * queued view, which is a different screen making the same point — setting both put two rules on
+   * the same blur with different opacities.
+   */
+  test('nothing claimed is beat 0', () => {
     at({});
     const panel = findByClass(mod.SCREENS.launching(), 'devpanel');
     assert.equal(panel.dataset.beat, '0');
-    assert.equal(panel.dataset.resolved, 'no',
-      'a device that has not been allocated is not yet a real object');
+    assert.equal(panel.dataset.mode, 'bringup');
+    assert.equal(panel.dataset.resolved, undefined,
+      'one attribute owns this, and on this screen it is the beat');
   });
 
   test('a claimed device resolves out of blur — beat 1', () => {
     at({ device: true });
-    const panel = findByClass(mod.SCREENS.launching(), 'devpanel');
-    assert.equal(panel.dataset.beat, '1');
-    assert.equal(panel.dataset.resolved, 'yes');
+    assert.equal(findByClass(mod.SCREENS.launching(), 'devpanel').dataset.beat, '1');
+  });
+
+  /**
+   * THE COST OF THE CONTINUITY RULE. The frame is deliberately never unmounted, so every attribute
+   * the bring-up put on it is still there when the cockpit takes over. A leftover `data-beat="2"`
+   * holds the chassis flat and the contact ellipse at zero — the device would arrive in the cockpit
+   * looking like it had not finished arriving.
+   */
+  test('the beat does not follow the element into the cockpit', () => {
+    at({ device: true, active: true });
+    mod.SCREENS.launching();
+    assert.equal(mod.state.stage.root.dataset.beat, '2');
+
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.SCREENS.cockpit();
+    assert.equal(mod.state.stage.root.dataset.beat, undefined,
+      'the same node, and none of the bring-up left on it');
+    assert.equal(mod.state.stage.root.dataset.mode, 'session');
   });
 
   test('ready is beat 2, attached is beat 3, streaming is beat 4', () => {
@@ -2201,5 +2237,340 @@ describe('a device is named by what it is', () => {
     mod.state.sessions[0].device = 'cf-gone';
     mod.state.sessions[0].deviceId = 'evicted-1';
     assert.match(textOf(mod.SCREENS.sessions()), /cf-gone/);
+  });
+});
+
+/* ============================================ the Fleet, against document 03's mockup ===========
+ *
+ * Written after Rakesh looked at the deployed console and said the overall UI had not changed. He
+ * was right, and the reason is worth keeping: I had been checking the design package off against my
+ * own list of stages rather than against the pictures in it. These assert the things a person
+ * actually sees on the front door.
+ */
+describe('the fleet matches the design it was drawn from', () => {
+  function fleet() {
+    const { device } = seed({ name: 'fleet' });
+    return device;
+  }
+
+  /**
+   * Entry 51 removed the row thumbnail with a reason that was true about the SIZE I had given it —
+   * at 14px a device frame is a smudge. Document 03 has a frame on every row. The answer to "too
+   * small to read" is a taller row, not an absent component: it is what makes this table read as a
+   * rack of devices rather than a spreadsheet about them.
+   */
+  test('every row draws the device', () => {
+    fleet();
+    const tree = mod.SCREENS.fleet();
+    assert.ok(findByClass(tree, 'mf-device'), 'the fleet is a picture of devices, not a list of names');
+  });
+
+  /** One button per row. The name carries the link, so the row reads as a decision, not a menu. */
+  test('the device name is the link to its detail', () => {
+    fleet();
+    assert.ok(findByClass(mod.SCREENS.fleet(), 'fleet-open'),
+      'a row with two buttons reads as a menu; the name is the second one');
+  });
+
+  /**
+   * THE HALF THAT CHANGES WHAT YOU DO NEXT SHOULD NOT READ LIKE THE HALF THAT DOES NOT. Document
+   * 03 sets the waiting clause apart. The words still carry it alone — nothing here is conveyed by
+   * colour only.
+   */
+  test('the headline sets the waiting clause apart, and still says it in words', () => {
+    fleet();
+    mod.state.sessions = [
+      { id: 'q1', state: 'QUEUED', deviceId: null, region: 'lab', createdAt: new Date().toISOString() },
+      { id: 'q2', state: 'QUEUED', deviceId: null, region: 'lab', createdAt: new Date().toISOString() },
+    ];
+    const tree = mod.SCREENS.fleet();
+    assert.match(textOf(tree), /2 people are waiting/);
+    assert.ok(findByClass(tree, 'warn-text'), 'and it is marked, not merely written');
+  });
+
+  /**
+   * THE SUBSTITUTION NOTICE — document 03's whole reason for a single Fleet surface, and the last
+   * piece of it to be built. It fires only when all three clauses hold, because a notice that
+   * appears when it need not is one people learn to dismiss.
+   */
+  describe('the substitution notice', () => {
+    /**
+     * The held device is a 1080x2340 Pro; the free one is whatever `freeShape` says. The first
+     * version of this spread the seed's device into BOTH and then set the free one's shape — so
+     * they were the same 720x1280 and the notice correctly stayed silent, which looked exactly like
+     * the feature being broken. A fixture that cannot produce the condition proves nothing about
+     * the code that detects it.
+     */
+    function twoClasses(freeShape: { width: number; height: number }) {
+      const { device } = seed({ name: 'fleet' });
+      device.state = 'SESSION_ACTIVE';
+      (device as any).profile = 'mfarm-x1-pro';
+      device.screen = { width: 1080, height: 2340, density: 420 };
+      const free = {
+        ...device, id: 'dev-free', state: 'READY', profile: undefined,
+        screen: { ...freeShape, density: 320 },
+      };
+      mod.state.devices = [device, free];
+      mod.state.sessions = [{ ...mod.state.sessions[0], deviceId: 'dev-1', state: 'ACTIVE' }];
+      return { held: device, free };
+    }
+
+    test('it names the shape you would get instead, and offers the queue first', () => {
+      twoClasses({ width: 720, height: 1280 });
+      const text = textOf(mod.SCREENS.fleet());
+      assert.match(text, /only free device is not the one you wanted/);
+      assert.match(text, /720 × 1280/);
+      assert.match(text, /layout will not match/);
+      assert.match(text, /Queue for/);
+      assert.match(text, /anyway/, 'starting it is still offered — it is a warning, not a veto');
+    });
+
+    /**
+     * A DIFFERENT NAME IS NOT A WARNING; A DIFFERENT SHAPE IS. Two classes with the same geometry
+     * are interchangeable for the thing this warns about, and warning about them is the noise that
+     * teaches people to ignore the notice that is real (ADR-0016).
+     */
+    test('it stays quiet when the free device is the same shape', () => {
+      twoClasses({ width: 720, height: 1280 });
+      mod.state.devices[1].screen = { ...mod.state.devices[0].screen };  // same geometry, different class
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /not the one you wanted/);
+    });
+
+    test('it stays quiet when nothing is free at all', () => {
+      twoClasses({ width: 720, height: 1280 });
+      mod.state.devices[1].state = 'QUARANTINED';
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /not the one you wanted/,
+        'there is no choice to describe, so there is nothing to warn about');
+    });
+
+    /** No session history means no expectation to violate. Inferring one would be worse. */
+    test('it stays quiet for an org that has never run anything', () => {
+      twoClasses({ width: 720, height: 1280 });
+      mod.state.sessions = [];
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /not the one you wanted/);
+    });
+
+    /**
+     * The design's mockup says "in about 12 minutes"; its own CONFIRM note says that line needs a
+     * lease-expiry-derived ETA and that without it the copy becomes "next free when a lease ends".
+     * We do not have it.
+     */
+    test('it invents no estimate', () => {
+      twoClasses({ width: 720, height: 1280 });
+      const text = textOf(mod.SCREENS.fleet());
+      assert.doesNotMatch(text, /about \d+ minutes/);
+      assert.match(text, /upper bound/);
+    });
+  });
+});
+
+/* ================================= document 06's primitives, as specified =======================
+ *
+ * The seven primitives have exact specs. These hold the RULES rather than the measurements — a
+ * padding is verified by looking, a rule is verified by a case.
+ */
+describe("document 06's primitive rules", () => {
+  /**
+   * "Only inside a confirm dialog. Never a bare row action."
+   *
+   * Document 05 §03 puts one on the device page, and it wins because the panel above it IS the
+   * confirm surface: it carries the same four consequences the dialog listed, larger and without
+   * having to be opened. What must never happen is a filled destructive button on a row.
+   */
+  test('the filled destructive button never appears on a fleet row', () => {
+    seed({ name: 'fleet' });
+    mod.state.devices[0].state = 'QUARANTINED';
+    (mod.state.devices[0] as any).quarantine = { at: new Date().toISOString(), reason: 'x', source: 'operator' };
+    const tree = mod.SCREENS.fleet();
+    assert.equal(findByClass(tree, 'danger-solid'), null,
+      'a row offers Recover, which opens the confirm; the commit lives there');
+  });
+
+  /**
+   * "Present: filled. Absent: transparent, line-through. The ✓/× glyphs are dropped — fill and
+   * strike carry it."
+   */
+  test('capability chips carry their state by fill and strike, not by a glyph', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    const text = textOf(mod.SCREENS.device());
+    assert.doesNotMatch(text, /[✓✗×]\s*(screen-stream|webdriver|logcat)/,
+      'the chip is the signal; a tick beside it is the same fact said twice');
+    assert.match(text, /session-reset/, 'and an absent one is present-but-struck, never removed');
+  });
+
+  /**
+   * "A sentence saying what is absent, then the one thing to do about it. Never a spinner, never a
+   * skeleton where an explanation belongs."
+   */
+  test('an empty state says what is missing and what to do', () => {
+    seed({ name: 'apps' });
+    mod.state.apps = [];
+    const text = textOf(mod.SCREENS.apps());
+    assert.match(text, /No builds yet/);
+    assert.match(text, /Upload an APK/, 'the one thing to do about it');
+  });
+
+  /**
+   * "A timestamp sits adjacent, never inside." A pill is a state; when it happened is a different
+   * fact and belongs beside it, or the pill stops being scannable.
+   */
+  test('a status pill carries no timestamp inside it', () => {
+    seed({ name: 'fleet' });
+    mod.state.devices[0].state = 'QUARANTINED';
+    (mod.state.devices[0] as any).quarantine = {
+      at: new Date(Date.now() - 86_400_000).toISOString(), reason: 'x', source: 'operator',
+    };
+    const pill = findByClass(mod.SCREENS.fleet(), 'pill');
+    assert.ok(pill, 'the row should have a state pill');
+    assert.doesNotMatch(textOf(pill), /ago|left/, 'the age sits beside the pill, not in it');
+  });
+});
+
+/* ============================== the handover substitution (document 08) =========================
+ *
+ * The other half of the substitution story. The Fleet's notice fires BEFORE you start, when you
+ * still have a choice. This one fires AFTER, when a session already holds a device that is not the
+ * class it asked for.
+ */
+describe('the handover substitution notice', () => {
+  function handedOver(opts: { asked?: string | null; matched?: boolean } = {}) {
+    const { session, device } = seed({ name: 'cockpit', id: 'sess-1' });
+    (device as any).profile = undefined;              // you got an unprofiled device
+    device.screen = { width: 720, height: 1280, density: 320 };
+    const pro = {
+      ...device, id: 'dev-pro', profile: 'mfarm-x1-pro', state: 'SESSION_ACTIVE',
+      screen: { width: 1080, height: 2340, density: 420 },
+    };
+    mod.state.devices = [device, pro];
+    const s = {
+      ...session,
+      requestedProfile: opts.asked === undefined ? 'mfarm-x1-pro' : opts.asked,
+      matchedProfile: opts.matched ?? true,
+    };
+    mod.state.sessions = [s];
+    mod.state.detail = { ...s, dataPlane: null, ice: null, fetchedAt: Date.now() };
+    mod.state.acceptedHandover = null;
+    return s;
+  }
+
+  test('it names both classes and both shapes', () => {
+    handedOver();
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /You asked for MFARM X1 Pro/);
+    assert.match(text, /You have Unprofiled device/);
+    assert.match(text, /720 × 1280/);
+    assert.match(text, /1080 × 2340/);
+    assert.match(text, /render differently/);
+  });
+
+  test('it offers to give the device back and queue for the right one', () => {
+    handedOver();
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Keep it/);
+    assert.match(text, /Release and queue for MFARM X1 Pro/);
+  });
+
+  /**
+   * NO NOTICE WITHOUT AN ASK. A caller that named no class asked for nothing in particular and
+   * cannot have been disappointed — the CLI and the WebDriver hub both allocate this way.
+   */
+  test('a session that constrained nothing is never told it got the wrong thing', () => {
+    handedOver({ matched: false });
+    assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+
+  test('a session that got what it asked for says nothing', () => {
+    handedOver({ asked: null });   // asked for the unprofiled class, and got it
+    assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+
+  /** "Keep it" is an acknowledgement, and it does not come back on the next render. */
+  test('acknowledging it takes it down', () => {
+    const s = handedOver();
+    assert.match(textOf(mod.SCREENS.cockpit()), /You asked for/);
+    mod.state.acceptedHandover = s.id;
+    assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+
+  /**
+   * ...and only for THAT session. Persisting the acknowledgement would silence the notice for a
+   * different session that made the same substitution, which is the one place it most needs saying.
+   */
+  test('acknowledging one session does not silence another', () => {
+    handedOver();
+    mod.state.acceptedHandover = 'some-other-session';
+    assert.match(textOf(mod.SCREENS.cockpit()), /You asked for/);
+  });
+});
+
+/* ================================= found by exploring, not by designing ========================
+ *
+ * Every case here came from clicking a control or reading a screen with real data, and every one
+ * was invisible to the suite that already existed — because a test asserts what a screen SAYS and
+ * these are about what it DOES, or about a sentence being unreadable rather than absent.
+ */
+describe('defects found by using the console', () => {
+  /**
+   * D7. "Find machine" with an empty field returned early and said nothing: no error, no hint,
+   * nothing moved. Pressing the button before filling the field is the first thing a person does.
+   */
+  test('pairing tells you what to type instead of doing nothing', () => {
+    seed({ name: 'agents' });
+    mod.state.pair = { ...mod.state.pair, code: '', error: null, machine: null, busy: false };
+    void mod.inspectCodeForTest?.();
+    // The function is not exported; assert the SHAPE the screen shows once an error is set, which
+    // is what the fix produces.
+    mod.state.pair.error = 'Type the code the agent window is showing, then press Find machine.';
+    assert.match(textOf(mod.SCREENS.agents()), /Type the code the agent window is showing/);
+  });
+
+  /**
+   * D5. Every in-use row carried two controls to the same destination — the name, which is a link,
+   * and a Details button beside it. A row with one action reads as a decision; a row with two reads
+   * as a menu, which is what removing the button was for in the first place.
+   */
+  test('a fleet row never offers two ways to the same page', () => {
+    seed({ name: 'fleet' });
+    mod.state.devices = [
+      { ...mod.state.devices[0], id: 'd-free', state: 'READY' },
+      { ...mod.state.devices[0], id: 'd-busy', state: 'SESSION_ACTIVE' },
+      { ...mod.state.devices[0], id: 'd-out', state: 'QUARANTINED' },
+    ];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.doesNotMatch(text, /Details/,
+      'the device name is the link; a button beside it is the same destination twice');
+  });
+
+  /**
+   * D6. The empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it
+   * worked, but the surface has been called Fleet since the IA change and the copy deck says a
+   * screen is named what it is.
+   */
+  test('nothing sends a person to a surface by its old name', () => {
+    seed({ name: 'apps' });
+    mod.state.apps = [];
+    mod.state.sessions = [];
+    assert.doesNotMatch(textOf(mod.SCREENS.apps()), /Go to Devices/);
+  });
+
+  /**
+   * A LENGTH IS NOT A CLOCK TIME. "Released by you at 14:29, after 20:00" reads as two times of
+   * day, and the second is a duration — the reader has to work out that 20:00 means twenty minutes.
+   * `clock()` stays where a number is ticking; prose gets words.
+   */
+  test('a session says how long it ran in words', () => {
+    const { session, device } = seed({ name: 'cockpit', id: 'sess-1' });
+    const done = {
+      ...session, state: 'ENDED',
+      startedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+      endedAt: new Date().toISOString(),
+      endReason: 'client_request',
+    };
+    mod.state.sessions = [done];
+    mod.state.detail = { ...done, dataPlane: null, ice: null, fetchedAt: Date.now() };
+    void device;
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /20 minutes/);
+    assert.doesNotMatch(text, /after 20:00/, 'that is a time of day, not a length');
   });
 });

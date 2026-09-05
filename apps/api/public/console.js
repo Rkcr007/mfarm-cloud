@@ -115,6 +115,14 @@ export const state = {
   detail: null,
   /** The build the cockpit's tool picker has selected, kept across re-renders. */
   pickedApp: null,
+  /**
+   * The session whose handover substitution the person has acknowledged.
+   *
+   * Per-session and in memory only: "I know, keep it" is a fact about this session and this sitting.
+   * Persisting it would silence the notice for a DIFFERENT session that made the same substitution,
+   * which is the one place it most needs to be said.
+   */
+  acceptedHandover: null,
   route: { name: 'devices', id: null },
 
   /**
@@ -435,6 +443,30 @@ function clock(ms) {
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
   const ss = String(s % 60).padStart(2, '0');
   return hr > 0 ? `${hr}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/**
+ * A LENGTH IN WORDS — "20 minutes", not "20:00".
+ *
+ * `clock()` is mm:ss and it is right where a number is TICKING: a lease counting down wants a
+ * stable, monospaced shape that changes every second. It is wrong in a sentence. "Released by you
+ * at 14:29, after 20:00" reads as two clock times, and the second one is a duration — a person has
+ * to stop and work out that 20:00 is twenty minutes rather than eight in the evening.
+ *
+ * Coarse on purpose, like `ago`. Nobody reading "how long did I hold that device" needs the
+ * seconds, and offering them invites the same misreading in a smaller way.
+ */
+function lengthInWords(from, to) {
+  if (!from) return '—';
+  const ms = (to ? new Date(to) : new Date()) - new Date(from);
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} seconds`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'}`;
+  const hr = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest ? `${hr}h ${rest}m` : `${hr} hour${hr === 1 ? '' : 's'}`;
 }
 
 function duration(from, to) {
@@ -1191,7 +1223,13 @@ function setNavToggleIcon(collapsed) {
 
 /* ---------------------------------------------------------------------------- page header */
 
-function pageHead(crumbs, title, sub, actions) {
+/**
+ * `subNode` is for a subtitle that has to be MARKED UP rather than said flatly — the Fleet's
+ * headline sets its waiting clause apart, because the half that changes what you do next should not
+ * read like the half that does not. Every other screen passes a plain `sub` and gets a plain
+ * paragraph; a screen may pass one or the other, never both.
+ */
+function pageHead(crumbs, title, sub, actions, subNode) {
   return h('div', null,
     crumbs?.length ? h('p', { class: 'crumb' }, crumbs.map((c, i) => [
       i ? ' / ' : null,
@@ -1199,7 +1237,7 @@ function pageHead(crumbs, title, sub, actions) {
     ])) : null,
     h('div', { class: 'page-head' },
       h('h1', { class: 'page-title', text: title }),
-      sub ? h('p', { class: 'page-sub', text: sub }) : null,
+      subNode || (sub ? h('p', { class: 'page-sub', text: sub }) : null),
       actions ? [h('span', { class: 'spacer' }), actions] : null,
     ),
   );
@@ -1554,7 +1592,9 @@ function fleetHeadline() {
   const waiting = queuedSessions().length;
   const held = state.sessions.filter((x) => LIVE_SESSION_STATES.has(x.state) && x.deviceId).length;
 
-  if (!state.devices.length) return 'No devices are registered. Start a worker and one appears within a heartbeat.';
+  if (!state.devices.length) {
+    return { capacity: 'No devices are registered. Start a worker and one appears within a heartbeat.', queue: '', waiting: 0 };
+  }
 
   const capacity = free === 0
     ? 'Every device is in use.'
@@ -1571,7 +1611,7 @@ function fleetHeadline() {
     ? (held ? 'Nobody is waiting.' : '')
     : `${waiting === 1 ? 'One person is' : `${waiting} people are`} waiting — the farm hands over the moment a lease ends.`;
 
-  return `${capacity} ${queue}`.trim();
+  return { capacity, queue, waiting };
 }
 
 /** `you`, a colleague's email, a CI run, or nothing — in that order of usefulness. */
@@ -1597,6 +1637,65 @@ function sessionHolding(deviceId) {
  * ordering IS the answer to the page's question, so it is not configurable and there is no sort
  * control: a table you have to sort before it tells you anything has not told you anything.
  */
+/**
+ * "THE ONLY FREE DEVICE IS NOT THE ONE YOU WANTED" — document 03's substitution notice.
+ *
+ * The one moment the Fleet surface exists to make honest, and the last piece of it to be built. It
+ * fires on a narrow, checkable condition:
+ *
+ *   1. something IS free, so there is a real choice to describe;
+ *   2. the class you have been working on is NOT free;
+ *   3. the free device is a different SHAPE, not merely a different name.
+ *
+ * THE THIRD CLAUSE IS THE ONE THAT MATTERS. Two classes with the same geometry are interchangeable
+ * for the thing this warns about — a layout that will not match — so warning about them would be
+ * noise, and noise here trains people to dismiss the notice that is real (ADR-0016: geometry is why
+ * somebody picked a device).
+ *
+ * WHAT "THE ONE YOU WANTED" MEANS, precisely: the class of the most recent session this org
+ * opened. Not a preference anybody typed — inferring intent from a stored setting nobody set would
+ * be worse than saying nothing. If the org has never run a session there is no expectation to
+ * violate, and this returns null.
+ *
+ * NO ETA, for the reason `fleetHeadline` and the queue card both give. The design's mockup reads
+ * "in about 12 minutes"; its own CONFIRM note says that line needs lease-expiry-derived ETA and
+ * that "without it the copy becomes 'next free when a lease ends'". We do not have it, so it does.
+ */
+function substitutionNotice() {
+  const free = state.devices.filter((d) => d.state === 'READY');
+  if (!free.length) return null;
+
+  // The class most recently worked on, from the newest session that named a device.
+  const recent = state.sessions.find((x) => x.deviceId);
+  const wanted = recent ? deviceById(recent.deviceId) : null;
+  if (!wanted) return null;
+
+  const wantedClass = deviceClass(wanted);
+  if (free.some((d) => deviceClass(d) === wantedClass)) return null;
+
+  // A different NAME is not a warning; a different SHAPE is.
+  const sameShape = (a, b) => a?.screen?.width === b?.screen?.width
+    && a?.screen?.height === b?.screen?.height;
+  const different = free.filter((d) => !sameShape(d, wanted));
+  if (!different.length) return null;
+
+  const alt = different[0];
+  const shape = geometryText(alt) ? `a ${alt.screen.width} \u00d7 ${alt.screen.height} screen` : 'a different screen';
+
+  return h('section', { class: 'card gate waiting mt-gap' },
+    h('p', { class: 'card-title', text: 'The only free device is not the one you wanted' }),
+    h('p', { class: 'help' },
+      `${deviceName(alt)} has ${shape} \u2014 a different shape from the ${deviceName(wanted)} you `
+      + 'have been testing on. Starting it is fine, but layout will not match.'),
+    h('div', { class: 'row tight mt-lg' },
+      btn(`Queue for ${deviceName(wanted)}`, 'primary', () => startSession(wanted)),
+      btn(`Start ${deviceName(alt)} anyway`, 'ghost', () => startSession(alt))),
+    h('p', { class: 'caption mt-md', text:
+      'Queueing hands you the class you asked for the moment a lease ends \u2014 there is no estimate '
+      + 'here, because the soonest expiry is only an upper bound.' }),
+  );
+}
+
 function fleetCapacity() {
   const rank = (d) => (d.state === 'READY' ? 0 : BUSY_STATES.has(d.state) ? 1 : 2);
   const rows = [...state.devices].sort((a, b) =>
@@ -1623,15 +1722,31 @@ function fleetCapacity() {
 
       return h('tr', null,
         /**
-         * NAME AND ID, no frame.
+         * NAME, ID — AND THE FRAME, which I removed once and was wrong to.
          *
-         * Stage 3's rule is that a device should be recognisable by its SHAPE before its name is
-         * read, and it earns its place on a card, a picker row and a palette result. Not here: at a
-         * table row's height the frame is a fourteen-pixel sliver that reads as a dark smudge, and
-         * the SCREEN column beside it already states the geometry in words. A component used where
-         * it cannot do its job is decoration.
+         * Entry 51 took the thumbnail out of this table with a reason that was true about the
+         * SIZE I had given it: at 14px a device frame is a dark smudge and the SCREEN column beside
+         * it already states the geometry in words. But document 03's fleet mockup has a frame on
+         * every row, and the answer to "too small to read" is a taller row, not an absent
+         * component. It is what makes this table read as a rack of devices rather than as a
+         * spreadsheet about devices — and a 720x1280 row is visibly stubbier than a 1080x2340 one,
+         * which is a fact you can see before you have read anything.
          */
-        h('td', null, h('div', { class: 'row tight' },
+        /**
+         * THE NAME IS THE LINK, so the row can carry ONE button — document 03's fleet rows have
+         * exactly one, and the second was costing more than it bought. "Details" sat on every row
+         * including the three that already had the action you actually wanted, so the column read
+         * as two choices where there was really one plus a footnote.
+         *
+         * The whole name block is the target rather than the text alone: a 40px-tall row with a
+         * device drawn in it is a much easier thing to hit than eleven characters of it.
+         */
+        h('td', null, h('button', {
+          class: 'row tight fleet-open', type: 'button',
+          title: `Open ${deviceName(d)}`,
+          onclick: () => go(`#/devices/${d.id}`),
+        },
+          deviceThumb(d, 40),
           h('span', { class: 'stack none' },
             h('span', { class: 'fleet-name', text: deviceName(d) }),
             h('code', { class: 'caption', text: short(d.id) }),
@@ -1644,7 +1759,13 @@ function fleetCapacity() {
         h('td', null, geometryText(d)
           ? h('span', { class: 'stack none' },
               h('code', { class: 'caption', text: `${d.screen.width} × ${d.screen.height}` }),
-              h('span', { class: 'micro', text: widthDp(d) }))
+              // DENSITY AND WIDTH, both. They answer different questions: dpi is what an asset is
+              // rasterised for, dp is the number a layout bug is expressed in. Document 03 shows
+              // the pair; this column used to show only the second.
+              h('span', { class: 'caption mono', text: [
+                d.screen.density ? `${d.screen.density}dpi` : null,
+                widthDp(d).replace(' dp', 'dp'),
+              ].filter(Boolean).join(' \u00b7 ') }))
           : h('span', { class: 'caption', text: 'not reported' })),
 
         h('td', null, h('span', { class: 'stack none' },
@@ -1685,7 +1806,15 @@ function fleetCapacity() {
               : d.state === 'QUARANTINED'
                 ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
                 : null,
-          btn('Details', 'tiny ghost', () => go(`#/devices/${d.id}`)),
+          /**
+           * NO Details BUTTON AT ALL — the device's name is the link.
+           *
+           * The condition here used to keep one for the in-between states, which meant every in-use
+           * row carried two controls to the same destination: the name I had just made a link, and
+           * a button beside it. Found by clicking every control on the screen and reading where
+           * each one went. A row with one action reads as a decision; a row with two reads as a
+           * menu, which is what removing the button was for.
+           */
         )),
       );
     })),
@@ -1730,7 +1859,21 @@ function fleetCatalogue() {
     return freeA - freeB || rank(a[1][0]) - rank(b[1][0]) || deviceName(a[1][0]).localeCompare(deviceName(b[1][0]));
   });
 
-  return h('div', { class: 'catgrid' }, groups.map(([, members]) => {
+  /**
+   * PHYSICAL HANDSETS GET A STRIP, NOT A CARD — document 05 §02 puts them in a full-width row under
+   * the grid rather than beside the virtual classes.
+   *
+   * The reason is that they are different IN KIND, not merely a fourth product: they cannot be
+   * reset from a snapshot (only apps are cleared between sessions), they are named by their own
+   * model number rather than an MFARM class, and there is generally one of each. A peer card
+   * invites the comparison "which of these four should I pick", and for a handset that is the wrong
+   * question — you take the handset because it is that phone, or you do not.
+   */
+  const physical = groups.filter(([, m]) => isRealDevice(m[0]));
+  const virtual = groups.filter(([, m]) => !isRealDevice(m[0]));
+
+  return [
+    h('div', { class: 'catgrid' }, virtual.map(([, members]) => {
     const d = members[0];
     const free = members.filter((x) => x.state === 'READY').length;
     // COMING BACK vs NEVER COMING BACK. A device somebody else is using frees up on its own; a
@@ -1752,11 +1895,23 @@ function fleetCatalogue() {
         h('span', { class: `caption${free ? '' : ' warn-text'}`, text: `${free} of ${members.length} free` }),
       ),
 
-      h('div', { class: 'row tight' },
-        deviceThumb(d, 108),
-        h('span', { class: 'stack tight' },
+      /**
+       * THE DEVICE IS THE HERO, on the right, at full card height — document 05 §02. It was a 108px
+       * thumbnail tucked beside the title, which makes the card a text block with a picture in it;
+       * the design makes it a product card, where the shape is the first thing read and the specs
+       * explain it. On a page whose whole job is "choose a screen size", the screen should be the
+       * largest thing on the card.
+       *
+       * And when the class has nothing free, the panel says so INSIDE the glass rather than in a
+       * caption below — the panel is what is unavailable.
+       */
+      h('div', { class: 'cat-body' },
+        h('div', { class: 'stack tight' },
           h('span', { class: 'card-title', text: deviceName(d) }),
           h('p', { class: 'help cat-blurb', text: blurb }),
+        ),
+        h('div', { class: 'cat-hero' },
+          staticFrame(d, 230, 'off', free ? null : 'all in use'),
         ),
       ),
 
@@ -1787,11 +1942,22 @@ function fleetCatalogue() {
        * anyway, because it only asked whether anything was FREE — the same "busy versus
        * unavailable" distinction the launch picker already makes, missed one screen over.
        */
+      /**
+       * SHORT LABELS, because the card already says the name — document 05 §02 has "Start one" and
+       * "Join queue · 2 ahead". Repeating "MFARM X1 Pro" in a button eighteen pixels under a
+       * heading that says "MFARM X1 Pro" is words the reader has to check rather than read.
+       *
+       * The QUEUE LENGTH is on the button, though, and it is the one number that changes the
+       * decision: "join a queue" and "join a queue with four people in it" are different offers.
+       * Counted from the sessions already waiting, not invented.
+       */
       h('div', { class: 'row tight' },
         free
-          ? btn(`Start ${deviceName(d)}`, 'primary', () => startSession(d))
+          ? btn('Start one', 'primary', () => startSession(d))
           : coming
-            ? btn(`Join the queue for ${deviceName(d)}`, 'ghost', () => startSession(d))
+            ? btn(queuedSessions().length
+              ? `Join queue \u00b7 ${queuedSessions().length} ahead`
+              : 'Join queue', 'ghost', () => startSession(d))
             : null,
         btn('Full specification', 'ghost', () => go(`#/devices/${d.id}`)),
       ),
@@ -1802,7 +1968,46 @@ function fleetCatalogue() {
             ? 'Out of the pool. Nothing is queued for it, because a queue here would never be served.'
             : 'Every device in this class is out of the pool. A queue here would never be served.' }),
     );
-  }));
+    })),
+
+    physical.length ? physicalStrip(physical) : null,
+  ];
+}
+
+/**
+ * The handsets, summarised in one row — document 05 §02.
+ *
+ * States the two things that make a real phone different from a class, both of which are facts
+ * about the hardware rather than opinions: it cannot be snapshot-reset, and it is named by its own
+ * model number. The count and the names come from the fleet, so a farm with none of them shows
+ * nothing at all rather than an empty section explaining an absence.
+ */
+function physicalStrip(groups) {
+  const all = groups.flatMap(([, m]) => m);
+  const free = all.filter((d) => d.state === 'READY');
+  const names = [...new Set(all.map((d) => deviceName(d)))];
+
+  return card(null, { class: 'phystrip mt-gap' },
+    h('div', { class: 'row tight' },
+      staticFrame(all[0], 92),
+      h('div', { class: 'stack tight' },
+        h('div', { class: 'row tight' },
+          h('span', { class: 'card-title', text: 'Physical handsets' }),
+          h('span', { class: 'kindtag real', text: `${all.length} in the farm` })),
+        h('p', { class: 'help cat-blurb' },
+          'Real phones plugged into a real machine. They cannot be reset from a snapshot \u2014 only '
+          + 'apps are cleared between sessions \u2014 and they are named by their own model number, '
+          + 'not an MFARM class. ',
+          // The specific ones, and their state, because "we have handsets" is not actionable and
+          // "one SM-S918B, out of the pool" is.
+          h('span', { class: 'secondary', text: names.join(', ') }),
+          free.length ? `, ${free.length} free.` : ', all out of the pool.'),
+      ),
+      h('span', { class: 'spacer' }),
+      btn(free.length ? 'Start one' : 'See it', free.length ? 'primary' : 'ghost',
+        () => (free.length ? startSession(free[0]) : go(`#/devices/${all[0].id}`))),
+    ),
+  );
 }
 
 /**
@@ -1819,7 +2024,23 @@ function screenFleet() {
   const counts = { live, waiting };
 
   return [
-    pageHead([{ label: 'Farm' }], 'Fleet', fleetHeadline()),
+    /**
+     * THE HEADLINE IS A NODE, NOT A STRING — document 03 sets the waiting clause apart in amber.
+     *
+     * It was one flat sentence, and the half that changes what you do next ("two people are
+     * waiting") read exactly like the half that does not ("every device is in use"). Emphasis here
+     * is not decoration: it is the difference between a fact and a fact you have to act on. The
+     * WORDS still carry it on their own, so nothing is conveyed by colour alone.
+     */
+    pageHead([{ label: 'Farm' }], 'Fleet', null, null, (() => {
+      const hl = fleetHeadline();
+      return h('p', { class: 'page-sub' },
+        hl.capacity,
+        hl.queue ? ' ' : null,
+        hl.queue
+          ? h('span', { class: hl.waiting ? 'warn-text' : '', text: hl.queue })
+          : null);
+    })()),
 
     h('div', { class: 'row tight mb-gap lensrow' }, LENSES.map(([key, label]) => h('button', {
       class: `lens${lens === key ? ' on' : ''}`,
@@ -1838,7 +2059,7 @@ function screenFleet() {
           // available / Nobody is waiting" — which the headline four lines above already said, in
           // the same words. Two panels stating one fact is exactly the duplication this surface was
           // built to remove, and the queue has its own lens.
-          : fleetCapacity(),
+          : [fleetCapacity(), substitutionNotice()],
   ];
 }
 
@@ -2151,9 +2372,27 @@ function quarantineCard(d) {
              * removed: an admin may know the host is back, and a control an admin might need is
              * not the console's to delete (stage 5).
              */
+            /**
+             * THE PANEL IS THE CONFIRM — document 05 §03 draws Authorise and Cancel inline, not a
+             * modal on top of them.
+             *
+             * Two documents disagree and the specific one wins: document 06's primitive table says
+             * the filled destructive button belongs "only inside a confirm dialog", and §03 puts
+             * one on this page. §03 is right, because the panel above IS the confirm surface — it
+             * carries the same four consequences the dialog was listing, only larger and without
+             * having to be opened. A modal that repeats the list verbatim asks somebody to read it
+             * twice and teaches them to skip it the second time.
+             *
+             * SAFE TO INLINE because of what the action is: releasing authorises ONE reset and one
+             * health check. It destroys nothing, it does not return the device to the pool, and the
+             * panel says both. A confirm step exists to slow down an irreversible thing, and this
+             * is not one.
+             */
             derivedNote
-              ? btn('Ask for a recovery attempt anyway', 'danger', () => askReleaseQuarantine(d))
-              : btn('Authorise one recovery attempt', 'danger-solid', () => askReleaseQuarantine(d))),
+              ? btn('Ask for a recovery attempt anyway', 'danger', () => releaseQuarantine(d.id))
+              : btn('Authorise one recovery attempt', 'danger-solid', () => releaseQuarantine(d.id)),
+            // Cancel leaves the page rather than closing something — there is no overlay to close.
+            btn('Cancel', 'ghost', () => go('#/fleet'))),
         ]
         // Said rather than silently absent: a member who cannot find the button should learn why
         // instead of concluding the console has none.
@@ -2865,7 +3104,10 @@ function bringupStage(sess, device, steps) {
   st.root.dataset.mode = 'bringup';
   const beat = bringupBeat(sess, steps);
   st.root.dataset.beat = String(beat);
-  st.root.dataset.resolved = beat === 0 ? 'no' : 'yes';
+  // `data-resolved` belongs to the COCKPIT's queued state, which is a different screen making the
+  // same point. Setting both here meant two rules fighting over the same blur with different
+  // opacities, and the loser was whichever the cascade happened to put second.
+  delete st.root.dataset.resolved;
 
   // The panel interior follows the same rules it does in the cockpit — `stageState` already knows
   // about a device that declares no stream, and beat 4 is exactly its `live`.
@@ -3045,6 +3287,8 @@ function screenLaunching(id) {
         btn('Cancel', 'ghost', () => cancelBringup(id)),
       ),
     ),
+
+    state.acceptedHandover === id ? null : handoverNotice(sess),
 
     h('div', { class: 'bringup' },
       h('div', { class: 'bringup-stage' },
@@ -3340,6 +3584,16 @@ function stagePanel(sess, live) {
 
   const st = state.stage;
   st.root.dataset.mode = 'session';
+  /**
+   * THE BEAT DOES NOT FOLLOW THE ELEMENT INTO THE COCKPIT.
+   *
+   * This is the cost of the continuity rule: the frame is deliberately never unmounted, so every
+   * attribute the bring-up screen put on it is still there when the cockpit takes it over. A
+   * leftover `data-beat="2"` would hold the chassis flat and the contact ellipse at zero on a
+   * session that is fully attached — the device would arrive in the cockpit looking like it had not
+   * finished arriving.
+   */
+  delete st.root.dataset.beat;
   paintToolbar(sess, live, caps);
   paintOverlay(sess, live, caps);
   paintFrame(device);
@@ -3642,8 +3896,19 @@ function paintOverlay(sess, live, caps) {
    */
   if (!canStream) {
     return show(
-      h('p', { class: 'micro', text: 'No live view' }),
-      h('p', { class: 'help', text: 'This device declares no screen-stream. That is a property of the device, not a fault.' }),
+      // Amber, not grey: document 04 marks this state. It is not a fault, but it IS the reason the
+      // panel is empty, and a grey line reads as a caption rather than as the answer.
+      h('p', { class: 'micro warn-text', text: 'No live view' }),
+      /**
+       * `screen-stream` IS STRUCK WHERE IT IS NAMED, exactly as the capability chips on device
+       * detail are struck and for the same reason: the strike is what makes "declares no" a thing
+       * you can see rather than a sentence you have to parse. Three surfaces now use one visual for
+       * one fact — the chip, the rail control, and this.
+       */
+      h('p', { class: 'help' },
+        'This device declares no ',
+        h('s', { class: 'mono', text: 'screen-stream' }),
+        '. That is a property of the device, not a fault.'),
       /**
        * NAMED IN FULL, because the half-list was doing the opposite of its job. It read "Input,
        * logcat, install and WebDriver still work" and left out keyboard and launch — so a person
@@ -3651,8 +3916,11 @@ function paintOverlay(sess, live, caps) {
        * device actually has. Document 04 S2 heads this "Everything else works" for that reason: the
        * point is not that some things work, it is that only the three needing pixels do not.
        */
-      h('p', { class: 'micro mt-sm', text: 'Everything else works' }),
-      h('p', { class: 'caption', text: 'Input, keyboard, install, launch, logcat and WebDriver are all live. Screenshot, zoom and fullscreen are struck through in the rail because they need the stream.' }),
+      // A panel, not two more lines of the same paragraph — document 04 gives this its own box,
+      // because it is the half that decides whether the device is worth keeping.
+      h('div', { class: 'worksbox' },
+        h('p', { class: 'worksbox-h', text: 'Everything else works' }),
+        h('p', { class: 'caption', text: 'Input, keyboard, install, launch, logcat and WebDriver are all live. Screenshot, zoom and fullscreen are struck through in the rail because they need the stream.' })),
     );
   }
 
@@ -3776,7 +4044,7 @@ function endedSentence(sess) {
   const clockAt = at && !Number.isNaN(at.getTime())
     ? ` at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
     : '';
-  const ran = sess?.startedAt && sess?.endedAt ? `, after ${duration(sess.startedAt, sess.endedAt)}` : '';
+  const ran = sess?.startedAt && sess?.endedAt ? `, after ${lengthInWords(sess.startedAt, sess.endedAt)}` : '';
 
   // Virtual devices reset from a snapshot between tenants; a handset does not have one.
   const fate = !device || isRealDevice(device)
@@ -4036,6 +4304,73 @@ function capturesCard() {
  * bars", but "no bar without a number behind it".
  */
 /**
+ * "YOU ASKED FOR AN X1 PRO. YOU HAVE AN UNPROFILED DEVICE." — document 08's handover panel.
+ *
+ * The other half of the substitution story. The Fleet's notice fires BEFORE you start, when the
+ * only free device is the wrong shape and you still have a choice; this one fires AFTER, when a
+ * session already holds a device that is not the class it asked for.
+ *
+ * WHEN IT CAN ACTUALLY HAPPEN, because a panel that cannot appear is worse than no panel. Since
+ * ADR-0025 the console always constrains, so a console-started session cannot land here — the
+ * allocator queues instead of substituting. What CAN: a session started by the CLI, a WebDriver
+ * suite, or any caller that named a class and accepted a substitute, then opened in the console.
+ * The data is `constraints->>'profile'`, which the API now returns as `requestedProfile`.
+ *
+ * NO NOTICE WITHOUT AN ASK. A caller that named no class asked for nothing in particular and
+ * cannot have been disappointed, so `matchedProfile` gates the whole thing.
+ */
+function handoverNotice(sess) {
+  if (!sess?.matchedProfile || !sess.deviceId) return null;
+  const got = deviceById(sess.deviceId);
+  if (!got) return null;
+
+  const asked = sess.requestedProfile ?? null;
+  const gotClass = got.profile ?? null;
+  if (asked === gotClass) return null;
+
+  // Name the class that was asked for, from any device that is in it — the profile id alone
+  // ("mfarm-x1-pro") is an internal handle and the copy deck forbids it in prose.
+  const exemplar = state.devices.find((d) => (d.profile ?? null) === asked);
+  const askedName = exemplar ? deviceName(exemplar) : (asked || 'an unprofiled device');
+
+  const gotShape = geometryText(got) ? `${got.screen.width} \u00d7 ${got.screen.height}` : 'a different screen';
+  const askedShape = exemplar && geometryText(exemplar)
+    ? `${exemplar.screen.width} \u00d7 ${exemplar.screen.height}` : null;
+
+  return h('section', { class: 'card gate waiting' },
+    h('p', { class: 'card-title', text: `You asked for ${askedName}. You have ${deviceName(got)}.` }),
+    h('p', { class: 'help' },
+      'Its screen is ', h('code', { text: gotShape }),
+      askedShape ? [', not ', h('code', { text: askedShape })] : null,
+      '. Everything works, but any layout you are testing will render differently.'),
+    h('div', { class: 'row tight mt-lg' },
+      // "Keep it" dismisses nothing — the session is already yours. It acknowledges, and the
+      // acknowledgement is per-session so it does not come back on the next render.
+      btn('Keep it', 'ghost', () => { state.acceptedHandover = sess.id; render(); }),
+      btn(`Release and queue for ${askedName}`, 'primary', () => releaseAndRequeue(sess, exemplar)),
+    ),
+  );
+}
+
+/**
+ * Give the wrong device back and ask again for the right class.
+ *
+ * TWO CALLS, IN THIS ORDER, and the order is the whole of it: release first, so the device this
+ * person is not using goes back to the pool where somebody else can have it, and only then queue.
+ * Queueing first would hold two devices' worth of capacity for one person.
+ */
+async function releaseAndRequeue(sess, exemplar) {
+  try {
+    await api(`/v1/sessions/${encodeURIComponent(sess.id)}`, { method: 'DELETE' });
+    await refreshAll();
+    if (exemplar) startSession(exemplar);
+    else toast('Released', 'The class you asked for is not in this fleet any more.', 'warn');
+  } catch (e) {
+    toast('Could not release the device', e.message, 'bad');
+  }
+}
+
+/**
  * WAITING, EXPLAINED — document 04's queued state.
  *
  * Beside the frame rather than on it: the frame is deliberately unresolved here, and a blur applies
@@ -4126,6 +4461,9 @@ function endedSummary(sess, live) {
   );
 }
 
+/** What a finished action is called, in the tense it finished in. */
+const OUTCOME_VERB = { install: 'Installed', launch: 'Launched', uninstall: 'Uninstalled' };
+
 function actionStatusStrip() {
   const a = state.action;
   if (!a) return null;
@@ -4168,8 +4506,10 @@ function actionStatusStrip() {
           : null,
       ]
       : [
+        // The past-tense verb is the headline — "Installed", "Launched" — with the machine detail
+        // underneath. Document 04's outcome block leads with what happened, not with who said so.
         h('p', { class: a.state === 'FAILED' ? 'meta bad-text' : 'meta ok-text',
-          text: a.error || (a.state === 'DONE' ? 'Confirmed by the worker.' : '') }),
+          text: a.error || (a.state === 'DONE' ? `${OUTCOME_VERB[a.kind] || 'Done'}` : '') }),
         h('p', { class: 'meta tnum', text: [
           a.finishedAt ? new Date(a.finishedAt).toLocaleTimeString() : null,
           gap !== null ? `${gap.toFixed(1)}s after queueing` : null,
@@ -4413,7 +4753,9 @@ function screenCockpit(id) {
         h('span', { class: 'spacer' }),
         live
           ? ticker('since', sess.startedAt || sess.createdAt, { prefix: 'running ', cls: 'caption' })
-          : h('span', { class: 'caption tnum', text: `ran ${duration(sess.startedAt || sess.createdAt, sess.endedAt)}` }),
+          // "ran 20 minutes", not "ran 20:00" — this sits beside a wall-clock time and the two
+          // were indistinguishable.
+          : h('span', { class: 'caption', text: `ran ${lengthInWords(sess.startedAt || sess.createdAt, sess.endedAt)}` }),
         copyrow(sess.id, 'Copy id'),
       ),
       live && sess.expiresAt ? h('div', { class: 'mt-md' }, leaseBlock(sess)) : null,
@@ -4425,6 +4767,7 @@ function screenCockpit(id) {
     h('div', { class: 'split' },
       h('div', { class: 'content' },
         queuedNote(sess),
+        state.acceptedHandover === sess.id ? null : handoverNotice(sess),
         stagePanel(sess, live),
         endedSummary(sess, live),
         logcatDock(sess, live),
@@ -4609,7 +4952,7 @@ function holdStrip() {
               h('span', { class: 'secondary', text: ready.length ? `Not holding a device. ${ready.length} ready.` : 'Not holding a device, and none are ready.' })),
             h('p', { class: 'caption', text: 'Installing needs a live session — the build goes onto the device you are holding, and nowhere else.' }),
           ),
-          btn('Go to Devices', 'ghost', () => go('#/devices')),
+          btn('Go to the Fleet', 'ghost', () => go('#/fleet')),
         ),
   );
 }
@@ -5303,7 +5646,18 @@ function screenHealth() {
   const failures = state.actions.filter((a) => a.state === 'FAILED' && new Date(a.finishedAt || a.requestedAt) > dayAgo);
   const active = state.sessions.filter((s) => LIVE_SESSION_STATES.has(s.state)).length;
 
-  const stat = (label, value, tone, note) => card(null, { class: 'stat stack tight' },
+  /**
+   * A COUNT THAT IS BAD NEWS CARRIES THE BORDER — document 05 §06 draws the failed-actions card
+   * with a red edge and the other two plain.
+   *
+   * The dot alone put the severity inside the card, where it competes with the number; the edge
+   * puts it on the card, so a page of five stats says which one to read first from across the room.
+   * Only when the count is non-zero: a red border around "0 failed" would be the alarm that cries
+   * wolf, which is the thing this console keeps deleting.
+   */
+  const stat = (label, value, tone, note) => card(null, {
+    class: `stat stack tight${tone === 'bad' && value !== '0' ? ' stat-bad' : ''}`,
+  },
     h('p', { class: 'micro', text: label }),
     h('p', { class: 'row tight' }, h('span', { class: `dot ${tone || ''}`.trim() }), h('span', { class: 'val', text: value })),
     h('p', { class: 'caption', text: note }),
@@ -5348,7 +5702,16 @@ function screenHealth() {
         ),
       ),
       h('div', { class: 'rail' },
-        card('Worker', {},
+        /**
+         * NAMED AND MARKED — document 05 §06: *"Health's most valuable panel is the one that says
+         * what the console cannot see... Keeping this panel is the point. An observability page
+         * that implies it sees everything is worse than one that names its blind spot."*
+         *
+         * It was a plain card called "Worker", which reads as one more section. The design gives it
+         * the amber edge every other "read this" surface in the console has, and a title that says
+         * what it is for rather than what it is about.
+         */
+        card('What this page cannot see', { class: 'gate waiting' },
           // The heartbeat is the number this screen most wants, and POST /v1/workers/heartbeat is
           // the only route that touches it — worker-authenticated and write-only. There is no read
           // endpoint for host state, so this says so instead of showing a dot that means nothing.
@@ -5414,6 +5777,21 @@ function commands() {
     }
     list.push({ frame: d, label: `Open ${deviceName(d)}`, note: geometryText(d), group: 'Go to', run: () => go(`#/devices/${d.id}`) });
   }
+  /**
+   * LAUNCH LIVES HERE NOW, not in the nav — document 06: the palette is *"the fastest path to
+   * everything, and the reason Launch does not need to be a route"*.
+   *
+   * The nav item is gone, the ROUTE is not. Typing a device name already offers to start it, and
+   * that covers the ordinary case; what it does not cover is the one thing the Launch screen
+   * uniquely does — choose a build so it is installed BEFORE you arrive at the cockpit. Deleting
+   * the nav item without relocating that would have removed a capability rather than moved it,
+   * which is the objection that kept the item for three weeks.
+   */
+  list.push({
+    icon: 'launch', label: 'Start a device with a build installed', group: 'Do',
+    note: 'picks the class and the APK, then hands you the cockpit',
+    run: () => go('#/launch'),
+  });
   list.push({ icon: 'upload', label: 'Upload an APK', group: 'Do', run: () => { go('#/apps'); setTimeout(() => $('apk-input')?.click(), 60); } });
   list.push({
     icon: 'copy', label: 'Copy the WebDriver URL', group: 'Do',
@@ -5730,7 +6108,19 @@ function screenAgents() {
 
 async function inspectCode() {
   const code = state.pair.code.trim();
-  if (!code) return;
+  /**
+   * AN EMPTY FIELD GETS AN ANSWER, not silence.
+   *
+   * This returned early and said nothing: a person clicked Find machine with nothing typed and the
+   * console did not move, error, or hint. Found by clicking every control on every screen — no test
+   * covers "what happens when you press the button before filling the field", and it is the first
+   * thing a person actually does.
+   */
+  if (!code) {
+    state.pair.error = 'Type the code the agent window is showing, then press Find machine.';
+    render();
+    return;
+  }
   state.pair.busy = true;
   state.pair.error = null;
   state.pair.machine = null;

@@ -242,11 +242,25 @@ export function applyFrame(dom, frame, opts = {}) {
  * and a placeholder app is a lie. The empty panel says "this device is not showing you anything
  * right now", which is true.
  */
-export function staticFrame(device, height, state = 'off') {
+/**
+ * `note` PUTS A LINE INSIDE THE SCREEN, and the catalogue is why it exists: document 05 §02 draws
+ * a class with nothing free as a dark panel reading "all in use" rather than as an empty frame with
+ * a caption underneath it. The panel is the thing being described, so the description belongs in it.
+ *
+ * Text only, and only for a frame nothing is streaming into — a note over a live framebuffer would
+ * be the one thing a device-mirroring panel must never do.
+ */
+export function staticFrame(device, height, state = 'off', note = null) {
   const panel = document.createElement('div');
   panel.className = 'mf-panel';
   const dom = buildFrame(panel);
   applyFrame(dom, frameFor(device), { state });
+  if (note) {
+    const n = document.createElement('p');
+    n.className = 'mf-note';
+    n.textContent = note;
+    dom.glass.append(n);
+  }
   /**
    * SIZED BY HEIGHT HERE, unlike the cockpit's `size`, and the difference is what makes a row of
    * devices readable.

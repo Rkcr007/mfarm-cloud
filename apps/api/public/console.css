@@ -394,12 +394,27 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   margin-bottom: var(--mf-gap, 14px);
 }
 .card.gate.waiting .card-title { color: var(--warn, #E8A30E); }
+/* A card head rendered as a `micro` label rather than a title still needs the colour. */
+.card.gate.waiting > .card-head .micro { color: var(--warn, #E8A30E); }
+
+/* A stat whose number is bad news, marked on the edge rather than only by its dot. */
+.card.stat-bad { border-color: var(--bad-line, rgba(224, 80, 95, .30)); }
 .endstats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 14px 20px;
 }
-.endstat { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/*
+ * EACH NUMBER IN ITS OWN BOX — document 04 S4. They were a flat grid, which reads as one paragraph
+ * of four numbers; boxed, each is a separate answer to a separate question, which is what they are.
+ */
+.endstat {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--b-card, #1F1F22);
+  border-radius: var(--r-md, 9px);
+  background: var(--s-inset, #050506);
+}
 .endstat-v {
   font-family: var(--f-mono);
   font-size: 17px;
@@ -409,6 +424,30 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   text-overflow: ellipsis;
 }
 .endstat-l { font-size: 10.5px; color: var(--t-caption, #6A6A6A); }
+
+/*
+ * "Everything else works" — document 04 S2 gives this its own box, because it is the half that
+ * decides whether a stream-less device is worth keeping. Amber like the state above it: not a
+ * fault, but the reason the panel is empty.
+ */
+.worksbox {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border-radius: var(--r-sm, 6px);
+  background: var(--warn-bg, rgba(232, 163, 14, .06));
+  border: 1px solid var(--warn-line, rgba(232, 163, 14, .24));
+  text-align: left;
+  max-width: 40ch;
+}
+.worksbox-h {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--warn, #E8A30E);
+  margin-bottom: 5px;
+}
+/* The struck capability, wherever it is NAMED in prose — one visual for one fact, the same as the
+   chip on device detail and the control in the rail. */
+.dev-overlay s, .help s { text-decoration-thickness: 1px; color: #8A8A8A; }
 
 /*
  * THE QUEUED FRAME IS PRESENT BUT UNRESOLVED — document 04. It has not been allocated, so it is
@@ -432,6 +471,25 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
               opacity var(--m-arrive, 700ms) var(--ease-emphatic),
               transform var(--m-arrive, 700ms) var(--ease-emphatic);
 }
+
+/*
+ * The fleet row's name block, which is the row's link. A button, so it is reachable by keyboard and
+ * announced as an action — styled back down to look like the text it replaced, because a row of
+ * four buttons that look like buttons is a toolbar, not a table.
+ */
+.fleet-open {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--r-sm, 6px);
+}
+.fleet-open:hover .fleet-name { color: var(--mf-accent-text, var(--accent-text)); }
+.fleet-open:focus-visible { outline: 2px solid var(--b-focus); outline-offset: 3px; }
 
 /* Key/value row. */
 .kv { display: grid; grid-template-columns: minmax(96px, 34%) 1fr; }
@@ -460,10 +518,19 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   padding: 8px 8px 8px 10px;
   min-width: 0;
 }
+/*
+ * ELLIPSIS, NEVER A SHORTENED VALUE — document 06's copy-field spec.
+ *
+ * This scrolled instead, with the scrollbar hidden: the overflow was reachable but there was no
+ * sign it existed, so a truncated uuid looked like a complete one. An ellipsis is the cue that
+ * there is more. The DATA is untouched either way — the full value is in the DOM, selectable, and
+ * the Copy button takes all of it — which is the half of the rule that actually matters.
+ */
 .copyrow code {
   flex: 1 1 auto;
   min-width: 0;
-  overflow-x: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--t-body, #D4D4D4);
   font-size: 11.5px;
@@ -1454,44 +1521,112 @@ kbd {
   --f-w: calc(min(46vh, 420px) * var(--f-aspect));
 }
 
-/*
- * BEAT 01 — the allocator claims a device: the chassis resolves out of blur.
+/* ---------------------------------------------------------------- the six beats
  *
- * Shared with the queued cockpit above, which is the same fact wearing a different screen: a device
- * that has not been allocated is not yet a real object, so it is not yet drawn as one.
+ * DRIVEN ENTIRELY BY `data-beat`, and scoped to the bring-up screen. The cockpit shows the same
+ * element with everything already arrived, so none of this applies there — the frame carries its
+ * final appearance the moment `data-mode` becomes `session`, and the transition between the two is
+ * beat 06's settle.
+ *
+ * The previous version declared transitions for beats 02, 04 and 06 and never changed the
+ * properties they were watching, so three of the six did nothing at all. A transition with no state
+ * change is a comment that looks like code.
  */
 
 /*
- * BEAT 03 — the data-plane socket opens and DEPTH LANDS. This is the beat where the device becomes
- * a physical object, and it is the only shadow change in the product.
- *
- * KEYED TO THE SOCKET, NOT THE STREAM, and that is a correction. Depth used to land on
- * `data-state="live"` — so a device declaring no `screen-stream` never became physical at all, and
- * one with a slow negotiation stayed flat while it was already fully attached and driveable. The
- * socket is what makes a session real (migration 017); the video is a nicety on top of it.
+ * BEAT 01 — the allocator claims one: the chassis resolves out of blur.
+ * `opacity .06 → 1, scale .955 → 1, blur 9px → 0`. The screen stays off and the shadow stays flat:
+ * a device that exists is not yet a device that is awake.
  */
-.devpanel[data-beat] .mf-chassis {
-  transition: box-shadow var(--m-settle, 900ms) var(--ease-out);
+.devpanel[data-mode="bringup"] .dev-fit {
+  transition: filter var(--m-arrive, 700ms) var(--ease-emphatic),
+              opacity var(--m-arrive, 700ms) var(--ease-emphatic),
+              transform var(--m-arrive, 700ms) var(--ease-emphatic);
 }
-.devpanel[data-beat] .mf-contact {
-  transition: opacity var(--m-settle, 900ms) var(--ease-out);
+.devpanel[data-mode="bringup"][data-beat="0"] .dev-fit {
+  filter: blur(9px);
+  opacity: .06;
+  transform: scale(.955);
 }
-.devpanel[data-beat="3"] .mf-chassis,
-.devpanel[data-beat="4"] .mf-chassis,
-.devpanel[data-beat="5"] .mf-chassis,
-.devpanel[data-beat="6"] .mf-chassis { box-shadow: var(--e-device); }
-.devpanel[data-beat="3"] .mf-contact,
-.devpanel[data-beat="4"] .mf-contact,
-.devpanel[data-beat="5"] .mf-contact,
-.devpanel[data-beat="6"] .mf-contact { opacity: 1; }
 
 /*
- * BEAT 04 — real pixels cross-fade up, and the glass sheen fades in with them. The panel's own
- * `data-state` already switches the interior; this is only the timing.
+ * BEAT 02 — the clean snapshot is restored: the screen wakes.
+ *
+ * A centred cool glow RAMPS UP behind the glass. The design tracks the glow's radius to
+ * snapshot-restore progress where that exists and says plainly what to do where it does not — "the
+ * wake glow pulses instead of tracking" — and no worker reports restore progress, so it ramps in
+ * and then breathes on the system loop. Both gates stop the breathing; the glow itself stays, so a
+ * viewer with motion off still sees a woken screen rather than a dead one.
  */
-.devpanel[data-beat] .mf-glass > .mf-panel,
-.devpanel[data-beat] .mf-sheen {
+@keyframes mf-wake-in { from { opacity: 0; } to { opacity: 1; } }
+.devpanel[data-mode="bringup"] .mf-glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: radial-gradient(62% 44% at 50% 46%, var(--mf-accent, #755EB8), transparent 70%);
   transition: opacity var(--m-arrive, 700ms) var(--ease-out);
+}
+.devpanel[data-mode="bringup"][data-beat="2"] .mf-glass::before,
+.devpanel[data-mode="bringup"][data-beat="3"] .mf-glass::before {
+  opacity: .34;
+  animation: mf-wake var(--mf-pulse, 2.2s) ease-in-out infinite;
+}
+
+/*
+ * BEAT 03 — the data-plane socket opens and DEPTH LANDS. The beat where the device stops being a
+ * picture and becomes an object, and the only shadow change in the product.
+ *
+ * KEYED TO THE SOCKET, NOT THE STREAM. Depth used to land on `data-state="live"`, so a device that
+ * declares no `screen-stream` never became physical at all, and one with a slow negotiation stayed
+ * flat while it was already attached and driveable (migration 017: the socket is what makes a
+ * session real).
+ */
+.devpanel[data-beat] .mf-chassis { transition: box-shadow var(--m-settle, 900ms) var(--ease-out); }
+.devpanel[data-beat] .mf-contact { transition: opacity var(--m-settle, 900ms) var(--ease-out); }
+.devpanel[data-beat="0"] .mf-chassis,
+.devpanel[data-beat="1"] .mf-chassis,
+.devpanel[data-beat="2"] .mf-chassis { box-shadow: var(--e-device-flat); }
+.devpanel[data-beat="0"] .mf-contact,
+.devpanel[data-beat="1"] .mf-contact,
+.devpanel[data-beat="2"] .mf-contact { opacity: 0; }
+
+/*
+ * BEAT 04 — the stream negotiates: real pixels cross-fade up OVER the wake glow, and the glass
+ * sheen fades in with them.
+ *
+ * The glow going out as the pixels come in is the cross-fade — the wake light was standing in for a
+ * screen, and now there is one. Sub-states read as machine text under the step, never as motion.
+ */
+.devpanel[data-mode="bringup"] .mf-glass > .mf-panel,
+.devpanel[data-mode="bringup"] .mf-sheen {
+  transition: opacity 800ms var(--ease-out);
+}
+.devpanel[data-mode="bringup"]:not([data-beat="4"]):not([data-beat="5"]):not([data-beat="6"]) .mf-glass > .mf-panel,
+.devpanel[data-mode="bringup"]:not([data-beat="4"]):not([data-beat="5"]):not([data-beat="6"]) .mf-sheen {
+  opacity: 0;
+}
+.devpanel[data-mode="bringup"][data-beat="4"] .mf-glass::before,
+.devpanel[data-mode="bringup"][data-beat="5"] .mf-glass::before,
+.devpanel[data-mode="bringup"][data-beat="6"] .mf-glass::before {
+  opacity: 0;
+  animation: none;
+}
+
+/*
+ * BEAT 06 — the app is open. NOTHING IS DRAWN: the app appearing IS the animation, and it arrives
+ * in the framebuffer on its own. What moves is the composition, settling into the layout the
+ * cockpit will hold it in.
+ *
+ * A scale, not a position: the frame's place on the page is the bring-up screen's grid and the
+ * cockpit's is its own, and animating between two layouts would need both on screen at once. This
+ * is the settle the design asks for — the device arriving at rest — and the handover to the cockpit
+ * is then a mode change on an element that is already still.
+ */
+.devpanel[data-mode="bringup"][data-beat="6"] .dev-fit {
+  transform: scale(1.015);
+  transition: transform var(--m-settle, 900ms) var(--ease-out);
 }
 
 /*
@@ -2113,8 +2248,17 @@ kbd {
  * decision the full-size frame makes with a gradient, taken with the one tool that survives at this
  * scale.
  */
+/*
+ * A HAIRLINE, so the silhouette reads at 40px.
+ *
+ * The tiny scale drops the shadow, the contact ellipse and the rails — correct, they are three
+ * pixels of grey that make a row look dirty. But with all of them gone the chassis was a flat fill
+ * against a dark table and the thumbnails read as black rectangles: the SHAPE, which is the entire
+ * reason the frame is in the row at all, was the thing that disappeared. One border restores it and
+ * costs nothing.
+ */
 .mf-device[data-scale="tiny"] .mf-chassis {
-  box-shadow: none;
+  box-shadow: 0 0 0 1px rgba(235, 238, 245, .10);
   background: #34323C;
 }
 .mf-device[data-scale="tiny"][data-kind="physical"] .mf-chassis { background: #3A3630; }
@@ -2217,3 +2361,39 @@ kbd {
 .catgrid { display: grid; gap: var(--mf-gap, 16px); grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
 .cat-card { gap: var(--mf-gap, 16px); }
 .cat-blurb { max-width: 46ch; text-wrap: pretty; }
+
+/*
+ * The catalogue card as a PRODUCT card — document 05 §02. Text on the left, the device at full
+ * card height on the right. On a page whose whole job is "choose a screen size", the screen is the
+ * largest thing on the card and two classes are told apart by silhouette before a word is read.
+ */
+.cat-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: start;
+}
+.cat-hero { display: grid; place-items: start center; }
+/* The handsets' row: full width under the grid, so they read as a different kind rather than a
+   fourth product to choose between. */
+.phystrip .cat-blurb { max-width: 72ch; }
+/* Below the two-column breakpoint the frame would squeeze the prose to a ribbon, so it steps out. */
+@media (max-width: 900px) {
+  .cat-body { grid-template-columns: minmax(0, 1fr); }
+  .cat-hero { display: none; }
+}
+
+/* A line inside the glass, for a panel that is not streaming — see `staticFrame`'s `note`. */
+.mf-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  margin: 0;
+  padding: 8%;
+  text-align: center;
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+  color: #787878;
+  pointer-events: none;
+}

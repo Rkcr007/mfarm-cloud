@@ -348,7 +348,22 @@ export async function sessionRoutes(app: FastifyInstance) {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.device_id, s.fence, s.region, s.created_at, s.started_at,
                 s.expires_at, s.ended_at, s.end_reason,
-                s.run_id, r.external_id AS run_external_id
+                s.run_id, r.external_id AS run_external_id,
+                -- WHAT WAS ASKED FOR, so the console can tell whether it got it.
+                --
+                -- The constraints column is where migration 006 records the scheduling inputs so
+                -- promote_queued can re-apply them minutes later; ADR-0025 added the device class
+                -- to it. Reading it back is what lets a session say "you asked for an X1 Pro and
+                -- you have an unprofiled device" instead of silently handing over a different
+                -- screen -- document 08's handover panel, which had no data behind it.
+                --
+                -- Only meaningful when the caller CONSTRAINED. A CLI or hub request that named no
+                -- class asked for nothing in particular and cannot have been disappointed.
+                --
+                -- No backticks in here: this is inside a JS template literal, and one ends the
+                -- string on a line of prose. TS1005 then points at the next SQL keyword.
+                s.constraints->>'profile'   AS requested_profile,
+                (s.constraints->>'matchProfile')::boolean AS matched_profile
            FROM sessions s
            LEFT JOIN runs r ON r.id = s.run_id
           WHERE s.id = $1`,
@@ -424,6 +439,11 @@ export async function sessionRoutes(app: FastifyInstance) {
         region: row.region, createdAt: row.created_at, startedAt: row.started_at,
         expiresAt: row.expires_at, endedAt: row.ended_at, endReason: row.end_reason,
         run: row.run_id ? { id: row.run_id, runId: row.run_external_id } : null,
+        // Sent only when the caller actually constrained — see the query. Absent means "anything
+        // was acceptable", which is a different thing from "asked for nothing and got nothing".
+        ...(row.matched_profile
+          ? { requestedProfile: row.requested_profile ?? null, matchedProfile: true }
+          : {}),
       },
       ...(dataPlane ? { dataPlane } : {}),
       ...(ice ? { ice } : {}),

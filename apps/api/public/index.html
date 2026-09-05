@@ -152,16 +152,18 @@
       LAUNCH KEEPS ITS NAV ITEM, and direction B says it should not — launching is something you do,
       not somewhere you go, and Start is now on every Fleet row. It stays because the Launch screen
       is also the only place that can preinstall a BUILD before handing the device over, and no
-      Fleet row offers that yet. Removing the item first would delete a capability rather than
-      relocate one. It goes when the Fleet can install.
+      Fleet row offers that yet — so it moved to the COMMAND PALETTE ("Start a device with a build
+      installed") rather than being deleted, and the `#/launch` route still works. Document 06 is
+      explicit that the palette is why Launch does not need to be a route; the objection was only
+      ever that nothing else could preinstall, and now something can reach it.
+
+      Health sits under Farm, not in an Operations group of its own. Four items and three, which is
+      document 06's sidebar exactly.
     -->
     <p class="navgroup">Farm</p>
     <button class="navitem" data-route="fleet"><span class="glyph" data-icon="devices"></span><span class="txt">Fleet</span><span class="sc">G F</span></button>
-    <button class="navitem" data-route="launch"><span class="glyph" data-icon="launch"></span><span class="txt">Launch</span><span class="sc">G L</span></button>
     <button class="navitem" data-route="apps"><span class="glyph" data-icon="apps"></span><span class="txt">Apps</span><span class="sc">G A</span></button>
     <button class="navitem" data-route="runs"><span class="glyph" data-icon="runs"></span><span class="txt">Runs</span><span class="sc">G U</span></button>
-
-    <p class="navgroup">Operations</p>
     <button class="navitem" data-route="health"><span class="glyph" data-icon="health"></span><span class="txt">Health</span><span class="sc">G H</span></button>
 
     <p class="navgroup">Organisation</p>
@@ -185,7 +187,7 @@
         <span class="dot ok live"></span><span class="secondary" id="sc-device">—</span>
       </div>
       <p class="caption tnum" id="sc-lease">—</p>
-      <button class="btn tiny wide mt-sm" id="sc-open">Cockpit</button>
+      <button class="btn tiny wide mt-sm primary" id="sc-open">Open cockpit</button>
     </div>
     <button class="sessionstub" id="sessionstub" hidden title="Open your session"><span class="dot ok live"></span></button>
   </nav>

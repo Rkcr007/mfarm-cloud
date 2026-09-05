@@ -158,3 +158,72 @@ describe('the chrome goes through tokens', () => {
       `${bare.length} hardcoded colours in the console chrome (ceiling 16):\n  ${bare.join('\n  ')}`);
   });
 });
+
+/**
+ * THE SIX BEATS ACTUALLY CHANGE SOMETHING.
+ *
+ * The failure this guards against has no symptom in any other test: three of the six beats had a
+ * `transition` declared for a property and no rule that ever changed it, so they read as correct
+ * code and moved nothing. Beat 02's wake glow, beat 04's cross-fade and beat 06's settle were all
+ * inert for a week.
+ *
+ * A transition is a promise about how a value will change. If nothing changes the value, the
+ * promise is about nothing — and only a rendered frame mid-transition can tell you, which is why
+ * this file asserts the SHAPE and a screenshot pass asserts the motion.
+ */
+describe('the bring-up choreography moves', () => {
+  /**
+   * Declarations that set a property, ignoring `transition` and `animation` themselves.
+   *
+   * THE WHOLE SELECTOR GROUP, not its last line. `.devpanel[data-beat="0"] .mf-chassis,` and its
+   * two siblings share one block, and taking `.split('\n').pop()` saw only the third — so beats 0
+   * and 1 looked like they set nothing while the rule that holds them flat was right there. Third
+   * parser in this file to make the same mistake; the lesson is that a CSS selector is not a line.
+   */
+  function settersFor(beat: string): string[] {
+    const out: string[] = [];
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const sel = m[1];
+      if (!sel.includes(`data-beat="${beat}"`)) continue;
+      for (const decl of m[2].split(';')) {
+        const prop = decl.split(':')[0]?.trim();
+        if (prop && !/^(transition|animation)/.test(prop)) out.push(prop);
+      }
+    }
+    return [...new Set(out)];
+  }
+
+  for (const [beat, what] of [
+    ['0', 'the unresolved frame — blur, opacity, scale'],
+    ['2', 'the wake glow ramping up behind the glass'],
+    ['4', 'the pixels crossing over the glow, and the sheen with them'],
+    ['6', 'the composition settling'],
+  ] as const) {
+    test(`beat ${beat} changes a property: ${what}`, () => {
+      const props = settersFor(beat);
+      assert.ok(props.length > 0,
+        `beat ${beat} has no rule that changes anything — a transition with nothing to transition `
+        + 'is a comment that looks like code');
+    });
+  }
+
+  /**
+   * And the two that must NOT be animated by this file, because they are the device's own
+   * behaviour rather than the bring-up's: depth lands on the socket (beat 3) via the chassis rule,
+   * and beat 5 is the tile, which lives outside the frame.
+   */
+  test('depth is held flat before beat 3 and never after', () => {
+    for (const early of ['0', '1', '2']) {
+      assert.ok(settersFor(early).includes('box-shadow') || settersFor(early).includes('opacity'),
+        `beat ${early} should hold the device flat and contactless`);
+    }
+    /**
+     * Depth lands by the flat rule CEASING TO APPLY, not by a rule of its own — so beat 3 must not
+     * set `box-shadow`. It does still carry the wake glow, which is correct: the screen is awake
+     * from beat 2 and stays lit until real pixels replace it at beat 4. The first version of this
+     * asserted beat 3 set nothing at all and failed against exactly that.
+     */
+    assert.ok(!settersFor('3').includes('box-shadow'),
+      'depth lands because the flat rule stops matching, not because a fourth rule fires');
+  });
+});
