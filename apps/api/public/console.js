@@ -2336,9 +2336,27 @@ function quarantineCard(d) {
              * removed: an admin may know the host is back, and a control an admin might need is
              * not the console's to delete (stage 5).
              */
+            /**
+             * THE PANEL IS THE CONFIRM — document 05 §03 draws Authorise and Cancel inline, not a
+             * modal on top of them.
+             *
+             * Two documents disagree and the specific one wins: document 06's primitive table says
+             * the filled destructive button belongs "only inside a confirm dialog", and §03 puts
+             * one on this page. §03 is right, because the panel above IS the confirm surface — it
+             * carries the same four consequences the dialog was listing, only larger and without
+             * having to be opened. A modal that repeats the list verbatim asks somebody to read it
+             * twice and teaches them to skip it the second time.
+             *
+             * SAFE TO INLINE because of what the action is: releasing authorises ONE reset and one
+             * health check. It destroys nothing, it does not return the device to the pool, and the
+             * panel says both. A confirm step exists to slow down an irreversible thing, and this
+             * is not one.
+             */
             derivedNote
-              ? btn('Ask for a recovery attempt anyway', 'danger', () => askReleaseQuarantine(d))
-              : btn('Authorise one recovery attempt', 'danger-solid', () => askReleaseQuarantine(d))),
+              ? btn('Ask for a recovery attempt anyway', 'danger', () => releaseQuarantine(d.id))
+              : btn('Authorise one recovery attempt', 'danger-solid', () => releaseQuarantine(d.id)),
+            // Cancel leaves the page rather than closing something — there is no overlay to close.
+            btn('Cancel', 'ghost', () => go('#/fleet'))),
         ]
         // Said rather than silently absent: a member who cannot find the button should learn why
         // instead of concluding the console has none.

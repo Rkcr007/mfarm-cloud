@@ -513,10 +513,19 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   padding: 8px 8px 8px 10px;
   min-width: 0;
 }
+/*
+ * ELLIPSIS, NEVER A SHORTENED VALUE — document 06's copy-field spec.
+ *
+ * This scrolled instead, with the scrollbar hidden: the overflow was reachable but there was no
+ * sign it existed, so a truncated uuid looked like a complete one. An ellipsis is the cue that
+ * there is more. The DATA is untouched either way — the full value is in the DOM, selectable, and
+ * the Copy button takes all of it — which is the half of the rule that actually matters.
+ */
 .copyrow code {
   flex: 1 1 auto;
   min-width: 0;
-  overflow-x: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--t-body, #D4D4D4);
   font-size: 11.5px;

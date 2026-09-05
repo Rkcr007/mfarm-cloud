@@ -2341,3 +2341,65 @@ describe('the fleet matches the design it was drawn from', () => {
     });
   });
 });
+
+/* ================================= document 06's primitives, as specified =======================
+ *
+ * The seven primitives have exact specs. These hold the RULES rather than the measurements — a
+ * padding is verified by looking, a rule is verified by a case.
+ */
+describe("document 06's primitive rules", () => {
+  /**
+   * "Only inside a confirm dialog. Never a bare row action."
+   *
+   * Document 05 §03 puts one on the device page, and it wins because the panel above it IS the
+   * confirm surface: it carries the same four consequences the dialog listed, larger and without
+   * having to be opened. What must never happen is a filled destructive button on a row.
+   */
+  test('the filled destructive button never appears on a fleet row', () => {
+    seed({ name: 'fleet' });
+    mod.state.devices[0].state = 'QUARANTINED';
+    (mod.state.devices[0] as any).quarantine = { at: new Date().toISOString(), reason: 'x', source: 'operator' };
+    const tree = mod.SCREENS.fleet();
+    assert.equal(findByClass(tree, 'danger-solid'), null,
+      'a row offers Recover, which opens the confirm; the commit lives there');
+  });
+
+  /**
+   * "Present: filled. Absent: transparent, line-through. The ✓/× glyphs are dropped — fill and
+   * strike carry it."
+   */
+  test('capability chips carry their state by fill and strike, not by a glyph', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    const text = textOf(mod.SCREENS.device());
+    assert.doesNotMatch(text, /[✓✗×]\s*(screen-stream|webdriver|logcat)/,
+      'the chip is the signal; a tick beside it is the same fact said twice');
+    assert.match(text, /session-reset/, 'and an absent one is present-but-struck, never removed');
+  });
+
+  /**
+   * "A sentence saying what is absent, then the one thing to do about it. Never a spinner, never a
+   * skeleton where an explanation belongs."
+   */
+  test('an empty state says what is missing and what to do', () => {
+    seed({ name: 'apps' });
+    mod.state.apps = [];
+    const text = textOf(mod.SCREENS.apps());
+    assert.match(text, /No builds yet/);
+    assert.match(text, /Upload an APK/, 'the one thing to do about it');
+  });
+
+  /**
+   * "A timestamp sits adjacent, never inside." A pill is a state; when it happened is a different
+   * fact and belongs beside it, or the pill stops being scannable.
+   */
+  test('a status pill carries no timestamp inside it', () => {
+    seed({ name: 'fleet' });
+    mod.state.devices[0].state = 'QUARANTINED';
+    (mod.state.devices[0] as any).quarantine = {
+      at: new Date(Date.now() - 86_400_000).toISOString(), reason: 'x', source: 'operator',
+    };
+    const pill = findByClass(mod.SCREENS.fleet(), 'pill');
+    assert.ok(pill, 'the row should have a state pill');
+    assert.doesNotMatch(textOf(pill), /ago|left/, 'the age sits beside the pill, not in it');
+  });
+});
