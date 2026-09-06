@@ -106,7 +106,11 @@ export type ExecutionEventKind =
   | 'session-ended'
   | 'device-released'
   | 'incident'
-  | 'run-completed';
+  | 'run-completed'
+  // Migration 042. What the SUITE says happened, and what evidence landed — the two things the
+  // timeline could not say, and the reason somebody opens it.
+  | 'test-failed'
+  | 'artifact-created';
 
 /**
  * Swallow and report. Deliberately not `void`-ing the promise: awaiting keeps the event ordered

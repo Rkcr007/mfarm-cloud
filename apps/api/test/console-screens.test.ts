@@ -3292,5 +3292,177 @@ describe('a blank geometry says whether anybody has asked lately', () => {
     mod.state.deviceDetail = { id: 'dev-1', device: d, loaded: true };
     assert.match(textOf(mod.SCREENS.device()), /not reported — last heard from this device/);
   });
-});
 
+  /**
+   * ---------------------------------------------------------------- the run screen, end to end
+   *
+   * THE DEFECT THIS SECTION EXISTS FOR, and why the suite could not see it.
+   *
+   * `GET /v1/runs/:id` has always returned `failures` and `incidents`. `loadRunDetail` spread
+   * `run` and `sessions` and dropped both, so `d.failures?.length` was `undefined?.length` on every
+   * run ever opened and the Failures card — which its own comment calls "the whole payoff of runs
+   * plus outcomes" — never rendered. The optional chaining is what made it silent.
+   *
+   * Every existing test above passes anyway, because `seed()` writes `failures` STRAIGHT INTO
+   * STATE. A fixture that supplies what the loader is supposed to supply cannot see the loader not
+   * supplying it — the whole class of defect this repo has now hit six times.
+   *
+   * So these drive the LOADER, against a stubbed `fetch`, and assert on what it puts in state.
+   */
+  describe('the run screen gets what the API sends it', () => {
+    /** Answer the console's own fetches with a fixed payload per path. */
+    function stubFetch(byPath: Record<string, unknown>) {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: string) => {
+        const path = String(url).split('?')[0];
+        const body = byPath[path];
+        return {
+          ok: body !== undefined,
+          status: body === undefined ? 404 : 200,
+          headers: { get: () => 'application/json' },
+          json: async () => body ?? { error: { message: 'not stubbed' } },
+          text: async () => JSON.stringify(body ?? {}),
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+      return () => { globalThis.fetch = original; };
+    }
+
+    test('loadRunDetail carries failures, incidents and events into state', async () => {
+      seed({ name: 'run', id: 'run-1' });
+      const restore = stubFetch({
+        '/v1/runs/run-1': {
+          run: mod.state.runDetail.run,
+          sessions: [],
+          failures: [{ id: 'tr-9', sessionId: 'sess-1', name: 'a red test', failure: 'boom' }],
+          incidents: [{ id: 'si-1', sessionId: 'sess-1', class: 'device', reason: 'adb-offline' }],
+        },
+        '/v1/runs/run-1/timeline': { events: [{ kind: 'test-failed', detail: {}, occurredAt: new Date().toISOString() }] },
+      });
+      try {
+        mod.state.runDetail = null;
+        await mod.loadRunDetail('run-1');
+
+        // Each one asserted by name. A `deepEqual` on the whole object would pass on a loader that
+        // dropped a field the fixture also happened to omit.
+        assert.equal(mod.state.runDetail.failures.length, 1, 'failures were being dropped here');
+        assert.equal(mod.state.runDetail.incidents.length, 1, 'and so were incidents');
+        assert.equal(mod.state.runDetail.events.length, 1, 'the timeline is fetched alongside');
+      } finally { restore(); }
+    });
+
+    test('a timeline that fails does not cost the page its failures', async () => {
+      seed({ name: 'run', id: 'run-1' });
+      // Only the detail is stubbed; the timeline 404s. A run page must still show why it went red.
+      const restore = stubFetch({
+        '/v1/runs/run-1': {
+          run: mod.state.runDetail.run, sessions: [],
+          failures: [{ id: 'tr-9', sessionId: 'sess-1', name: 'a red test', failure: 'boom' }],
+          incidents: [],
+        },
+      });
+      try {
+        mod.state.runDetail = null;
+        await mod.loadRunDetail('run-1');
+        assert.equal(mod.state.runDetail.failures.length, 1);
+        assert.deepEqual(mod.state.runDetail.events, []);
+      } finally { restore(); }
+    });
+
+    test('the timeline renders, and red is reserved for the test failing', () => {
+      seed({ name: 'run', id: 'run-1' });
+      const at = new Date().toISOString();
+      mod.state.runDetail.events = [
+        { kind: 'device-allocated', detail: {}, occurredAt: at },
+        { kind: 'test-failed', detail: { test: 'checkout applies a promo', message: 'expected 8 got 10' }, occurredAt: at },
+        { kind: 'incident', detail: { reason: 'adb-offline', detail: 'the phone dropped off USB' }, occurredAt: at },
+      ];
+      const tree = mod.SCREENS.run();
+      const text = textOf(tree);
+
+      assert.match(text, /What happened/);
+      assert.match(text, /Test failed/);
+      assert.match(text, /checkout applies a promo/);
+
+      /**
+       * THE DISTINCTION THIS SCREEN REFUSES TO LOSE. A test failing is `bad`; the farm having a
+       * problem is `warn`. The two cards above this one are side by side for exactly that reason,
+       * and a timeline that painted both red would undo it in the place a reader scans fastest.
+       */
+      const classes = classesOf(tree);
+      assert.ok(classes.includes('bad'), 'the failure is red');
+      assert.ok(classes.includes('warn'), 'the incident is amber, not red');
+    });
+
+    test('an event kind this build has never seen renders as itself rather than vanishing', () => {
+      seed({ name: 'run', id: 'run-1' });
+      mod.state.runDetail.events = [
+        { kind: 'teleport-initiated', detail: {}, occurredAt: new Date().toISOString() },
+      ];
+      // A timeline is read as complete, so an entry silently dropped is worse than an ugly one.
+      assert.match(textOf(mod.SCREENS.run()), /teleport-initiated/);
+    });
+  });
+
+  /**
+   * ---------------------------------------------------------------- the steps card
+   *
+   * Migration 041's payoff: the list of steps with the failing one in red, which is what a person
+   * opening a red session is actually looking for.
+   */
+  describe('the steps card', () => {
+    const step = (over: Record<string, unknown> = {}) => ({
+      seq: 1, method: 'POST', path: 'element', status: 200, durationMs: 40,
+      startedAt: new Date().toISOString(), error: null, failed: false, ...over,
+    });
+
+    test('failed steps are marked, and the count is on the card', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.commands = {
+        sessionId: 'sess-1', truncated: false, loaded: true,
+        items: [
+          step(),
+          step({ seq: 2, method: 'GET', path: 'element/e-1/text', status: 404,
+                 error: 'no such element', failed: true }),
+          step({ seq: 3, path: 'element/e-1/click', status: null, error: 'timeout', failed: true }),
+        ],
+      };
+      const tree = mod.SCREENS.cockpit();
+      const text = textOf(tree);
+
+      assert.match(text, /Steps/);
+      assert.match(text, /3 steps, 2 failed/);
+      assert.match(text, /no such element/, 'the W3C code is what says WHY the step went red');
+
+      // The class the stylesheet tints. Asserted rather than the colour, because the colour lives
+      // in a token and this test has no renderer.
+      assert.equal(classesOf(tree).filter((c: string) => c === 'step-bad').length, 2,
+        'exactly the two failed rows carry the failed class');
+    });
+
+    test('a step that never got an answer says so, rather than showing a status it never had', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.commands = {
+        sessionId: 'sess-1', truncated: false, loaded: true,
+        items: [step({ status: null, error: null, failed: true })],
+      };
+      // The most important thing this table can say: the device stopped talking, which is a
+      // completely different investigation from a test that failed.
+      assert.match(textOf(mod.SCREENS.cockpit()), /no answer/);
+    });
+
+    test('the card says what it does NOT store', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.commands = { sessionId: 'sess-1', truncated: false, loaded: true, items: [step()] };
+      // A reader has to know that `POST element` means "a lookup failed" and not "a lookup for X
+      // failed" — otherwise the absence reads as a bug rather than as a deliberate privacy limit.
+      assert.match(textOf(mod.SCREENS.cockpit()), /selectors, test data and passwords/);
+    });
+
+    test('a session with no recorded steps says why, rather than showing an empty table', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.commands = { sessionId: 'sess-1', truncated: false, loaded: true, items: [] };
+      assert.match(textOf(mod.SCREENS.cockpit()), /No WebDriver commands were recorded/);
+    });
+  });
+});

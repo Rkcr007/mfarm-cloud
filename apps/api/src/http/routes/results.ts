@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { ALL_FAILURE_REASONS, classifyReason } from '@mfarm/protocol';
 import { withTenant } from '../../db.ts';
+import { recordSessionEvent } from '../../executionEvents.ts';
 import { requireTenant } from '../server.ts';
 import { badRequest, notFound } from '../errors.ts';
 
@@ -56,6 +57,16 @@ interface ResultBody {
    * one of them can be wrong.
    */
   failureReason?: string;
+  /**
+   * When the SUITE says the test finished, as opposed to when we heard (migration 042).
+   *
+   * OPTIONAL, and a suite that omits it reads exactly as it did before. It matters for one shape
+   * that is common rather than exotic: a reporter that flushes in an `after()` hook — which is what
+   * every CI-friendly reporter does on a crashed run — posts ten results in one burst, and a
+   * timeline built on arrival time then says the suite failed everything simultaneously, minutes
+   * after the session ended.
+   */
+  occurredAt?: string;
 }
 
 interface ResultRow {
@@ -68,6 +79,7 @@ interface ResultRow {
   failure_reason: string | null;
   duration_ms: number | null;
   reported_at: Date;
+  occurred_at: Date | null;
 }
 
 const resultJson = (r: ResultRow) => ({
@@ -80,6 +92,9 @@ const resultJson = (r: ResultRow) => ({
   failureReason: r.failure_reason,
   durationMs: r.duration_ms,
   reportedAt: r.reported_at,
+  // What the suite says, falling back to when we heard. A reader should never have to know which
+  // of the two they are looking at, so the API answers the question rather than exposing both.
+  occurredAt: (r.occurred_at ?? r.reported_at),
 });
 
 export async function resultRoutes(app: FastifyInstance): Promise<void> {
@@ -117,6 +132,10 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
             // than a CHECK violation surfacing as a 500. The list lives in `packages/protocol` so
             // the constraint, this schema and the console cannot drift apart.
             failureReason: { type: 'string', enum: [...ALL_FAILURE_REASONS] },
+            // `date-time` is not used: nothing else in this API relies on ajv-formats being
+            // registered, and a schema that silently accepts anything is worse than no schema. The
+            // handler parses and clamps it instead, which it would have to do anyway.
+            occurredAt: { type: 'string', maxLength: 40 },
           },
         },
       },
@@ -143,17 +162,37 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
       // so this cannot be undefined here, but the fallback keeps that from being a silent assumption.
       const failureClass = failureReason === undefined ? null : classifyReason(failureReason) ?? null;
 
+      /**
+       * PARSED HERE, CLAMPED IN SQL. A timestamp from a caller is a claim, not a fact: a reporter
+       * with a skewed clock — or somebody who would simply like their failure to appear before the
+       * run started — must not be able to write a timeline that could not have happened.
+       *
+       * Unparseable is treated as absent rather than as a 400. The result is what this endpoint
+       * exists for, and losing it over a malformed optional field would be the same mistake
+       * `boundFailure` refuses to make with an oversized stack.
+       */
+      const claimed = req.body.occurredAt ? new Date(req.body.occurredAt) : null;
+      const occurredAt = claimed && !Number.isNaN(claimed.getTime()) ? claimed.toISOString() : null;
+
       const row = await withTenant(orgId, async (c) => {
         // The org comes from the SESSION, and the INSERT ... SELECT is what ties them together in
         // one statement: there is no window in which a caller could name a session it does not own
         // and have the row written under an org it does.
+        //
+        // `occurred_at` is clamped to the session's own lifetime by the GREATEST/LEAST pair: not
+        // before the session was created, and not after now. A suite reporting mid-run gets its own
+        // timestamp through untouched, which is the case this is for.
         const { rows } = await c.query<ResultRow>(
           `INSERT INTO test_results
-             (org_id, session_id, name, status, failure, duration_ms, failure_class, failure_reason)
-           SELECT s.org_id, s.id, $2, $3, $4, $5, $6, $7 FROM sessions s WHERE s.id = $1
+             (org_id, session_id, name, status, failure, duration_ms, failure_class, failure_reason,
+              occurred_at)
+           SELECT s.org_id, s.id, $2, $3, $4, $5, $6, $7,
+                  CASE WHEN $8::timestamptz IS NULL THEN NULL
+                       ELSE LEAST(GREATEST($8::timestamptz, s.created_at), now()) END
+             FROM sessions s WHERE s.id = $1
            RETURNING *`,
           [sessionId, name.trim(), status, boundFailure(req.body.failure), req.body.durationMs ?? null,
-           failureClass, failureReason ?? null],
+           failureClass, failureReason ?? null, occurredAt],
         );
         return rows[0] ?? null;
       });
@@ -180,6 +219,27 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
        * tests requests at most one of each per beat rather than sixty.
        */
       if (status === 'failed') {
+        /**
+         * THE LINE THE TIMELINE WAS MISSING (migration 042).
+         *
+         * Nine event kinds described what the FARM did and none described what the TEST did, so a
+         * timeline could say the device was allocated at 10:30:04 and not that the test failed at
+         * 10:31:43 — which is the line somebody opened the page for.
+         *
+         * Recorded before the captures are requested, so a run watched live shows the failure and
+         * then its evidence arriving, in that order, which is the order they happened in.
+         */
+        await recordSessionEvent(orgId, sessionId, 'test-failed', {
+          testResultId: row.id,
+          test: row.name,
+          failureClass,
+          failureReason: failureReason ?? null,
+          // The message, bounded hard. A timeline entry is a headline; the full stack is one click
+          // away on the result itself, and a 10k stack inside a jsonb detail would be carried by
+          // every SSE frame of a live run.
+          message: row.failure ? row.failure.split('\n')[0].slice(0, 300) : null,
+        });
+
         const context = JSON.stringify({ source: 'test-failure', testResultId: row.id, test: row.name });
         for (const kind of ['screenshot', 'logcat'] as const) {
           try {

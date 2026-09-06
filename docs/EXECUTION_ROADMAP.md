@@ -188,36 +188,46 @@ code without the message, no request body, no upstream session id, quit as the l
 awaited drain, cross-org read and write isolation, paging, the latency bound, and a database that
 refuses the write not breaking the suite.
 
-## S4 — The timeline learns about tests, and gets a screen
+## S4 — The timeline learns about tests, and gets a screen — **BUILT (2026-09-07)**
 
-`execution_events`' nine kinds cover what the *farm* does and nothing about what the *test* does, so
-the timeline can tell you the device was allocated at 10:30:04 and not that the test failed at
-10:31:43 — the line the user came for.
+**Schema — migration 042.** `test-failed` and `artifact-created` on the `execution_events` CHECK,
+plus `test_results.occurred_at` — when the *suite* says the test finished, as against when we heard.
+A reporter that flushes in an `after()` hook posts ten results in one burst, and a timeline built on
+arrival time then claims the suite failed everything simultaneously, minutes after the session
+ended. Optional, defaulted, and **clamped to the session's own lifetime**: a timestamp from a caller
+is a claim, not a fact.
 
-**Schema — migration 042.** Four kinds onto the `CHECK`, which is one line because 019 chose
-`text + CHECK` over an enum precisely so it could be:
+**`command-failed` is deliberately not a kind.** An implicit wait polls `findElement` until it
+succeeds, so one successful step produces a dozen `no such element` responses. Those belong in the
+session's step list, not on the run timeline — the run timeline stays a summary and the two link
+rather than merge.
 
-`'test-started'`, `'test-failed'`, `'artifact-created'`, `'command-failed'`.
+**Code.** `results.ts` emits `test-failed` before requesting evidence, so a live run shows the
+failure and then its evidence arriving, in that order. `artifacts.ts` emits `artifact-created`
+carrying the artifact id, so the entry is a *link to the picture* rather than a note that a picture
+exists. The console gained a **What happened** card on the run screen and a **Steps** card on the
+session screen.
 
-`command-failed` is emitted by S3's proxy on a non-2xx, and it is the join between the two tables:
-the timeline entry a person clicks, the command row it came from.
+**Red is reserved.** `test-failed` is `bad`; an `incident` is `warn`. The run screen already refuses
+to conflate a test failing with the farm having a problem — its two cards are side by side for that
+reason — and a timeline painting both red would undo it in the place a reader scans fastest.
 
-**Code.**
+**A shipped defect found on the way, and the reason no test could see it (D26).** `loadRunDetail`
+spread `run` and `sessions` and **dropped `failures` and `incidents`**, so the Failures card — whose
+own comment calls it "the whole payoff of runs plus outcomes" — has never rendered for anybody. The
+optional chaining made it silent: the card did not throw, it was simply absent, and the screen
+looked finished.
 
-- `apps/api/src/http/routes/results.ts` and `artifacts.ts` emit their kinds.
-- `apps/api/public/console.js` — a **Timeline** card on the run detail screen, between the failures
-  card and the session table. `timeline()` already exists (`console.js:690`) with `ok` / `warn` /
-  `bad` / `info` / `accent` tones and is used by three other screens; this is the fourth caller, not
-  a new component.
-- Red is `bad`, and it is reserved for `test-failed` and `command-failed`. An `incident` stays
-  `warn` — the farm having a problem is not the test failing, and the run screen already refuses to
-  conflate those two. Repeating that refusal here is the point.
-- Live via the existing SSE at `/runs/:id/events` while the run is open; the poll endpoint after.
+229 console-screen tests were green throughout because the fixture seeds `failures` **straight into
+state**. *A test that seeds state tests the renderer, never the loader.* The fix ships with a test
+that drives `loadRunDetail` against a stubbed `fetch`, verified by reverting the loader and watching
+it go red.
 
-**Test.** `apps/api/test/console-screens.test.ts` renders the run screen against a fixture with a
-failure and asserts the red entry is the failure and the incident is not red.
-
----
+**Verified.** Eight console tests (the loader, a timeline whose secondary fetch fails, the red/amber
+reservation, an unknown kind rendering as itself rather than vanishing, the step table's failed-row
+class, "no answer", the privacy note, and the empty state) and four API tests (the event and its
+one-line headline, a passing test leaving no mark, the timestamp clamp against a 2020 and a 2099
+claim, and evidence landing as a link).
 
 ## S5 — Video, recorded only for failures
 
@@ -312,7 +322,7 @@ host, then the rate limiter.
 1. ~~**S1 fairness**~~ — **done**, migration 039 / ADR-0028.
 2. ~~**S2 evidence at failure time**~~ — **done**, migration 040.
 3. ~~**S3 command trace**~~ — **done**, migration 041 / ADR-0029.
-4. **S4 timeline + screen** — makes S2 and S3 visible; nothing renders any of it today.
+4. ~~**S4 timeline + screen**~~ — **done**, migration 042.
 5. **S5 video** — affordable only after S2/S4 make "record only failures" expressible, and gated on
    one measurement.
 6. **S6 queue visibility** — smaller than it sounds, and it is most of what "graceful queuing" means

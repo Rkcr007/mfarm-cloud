@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { basename } from 'node:path';
 import type { Readable } from 'node:stream';
 import { withTenant, withSystem } from '../../db.ts';
+import { recordSessionEvent } from '../../executionEvents.ts';
 import { loadConfig } from '../../config.ts';
 import { appStore, BlobTooLargeError } from '../../appstore.ts';
 import { requireTenant, requireWorker } from '../server.ts';
@@ -197,6 +198,25 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
         if (blob.created) await store.remove(blob.sha256);
         throw conflict('not_your_session',
           'That session is not on that device, or that device is not on this host.');
+      }
+
+      /**
+       * EVIDENCE LANDING IS A TIMELINE EVENT (migration 042).
+       *
+       * The `detail` carries the artifact id, so the entry is a LINK to the picture rather than a
+       * note that a picture exists somewhere — and it carries the context from 040, so a screenshot
+       * taken for a failure sits under that failure rather than beside it.
+       *
+       * `recordSessionEvent` is a no-op for a session with no run, which is most console captures,
+       * and it swallows its own errors. An artifact is stored either way: a timeline that could not
+       * be written must never cost somebody the evidence itself.
+       */
+      const org = await withSystem(async (c) => (await c.query<{ org_id: string }>(
+        'SELECT org_id FROM artifacts WHERE id = $1', [id])).rows[0]?.org_id ?? null);
+      if (org) {
+        await recordSessionEvent(org, req.params.id, 'artifact-created', {
+          artifactId: id, kind, sizeBytes: blob.sizeBytes, context: JSON.parse(context),
+        });
       }
 
       return reply.code(201).send({ artifact: { id, kind, sha256: blob.sha256, sizeBytes: blob.sizeBytes } });

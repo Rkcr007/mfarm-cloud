@@ -2426,3 +2426,25 @@ kbd {
   color: #787878;
   pointer-events: none;
 }
+
+/* Steps: the WebDriver command trace (migration 041, ADR-0029).
+
+   A FAILED STEP IS TINTED, NOT JUST DOTTED. The pill beside it already carries the W3C code in the
+   bad tone, so the row tint is redundant on its own — and that redundancy is the point on a table
+   somebody scans rather than reads. A row you can find at a glance while scrolling is the whole
+   value of a step list.
+
+   Tint rather than a left border: a border moves the cells, so a table with three failures in it
+   would have three rows that do not line up with the rest.
+
+   `--bad-bg` is the existing 7% wash, defined in BOTH themes (design-tokens 185 and 388). A new
+   token invented here would have had one definition and gone invisible in the other, which is the
+   theme bug this console has already paid for once. */
+.table.steps tbody tr.step-bad { background: var(--bad-bg, rgba(224, 80, 95, .07)); }
+.table.steps tbody tr.step-bad code { color: var(--bad-text, #E0505F); }
+/* Monospace numerals so durations compare down the column by eye, which is the only reason anybody
+   reads this column at all. */
+.table.steps .tnum { font-variant-numeric: tabular-nums; }
+/* A slow step that SUCCEEDED. Amber, never red: it did not fail, and painting it as though it had
+   would put the reader's attention on the wrong row. */
+.table.steps .step-slow { color: var(--warn, #E8A30E); font-weight: 500; }
