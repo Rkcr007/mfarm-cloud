@@ -145,7 +145,19 @@ export const state = {
    * because §17 of the product direction is explicit: do not dump raw logcat into the main UI.
    * Measured on a real session, 37% of the lines were one system service retrying a connection.
    */
-  log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0, scope: 'app' },
+  /**
+   * `scope: 'all'` — D23, and the default is the whole defect.
+   *
+   * It was `'app'`. On the lab, with the build installed, launched and visibly on screen, that
+   * matched **0 of 270 lines**: every tag a Cuttlefish instance emits is a system one (`adbd`,
+   * `logd`, `WifiService`, `SatelliteController`), and there is no `ActivityManager` line at all —
+   * which is precisely the fallback `visibleLog`'s comment says the name match relies on. So the
+   * first thing anybody saw on a healthy session was an empty pane reading "0 / 260 lines".
+   *
+   * The scope stays, because on a device that DOES tag its lines it is the right lens. It is now
+   * something you turn on, not something that turns your log off before you have seen it.
+   */
+  log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0, scope: 'all' },
   /**
    * Which kind of device the fleet screen is showing (spec §25).
    *
@@ -463,9 +475,17 @@ function lengthInWords(from, to) {
   if (!from) return '—';
   const ms = (to ? new Date(to) : new Date()) - new Date(from);
   if (!Number.isFinite(ms) || ms < 0) return '—';
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s} seconds`;
-  const m = Math.round(s / 60);
+  /**
+   * FLOORED, NOT ROUNDED — D25, and it is about agreement rather than accuracy.
+   *
+   * `clock()` truncates, so a 6.5-second session rendered "00:06 held for" beside a sentence
+   * reading "after 7 seconds": one card stating one fact as two numbers. Prose that rounds up is
+   * marginally friendlier on its own and contradicts the figure printed next to it, which is worse.
+   * Both now count the same whole seconds.
+   */
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s} second${s === 1 ? '' : 's'}`;
+  const m = Math.floor(s / 60);
   if (m < 60) return `${m} minute${m === 1 ? '' : 's'}`;
   const hr = Math.floor(m / 60);
   const rest = m % 60;
@@ -1435,6 +1455,20 @@ async function releaseSession(sessionId) {
   }
   state.held = null;
   await Promise.all([refreshDevices(), refreshSessions()]);
+  /**
+   * D24 — AND THE DETAIL, or the cockpit repaints the session you just ended as a live one.
+   *
+   * `screenCockpit` prefers `state.detail` over the polled row, and nothing here refreshed it. So
+   * the confirm ran, the toast said the device was restoring, and `render()` below faithfully
+   * redrew a live session with fourteen enabled controls — Power, Home, Screenshot, Install —
+   * aimed at a device being wiped. The poll corrected it only once the detail passed its 10s
+   * staleness threshold: measured on the farm as `mode=session` at t+2s and t+7s, `mode=ended` at
+   * t+12s.
+   *
+   * Awaited before the render rather than fired alongside it: the whole defect was a render that
+   * happened with data it had not waited for.
+   */
+  if (state.detail?.id === sessionId) await loadSessionDetail(sessionId);
   render();
 }
 
@@ -1957,11 +1991,22 @@ function fleetCapacity() {
          * column stops meaning "holder". A quarantine reason is different — that IS what occupies
          * the device, and it is the operator's first question.
          */
+        /**
+         * AND AN ESCALATED DEVICE SAYS SO HERE — D21 on the Fleet.
+         *
+         * `st.note` for CLEANING is "Snapshot restore in progress", which is exactly wrong once the
+         * budget is spent: nothing is in progress and nothing will be until somebody resumes it.
+         * Seen on the live farm, on a row whose pill read RESTORING for twenty minutes.
+         */
         h('td', null, who
           ? h('span', { class: 'stack none' },
               h('span', { class: 'secondary', text: who }),
               sess?.startedAt ? h('span', { class: 'caption', text: `since ${when(sess.startedAt).split(', ').pop()}` }) : null)
-          : h('span', { class: 'caption', text: d.quarantine?.reason || (d.state === 'READY' ? '—' : st.note) })),
+          : d.resetEscalation?.at
+            ? h('span', { class: 'stack none' },
+                h('span', { class: 'caption bad-text', text: 'its reset gave up' }),
+                h('span', { class: 'caption', text: `${ago(d.resetEscalation.at)} — open it to resume` }))
+            : h('span', { class: 'caption', text: d.quarantine?.reason || (d.state === 'READY' ? '—' : st.note) })),
 
         /**
          * ONE ACTION PER ROW, and it is the one that applies to THIS device in THIS state. Start
@@ -2205,7 +2250,7 @@ function physicalStrip(groups) {
 function screenFleet() {
   const lens = state.lens || 'capacity';
   const waiting = queuedSessions().length;
-  const live = state.sessions.filter((x) => LIVE_SESSION_STATES.has(x.state) && x.deviceId).length;
+  const live = liveSessions().length;
   const counts = { live, waiting };
 
   return [
@@ -2238,7 +2283,9 @@ function screenFleet() {
     ))),
 
     lens === 'catalogue' ? fleetCatalogue()
-      : lens === 'live' ? screenSessionsBody()
+      // D22 — the same predicate the badge above is counted from, so the tab and the table cannot
+      // describe different sets again.
+      : lens === 'live' ? screenSessionsBody(liveSessions())
         : lens === 'waiting' ? screenQueueBody()
           // FULL WIDTH, and no rail. The rail carried a queue card that said "All devices are
           // available / Nobody is waiting" — which the headline four lines above already said, in
@@ -2658,6 +2705,87 @@ function screenSize(d) {
   return sc?.width && sc?.height ? `${sc.width} \u00d7 ${sc.height}` : 'not reported';
 }
 
+/**
+ * A DEVICE WHOSE RESET BUDGET IS SPENT — D21, and until now the console could not see this at all.
+ *
+ * Migration 032 has carried `resetEscalation` on both projections since it shipped. Nothing rendered
+ * it anywhere except the Health line added for D1, and NOT on this page — the one somebody opens to
+ * do something about a device. So a device sat on `RESTORING` forever, the fleet quietly lost a
+ * slot, and the only way back was `curl`: recovering `cf-4` twice on 2026-09-05 needed exactly that.
+ *
+ * IT IS NOT A QUARANTINE AND MUST NOT LOOK LIKE ONE. The device stays CLEANING on purpose — 032 is
+ * explicit that quarantining would ALSO stop the reset offers that are the only thing which could
+ * fix it. So this is its own panel, in the same amber register the console uses for "read this
+ * before you look at anything else", and it says the one thing the state pill cannot: that nothing
+ * is coming unless somebody acts.
+ *
+ * ADMIN ONLY, because `clear-reset-escalation` is an admin route and a member pressing it gets a
+ * 403 — the same gate device detail already puts on the quarantine recovery directly below.
+ */
+function resetEscalationCard(d) {
+  const esc = d.resetEscalation;
+  if (!esc?.at) return null;
+  const admin = isOrgAdmin();
+
+  return h('section', { class: 'card gate waiting mb-gap' },
+    h('div', { class: 'card-head' },
+      h('p', { class: 'card-title', text: 'Out of the pool — its reset gave up' }),
+      h('span', { class: 'pill-at', text: ago(esc.at) })),
+    h('p', { class: 'help' },
+      esc.reason || 'The farm stopped retrying this device\u2019s reset.',
+      esc.attempts ? ` It was attempted ${esc.attempts} time${esc.attempts === 1 ? '' : 's'}.` : ''),
+    /**
+     * WHY IT STILL SAYS `CLEANING`, said here rather than left as a contradiction between this card
+     * and the state pill six lines above it.
+     */
+    h('p', { class: 'caption mt-sm', text: 'The device still reads CLEANING because it is not clean — it may hold the last session\u2019s data, so the farm will not hand it to anybody. It is not quarantined: quarantining would also stop the resets that are the only thing which could fix it.' }),
+    /**
+     * A SILENT HOST IS A DIFFERENT STORY, and worth naming here because migration 038 makes it a
+     * different one going forward. An escalation recorded while the host was away is about the
+     * outage, not about the device.
+     */
+    h('p', { class: 'caption mt-sm', text: 'Nothing will be offered to it until somebody resumes recovery. A reset that will genuinely never work escalates again on the next attempt, so this is safe to press once and watch.' }),
+    admin
+      ? h('div', { class: 'row tight mt-lg' },
+          btn('Resume recovery', 'primary', () => askResumeRecovery(d)))
+      : h('p', { class: 'caption mt-lg', text: 'Resuming recovery needs an admin.' }),
+  );
+}
+
+/**
+ * Behind a dialog, like every other write on this page — and the consequences are the API’s own,
+ * not a second description of them written here.
+ */
+function askResumeRecovery(d) {
+  confirmDialog({
+    title: `Resume recovery for ${deviceName(d)}?`,
+    lead: 'This puts the device back in the queue for a reset. It does not make it available.',
+    removes: [
+      'the reset budget is returned to full',
+      'the next heartbeat offers this device a reset again',
+      'only a completed reset puts it back in the pool',
+      'a reset that fails again escalates it again, with a fresh count',
+    ],
+    keeps: 'Nothing is handed to a tenant until a reset completes.',
+    confirm: 'Resume recovery',
+    onConfirm: () => resumeRecovery(d.id),
+  });
+}
+
+async function resumeRecovery(id) {
+  try {
+    const out = await api(`/v1/devices/${encodeURIComponent(id)}/clear-reset-escalation`, { method: 'POST' });
+    // The API’s sentence, not one written here — two places wording one guarantee is how a console
+    // ends up promising something the control plane does not do.
+    toast(out.cleared ? 'Recovery resumed' : 'Nothing changed', out.detail, out.cleared ? '' : 'warn');
+    await refreshDevices();
+    await loadDevice(id);
+    render();
+  } catch (e) {
+    toast('Could not resume recovery', e.message, 'bad');
+  }
+}
+
 function screenDevice(id) {
   /**
    * THE DETAIL READ FIRST, THE POLL ROW AS A FALLBACK.
@@ -2723,6 +2851,9 @@ function screenDevice(id) {
       h('div', { class: 'content' },
         // FIRST, above the metadata. A device that is out of the pool has exactly one thing a
         // person opened this screen to find out, and it is not its OS version.
+        // Above the quarantine card: a device can only be in one of the two states, and this is the
+        // one nothing else in the console has ever been able to show.
+        resetEscalationCard(d),
         quarantineCard(d),
         card('Metadata', {},
           kv([
@@ -4402,12 +4533,26 @@ function paintLog() {
   const body = $('logbody');
   if (!body) return;
   const rows = visibleLog().slice(-600);
-  body.replaceChildren(...rows.map((l) => h('div', { class: `logline l${l.level || 'X'}` },
-    h('span', { class: 'log-t', text: l.time }),
-    h('span', { class: 'log-l', text: l.level }),
-    h('span', { class: 'log-g', text: l.tag }),
-    h('span', { class: 'log-m', text: l.message }),
-  )));
+  /**
+   * AN EMPTY PANE SAYS WHY IT IS EMPTY — D23's other half.
+   *
+   * The counter above already admits it is filtering ("260 hidden"), and that was not enough: the
+   * thing a person looks at is the pane, and a blank pane reads as a broken feed however honest the
+   * number beside it. This names the package, says no line mentions it, and points at the control
+   * that fixes it — rather than leaving somebody to discover the scope buttons by accident.
+   */
+  const scopedOut = rows.length === 0 && state.log.lines.length > 0;
+  body.replaceChildren(...(scopedOut
+    ? [h('p', { class: 'help logempty' },
+        state.log.scope === 'app'
+          ? `No line in this log names ${scopedPackage() || 'the installed build'}. Many devices tag their lines with a class name rather than a package, so "Everything" is usually the one to read.`
+          : 'Nothing in the log matches this filter.')]
+    : rows.map((l) => h('div', { class: `logline l${l.level || 'X'}` },
+        h('span', { class: 'log-t', text: l.time }),
+        h('span', { class: 'log-l', text: l.level }),
+        h('span', { class: 'log-g', text: l.tag }),
+        h('span', { class: 'log-m', text: l.message }),
+      ))));
   const count = $('logcount');
   if (count) {
     const total = state.log.lines.length;
@@ -5405,8 +5550,23 @@ function screenSessions() {
   ];
 }
 
-function screenSessionsBody() {
-  const rows = state.sessions;
+/**
+ * THE SESSIONS THIS FARM IS ACTUALLY RUNNING — one predicate, used by the Fleet's Live badge AND by
+ * its table (D22).
+ *
+ * They disagreed. The badge counted live sessions; the table rendered `state.sessions` entire, so
+ * the Live lens listed fifty ENDED rows under a tab showing no number. Two answers to one question,
+ * derived from two places, which is the shape this console keeps having to fix — and the fix is
+ * always to make the second one impossible rather than to correct it.
+ */
+const liveSessions = () => state.sessions.filter((s) => LIVE_SESSION_STATES.has(s.state) && s.deviceId);
+
+/**
+ * `rows` defaults to every session, because `#/sessions` IS the history and should stay so. Only
+ * the Fleet's Live lens narrows it — that lens answers "what is running right now", and the page it
+ * shares a body with answers something else.
+ */
+function screenSessionsBody(rows = state.sessions) {
   return [
     card(null, { class: 'flush' },
       rows.length

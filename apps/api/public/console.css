@@ -1493,6 +1493,9 @@ kbd {
 }
 .dev-caption-text { margin: 0; }
 
+/* The log pane explaining its own emptiness — D23. Padded like a log line, not like a card. */
+.logempty { padding: 10px 12px; margin: 0; }
+
 @media (max-width: 720px) {
   .devpanel { grid-template-columns: 1fr; grid-template-areas: "stage" "bar" "caption"; }
   .devbar { flex-direction: row; flex-wrap: wrap; justify-content: center; }

@@ -3705,3 +3705,59 @@ when the feature is broken. See issues 37 and 38.
     and every response ≥400 were collected for the whole session and printed whether or not
     anything looked wrong. That is what makes "zero errors" a finding rather than an absence of
     looking — and it is what let me state plainly that the integration held, instead of hedging.
+
+71. **THE FIVE THE EXPLORATORY PASS FOUND, AND THE FARM ONE UNDERNEATH THEM.** 2026-09-06.
+
+    **MIGRATION 038 — A RESET NOBODY WAS THERE TO ATTEMPT IS NOT A STALLED RESET.** `cf-4` escalated
+    itself out of the pool twice in thirty minutes with nothing wrong with it. The agent drains and
+    EXITS to withdraw a capability, which stops every backend on the host and cold-boots them on the
+    way back; that took thirteen minutes, during which the host sent no heartbeats and performed no
+    resets, and the reaper counted three attempts against a device that had never been offered one.
+
+    `count_stalled_resets` now requires the host to have beaten inside the same window the reset is
+    judged over. **The two mechanisms were both firing on one outage, and only one of them heals** —
+    a silence quarantine is undone by the next heartbeat (016's whole point is that its evidence is
+    falsifiable), while a reset escalation is deliberately terminal and waits for a human. Letting a
+    host outage produce the non-self-healing one meant every agent restart permanently cost a device.
+    It is not a forgiving budget: a host that is beating and failing to reset burns it exactly as
+    before, and there is a test whose only job is that contrast.
+
+    **AND THE SECURITY TESTS CAUGHT WHAT THE MIGRATION LOST.** `DROP FUNCTION` + `CREATE` resets
+    ownership and grants. A SECURITY DEFINER function recreated by the migration runner is owned by
+    `mfarm` — a superuser — so every caller would have run as one with RLS off; and Postgres grants
+    EXECUTE to PUBLIC on every new function, so `mfarm_app` could reach a fleet-wide write. 032 had
+    set both; recreating it silently undid them. `definer-acl.test.ts` failed on both halves, by
+    name. **A migration that recreates a definer function must re-assert `OWNER TO mfarm_definer`
+    and `REVOKE EXECUTE … FROM PUBLIC, mfarm_app`** — that is now written into 038 with the reason.
+
+    **D21 — an escalated device can finally be seen and resumed.** Device detail carries its own
+    amber panel: what gave up, when, how many attempts, and why the device still reads CLEANING
+    rather than QUARANTINED (032 is explicit that quarantining would also stop the offers that are
+    the only thing which could fix it). Admin-gated **Resume recovery** behind the same confirm shape
+    the quarantine release uses. The Fleet row stops saying "Snapshot restore in progress" about a
+    restore that gave up.
+
+    **D22 — one predicate.** `liveSessions()` now feeds BOTH the Live badge and the Live table, so
+    they cannot describe different sets again. `#/sessions` keeps every row; it is the history.
+
+    **D23 — the default cannot be a filter that hides everything.** Scope defaults to `all`. The
+    scope remains as a narrowing you turn on, and an empty pane says why it is empty, naming the
+    package — the counter already admitted it was filtering ("260 hidden") and that was not enough,
+    because the thing a person looks at is the pane.
+
+    **D24 — `releaseSession` awaits the detail before rendering.** It refreshed devices and sessions,
+    called `render()`, and never touched `state.detail`, which `screenCockpit` PREFERS. The confirm
+    repainted a live cockpit with fourteen enabled controls aimed at a device being wiped.
+
+    **D25 — both forms floor now**, so "after 6 seconds" and "00:06 held for" agree.
+
+    **AND A TEST OF MY OWN THAT WAS VACUOUS TWICE.** First
+    `mod.lengthInWordsForTest?.(…) ?? '6 seconds'` — an optional call with the expected value as its
+    fallback passes whether or not the function exists. Deleted. Then
+    `assert.equal(mod.state.log.scope, 'all')`, which reads a SHARED MUTABLE SINGLETON that earlier
+    tests in the same file have already written to — it passed against the unfixed console, which is
+    how it got caught. Rewritten to import the module fresh under a query string, since ESM caches
+    by URL and a new URL gives pristine state. **The negative control is what found both**: 7 of the
+    new assertions fail against `main`, and any that did not had to be explained.
+
+    Suite 1430 green, typecheck clean.

@@ -116,6 +116,23 @@ async function ageBy(deviceId: string, seconds: number): Promise<void> {
   ));
 }
 
+/**
+ * Move the HOST's heartbeat back, so the reaper sees a host that was not there to be offered a
+ * reset. Separate from `ageBy` on purpose: the two facts are independent, and migration 038 is
+ * entirely about the case where one is old and the other is not.
+ */
+async function silenceHost(seconds: number): Promise<void> {
+  await withSystem((c) => c.query(
+    'UPDATE hosts SET last_heartbeat_at = now() - make_interval(secs => $2) WHERE id = $1',
+    [hostId, seconds],
+  ));
+}
+
+/** And put it back, so one test's silence cannot leak into the next. */
+async function hostBeatsNow(): Promise<void> {
+  await withSystem((c) => c.query('UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1', [hostId]));
+}
+
 /** The counter on the device row. */
 async function budget(deviceId: string) {
   return withSystem(async (c) => {
@@ -249,6 +266,67 @@ describe('the reset budget', () => {
     assert.equal(rows.length, 2, 'the ledger and the counter must agree, having been read separately');
     assert.deepEqual(rows.map((r) => r.attempt), [1, 2]);
     assert.deepEqual(rows.map((r) => r.outcome), ['timed-out', 'timed-out']);
+  });
+
+  /**
+   * MIGRATION 038 — A RESET NOBODY WAS THERE TO ATTEMPT IS NOT A STALLED RESET.
+   *
+   * Found on the lab: `cf-4` escalated itself out of the pool twice in thirty minutes with nothing
+   * wrong with it. The agent drains and EXITS to withdraw a capability, which stops every backend
+   * on the host and cold-boots them on the way back — thirteen minutes during which the host sent
+   * no heartbeats and performed no resets. The reaper counted three attempts against a device that
+   * had never been offered one.
+   *
+   * The budget answers "will this reset ever succeed". That question needs somebody to have been
+   * asked. A silent host is the silence quarantine's business (migration 016), and the difference
+   * matters because that one is UNDONE BY THE NEXT HEARTBEAT while an escalation waits for a human.
+   */
+  test('a host that was silent for the whole window burns no budget', async () => {
+    const { deviceId } = await freshCleaningDevice();
+    await ageBy(deviceId, 200);
+    await silenceHost(200);
+
+    await reap();
+    await reap();
+    await reap();
+
+    const b = await budget(deviceId);
+    assert.equal(b.attempts, 0,
+      'the host was not there to be offered the reset, so nothing about the device was learned');
+    assert.equal(b.escalated, false);
+    assert.equal((await ledger(deviceId)).length, 0, 'and nothing is written to the ledger either');
+
+    await hostBeatsNow();
+  });
+
+  /**
+   * THE CONTRAST, and it is the half that keeps 038 honest. A host that IS beating and still not
+   * resetting is exactly the case migration 032 exists for, and it must be unaffected.
+   */
+  test('a beating host still burns it — 038 forgives absence, not failure', async () => {
+    await hostBeatsNow();
+    const { deviceId } = await freshCleaningDevice();
+
+    await tickAfterTimeout(deviceId);
+
+    assert.equal((await budget(deviceId)).attempts, 1,
+      'a present host that did not reset is evidence about the device, and still counts');
+  });
+
+  /**
+   * A host that came BACK is judged from its return. The window is the same one the reset is judged
+   * over, so a heartbeat inside it means the host was present to act — whatever it was doing before.
+   */
+  test('a host that beat inside the window is counted again', async () => {
+    const { deviceId } = await freshCleaningDevice();
+    await ageBy(deviceId, 200);
+    await silenceHost(200);
+    await reap();
+    assert.equal((await budget(deviceId)).attempts, 0, 'silent: nothing counted');
+
+    await hostBeatsNow();
+    await reap();
+    assert.equal((await budget(deviceId)).attempts, 1, 'back, and now answerable for the reset');
   });
 
   test('the count never exceeds the budget, and exhausting it escalates', async () => {
