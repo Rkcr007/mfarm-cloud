@@ -22,10 +22,13 @@ import { createServer, type Server } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/http/server.ts';
-import { withSystem, closePools } from '../src/db.ts';
+import { withSystem, withTenant, closePools } from '../src/db.ts';
 import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { parseCapabilities } from '../src/http/webdriver/capabilities.ts';
 import { verifySessionToken } from '../src/tokens.ts';
+import {
+  record, drainCommandLog, resetCommandLog, commandLogStats,
+} from '../src/commandLog.ts';
 
 let app: FastifyInstance;
 let orgA: string, orgB: string, hostId: string;
@@ -1509,5 +1512,262 @@ describe('mfarm:appId', () => {
       .body as { capabilities: { alwaysMatch: Record<string, unknown> } }).capabilities.alwaysMatch;
     assert.equal(sent['appium:appPackage'], 'com.acme.hostapp');
     assert.equal(sent['appium:appActivity'], '.MainActivity');
+  });
+});
+
+// ------------------------------------------------------------------ the command trace
+
+/**
+ * Migration 041: a session remembers the commands that were run against it.
+ *
+ * WHY THIS IS THE INTERESTING TEST FILE FOR IT. The trace is produced by the proxy, and the proxy's
+ * whole justification is that it costs "a few milliseconds" — so most of what follows is about the
+ * ways recording could betray that: by slowing a command, by failing one, or by storing something
+ * that is not ours to store.
+ *
+ * The last of those is the one that would matter most and the one a test is least likely to catch
+ * by accident, so it is asserted directly: a WebDriver body carries the customer's selectors, their
+ * test data, and on `POST /element/:id/value` their passwords.
+ */
+describe('the command trace', () => {
+  async function open(key = keyA): Promise<string> {
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(key), payload: androidCaps(),
+    });
+    assert.equal(r.statusCode, 200, r.body);
+    return r.json().value.sessionId;
+  }
+
+  const trace = async (sid: string, key = keyA) => {
+    const r = await app.inject({
+      method: 'GET', url: `/v1/sessions/${sid}/commands`, headers: auth(key) });
+    assert.equal(r.statusCode, 200, r.body);
+    return r.json().commands as Array<{
+      seq: number; method: string; path: string; status: number | null;
+      durationMs: number | null; startedAt: string; error: string | null; failed: boolean;
+    }>;
+  };
+
+  test('every command becomes a numbered step, in the order it was sent', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open();
+
+    await app.inject({ method: 'POST', url: `/wd/hub/session/${sid}/element`, headers: auth(keyA),
+      payload: { using: 'id', value: 'login' } });
+    await app.inject({ method: 'GET', url: `/wd/hub/session/${sid}/screenshot`, headers: auth(keyA) });
+    await drainCommandLog();
+
+    const steps = await trace(sid);
+    assert.deepEqual(steps.map((s) => `${s.method} ${s.path}`), ['POST element', 'GET screenshot']);
+    // Dense and 1-based: this is the step number a person reads off the screen.
+    assert.deepEqual(steps.map((s) => s.seq), [1, 2]);
+    for (const s of steps) {
+      assert.equal(s.status, 200);
+      assert.equal(s.failed, false);
+      assert.ok(s.durationMs !== null && s.durationMs >= 0, 'a step has to carry how long it took');
+      assert.ok(!Number.isNaN(Date.parse(s.startedAt)));
+    }
+  });
+
+  test('a failing command carries the W3C error code and nothing from the message', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open();
+
+    // The stub answers an unknown path with 404 and a message that QUOTES THE URL — which is the
+    // shape of the real thing: Appium's message routinely quotes the selector that failed.
+    await app.inject({ method: 'GET', url: `/wd/hub/session/${sid}/nonsense`, headers: auth(keyA) });
+    await drainCommandLog();
+
+    const [step] = await trace(sid);
+    assert.equal(step.status, 404);
+    assert.equal(step.failed, true, 'this is the step that renders red');
+    assert.equal(step.error, 'unknown command', 'the code, which is a fixed W3C vocabulary');
+
+    /**
+     * THE CODE, AND ONLY THE CODE. The stub's message is `/session/upstream-session-1/nonsense` —
+     * the full url — which stands in for the real thing: Appium's message quotes the selector that
+     * failed. The path is stored deliberately and the message is not, so the distinguishing string
+     * is the part of the message that is NOT in the path.
+     *
+     * Asserted as an exact equality above and again here from the other side, because an `error`
+     * that had picked up the message would still start with the code and pass a `startsWith`.
+     */
+    assert.ok(!JSON.stringify(step).includes('upstream-session-1'),
+      'the message beside the code carries the url; storing it would store the selector too');
+  });
+
+  test('nothing from a request body reaches the trace', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open();
+
+    /**
+     * THE MOST IMPORTANT ASSERTION IN THIS FILE. A farm that quietly retains its tenants'
+     * credentials for days is not a debugging feature, it is an incident with a date on it.
+     */
+    const secret = 'hunter2-correct-horse-battery-staple';
+    await app.inject({ method: 'POST', url: `/wd/hub/session/${sid}/element`, headers: auth(keyA),
+      payload: { using: 'xpath', value: `//input[@password='${secret}']` } });
+    await drainCommandLog();
+
+    const steps = await trace(sid);
+    assert.equal(steps.length, 1);
+    assert.ok(!JSON.stringify(steps).includes(secret), 'a selector is the customer\'s, not ours');
+    assert.ok(!JSON.stringify(steps).includes('xpath'), 'and neither is the strategy they used');
+    assert.equal(steps[0].path, 'element', 'the SHAPE is kept; the contents are not');
+  });
+
+  test('the upstream session id never appears in a tenant-readable row', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open();
+    await app.inject({ method: 'GET', url: `/wd/hub/session/${sid}/screenshot`, headers: auth(keyA) });
+    await drainCommandLog();
+
+    const steps = await trace(sid);
+    // `upstream-session-1` is the automation server's own id. It is identical on every row of a
+    // session, so it adds nothing, and it is a detail of the farm's internals.
+    assert.ok(!JSON.stringify(steps).includes('upstream-session-1'));
+    assert.equal(steps[0].path, 'screenshot');
+  });
+
+  test('quit is the last step, and a suite that reads its trace straight after sees all of it', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open();
+    await app.inject({ method: 'GET', url: `/wd/hub/session/${sid}/screenshot`, headers: auth(keyA) });
+
+    // NO DRAIN HERE, deliberately. The quit path awaits the flush itself, because a CI job reads
+    // its own trace the instant the suite finishes. If that await is ever removed this goes red.
+    await app.inject({ method: 'DELETE', url: `/wd/hub/session/${sid}`, headers: auth(keyA) });
+
+    const steps = await trace(sid);
+    assert.equal(steps.length, 2, `expected the screenshot and the quit, got ${steps.length}`);
+    assert.equal(steps[1].method, 'DELETE');
+    assert.equal(steps[1].failed, false);
+  });
+
+  test("another org cannot read a session's trace", async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open(keyA);
+    await app.inject({ method: 'GET', url: `/wd/hub/session/${sid}/screenshot`, headers: auth(keyA) });
+    await drainCommandLog();
+
+    assert.equal((await trace(sid, keyA)).length, 1, 'the owner sees it');
+    // RLS, not a 403: another org's session id must be indistinguishable from one that never
+    // existed, which is the disclosure boundary the rest of the API keeps.
+    assert.deepEqual(await trace(sid, keyB), [], 'and nobody else does');
+  });
+
+  test('a tenant cannot write steps into another org\'s session', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open(keyA);
+
+    /**
+     * REASONED AND THEN CHECKED, because the reasoning has a hidden premise.
+     *
+     * `record_session_commands` is SECURITY DEFINER and granted to `mfarm_app`, so it is reachable
+     * from a request handler — and it takes a session id from its caller.
+     *
+     * THE FIRST DRAFT RELIED ON RLS TO SCOPE IT, reasoning that the function derives the org by
+     * SELECTing the session and `sessions` is FORCE ROW LEVEL SECURITY. That reasoning was wrong in
+     * its last step: `mfarm_definer` has **BYPASSRLS** — migration 012 gave it that deliberately, so
+     * that `promote_queued` can read every org's queued sessions — which means RLS is simply not
+     * present inside any definer function, and a "derived" org is whatever org owns whatever id the
+     * caller passed.
+     *
+     * This test was written to confirm the reasoning and instead found org B writing a forged step
+     * into org A's session, filed under A. The function now takes the org and names it in its WHERE
+     * clause, which is the shape `request_capture` already had.
+     */
+    const written = await withTenant(orgB, async (c) => Number((await c.query(
+      'SELECT record_session_commands($1, $2, $3::jsonb) AS n',
+      [orgB, sid, JSON.stringify([{ method: 'POST', path: 'forged', status: 200, durationMs: 1,
+                                   startedAt: new Date().toISOString(), error: null }])],
+    )).rows[0].n));
+
+    assert.equal(written, 0, 'B must not be able to write a step into A\'s session');
+    assert.deepEqual(await trace(sid, keyA), [],
+      'and A\'s trace must not contain a step A never ran');
+  });
+
+  test('the trace pages, and says when there is more', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open();
+    for (let i = 0; i < 5; i++) {
+      await app.inject({ method: 'GET', url: `/wd/hub/session/${sid}/screenshot`, headers: auth(keyA) });
+    }
+    await drainCommandLog();
+
+    const first = await app.inject({
+      method: 'GET', url: `/v1/sessions/${sid}/commands?limit=2`, headers: auth(keyA) });
+    const page = first.json();
+    assert.equal(page.commands.length, 2);
+    assert.equal(page.nextAfter, 2, 'a step number, not an opaque cursor — a caller can resume by eye');
+
+    const rest = await app.inject({
+      method: 'GET', url: `/v1/sessions/${sid}/commands?after=${page.nextAfter}`, headers: auth(keyA) });
+    assert.deepEqual(rest.json().commands.map((c: { seq: number }) => c.seq), [3, 4, 5]);
+    assert.equal(rest.json().nextAfter, undefined, 'absent, not null, when the trace is exhausted');
+  });
+
+  test('recording adds well under a millisecond to the proxy hop', async () => {
+    /**
+     * THE MEASUREMENT THIS FEATURE WAS GATED ON, kept as a test so it cannot quietly regress.
+     *
+     * `record()` is on the hot path of every command a customer's suite sends. It is synchronous
+     * and does no I/O — it appends to an array — and this pins that: if someone later makes it
+     * await a write, this fails rather than the farm getting slower for everyone.
+     *
+     * Measured on `record()` itself rather than end-to-end. A proxy hop through a local HTTP server
+     * is tens of milliseconds of noise, which would swallow the very thing being measured.
+     */
+    resetCommandLog();
+    const N = 10_000;
+    const started = process.hrtime.bigint();
+    for (let i = 0; i < N; i++) {
+      record('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000001', {
+        method: 'POST', path: `element/e-${i}/click`, status: 200,
+        durationMs: 12, startedAt: new Date(), error: null,
+      });
+    }
+    const perCallMs = Number(process.hrtime.bigint() - started) / 1e6 / N;
+    resetCommandLog();
+
+    assert.ok(perCallMs < 0.05,
+      `record() cost ${perCallMs.toFixed(4)}ms per command; it must stay off the critical path`);
+  });
+
+  test('a database that will not take the trace does not break the suite', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    resetCommandLog();
+    const sid = await open();
+
+    /**
+     * The rule the whole module exists to keep: a control plane whose command log is broken still
+     * runs suites. Simulated by pointing the flush at a session that no longer exists, which is
+     * also a real race — the recorder is asynchronous, and a run whose rows were deleted between
+     * the command and the flush is ordinary rather than a fault.
+     */
+    await app.inject({ method: 'GET', url: `/wd/hub/session/${sid}/screenshot`, headers: auth(keyA) });
+    await withSystem((c) => c.query('DELETE FROM sessions WHERE id = $1', [sid]));
+
+    await drainCommandLog();
+    assert.equal(commandLogStats().failedFlushes, 0,
+      'a vanished session is a no-op inside the function, not an error to log');
   });
 });

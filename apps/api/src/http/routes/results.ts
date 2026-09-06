@@ -213,4 +213,60 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
     });
     return { results: rows.map(resultJson) };
   });
+
+  /**
+   * GET /v1/sessions/:id/commands — the steps, in order (migration 041).
+   *
+   * The source a step list is built from: what was sent, what came back, and how long it took. The
+   * hub records these as it forwards them and interprets none of them, so a command Appium adds
+   * tomorrow appears here correctly without this API knowing what it is.
+   *
+   * PAGED, and the default is small. A long-running suite produces thousands of these, and a screen
+   * that asks for all of them by accident is a screen that times out on the run worth reading.
+   */
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; after?: string } }>(
+    '/sessions/:id/commands',
+    async (req) => {
+      const { orgId } = requireTenant(req);
+      const limit = Math.min(Math.max(Number(req.query.limit ?? 200) || 200, 1), 1000);
+      // `after` is a step number, not an opaque cursor: the ordering is a dense integer sequence
+      // this API assigns, so there is nothing for a cursor to hide and a caller can resume by eye.
+      const after = Number(req.query.after ?? 0) || 0;
+
+      const rows = await withTenant(orgId, async (c) => (await c.query<{
+        seq: number; method: string; path: string; status: number | null;
+        duration_ms: number | null; started_at: Date; error: string | null;
+      }>(
+        `SELECT seq, method, path, status, duration_ms, started_at, error
+           FROM session_commands
+          WHERE session_id = $1 AND seq > $2
+          ORDER BY seq
+          LIMIT $3`,
+        [req.params.id, after, limit + 1],
+      )).rows);
+
+      const more = rows.length > limit;
+      return {
+        commands: rows.slice(0, limit).map((r) => ({
+          seq: r.seq,
+          method: r.method,
+          path: r.path,
+          status: r.status,
+          durationMs: r.duration_ms,
+          startedAt: r.started_at.toISOString(),
+          error: r.error,
+          /**
+           * Derived here rather than stored, so that what "failed" means can change without a
+           * migration — and so the console cannot disagree with the API about which step is red.
+           *
+           * A NULL status is a failure: the command was sent and never answered. Treating it as
+           * anything else would paint the most alarming thing that can happen to a session as
+           * ordinary.
+           */
+          failed: r.status === null || r.status >= 400,
+        })),
+        // Absent rather than null when there is no more, so a caller loops `while (nextAfter)`.
+        ...(more ? { nextAfter: rows[limit - 1].seq } : {}),
+      };
+    });
 }

@@ -85,6 +85,16 @@ export interface Config {
   artifactRetentionHours: number;
 
   /**
+   * How long a session's command trace is kept (migration 041).
+   *
+   * SHORTER THAN ARTIFACTS BY DEFAULT — three days against fourteen — because this is the only
+   * table written once per WebDriver command rather than once per session. The trace answers "why
+   * did this run fail", which is a question asked within hours; a fortnight of every click on the
+   * farm is disk spent on a question nobody is still asking.
+   */
+  commandRetentionHours: number;
+
+  /**
    * Public base url of the data-plane route, or null when no live view is reachable.
    *
    * The worker's own `hosts.endpoint` is what a program on the network dials. This is what a
@@ -555,6 +565,9 @@ export function parseConfig(env: Env): Config {
   const artifactRetentionHours = intVar(
     env.ARTIFACT_RETENTION_HOURS, 'ARTIFACT_RETENTION_HOURS', 14 * 24, 1, 365 * 24, problems,
   );
+  const commandRetentionHours = intVar(
+    env.COMMAND_RETENTION_HOURS, 'COMMAND_RETENTION_HOURS', 3 * 24, 1, 365 * 24, problems,
+  );
 
   // 512 MB. Comfortably past a large debug build with every ABI in it, and far short of a number
   // that lets one upload fill the disk the snapshots live on.
@@ -633,6 +646,7 @@ export function parseConfig(env: Env): Config {
     artifactDir,
     artifactMaxUploadBytes,
     artifactRetentionHours,
+    commandRetentionHours,
     dataPlanePublicBase,
     turnUrls,
     turnSecretSource: turnSecret ? 'environment' as const : 'none' as const,
@@ -691,6 +705,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     artifactDir: c.artifactDir,
     artifactMaxUploadBytes: c.artifactMaxUploadBytes,
     artifactRetentionHours: c.artifactRetentionHours,
+    commandRetentionHours: c.commandRetentionHours,
     // "unset (no live view route)" was true and is not any more: unset now means the live-view
     // socket is same-origin on this console's own ingress, which is the recommended shape.
     dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (same-origin /dp on this console)',
