@@ -142,62 +142,51 @@ product.
 capture lands up to ten seconds after the assertion. Ten seconds late beats after-force-stop, and
 S3 is what makes a late screenshot readable — the command trace says what happened in between.
 
-## S3 — There is no step trace, so nothing can be highlighted
+## S3 — There is no step trace, so nothing can be highlighted — **BUILT (2026-09-07)**
 
-**The gap.** The hub deliberately does not model WebDriver commands
-(`apps/api/src/http/routes/webdriver.ts:670`): *"the automation server is the authority on what
-exists, and a hub that enumerates commands is a hub that breaks when a driver adds one."* That rule
-is correct and this step does not break it.
+**The gap.** The hub deliberately does not model WebDriver commands: *"the automation server is the
+authority on what exists, and a hub that enumerates commands is a hub that breaks every time Appium
+adds one."* That rule is correct, and ADR-0029 keeps it: what a step list needs is not a semantic
+model but method, path, status, duration and time — what the proxy had in its hands one line before,
+because it had just forwarded it.
 
-What BrowserStack and LambdaTest show as a step list is not a semantic model. It is method, path,
-HTTP status, duration and timestamp, logged as the bytes go past. A proxy that records
-`POST /element/:id/click → 200 in 84ms` has not modelled anything — it has written down what it
-already forwarded. If Appium adds a command tomorrow, this logs it correctly without knowing what it
-is, which is exactly the property §670 is protecting.
+**Schema — migration 041.** `session_commands`, append-only, RLS'd, `bigserial` (the only table in
+the schema written once per command rather than once per session). `record_session_commands()` for
+the batched write and `expire_session_commands()` for the sweep.
 
-**Schema — migration 041.**
+**What is deliberately not stored: bodies and headers.** A WebDriver body carries the customer's
+selectors, their test data, and on `POST /element/:id/value` their passwords. The stored `error` is
+the W3C code only — the message beside it quotes the selector. This is the single most important
+line in the migration.
 
-```sql
-CREATE TABLE session_commands (
-  id           bigserial PRIMARY KEY,
-  org_id       uuid NOT NULL REFERENCES orgs(id)     ON DELETE CASCADE,
-  session_id   uuid NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  seq          integer NOT NULL,          -- ordinal within the session; the step number a person sees
-  method       text NOT NULL,
-  path         text NOT NULL,             -- upstream path, session id stripped
-  status       integer,                   -- NULL when the proxy never got an answer
-  duration_ms  integer,
-  started_at   timestamptz NOT NULL,
-  error        text,                      -- WebDriver error name only, never the body
-  UNIQUE (session_id, seq)
-);
-```
+**Code.** `apps/api/src/commandLog.ts` — a synchronous, bounded, batched recorder that swallows and
+counts every database error, so a control plane whose command log is broken still runs suites. The
+proxy calls it without awaiting; the only awaited flush is on `driver.quit()`, because a CI job
+reads its own trace the instant the suite finishes. `GET /v1/sessions/:id/commands` pages the
+result and derives `failed` rather than storing it.
 
-Append-only, same revoke as `execution_events`. **No request or response bodies** — a body carries
-the customer's selectors, their test data and, on a `POST /element/value`, their passwords. The
-shape is worth keeping and the contents are not ours to store.
+**The latency question this step was gated on is answered and pinned.** `record()` costs well under
+0.05 ms per command, asserted as a test so it cannot quietly regress into an awaited write.
 
-`bigserial`, not `uuid`: a saturated four-device farm writes a few hundred of these a minute and this
-is the one table in the schema with that write rate.
+**Two real bugs found while verifying, neither of which a green test would have shown:**
 
-**Retention is mandatory, not optional.** Same reasoning as `artifacts.expires_at` — a 500 GB disk
-and unbounded capture is an outage with a date on it. A sweep in `allocator.ts` alongside
-`expire_artifacts`.
+1. `SELECT COALESCE(MAX(seq),0) … FOR UPDATE` — Postgres refuses `FOR UPDATE` beside an aggregate.
+   The recorder's swallow-and-count then hid it as a *silently empty trace*: the module's designed
+   failure mode working exactly as intended, and a reminder that "it did not crash" is not "it
+   worked". Replaced with a transaction-scoped advisory lock, which is also the only thing that can
+   serialise the first batch of a session, since there is no row yet to lock.
+2. **A cross-tenant write.** The function derived the org by selecting the session, on the reasoning
+   that `sessions` is FORCE ROW LEVEL SECURITY. `mfarm_definer` has **BYPASSRLS** — migration 012
+   gave it that so `promote_queued` can read every org's queue — so RLS is not present inside any
+   definer function. A test written to *confirm* the reasoning found org B writing a forged step
+   into org A's session, filed under A. Now `p_org` is passed and named in the `WHERE`, which is the
+   shape `request_capture` already had. **The general rule: RLS will not scope a definer function;
+   the function must scope itself.**
 
-**Code.**
-
-- `apps/api/src/http/routes/webdriver.ts` — the command proxy already times every hop to `touch()`
-  the session. Write one row per command on the way back, fire-and-forget: **a failed insert must
-  never fail the customer's command.** That is the one rule this step lives or dies by.
-- `GET /v1/sessions/:id/commands` — paged, RLS-scoped, newest-last.
-
-**The cost, stated before it is paid.** One insert per WebDriver command on a path whose whole
-justification is that it adds "a few milliseconds". Batch the writes — accumulate per session in
-memory, flush every 250 ms or 50 commands, flush on quit. Measure the proxy hop before and after and
-put both numbers in the PR; if the added latency is not under a millisecond at the median, this ships
-behind a per-org flag instead of on by default.
-
----
+**Verified.** Eleven tests in `apps/api/test/webdriver.test.ts` — ordering and numbering, the error
+code without the message, no request body, no upstream session id, quit as the last step, the
+awaited drain, cross-org read and write isolation, paging, the latency bound, and a database that
+refuses the write not breaking the suite.
 
 ## S4 — The timeline learns about tests, and gets a screen
 
@@ -322,8 +311,7 @@ host, then the rate limiter.
 
 1. ~~**S1 fairness**~~ — **done**, migration 039 / ADR-0028.
 2. ~~**S2 evidence at failure time**~~ — **done**, migration 040.
-3. **S3 command trace** — what makes a late screenshot readable, and the only source a step list can
-   have that does not require every customer to instrument their suite.
+3. ~~**S3 command trace**~~ — **done**, migration 041 / ADR-0029.
 4. **S4 timeline + screen** — makes S2 and S3 visible; nothing renders any of it today.
 5. **S5 video** — affordable only after S2/S4 make "record only failures" expressible, and gated on
    one measurement.

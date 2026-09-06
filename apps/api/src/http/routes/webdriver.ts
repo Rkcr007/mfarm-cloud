@@ -16,6 +16,7 @@ import { parseTunnelAutomationUrl } from '@mfarm/protocol';
 import { callOverTunnel } from '../automation-tunnel.ts';
 import type { TunnelRegistry } from '../tunnel.ts';
 import { recordSessionEvent, recordRunEvent } from '../../executionEvents.ts';
+import { record, drainCommandLog } from '../../commandLog.ts';
 import { clientGone } from '../clientGone.ts';
 
 /**
@@ -619,16 +620,35 @@ export async function webdriverRoutes(app: FastifyInstance) {
     const { orgId } = requireTenant(req);
     const row = await lookup(orgId, req.params.sessionId);
 
+    const quitStartedAt = new Date();
+    const quitStartedHr = process.hrtime.bigint();
+
     // Best effort, and deliberately not fatal. Telling the automation server to clean up is polite;
     // giving the device back is the part that must happen, because the snapshot restore that
     // follows erases whatever the upstream would have tidied anyway.
+    let quitFailed: string | null = null;
     await callUpstream(
       `${row.upstream_base_url}/session/${encodeURIComponent(row.upstream_session_id)}`,
       { method: 'DELETE', headers: grantFor(orgId, req.params.sessionId, row) },
       30_000,
       { tunnels: app.tunnels, hostId: row.host_id },
     ).catch((e: Error) => {
+      quitFailed = e.name === 'TimeoutError' ? 'timeout' : 'automation unreachable';
       req.log.warn({ err: e, sessionId: req.params.sessionId }, 'upstream session delete failed; releasing anyway');
+    });
+
+    /**
+     * QUIT IS A STEP TOO, and the last one in the trace.
+     *
+     * Worth its own row because it can fail on its own: an upstream that will not answer the delete
+     * is a real and confusing failure — the suite believes it tidied up and the farm reclaimed the
+     * device by timeout instead. A trace that stopped at the previous command would leave that
+     * looking like a suite that simply stopped talking.
+     */
+    record(orgId, req.params.sessionId, {
+      method: 'DELETE', path: '', status: quitFailed ? null : 200,
+      durationMs: Number((process.hrtime.bigint() - quitStartedHr) / 1_000_000n),
+      startedAt: quitStartedAt, error: quitFailed,
     });
 
     await withTenant(orgId, (c) =>
@@ -661,8 +681,43 @@ export async function webdriverRoutes(app: FastifyInstance) {
       await recordSessionEvent(orgId, req.params.sessionId, 'device-released', { reason: 'webdriver_quit' });
     }
 
+    /**
+     * AWAITED HERE AND NOWHERE ELSE ON THE HOT PATH.
+     *
+     * Quit is the one moment where waiting is right: a suite that finishes and immediately reads
+     * its own trace — which is what a CI job does — should see all of it rather than all but the
+     * last few hundred milliseconds. Every other command returns without waiting for the write.
+     *
+     * `drainCommandLog` swallows its own errors, so this cannot turn a successful quit into a 500.
+     */
+    await drainCommandLog();
+
     return { value: null };
   });
+
+  /**
+   * The W3C error CODE out of an upstream error body, and nothing else.
+   *
+   * A failing WebDriver response is `{"value": {"error": "no such element", "message": "…"}}`. The
+   * `error` field is a fixed vocabulary defined by the specification — safe to store, and exactly
+   * what a step list needs to say why a step went red.
+   *
+   * THE MESSAGE IS NOT TAKEN, and that is the whole reason this is a function rather than a field
+   * access at the call site. Appium's message routinely quotes the selector that failed, which is
+   * the customer's test data; migration 041's header refuses to store bodies for the same reason
+   * and this is where that refusal is actually enforced.
+   *
+   * Returns null on anything unparseable. A body this hub cannot read is one it has no opinion
+   * about, which is the same position it takes on every other payload.
+   */
+  function webdriverErrorCode(body: string): string | null {
+    try {
+      const v = (JSON.parse(body) as { value?: { error?: unknown } })?.value;
+      return typeof v?.error === 'string' && v.error ? v.error.slice(0, 200) : null;
+    } catch {
+      return null;
+    }
+  }
 
   // ---------------------------------------------------------------- command proxy
 
@@ -687,6 +742,24 @@ export async function webdriverRoutes(app: FastifyInstance) {
       );
 
       const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'DELETE';
+
+      /**
+       * THE STEP THIS COMMAND WILL BECOME (migration 041), timed around the upstream hop only.
+       *
+       * `startedAt` is taken before the call and the duration measured across it, so what a person
+       * reads as "click took 84ms" is the device's time and not this hub's bookkeeping.
+       *
+       * `commandPath` drops the `/session/<id>` prefix: it is identical on every row of a session,
+       * and it carries the AUTOMATION SERVER'S session id, which has no business in a
+       * tenant-readable table. What is left — `element/abc-123/click` — is what distinguishes one
+       * step from the next.
+       */
+      const commandPath = upstreamPath.replace(
+        `/session/${encodeURIComponent(row.upstream_session_id)}`, '').replace(/^\//, '');
+      const startedAt = new Date();
+      const startedHr = process.hrtime.bigint();
+      const elapsedMs = () => Number((process.hrtime.bigint() - startedHr) / 1_000_000n);
+
       const res = await callUpstream(
         `${row.upstream_base_url}${upstreamPath}`,
         {
@@ -702,6 +775,17 @@ export async function webdriverRoutes(app: FastifyInstance) {
         COMMAND_TIMEOUT_MS,
         { tunnels: app.tunnels, hostId: row.host_id },
       ).catch((e: Error) => {
+        /**
+         * RECORDED WITH A NULL STATUS, which is a state worth being able to see: the command was
+         * sent and its outcome is unknown. A timeline that showed nothing here would suggest the
+         * suite simply stopped, when what happened is that the device stopped answering — and those
+         * two send a person looking in completely different places.
+         */
+        record(orgId, req.params.sessionId, {
+          method: req.method, path: commandPath, status: null,
+          durationMs: elapsedMs(), startedAt,
+          error: e.name === 'TimeoutError' ? 'timeout' : 'automation unreachable',
+        });
         // A dead host is not a dead session yet — a restart or a blip is survivable, and ending the
         // session here would throw away a device the client may still recover. The TTL collects it
         // if it really is gone.
@@ -710,6 +794,14 @@ export async function webdriverRoutes(app: FastifyInstance) {
           `The device's automation server did not answer: ${e.message}`,
           { mfarmCode: 'automation_unreachable' },
         );
+      });
+
+      // Synchronous and unawaited by design — see `commandLog.ts`. A command must never be slower
+      // or less reliable because it was written down.
+      record(orgId, req.params.sessionId, {
+        method: req.method, path: commandPath, status: res.status,
+        durationMs: elapsedMs(), startedAt,
+        error: res.status >= 400 ? webdriverErrorCode(res.text) : null,
       });
 
       await touch(orgId, req.params.sessionId, row.last_command_at);

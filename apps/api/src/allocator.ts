@@ -221,7 +221,7 @@ let lastHostSweepAt = 0;
 export async function reap(): Promise<{
   expired: number; idleEnded: number; promoted: number; keysPurged: number; installsOrphaned: number;
   hostsQuarantined: number; artifactsExpired: number; blobsDeleted: number; resetsEscalated: number;
-  attemptsClosed: number; recoveriesExpired: number;
+  attemptsClosed: number; recoveriesExpired: number; commandsExpired: number;
 }> {
   return withSystem(async (c: PoolClient) => {
     const e = await c.query('SELECT expire_sessions() AS n');
@@ -392,6 +392,21 @@ export async function reap(): Promise<{
       }
     }
 
+    /**
+     * The command trace's retention (migration 041).
+     *
+     * THE HIGHEST-WRITE TABLE IN THE SCHEMA — one row per WebDriver command, so a saturated farm
+     * writes a few hundred a minute. 019 said retention is not optional for artifacts; it is more
+     * true for something written once per click than once per session.
+     *
+     * Bounded per sweep for `expire_artifacts`' reason: the first sweep after a retention change
+     * must not hold a lock for as long as it takes to delete a month.
+     */
+    const sc = await c.query<{ n: number }>(
+      'SELECT expire_session_commands(make_interval(hours => $1), $2) AS n',
+      [loadConfig().commandRetentionHours, 5000],
+    );
+
     return {
       expired: Number(e.rows[0].n),
       idleEnded: Number(w.rows[0].n),
@@ -404,6 +419,7 @@ export async function reap(): Promise<{
       resetsEscalated: Number(esc.rows[0].n),
       attemptsClosed: Number(ca.rows[0].n),
       recoveriesExpired: Number(rec.rows[0].n),
+      commandsExpired: Number(sc.rows[0].n),
     };
   });
 }
