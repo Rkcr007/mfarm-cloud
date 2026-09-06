@@ -210,6 +210,107 @@ describe('allocator under concurrency', () => {
   });
 });
 
+/**
+ * Section 20 of the spec, which asks by name that "ten users submit tests" must not let one of them
+ * monopolise the farm.
+ *
+ * THE BUG THIS FIXES was not a slow queue, it was a stopped one. `promote_queued` read the twenty
+ * oldest QUEUED sessions GLOBALLY, ordered by `created_at`, and skipped each one whose org sat at
+ * its concurrency cap. An org holding twenty or more queued sessions at its cap therefore filled
+ * the entire candidate window with rows that all `CONTINUE` — and a second org's session was never
+ * looked at, with devices sitting READY. The sweep repeated the same window every ten seconds and
+ * promoted nothing.
+ *
+ * Invisible on a one-org farm, which is why it survived to migration 038. It surfaces on the first
+ * day of the second team.
+ */
+describe('queue fairness across orgs', () => {
+  test('a large org at its cap cannot starve a small one behind it', async () => {
+    await resetFleet();
+    /**
+     * THE SHAPE THIS TEST HAS TO HAVE, and the one an earlier version of it got wrong.
+     *
+     * Org A must still be AT ITS CAP at the moment a device frees. If A releases the device that
+     * frees, A drops under its cap and is legitimately first in line for it — round-robin gives A
+     * that device and is right to. There is no starvation in that story and a test built on it
+     * fails against a correct fix.
+     *
+     * So: two devices. A holds one and stays holding it. B holds the other and releases it. A
+     * spends the whole test pinned at cap 1 with a long backlog, which is exactly the production
+     * situation — one team's CI queues a hundred jobs and every other team stops.
+     */
+    await seedDevices(2);
+    await withSystem((c) => c.query('UPDATE orgs SET max_concurrent = 1 WHERE id = $1', [orgA]));
+
+    const pinned = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    assert.ok(pinned.deviceId, 'org A should hold one device for the duration');
+    const bHeld = await allocate({ orgId: orgB, userId: null, region: REGION, platform: 'android' });
+    assert.ok(bHeld.deviceId, 'org B should hold the other');
+
+    // A's backlog is deliberately larger than promote_queued's window of 20. That is the whole
+    // mechanism: a window one org can fill by itself is a window no other org appears in.
+    for (let i = 0; i < 25; i++) {
+      await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    }
+    // B's second session arrives LAST, so strict `created_at` ordering puts it behind all 25.
+    const b = await allocate({ orgId: orgB, userId: null, region: REGION, platform: 'android' });
+    assert.equal(b.deviceId, null, 'both devices are busy, so B queues — that part was always right');
+
+    // B hands its own device back. One device is now READY and A is still at cap, so A cannot use
+    // it. The only session in the fleet that can is B's.
+    await release(orgB, bHeld.sessionId, 'test');
+    await resetComplete(host, bHeld.deviceId!, (await withSystem(async (c) =>
+      Number((await c.query('SELECT fence FROM devices WHERE id = $1', [bHeld.deviceId])).rows[0].fence))));
+
+    await reap();
+
+    const bState = await withSystem(async (c) =>
+      (await c.query('SELECT state FROM sessions WHERE id = $1', [b.sessionId])).rows[0].state);
+
+    /**
+     * Asserted on WHOSE session moved, not on how many. A count would also pass if the window had
+     * simply been made bigger, which is not the fix — the property is "every org's oldest is
+     * considered before any org's second", and only B's own id can say that held.
+     */
+    assert.notEqual(bState, 'QUEUED',
+      'org B waited behind 25 of org A\'s queued sessions and was never considered, with a device READY '
+      + '— one org can starve another out of the queue');
+    assert.equal(bState, 'ALLOCATING', 'B\'s session should have been promoted onto the freed device');
+
+    await withSystem((c) => c.query('UPDATE orgs SET max_concurrent = 100 WHERE id = $1', [orgA]));
+  });
+
+  test('within one org the queue is still strictly first-in-first-out', async () => {
+    await resetFleet();
+    await seedDevices(1);
+    await withSystem((c) => c.query('UPDATE orgs SET max_concurrent = 1 WHERE id = $1', [orgA]));
+
+    const held = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    // Sequential, not Promise.all: this test is about ORDER, and concurrent inserts have no order
+    // to be about. `created_at` is `now()`, which inside one transaction is a constant.
+    const first = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    const second = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    assert.equal(first.deviceId, null);
+    assert.equal(second.deviceId, null);
+
+    await release(orgA, held.sessionId, 'test');
+    await resetComplete(host, held.deviceId!, (await withSystem(async (c) =>
+      Number((await c.query('SELECT fence FROM devices WHERE id = $1', [held.deviceId])).rows[0].fence))));
+
+    await reap();
+
+    const states = await withSystem(async (c) => (await c.query(
+      'SELECT id, state FROM sessions WHERE id = ANY($1)', [[first.sessionId, second.sessionId]])).rows);
+    const stateOf = (id: string) => states.find((r) => r.id === id)?.state;
+
+    // Fairness across orgs must not have cost ordering within one. The older session goes first.
+    assert.equal(stateOf(first.sessionId), 'ALLOCATING', 'the older of the two must be promoted');
+    assert.equal(stateOf(second.sessionId), 'QUEUED', 'the newer must wait its turn');
+
+    await withSystem((c) => c.query('UPDATE orgs SET max_concurrent = 100 WHERE id = $1', [orgA]));
+  });
+});
+
 describe('tenant isolation', () => {
   test('RLS hides another org\'s sessions', async () => {
     await resetFleet();
