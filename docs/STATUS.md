@@ -1,8 +1,9 @@
 # MFARM — status
 
 **Open this first.** What the product is, what works, what is left, and what it costs to run.
-Re-derived 2026-09-06 at `4913a28` / migration 038 / ADR-0027 — every number below was read from the
-code, the farm or `git` on that day, not carried forward from the last version of this page.
+Re-derived 2026-09-07 at `011a620` / migration 039 / ADR-0028 — every number below was read from the
+code, the farm or `git` on that day, not carried forward from the last version of this page. Two
+numbers on the last version had decayed and are corrected here; see §5.
 
 Two other documents complete the picture and nothing else is required reading:
 
@@ -58,8 +59,8 @@ half-finished one.
 
 | Area | State | The honest caveat |
 |---|---|---|
-| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1441-test suite**. All are closed. |
-| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 38 migrations, all applied. | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
+| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1382-test suite**. All are closed. |
+| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 39 migrations. | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host. A host outage is a farm outage; ADR-0027 and migration 038 reduce what one costs, they do not remove it. |
 | **Physical devices** | **Built, not currently serving.** Agent, pairing (ADR-0014), org-pinning, the outbound tunnel and the reset story (ADR-0012) are all built. | The farm's one `SM-S918B` is quarantined behind a machine that has not beaten since **2026-08-29**. Nothing is wrong with the code — it needs `npx @mfarm/agent` on that machine. |
@@ -67,7 +68,8 @@ half-finished one.
 | **Deploy / ops** | **Working, gaps instrumented.** `check-deployed.sh` answers "is this farm running `main`?" for the serving image and both checkouts; `verify-live.sh` asks it too. | **Deploy is manual.** A released commit reaches the farm when somebody runs `mfarm-deploy.sh`. Reported now, not closed. |
 | **Observability** | **Working** — Prometheus, Grafana, alert rules, host heartbeat and tunnel metrics. | No worker-side metrics: the agent reports incidents, not gauges. |
 | **Video / recording** | **Not built, deliberately.** Costed, and unbuilt until it can record only failures. | — |
-| **Execution timeline UI** | **Not built.** The events are recorded and served; no screen renders them. | The one console screen the execution model still asks for. |
+| **Execution timeline UI** | **Not built.** The events are recorded and served; no screen renders them. | The one console screen the execution model still asks for — [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md) S4. |
+| **Queue** | **Working, and fair as of ADR-0028.** FIFO within an org, round-robin across them, per-org concurrency caps, device-class matching (ADR-0025). | A queued caller is told it is queued and nothing else — no position, no estimate. `EXECUTION_ROADMAP.md` S6. |
 
 ---
 
@@ -100,7 +102,9 @@ such in the code. It is the one module between here and running two.
 
 ### 5. The execution timeline has no screen
 
-Events are recorded and served; nothing renders them. `AutomationExecutionPlan.md` §3.
+Events are recorded and served; nothing renders them. `AutomationExecutionPlan.md` §3, and S4 of
+[`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md) — which is the sequenced plan for this and for the
+other five things standing between the execution path and a stranger's CI.
 
 ### 6. A device arriving still restarts the agent
 
@@ -112,15 +116,21 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1441**, green, across five workspaces |
-| Migrations | 38, all applied on the farm |
-| Decisions | 26 ADRs (there is no 0013) |
-| Merged PRs | 115 |
+| Tests | **1382**, green, across three workspaces plus `deploy` |
+| Migrations | **39 in the repo, 38 applied on the farm** — 039 lands with the next deploy |
+| Decisions | 27 ADRs (there is no 0013) |
+| Merged PRs | 123 |
 | Defects | 25 recorded, **25 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |
 | Live view | 49–53 fps, ~39ms round trip, direct path |
 | Install → confirmed | ~8–12s, worker-reported |
+
+**Two numbers moved down, and neither is a regression.** The suite was 1441 across five workspaces
+on 2026-09-06 and is 1382 across three today: deleting the React console at `/app` (PR #122) took its
+tests with it, and `packages/protocol` has no test script at all — the "five workspaces" was counting
+workspaces, not workspaces with tests. Both figures were carried forward rather than re-read, which
+is the failure mode this page's header exists to prevent.
 
 **The ratio worth knowing:** every one of the 25 defects was found by clicking through a real farm.
 The suite has never found a console defect. That is not an argument against the suite — it catches
@@ -150,6 +160,9 @@ These three documents are the whole picture. The rest is reference, and each sit
 
 - **Operating it** — [`START_HERE.md`](START_HERE.md) (closed laptop → a device you can tap),
   [`RUNBOOK.md`](RUNBOOK.md) (start, ship, stop).
+- **Building it** — [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md), the sequenced plan from here to
+  a production execution engine: what each step changes in the schema, in the code, and how it is
+  verified.
 - **Using it** — [`EXECUTION_MODEL.md`](EXECUTION_MODEL.md), [`ci.md`](ci.md),
   [`../examples/medishop-suite/README.md`](../examples/medishop-suite/README.md).
 - **The record** — [`../HANDOFF.md`](../HANDOFF.md) is the numbered session log. **Trust its dated
