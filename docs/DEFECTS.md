@@ -1,8 +1,27 @@
-# Open defects and gaps
+# Defects
 
-One row per thing that is wrong or missing, found by using the console rather than by a test. A
-defect leaves this file when it is fixed **and** verified on the deployed farm — not when a patch is
-written.
+**How defects are found, recorded and closed here.** One of three documents:
+[`STATUS.md`](STATUS.md) is where things stand, [`DIRECTION.md`](DIRECTION.md) is why they are that
+way, and this is what is wrong with them.
+
+## The rule
+
+A defect leaves this file when it is **fixed AND verified on the deployed farm** — not when a patch
+is written and not when CI is green. Twice this month a fix was reasoned, unit-tested, merged and
+completely inert; only a watched boot and a real click said so.
+
+## Where they come from
+
+**All twenty-five entries were found by USING the product. None came from the test suite.** That is
+not a complaint about the suite — 1441 tests catch different things, and they caught two security
+regressions and a 500 this month. It is the reason an exploratory pass is part of the work rather
+than a nicety: clicking every control on a real farm, with console exceptions and failed requests
+instrumented, finds things no fixture can.
+
+The `FOUND` column records how each one surfaced, because that is the reusable half.
+
+
+One row per thing that is wrong or missing.
 
 **Severity** is about what it costs a person, not how hard it is to fix:
 

@@ -18,11 +18,13 @@ capabilities: {
 }
 ```
 
-## → [docs/INDEX.md](docs/INDEX.md) — the one page
+## Three documents
 
-Everything is curated there: what is built, every decision and what it rejected, the roads
-deliberately not taken, the invariants that fail silently if broken, and every number we actually
-measured. Nothing else needs to be read first.
+| | |
+|---|---|
+| **[docs/STATUS.md](docs/STATUS.md)** | What this is, what works, what is left in priority order, what it costs to run. **Open this first.** |
+| **[docs/DEFECTS.md](docs/DEFECTS.md)** | Everything wrong with it, how each was found, and when one is closed. |
+| **[docs/DIRECTION.md](docs/DIRECTION.md)** | What changed and why — every pivot and every decision, with the alternative it rejected. |
 
 Shortcuts, if you already know what you want:
 
@@ -31,8 +33,8 @@ Shortcuts, if you already know what you want:
 | Get it running | [docs/START_HERE.md](docs/START_HERE.md) |
 | Run your suite on it | [examples/medishop-suite/](examples/medishop-suite/README.md) · [docs/ci.md](docs/ci.md) |
 | How execution works | [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md) |
-| State of play, known issues | [HANDOFF.md](HANDOFF.md) |
-| Why things are the way they are | [docs/adrs/](docs/adrs/) |
+| The session log | [HANDOFF.md](HANDOFF.md) — trust its dated entries over its summaries |
+| Every decision in full | [docs/adrs/](docs/adrs/) |
 
 ## Layout
 
@@ -42,7 +44,7 @@ apps/cli/          the mfarm CLI
 workers/agent/     worker agent, Appium supervisor, Cuttlefish backend
 packages/protocol/ the shared contract
 deploy/            deploy scripts, and the checks that verify a farm is really live
-docs/              start with INDEX.md
+docs/              STATUS, DEFECTS, DIRECTION — everything else is reference
 examples/          a worked suite: 8 tests, one build, one run, real outcomes
 ```
 
