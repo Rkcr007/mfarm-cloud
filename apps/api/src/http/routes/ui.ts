@@ -62,6 +62,15 @@ const FILES: Record<string, { file: string; type: string }> = {
    */
   '/design-tokens.css': { file: 'design-tokens.css', type: 'text/css; charset=utf-8' },
   '/console.css': { file: 'console.css', type: 'text/css; charset=utf-8' },
+  /**
+   * The sign-in screen, in its own file rather than appended to `console.css`.
+   *
+   * It is a self-contained landing surface — its own layout, its own thirty keyframes — and it is
+   * the ONE screen every visitor is served, signed in or not. A separate file is what lets it be
+   * read and checked against the design artifact without scrolling past four thousand lines of
+   * console, and `ui.test.ts` derives its coverage from the markup, so it is checked either way.
+   */
+  '/signin.css': { file: 'signin.css', type: 'text/css; charset=utf-8' },
   '/console.js': { file: 'console.js', type: 'text/javascript; charset=utf-8' },
   // Imported as a module by console.js. Separate because it is the one part of the console that is
   // not a render function — it holds a socket and a peer connection open (ADR-0007) — and because
@@ -93,39 +102,22 @@ const FILES: Record<string, { file: string; type: string }> = {
   '/profiles.js': { file: 'profiles.js', type: 'text/javascript; charset=utf-8' },
 
   /**
-   * THE NEW CONSOLE, served at `/app` beside the old one at `/`.
+   * `/app` IS RETIRED, and these paths are gone rather than left serving something.
    *
-   * Both ship in the same image on purpose. The new console is not at parity yet, so the old one
-   * stays the front door; a cutover is repointing `/` at `app/index.html`, and a rollback is
-   * pointing it back. Nobody has to choose a release to find out.
+   * The React console was built to become the front door and never got there: it is two screens —
+   * a sign-in and a live device view — against the ten this console has. For a while both were
+   * served, on the theory that a cutover would be one line here when it reached parity.
    *
-   * THE FILENAMES ARE FIXED, NOT HASHED, and that is what makes this table possible — see the note
-   * in `apps/console/vite.config.ts`. A content hash changes every build, so an allowlist could
-   * never name it, and the alternative is a static-file plugin that would undo the security
-   * decision this table exists to make. It costs nothing: every response here is `no-store`, so a
-   * cache-busting name has no cache to bust.
+   * What that actually produced was the two halves crossed over. The new sign-in screen landed on
+   * `/app`, so the good front door led to a two-screen preview marked "Preview build", while the
+   * product people use sat behind the old form at `/`. Somebody signing in at `/app/signin` arrived
+   * at a page with no navigation, no fleet, no runs, and no way to sign out — and no reason to
+   * believe they had reached the wrong console rather than a broken one.
+   *
+   * So the sign-in design moved to `/` where the product is, and `/app` redirects there instead of
+   * being a second door people can fall through. The React code is still in the tree and still
+   * builds; what is gone is the ability to LAND on it. Restoring it is this block again.
    */
-  '/app': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
-  '/app/': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
-  /**
-   * THE REACT CONSOLE'S SCREENS, each serving the same document.
-   *
-   * It routes on `location.pathname` (see `apps/console/src/app/routes.ts`), which is what makes
-   * `/app/signin` a link somebody can send and a page somebody can reload. This table is an
-   * allowlist and not a fallback, so every screen needs a line: the alternative — a catch-all under
-   * `/app/` — is exactly the wildcard this table exists to avoid, and a path that is not here does
-   * not 404, it falls through to the authenticated API routes and answers 401, which is how the
-   * missing `/profiles.js` entry once turned the whole console into a blank page.
-   *
-   * A NEW SCREEN IN THE CONSOLE IS A NEW LINE HERE. `ui.test.ts` derives its coverage from
-   * `SERVED_PATHS`, so a line added without its file fails the suite; nothing fails when a route is
-   * added to the console and forgotten here, because the console reaches it by pushState and only a
-   * reload or a shared link ever asks the server for it.
-   */
-  '/app/signin': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
-  '/app/devices': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
-  '/app/app.js': { file: 'app/app.js', type: 'text/javascript; charset=utf-8' },
-  '/app/app.css': { file: 'app/app.css', type: 'text/css; charset=utf-8' },
 
   /**
    * Three faces, latin only, and ONE COPY SERVED TO BOTH CONSOLES.
@@ -153,8 +145,22 @@ const FILES: Record<string, { file: string; type: string }> = {
 /** Exported so a test can assert this table covers every module `console.js` actually imports. */
 export const SERVED_PATHS = Object.keys(FILES);
 
+/**
+ * Everything the retired React console used to answer, pointed at the console that exists.
+ *
+ * 308 rather than 301: permanent-and-cacheable is the wrong promise for a path we intend to give
+ * back when `/app` reaches parity, and a 301 in somebody's browser cache is close to unrevocable.
+ * 308 also preserves the method, which matters for nothing here today and would matter the moment
+ * one of these is hit by anything but a GET.
+ */
+const RETIRED = ['/app', '/app/', '/app/signin', '/app/devices', '/app/app.js', '/app/app.css'];
+
 export async function uiRoutes(app: FastifyInstance): Promise<void> {
   const dp = dataPlaneOrigin();
+
+  for (const gone of RETIRED) {
+    app.get(gone, async (_req, reply) => reply.code(308).redirect('/'));
+  }
   for (const [route, { file, type }] of Object.entries(FILES)) {
     /**
      * FONTS ARE BINARY AND ARE NOT CREDENTIALED, and both halves of that change how they are served.
@@ -211,5 +217,12 @@ export async function uiRoutes(app: FastifyInstance): Promise<void> {
   }
 }
 
-/** The console's paths, so the server can exempt them from the authenticate-by-default rule. */
-export const UI_PATHS = Object.keys(FILES);
+/**
+ * The console's paths, so the server can exempt them from the authenticate-by-default rule.
+ *
+ * THE RETIRED PATHS ARE IN HERE TOO, and leaving them out is a bug with a confusing symptom: the
+ * auth hook runs before the route handler, so `/app` answered 401 instead of redirecting, and the
+ * person who bookmarked it got "Missing or invalid credentials" for a page that is only trying to
+ * send them to the front door. A redirect nobody is allowed to receive is not a redirect.
+ */
+export const UI_PATHS = [...Object.keys(FILES), ...RETIRED];

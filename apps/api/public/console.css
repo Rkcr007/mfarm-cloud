@@ -83,15 +83,13 @@ html, body { height: 100%; }
 .card > h2,
 .card-title,
 .dialog h2,
-.signin-card h1,
 .stat .val {
   font-family: var(--f-display);
 }
 .page-title  { letter-spacing: var(--tr-display-lg); }
 .card-title,
 .card > h2,
-.dialog h2,
-.signin-card h1 { letter-spacing: var(--tr-display-md); }
+.dialog h2 { letter-spacing: var(--tr-display-md); }
 .stat .val { font-variant-numeric: tabular-nums; }
 
 /**
@@ -731,85 +729,14 @@ kbd {
 .stack.tight { gap: 6px; }
 .stack.loose { gap: var(--mf-gap, 16px); }
 
-/* ---------------------------------------------------------------------------- sign in */
-
-.signin {
-  min-height: 100%;
-  display: grid;
-  /* Stacks under ~800px on its own, without a media query. */
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr));
-}
-
-.signin-pitch {
-  position: relative;
-  overflow: hidden;
-  padding: 46px 40px;
-  display: flex; flex-direction: column; justify-content: center; gap: 22px;
-}
-/* Two neutral radial hazes. White, not accent — v2 has no coloured wash. */
-.signin-pitch::before,
-.signin-pitch::after {
-  content: "";
-  position: absolute;
-  border-radius: 50%;
-  pointer-events: none;
-}
-.signin-pitch::before {
-  width: 460px; height: 460px; top: -140px; left: -120px;
-  background: radial-gradient(circle, var(--hover-soft), transparent 70%);
-}
-.signin-pitch::after {
-  width: 380px; height: 380px; bottom: -130px; right: -60px;
-  background: radial-gradient(circle, var(--hover-row), transparent 70%);
-}
-.signin-pitch > * { position: relative; }
-
-.eyebrow {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: .28em;
-  color: var(--mf-accent, #755EB8);
-}
-.headline {
-  font-size: clamp(28px, 3.6vw, 42px);
-  font-weight: 500;
-  line-height: 1.14;
-  letter-spacing: -.01em;
-  text-transform: uppercase;
-  color: var(--t-primary, #F1F1F1);
-}
-.pitch-body { max-width: 46ch; color: var(--t-label, #8A8A8A); }
-
-.signin-panel {
-  display: flex; align-items: center; justify-content: center;
-  padding: 40px 26px;
-}
-.signin-card {
-  width: 100%;
-  max-width: 400px;
-  /* Slightly lifted off the sign-in ground rather than flush with it — `--s-overlay` is the token
-     for a surface that sits ON the page, which is what this is. */
-  background: var(--s-overlay, #101013);
-  border: 1px solid var(--b-overlay, #2E2E31);
-  border-radius: 4px;
-  padding: 28px;
-}
-.signin-card h1 { font-size: 19px; font-weight: 600; color: var(--t-primary, #F1F1F1); }
-.signin-card label {
-  display: block;
-  margin: 16px 0 6px;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: .12em;
-  color: var(--t-label, #8A8A8A);
-}
-.or {
-  display: flex; align-items: center; gap: 10px;
-  margin: 20px 0 12px;
-  font-size: 10px; text-transform: uppercase; letter-spacing: .12em;
-  color: var(--t-micro, #5A5A5A);
-}
-.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--b-chrome, #191919); }
+/* ---------------------------------------------------------------------------- sign in
+ *
+ * MOVED TO `signin.css`. The sign-in screen is now the design from
+ * `Farm_app_design_exploration/Sign In.dc.html` — a full-bleed dark landing surface with its
+ * own layout, its own keyframes and not one rule in common with the two-column form that used
+ * to live here. Keeping the old block would leave ~80 lines of CSS that nothing selects, which
+ * reads as load-bearing to the next person and quietly is not.
+ */
 
 .brand { display: inline-flex; align-items: center; gap: 9px; }
 .brand-mark {

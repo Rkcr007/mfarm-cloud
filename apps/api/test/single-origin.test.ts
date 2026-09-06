@@ -121,10 +121,28 @@ describe('the configuration these tests run under', () => {
 
 describe('the console loads on the existing port', () => {
   test('the console and its assets are served by the same server as the API', async () => {
-    for (const path of ['/', '/index.html', '/console.css', '/console.js', '/live.js', '/app']) {
+    for (const path of ['/', '/index.html', '/console.css', '/signin.css', '/console.js', '/live.js']) {
       const res = await app.inject({ method: 'GET', url: path });
       assert.equal(res.statusCode, 200, `${path} must be served on the console origin`);
       assert.ok(res.body.length > 0, `${path} must not be empty`);
+    }
+  });
+
+  /**
+   * `/app` USED TO BE IN THE LIST ABOVE, expecting a 200.
+   *
+   * The React console that lived there is retired: it was two screens against this console's ten,
+   * and while both were served the sign-in screen landed on the preview instead of on the product.
+   * It redirects here now — which still satisfies what this file is about, since a redirect to `/`
+   * is the same origin. Asserting the redirect rather than deleting the path is what keeps this
+   * covered: a 401 here is the failure mode that actually happened, when the retired paths were
+   * dropped from `UI_PATHS` and the authenticate-by-default rule answered before the handler.
+   */
+  test('the retired /app paths redirect to the console rather than 401ing', async () => {
+    for (const path of ['/app', '/app/', '/app/signin', '/app/devices']) {
+      const res = await app.inject({ method: 'GET', url: path });
+      assert.equal(res.statusCode, 308, `${path} should redirect, not ${res.statusCode}`);
+      assert.equal(res.headers.location, '/', `${path} should point at the console`);
     }
   });
 

@@ -392,7 +392,15 @@ async function api(path, { method = 'GET', body, raw } = {}) {
 
   const text = await res.text();
   const data = text ? safeJson(text) : null;
-  if (!res.ok) throw new Error(data?.error?.message || `Request failed (${res.status})`);
+  if (!res.ok) {
+    // THE STATUS TRAVELS WITH THE ERROR. Without it a caller can only match on the message string,
+    // which is server copy and changes; the sign-in screen needs to tell "wrong password" (401)
+    // apart from "too many attempts" (429) and from a farm that never answered, and it was written
+    // reading `err.status` off an error that never had one — a branch that could not fire.
+    const err = new Error(data?.error?.message || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -7221,11 +7229,48 @@ document.addEventListener('visibilitychange', () => {
 
 /* ---------------------------------------------------------------------------- sign in */
 
+/**
+ * The error row inside the modal. Separate from `showSignin` because the two are no longer the same
+ * act: a failed sign-in shows a message WITHOUT re-opening or re-rendering anything, and re-running
+ * `showSignin` for it would reset the overlay the person is already looking at.
+ */
+function showSigninError(message) {
+  const row = $('signin-error');
+  $('signin-error-text').textContent = message || '';
+  row.hidden = !message;
+  for (const id of ['email', 'password']) {
+    if (message) $(id).setAttribute('aria-invalid', 'true');
+    else $(id).removeAttribute('aria-invalid');
+  }
+}
+
 function showSignin(message) {
   $('signin').hidden = false;
   $('console').hidden = true;
-  const err = $('signin-error');
-  if (message) { err.textContent = message; err.hidden = false; } else { err.hidden = true; }
+  openSigninOverlay('signin');
+  showSigninError(message);
+}
+
+/* ---------------------------------------------------------------- the sign-in screen's overlays
+ *
+ * Two, and only ever one open: the sign-in modal and the "Pay as you use" popover. Both close on
+ * the backdrop, on their own close button, and on Escape.
+ *
+ * THE MODAL IS OPEN ON ARRIVAL. This is the page you land on when you are not signed in, so
+ * arriving with the form shut would make everybody's first action finding the button that opens the
+ * thing they came for. Closing it is still possible and reveals the surface behind it.
+ */
+function openSigninOverlay(which) {
+  const modal = $('si-modal-layer');
+  const pop = $('si-pop');
+  modal.hidden = which !== 'signin';
+  pop.hidden = which !== 'pricing';
+  $('si-scrim').hidden = !which;
+  $('signin-open').setAttribute('aria-expanded', String(which === 'signin'));
+  $('pricing-btn').setAttribute('aria-expanded', String(which === 'pricing'));
+  // Autofocus on OPEN rather than the `autofocus` attribute, which fires once per document and so
+  // does nothing the second time the modal is shown.
+  if (which === 'signin') $('email').focus();
 }
 
 function signedOut() {
@@ -7239,26 +7284,56 @@ function signedOut() {
   showSignin('Your session ended. Please sign in again.');
 }
 
+/**
+ * Sign in.
+ *
+ * THE PENDING STATE DOES NOT TOUCH THE LABEL, and that is the design's motion language rather than
+ * an omission: there is no spinner anywhere in this screen and no icon set to take one from, and
+ * swapping "Sign in" for "Signing in…" reflows the button under the cursor at the moment it is
+ * being pressed. Disabled plus opacity carries it, `aria-busy` says it to a screen reader, and the
+ * button's box does not move.
+ *
+ * The three messages are the design's, verbatim. Empty fields are answered here rather than by the
+ * browser's own `required` bubble, which is styled by the browser, positioned by the browser, and
+ * says "Please fill out this field" in a voice that is not ours.
+ */
 $('signin-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const b = $('signin-btn');
+  if (b.disabled) return;
+
+  const email = $('email').value.trim();
+  const password = $('password').value;
+  if (!email) { showSigninError('Enter the email your administrator gave you.'); $('email').focus(); return; }
+  if (!password) { showSigninError('Enter your password.'); $('password').focus(); return; }
+
   b.disabled = true;
-  b.textContent = 'Signing in…';
+  $('signin-form').setAttribute('aria-busy', 'true');
+  showSigninError('');
   try {
     const out = await api('/v1/auth/login', {
       method: 'POST',
-      body: { email: $('email').value.trim(), password: $('password').value },
+      body: { email, password },
     });
     state.csrf = out.csrfToken;
     $('password').value = '';
     await boot();
   } catch (err) {
-    showSignin(err.message);
+    // 401 is the only status the design's sentence fits. This endpoint also rate-limits at ten
+    // attempts a minute and answers 429 with how long to wait, and a farm that is down answers
+    // nothing at all — telling either of those that their password is wrong sends somebody to reset
+    // a password that is fine.
+    showSigninError(err.status === 401 ? 'That password does not match this account.' : err.message);
   } finally {
     b.disabled = false;
-    b.replaceChildren(document.createTextNode('Enter the farm '), h('kbd', { text: '↵' }));
+    $('signin-form').removeAttribute('aria-busy');
   }
 });
+
+/** Typing clears a visible error: it is about the previous attempt, not this one. */
+for (const id of ['email', 'password']) {
+  $(id).addEventListener('input', () => { if (!$('signin-error').hidden) showSigninError(''); });
+}
 
 $('signout').addEventListener('click', async () => {
   try { await api('/v1/auth/logout', { method: 'POST' }); } catch { /* leaving anyway */ }
@@ -7269,11 +7344,11 @@ $('signout').addEventListener('click', async () => {
   showSignin();
 });
 
-$('copy-hub-pre').addEventListener('click', async () => {
-  const v = $('hub-preview').textContent;
-  try { await navigator.clipboard.writeText(v); toast('Copied', v, 'ok'); }
-  catch { toast('Could not copy', 'Select the text instead.', 'bad'); }
-});
+/*
+ * THE CI HUB URL IS NO LONGER ON THIS PAGE, and nothing is lost with it. The design has no slot for
+ * it, and the console shows the same url in three places behind the sign-in — which is where it is
+ * useful anyway, since the credential half of it is an API key you cannot get without a session.
+ */
 
 /**
  * The FARM UP pill, and the only network call this page makes before anyone signs in.
@@ -7283,18 +7358,12 @@ $('copy-hub-pre').addEventListener('click', async () => {
  * absent rather than faked.
  */
 async function checkReach() {
-  const dot = $('reach-pill').querySelector('.dot');
-  try {
-    const res = await fetch('/health', { credentials: 'omit' });
-    const ok = res.ok;
-    $('reach-pill').className = `pill ${ok ? 'ok' : 'bad'}`;
-    dot.className = `dot ${ok ? 'ok live' : 'bad'}`;
-    $('reach-text').textContent = ok ? 'farm up' : 'farm unreachable';
-  } catch {
-    $('reach-pill').className = 'pill bad';
-    dot.className = 'dot bad';
-    $('reach-text').textContent = 'farm unreachable';
-  }
+  const paint = (ok) => {
+    $('reach-pill').className = `si-reach${ok ? '' : ' bad'}`;
+    $('reach-text').textContent = ok ? 'FARM REACHABLE' : 'FARM UNREACHABLE';
+  };
+  try { paint((await fetch('/health', { credentials: 'omit' })).ok); }
+  catch { paint(false); }
 }
 
 /**
@@ -7400,6 +7469,139 @@ try {
 } catch { /* private mode */ }
 setNavToggleIcon(root.dataset.nav === 'icons');
 
-$('hub-preview').textContent = `https://<api-key>@${location.host}/wd/hub`;
+/* ---------------------------------------------------------------- the sign-in screen, wired */
+
+$('signin-open').addEventListener('click', () => openSigninOverlay(
+  $('si-modal-layer').hidden ? 'signin' : null));
+$('pricing-btn').addEventListener('click', () => openSigninOverlay(
+  $('si-pop').hidden ? 'pricing' : null));
+$('si-close').addEventListener('click', () => openSigninOverlay(null));
+$('si-pop-close').addEventListener('click', () => openSigninOverlay(null));
+$('si-scrim').addEventListener('click', () => openSigninOverlay(null));
+// On `window`, as the artifact binds it, so it works whether focus is in the modal, in the popover,
+// or on the surface behind them. Guarded on the sign-in page being visible: the console behind it
+// has its own Escape handling for palettes and dialogs.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('signin').hidden) openSigninOverlay(null);
+});
+
+/**
+ * The host, said out loud in the modal.
+ *
+ * The artifact hard-codes `farm.mfarm.dev`, which is true of exactly one deployment. This is
+ * self-hosted software: on somebody's laptop it is `localhost:3000` and on their LAN it is a
+ * hostname we have never seen. Printing the design's string on their farm would be the console
+ * telling them a confident lie about which machine they are signing in to.
+ */
+$('si-host').textContent = location.host;
+
+/**
+ * The pipeline figure: request -> build -> install -> execute -> ship -> live.
+ *
+ * DECORATIVE, and the markup marks it `aria-hidden`. Every string in it is illustrative — the
+ * artifact's own footer says so — and this page is served to anonymous visitors who are entitled to
+ * none of the farm's real state. The one live reading on this screen is the FARM REACHABLE pill,
+ * which is driven by the genuinely-public `/health`.
+ *
+ * Built here rather than written into index.html because it is ninety-odd elements of pure
+ * decoration, and inlining it would bury this page's two pieces of real content — the heading and
+ * the form — in a screenful of divs.
+ *
+ * `h()` writes styles through CSSOM, which is what lets the per-device geometry be set at all: the
+ * CSP is `style-src 'self'` with no `'unsafe-inline'`, so a `style` ATTRIBUTE computes to nothing.
+ */
+function renderSigninDiagram() {
+  const node = (dot, label, meta, extra) => h('div', { class: `si-node ${extra}` },
+    h('div', { class: `si-dot ${dot}` }),
+    h('div', { class: 'si-node-label', text: label }),
+    meta);
+
+  const phone = (kind, label, meta, chrome, parts) => h('div', { class: `si-dev si-dev-${kind}` },
+    h('div', { class: `si-body si-body-${kind}` },
+      h('div', { class: 'si-shell' }),
+      kind === 'virtual' ? null : h('div', { class: 'si-inner' }),
+      h('div', { class: 'si-screen' }, h('div', { class: 'si-scan' }), ...chrome),
+      ...parts,
+      h('div', { class: 'si-tile', text: 'A' }),
+      h('div', { class: 'si-ripple' }),
+      h('div', { class: 'si-ripple si-ripple-2' })),
+    h('div', { class: 'si-dev-label', text: label }),
+    h('div', { class: 'si-dev-meta', text: meta }));
+
+  const sideBtn = (o) => h('div', { class: 'si-part si-btn-side', style: o });
+  const statusbar = (extra) => h('div', { class: 'si-status' },
+    h('span', { class: 'si-clock', text: '9:41' }), extra);
+
+  const ios = phone('ios', 'iOS', 'iOS 18 · 6.3in · 460ppi', [
+    statusbar(h('span', { class: 'si-batt-mini' }, h('span', { class: 'si-batt-box' }))),
+    h('div', { class: 'si-homebar' }),
+  ], [
+    h('div', { class: 'si-part si-notch' }),
+    sideBtn({ left: '-1.5px', top: '22%', height: '6.8%' }),
+    sideBtn({ left: '-1.5px', top: '33%', height: '11%' }),
+    sideBtn({ right: '-1.5px', top: '29.6%', height: '14.4%' }),
+  ]);
+
+  const android = phone('android', 'ANDROID', 'Android 15 · 6.8in · 120Hz', [
+    statusbar(h('span', { class: 'si-batt-box' })),
+    h('div', { class: 'si-navbar' },
+      h('span', { class: 'si-nav-square' }),
+      h('span', { class: 'si-nav-circle' }),
+      h('span', { class: 'si-nav-tri' })),
+  ], [
+    h('div', { class: 'si-part si-lens' }),
+    sideBtn({ right: '-1.5px', top: '25.4%', height: '7.1%' }),
+    sideBtn({ right: '-1.5px', top: '35.7%', height: '11.9%' }),
+  ]);
+
+  const virtual = phone('virtual', 'VIRTUAL', 'your spec · built on demand', [],
+    [h('div', { class: 'si-custom', text: 'CUSTOM' })]);
+
+  $('si-diagram').replaceChildren(h('div', { class: 'si-track' },
+    node('si-dot-req', 'ORG SUITE',
+      h('div', { class: 'si-node-meta' },
+        document.createTextNode('POST /session'), h('br'), document.createTextNode('3 devices')),
+      'si-node-src'),
+
+    h('div', { class: 'si-wire si-wire-in' }, h('div', { class: 'si-packet' })),
+
+    h('div', { class: 'si-stage' },
+      h('div', { class: 'si-devices' }, ios, android, virtual),
+      h('div', { class: 'si-meterrow' },
+        h('div', { class: 'si-meter' }, h('div', { class: 'si-meter-fill' })),
+        h('div', { class: 'si-passed' },
+          h('span', { class: 'si-passed-mark' }, icon('check', 9)),
+          h('span', { class: 'si-passed-text', text: '142 PASSED · 3 DEVICES' })))),
+
+    h('div', { class: 'si-wire si-wire-out' },
+      h('div', { class: 'si-release' },
+        h('span', { class: 'si-release-dot' }),
+        h('span', { class: 'si-release-text', text: 'release' }))),
+
+    node('si-dot-prod', 'PROD',
+      h('div', { class: 'si-node-meta si-node-meta-tight', text: 'promoted' }), 'si-node-prod'),
+
+    h('div', { class: 'si-stub' }),
+
+    node('si-dot-market', 'MARKET',
+      h('div', { class: 'si-livepill' },
+        h('span', { class: 'si-livepill-dot' }),
+        h('span', { class: 'si-livepill-text', text: 'LIVE FOR USERS' })), 'si-node-market')));
+
+  // Label and the point in the 18s loop it lights at, both verbatim from the artifact.
+  const steps = [['01 REQUEST', '0s'], ['02 BUILD DEVICES', '2.1s'], ['03 INSTALL', '6s'],
+    ['04 EXECUTE · METERED', '8s'], ['05 SHIP', '11.9s'], ['06 LIVE', '15.3s']];
+  const out = [h('span', { class: 'si-steps-lead', text: 'METERED WHILE RUNNING' })];
+  for (const [text, delay] of steps) {
+    out.push(h('span', { class: 'si-steps-rule' }));
+    const el = h('span', { class: 'si-step', text });
+    el.style.setProperty('--si-d', delay);
+    out.push(el);
+  }
+  $('si-steps').replaceChildren(...out);
+}
+
+renderSigninDiagram();
+
 checkReach();
 boot().catch(() => showSignin());
