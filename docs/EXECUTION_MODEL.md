@@ -478,7 +478,7 @@ run with real pass/fail counts and each failure linked to its own logcat and scr
 small, useful and unblocked — the release-time screenshot still shows the launcher. §4.4 (video) is
 now costed above and should stay unbuilt until it records only failures, which §4.3 has just made
 possible. Beyond those, the honest next question is not another capability: it is whether a
-two-device farm with a working execution model is worth putting in front of a second team.
+four-device farm with a working execution model is worth putting in front of a second team.
 
 **Hardware verification found a real bug, 2026-08-23 — see HANDOFF issue 31.** `mfarm:appId`
 failed on every session because both of the hub's long waits took `req.raw.destroyed` to mean "the

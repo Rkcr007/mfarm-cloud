@@ -1,18 +1,37 @@
 # MFARM_CLOUD — state of play
 
-Last updated 2026-09-02. **New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:
-what is built, every decision and what it rejected, the roads not taken, and every measured number.
-For the hands-on path instead, `docs/START_HERE.md` goes from a closed laptop to a device you can
-tap in seven steps.** This file is the state of play and every known issue.
+Last updated **2026-09-06**, at `303585f` / migration 038 / ADR-0027.
+
+**New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:** what is built, where
+each part actually stands (§4a), the priorities (§11), every decision and what it rejected. For the
+hands-on path instead, `docs/START_HERE.md` goes from a closed laptop to a device you can tap. For
+everything found by USING the console, [`docs/DEFECTS.md`](docs/DEFECTS.md).
+
+**READ THE NUMBERED LOG, NOT THIS HEADER, WHEN THE TWO DISAGREE.** The entries at the bottom are
+dated and have held up under two audits; the summary sections at the top are written in the present
+tense and decay — seventeen stale claims were found here on 2026-09-02 and the note on that is kept
+below because the pattern recurs. A dated entry cannot rot; a present-tense one does.
 
 **Two machines (ADR-0006): `mfarm-cp` holds the control plane and console at
 https://farm.mfarm.dev; `mfarm-lab` holds the devices.**
 
-**As of 2026-09-02 `mfarm-lab` is STOPPED and `mfarm-cp` is RUNNING.** That is deliberate rather
-than half-finished: the lab is the ~₹65/hour half and there is no reason to pay it between
-sessions, while the control plane is a few rupees an hour and keeping it up means the console, the
-API and every link into them still resolve. `./deploy/farm-online.sh` starts both and re-points the
-media relay; `./deploy/farm-check.sh` waits for the devices and reports what is actually live.
+**As of 2026-09-06 `mfarm-lab` is STOPPED and `mfarm-cp` is RUNNING**, which is the normal resting
+state rather than something half-finished: the lab is the ~₹65/hour half and the control plane is a
+few rupees an hour, so keeping the second up means the console, the API and every link into them
+still resolve. `./deploy/farm-online.sh` starts both and re-points the media relay;
+`./deploy/farm-check.sh` waits for the devices and reports what is live. **`./deploy/check-deployed.sh`
+answers the question that must come first — is this farm running `main`** — for the serving image and
+both checkouts, because an hour spent verifying against a farm running something else is an hour
+spent measuring nothing.
+
+**Where things stand, 2026-09-06.** The console has been used hard and its register is empty:
+twenty-five defects recorded, twenty-five closed, and **not one of them was found by the 1441-test
+suite** — every single one came from clicking through a real farm. The fleet is four Cuttlefish
+devices plus one physical handset that is quarantined behind a machine which stopped beating on
+2026-08-29; `npx @mfarm/agent` on that machine is the whole fix and it is not something this repo
+can do. The largest open gap is that **deploy is manual** (D18): a released commit reaches the farm
+when somebody runs `mfarm-deploy.sh`, and that is now reported rather than silent — which is not the
+same as closed. Priorities in `docs/INDEX.md` §11.
 
 **Read `## Next session — pick up here` at the very bottom of this file first.** It is the only
 section written for someone arriving cold.
@@ -1969,18 +1988,29 @@ agent running a DB-backed suite will corrupt the first's run.
 
 ## Next session — pick up here
 
-Written 2026-08-29, cold-start first. Everything below is verified unless it says otherwise.
+Rewritten **2026-09-06**, cold-start first. Everything below is verified unless it says otherwise.
 
 ### Where things stand
 
-The product direction changed: `MFARM_PRODUCT_DIRECTION_AND_DEVELOPMENT_RESET.md` (repo root)
-replaced the imitate-a-Samsung direction with an MFARM-owned one, and **ADR-0017 supersedes
-ADR-0016**. The devices are `MFARM X1 Pro` (384dp) and `MFARM X1` (360dp). Nothing pretends to be a
-handset somebody else makes.
+`303585f` / migration 038 / ADR-0027. **1441 tests green.** Both boxes and the serving image are on
+`main` — `./deploy/check-deployed.sh` is what says so, and it is the first thing to run.
 
-Four PRs shipped that day, all deployed and hardware-verified: **#43** (the cockpit crash), **#44**
-(the MFARM identity), **#45** (runbook), **#46** (the new console). Control plane and worker both on
-`1920d2f`. 995 tests green.
+**The console's defect register is empty**: twenty-five recorded, twenty-five closed. Read that as a
+statement about the list rather than about the console — every one was found by USING it, none by
+the suite, and the next hour of use is what says whether it is really empty.
+
+**The fleet is four Cuttlefish devices plus one physical `SM-S918B`, which is quarantined** behind a
+machine that has not beaten since 2026-08-29. Nothing is wrong with the code path;
+`npx @mfarm/agent` on that machine re-registers it. That machine is not something this repo reaches.
+
+**The direction, unchanged:** `MFARM_PRODUCT_DIRECTION_AND_DEVELOPMENT_RESET.md` replaced the
+imitate-a-Samsung direction with an MFARM-owned one, and **ADR-0017 supersedes ADR-0016**. The
+devices are `MFARM X1 Pro` (384dp) and `MFARM X1` (360dp). Nothing pretends to be a handset somebody
+else makes.
+
+**What to pick up**, in order, is `docs/INDEX.md` §11. The short version: whether a four-device farm
+goes in front of a second team is still the only question that matters; deploy is still manual and
+is the largest operational gap; and the handset is one command away from being back in the fleet.
 
 ### Bring the farm back
 
@@ -3886,3 +3916,44 @@ when the feature is broken. See issues 37 and 38.
     touched.
 
     Lab stopped, farm at 4 READY.
+
+75. **THE DOCS, BROUGHT INTO SYNC — AND SEVEN CLAIMS THAT WERE FALSE WHEN CHECKED.** 2026-09-06.
+
+    Asked to get every document in sync and to say where each part stands, what is working, what is
+    not, and in what order to pick things up. Done by RE-DERIVING rather than editing, because the
+    thing being fixed was exactly the habit of editing around a stale claim.
+
+    **`docs/INDEX.md` — the declared "one page" — was pinned at `95f6701` / migration 022, thirteen
+    days and sixteen migrations behind.** Its §11 "What is next" carried four claims that were false:
+
+    - *"bounded escalation for a stuck reset — today it is re-offered on every heartbeat forever"* —
+      built as migration 032 / ADR-0019.
+    - *"publishing is blocked because every package is private"* — `@mfarm/cli` is published
+      (ADR-0023); the three that are private are private on purpose.
+    - *"observability has no host metrics"* — `mfarm_host_last_heartbeat_timestamp_seconds` and
+      `mfarm_tunnel_hosts_connected` both exist.
+    - *"Milestone 0 … has never run on hardware"* — the physical path is built and was verified.
+
+    One claim in that section WAS still true and is kept: rate limiting is in-memory, so the API is
+    single-instance. That is the value of checking rather than assuming in either direction.
+
+    **New: `INDEX.md` §4a, "Where each part actually stands"** — console, API, hub, virtual devices,
+    physical devices, agent, deploy, observability, video, timeline — each with its state and its
+    honest caveat. And §11 rewritten as an ordered priority list with the reasoning, headed by the
+    only question that is not a capability: whether a four-device farm goes in front of a second
+    team.
+
+    **`HANDOFF.md`'s own header was four days and twelve entries stale**, which is the failure it
+    documents. It now says to read the numbered log when the two disagree, and why: a dated entry
+    cannot rot, a present-tense one does.
+
+    **Also corrected**, each verified first: `START_HERE.md` (a dead commit and "two Cuttlefish"
+    where there are four), `RUNBOOK.md` and `EXECUTION_MODEL.md` (the same count),
+    `E2E_MVP_PLAN.md` (a historical doc, so corrected IN PLACE with a date rather than rewritten),
+    and `AGENT_BUILD_PLAN.md` (a stale test count, and a hardware claim I deliberately did NOT
+    upgrade — nobody has been able to exercise that path since the handset's host went quiet).
+
+    **NO NEW STATUS PAGE, deliberately.** The obvious move was `docs/STATUS.md`. This repo already
+    has four documents that claim some part of that role, and adding a fifth adds a surface that
+    decays without adding a fact. The status went into the page that already says it is the one to
+    read.
