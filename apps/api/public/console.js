@@ -7244,11 +7244,85 @@ function showSigninError(message) {
   }
 }
 
+/**
+ * Show the sign-in screen.
+ *
+ * A MESSAGE IS THE DIFFERENCE. With one, something just happened that the person has to read and
+ * act on — a session that expired underneath them, a login that was refused — so the modal opens
+ * now and carries the reason. Without one this is a cold arrival, and the screen introduces itself
+ * first: see `armSigninInvite`.
+ */
 function showSignin(message) {
   $('signin').hidden = false;
   $('console').hidden = true;
-  openSigninOverlay('signin');
   showSigninError(message);
+  if (message) { cancelSigninInvite(); openSigninOverlay('signin'); }
+  else { openSigninOverlay(null); armSigninInvite(); }
+}
+
+/* ---------------------------------------------------------------- the invitation
+ *
+ * THE MODAL DOES NOT MEET YOU AT THE DOOR. Arriving to a password box on top of a page you have not
+ * read is the whole reason a landing surface exists, and this one has something to say: it names
+ * the three device kinds, states what the product does, and runs a diagram of a suite reaching
+ * three devices and shipping. Covering that with a form before it has drawn a frame throws the page
+ * away and asks for a credential instead.
+ *
+ * So: the pipeline runs ONE LAP, then the screen invites you in. Once. If you close it, it stays
+ * closed and the header's "Sign in" button is how you come back — you are reading, and a modal that
+ * reopens on its own is a page arguing with you.
+ *
+ * ONE LAP IS ASKED OF THE ANIMATION, NOT OF A NUMBER. `animationiteration` on the meter fill fires
+ * at the exact moment the 18s loop closes, so the invitation lands on the beat rather than near it,
+ * and it stays right if the loop is ever retimed — the duration lives in `signin.css` and nothing
+ * here has to be kept in step with it.
+ *
+ * THE TIMER IS NOT A DUPLICATE OF THAT. It is what runs when there is no animation to ask: under
+ * `prefers-reduced-motion` every animation on this screen is `none`, so `animationiteration` never
+ * fires at all and without this the invitation would never arrive. It is deliberately much shorter
+ * there — with nothing moving there is no lap to watch, and eighteen seconds of a still page before
+ * anything happens is not respect, it is a hang. When motion IS on, the same timer sits just past
+ * the loop as a backstop for the case where the element is missing.
+ */
+const SIGNIN_LOOP_MS = 18_000;   // matches the 18s pipeline loop in signin.css
+const SIGNIN_STILL_MS = 4_000;   // no lap to wait for; long enough to read the page
+
+/** Detaches whatever the pending invitation attached. Null when none is pending. */
+let signinInvite = null;
+
+function cancelSigninInvite() {
+  if (!signinInvite) return;
+  signinInvite();
+  signinInvite = null;
+}
+
+function armSigninInvite() {
+  cancelSigninInvite();
+
+  const meter = document.querySelector('.si-meter-fill');
+  // Optional-called: the console-screens suite renders this file against a DOM that has no
+  // `matchMedia`, and an invitation timer is not worth throwing a page over. Absent means "motion
+  // is on", which is the ordinary path and the safe assumption — the worst case is a longer wait.
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+
+  const invite = () => {
+    cancelSigninInvite();
+    // Guarded because the wait is long enough for the world to have changed: a person can sign in
+    // through another tab, and arriving to a modal over the console they are now looking at would
+    // be worse than never inviting them at all.
+    if (!$('signin').hidden && $('si-modal-layer').hidden && $('si-pop').hidden) {
+      openSigninOverlay('signin');
+    }
+  };
+
+  const onLap = () => invite();
+  if (meter) meter.addEventListener('animationiteration', onLap);
+  const timer = setTimeout(invite, reduced ? SIGNIN_STILL_MS : SIGNIN_LOOP_MS + 400);
+
+  signinInvite = () => {
+    clearTimeout(timer);
+    if (meter) meter.removeEventListener('animationiteration', onLap);
+  };
 }
 
 /* ---------------------------------------------------------------- the sign-in screen's overlays
@@ -7471,18 +7545,30 @@ setNavToggleIcon(root.dataset.nav === 'icons');
 
 /* ---------------------------------------------------------------- the sign-in screen, wired */
 
-$('signin-open').addEventListener('click', () => openSigninOverlay(
+/**
+ * Every overlay change the PERSON makes also cancels the pending invitation.
+ *
+ * Whichever they did, the invitation has nothing left to offer: they either opened the form
+ * themselves, or they opened the pricing note and are reading, or they closed something and want
+ * the page. A modal that arrives anyway, seconds later, is the screen ignoring all three.
+ */
+function userOverlay(which) {
+  cancelSigninInvite();
+  openSigninOverlay(which);
+}
+
+$('signin-open').addEventListener('click', () => userOverlay(
   $('si-modal-layer').hidden ? 'signin' : null));
-$('pricing-btn').addEventListener('click', () => openSigninOverlay(
+$('pricing-btn').addEventListener('click', () => userOverlay(
   $('si-pop').hidden ? 'pricing' : null));
-$('si-close').addEventListener('click', () => openSigninOverlay(null));
-$('si-pop-close').addEventListener('click', () => openSigninOverlay(null));
-$('si-scrim').addEventListener('click', () => openSigninOverlay(null));
+$('si-close').addEventListener('click', () => userOverlay(null));
+$('si-pop-close').addEventListener('click', () => userOverlay(null));
+$('si-scrim').addEventListener('click', () => userOverlay(null));
 // On `window`, as the artifact binds it, so it works whether focus is in the modal, in the popover,
 // or on the surface behind them. Guarded on the sign-in page being visible: the console behind it
 // has its own Escape handling for palettes and dialogs.
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('signin').hidden) openSigninOverlay(null);
+  if (e.key === 'Escape' && !$('signin').hidden) userOverlay(null);
 });
 
 /**
