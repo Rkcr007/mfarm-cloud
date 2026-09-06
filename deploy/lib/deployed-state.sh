@@ -31,17 +31,10 @@ mfarm_sha_verdict() {
   if [ "${want:0:$n}" = "$got" ] || [ "${got:0:${#want}}" = "$want" ]; then printf 'ok'; else printf 'behind'; fi
 }
 
-# One line per fact, so the caller can print them without re-deriving anything.
-mfarm_deploy_line() {
-  local label="$1" want="$2" got="$3"
-  local v; v="$(mfarm_sha_verdict "$want" "$got")"
-  case "$v" in
-    ok)      printf '  \033[32m✓\033[0m %-26s %s\n' "$label" "${got:0:7}" ;;
-    behind)  printf '  \033[31m✗\033[0m %-26s %s — origin/main is %s\n' "$label" "${got:0:7}" "${want:0:7}" ;;
-    *)       printf '  \033[33m!\033[0m %-26s could not be read\n' "$label" ;;
-  esac
-  printf '%s' "$v"
-}
-
-# The verdict alone, for callers that print in their own voice (verify-live.sh).
-mfarm_deploy_verdict_quiet() { mfarm_sha_verdict "$1" "$2"; }
+# WHY THERE IS NO print-and-return HELPER HERE. There was: `mfarm_deploy_line` printed the human
+# line AND returned the verdict, both on stdout — so `$(mfarm_deploy_line …)` captured the display
+# and the check ran against the real farm printing two empty sections under two headings. It looked
+# like a farm with nothing to say rather than a script eating its own output.
+#
+# A function returns ONE thing. The verdict is that thing; printing belongs to the caller, which
+# knows its own voice.

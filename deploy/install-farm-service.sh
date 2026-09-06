@@ -16,7 +16,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_SRC="$REPO_ROOT/deploy/mfarm-farm.service"
 UNIT_DST=/etc/systemd/system/mfarm-farm.service
-RUN_USER="${SUDO_USER:-$USER}"
+# THE OWNER OF THE CHECKOUT, not whoever invoked sudo.
+#
+# `${SUDO_USER:-$USER}` was the first version and it is wrong in the way that matters: run through a
+# nested sudo — `gcloud compute ssh` as one account, then `sudo -u rkcr070707` — `SUDO_USER` is the
+# OUTER login, so the unit was installed with `User=rakeshkumarbarik` on a farm whose devices belong
+# to `rkcr070707`. cvd's instance database is per-uid: that unit would have found no devices and
+# cheerfully built a second set. Caught by installing it for real and reading the file back.
+#
+# The repo's owner is the account that must run these units, because it is the account that owns the
+# cvd database, the snapshots and `deploy/.state`. It is also a fact about the machine rather than
+# about how somebody happened to invoke this.
+RUN_USER="$(stat -c '%U' "$REPO_ROOT")"
 RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
 
 [ -f "$UNIT_SRC" ] || { echo "missing $UNIT_SRC" >&2; exit 1; }

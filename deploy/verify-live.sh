@@ -76,9 +76,9 @@ HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 if [ "$WANT" = unknown ]; then
   warn "could not read origin/main — cannot say whether this farm is up to date"
 else
-  [ "$(mfarm_deploy_verdict_quiet "$WANT" "$SHA")" = ok ] \
+  [ "$(mfarm_sha_verdict "$WANT" "$SHA")" = ok ] \
     || { warn "the API is not running origin/main (${WANT:0:7}) — deploy/mfarm-deploy.sh $WANT"; }
-  [ "$(mfarm_deploy_verdict_quiet "$WANT" "$HEAD_SHA")" = ok ] \
+  [ "$(mfarm_sha_verdict "$WANT" "$HEAD_SHA")" = ok ] \
     || warn "this checkout is not on origin/main (${HEAD_SHA:0:7} vs ${WANT:0:7}) — git merge --ff-only origin/main"
 fi
 
