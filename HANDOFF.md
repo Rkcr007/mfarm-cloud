@@ -2,10 +2,11 @@
 
 Last updated **2026-09-06**, at `303585f` / migration 038 / ADR-0027.
 
-**New here? Read [`docs/INDEX.md`](docs/INDEX.md) — the one curated page:** what is built, where
-each part actually stands (§4a), the priorities (§11), every decision and what it rejected. For the
-hands-on path instead, `docs/START_HERE.md` goes from a closed laptop to a device you can tap. For
-everything found by USING the console, [`docs/DEFECTS.md`](docs/DEFECTS.md).
+**New here? There are three documents and this is not one of them.**
+[`docs/STATUS.md`](docs/STATUS.md) — what the product is, what works, what is pending, what it costs.
+[`docs/DEFECTS.md`](docs/DEFECTS.md) — everything wrong with it.
+[`docs/DIRECTION.md`](docs/DIRECTION.md) — what changed and why.
+For the hands-on path, `docs/START_HERE.md` goes from a closed laptop to a device you can tap.
 
 **READ THE NUMBERED LOG, NOT THIS HEADER, WHEN THE TWO DISAGREE.** The entries at the bottom are
 dated and have held up under two audits; the summary sections at the top are written in the present
@@ -3957,3 +3958,37 @@ when the feature is broken. See issues 37 and 38.
     has four documents that claim some part of that role, and adding a fifth adds a surface that
     decays without adding a fact. The status went into the page that already says it is the one to
     read.
+
+76. **THREE DOCUMENTS, AND THE REASON THE ONE PAGE HAD TO STOP BEING ONE.** 2026-09-06.
+
+    Rakesh asked for exactly three: progress/status, defect management, and what changed and what we
+    have — so that opening the repo tells you what it does, what is done, what is pending and what it
+    costs. I had argued one turn earlier AGAINST adding a status page, on the grounds that a fifth
+    document is a fifth surface to decay. He asked anyway, and he is right for a reason my objection
+    missed.
+
+    **The objection was about count; the real problem was MIXTURE.** `INDEX.md` carried status,
+    decisions and roadmap in one file, and those three things decay at completely different rates —
+    status weekly, defects on their own lifecycle, decisions never. Keeping them together meant the
+    parts that never change dragged the part that changes constantly out of date, and nothing forced
+    a re-read. That is exactly how it ended up thirteen days behind with four "pending" items already
+    built. **Splitting by rate of change is not more surface; it is less, because each file now has
+    one reason to be edited.**
+
+    - **`docs/STATUS.md`** — what the app is, the cost table (the ₹65/hour device host is 95% of the
+      bill and shapes every operational decision in the repo), where each part stands with its
+      honest caveat, what is pending in priority order, the measured numbers, and how to verify any
+      of it. Opens with the three-document map.
+    - **`docs/DEFECTS.md`** — unchanged as a register, with a preamble that makes it a management
+      document: the rule for when a defect closes (fixed AND verified on the farm, because twice
+      this month a merged fix was inert), and where they come from — **all 25 found by using it,
+      none by the 1441-test suite.**
+    - **`docs/DIRECTION.md`** — the four pivots with dates and what each reversed, what we have as
+      capabilities, and the decisions/roads-not-taken/invariants/lessons carried over VERBATIM from
+      INDEX rather than retyped, because that content was correct and re-typing it is how a
+      transcription error gets in.
+
+    **`INDEX.md` is now four lines and a signpost.** Kept at that filename because a lot of things
+    link to it, and it says why it shrank — a page that stops being the answer should explain
+    itself rather than quietly redirect. README, HANDOFF's header and START_HERE all retarget to the
+    three, and every internal link in all five files was checked to resolve.
