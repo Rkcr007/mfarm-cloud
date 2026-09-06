@@ -3761,3 +3761,29 @@ when the feature is broken. See issues 37 and 38.
     new assertions fail against `main`, and any that did not had to be explained.
 
     Suite 1430 green, typecheck clean.
+
+72. **ALL FIVE WATCHED, INCLUDING THE ONE THAT NEEDED A FAULT TO EXIST FIRST.** 2026-09-06.
+    Console `1eba6c6`.
+
+    D22 and D23 were visible the moment the deploy landed — the Live lens went from fifty ENDED rows
+    to "No sessions", and the log pane from empty to 600 lines on a fresh session. D24 re-measured
+    the way it was found: `mode=ended`, rail 0, at **t+2s**, against `session`/14 buttons at t+7s
+    before.
+
+    **D21 could not be verified by waiting**, because it needs a device whose reset budget is spent
+    and the farm had just healed itself. So I induced one — set `reset_escalated_at` on `523581b7`
+    directly, watched the whole path, and cleared it: the Fleet row read *"its reset gave up · 12m
+    ago — open it to resume"* instead of "Snapshot restore in progress", the panel explained why the
+    device still reads CLEANING rather than QUARANTINED, the dialog authorised it, the escalation
+    cleared, and the device was READY again eighty seconds later. Inducing the fault is the only way
+    to see a recovery path, and it is worth doing deliberately rather than waiting for the farm to
+    break on its own.
+
+    **AND THE DRIVER CAUGHT A NAMING SLIP OF MINE.** Clicking "Resume recovery" hit the PANEL's
+    button rather than the dialog's confirm, because I had given both the same label. A human is
+    protected by the scrim, so this would have gone unnoticed — but it also breaks the convention
+    device detail already follows: the quarantine dialog's confirm says "Authorise recovery" rather
+    than repeating its panel's button, because **a confirm should name what is being granted**. Mine
+    now says **"Queue a reset"**, which is exactly what it authorises.
+
+    Farm left at 4 available, lab stopped.

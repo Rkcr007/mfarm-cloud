@@ -2767,7 +2767,13 @@ function askResumeRecovery(d) {
       'a reset that fails again escalates it again, with a fresh count',
     ],
     keeps: 'Nothing is handed to a tenant until a reset completes.',
-    confirm: 'Resume recovery',
+    /**
+     * NAMES WHAT IS BEING GRANTED, not what the button behind it said. The quarantine dialog does
+     * the same thing for the same reason — "Release quarantine" described a state change the
+     * operator cannot make, and this one would just repeat the panel's own label back. What is
+     * actually authorised here is one more trip through the reset queue.
+     */
+    confirm: 'Queue a reset',
     onConfirm: () => resumeRecovery(d.id),
   });
 }
