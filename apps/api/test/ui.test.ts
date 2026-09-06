@@ -49,9 +49,12 @@ describe('the console is served from an allowlist', () => {
    * paths by hand and nobody added the new one.
    *
    * Derived from `SERVED_PATHS` instead, so an entry added to the table is automatically covered and
-   * an entry whose file does not exist fails HERE rather than in somebody's browser. That is also
-   * what makes this the test that fails if CI forgets to build the console: `/app/*` is emitted by
-   * `npm run build --workspace apps/console`, and without it these paths 404.
+   * an entry whose file does not exist fails HERE rather than in somebody's browser.
+   *
+   * This used to double as the check that CI had built the React console, because `/app/*` did not
+   * exist on disk until it ran. That console is deleted and nothing here is built any more — every
+   * path in the table is a file checked into `public/`, which is a stronger property than the one
+   * this paragraph used to describe.
    */
   test('every allowlisted path serves real bytes with the type it promises', async () => {
     const { SERVED_PATHS } = await import('../src/http/routes/ui.ts');
@@ -88,10 +91,9 @@ describe('the console is served from an allowlist', () => {
   test('every asset either console names is a path the allowlist serves', async () => {
     const pages: Array<[string, string]> = [
       ['/', (await get('/')).body],
-      ['/app', (await get('/app')).body],
       ['/console.css', (await get('/console.css')).body],
+      ['/signin.css', (await get('/signin.css')).body],
       ['/design-tokens.css', (await get('/design-tokens.css')).body],
-      ['/app/app.css', (await get('/app/app.css')).body],
     ];
 
     let checked = 0;
@@ -109,28 +111,26 @@ describe('the console is served from an allowlist', () => {
       }
     }
 
-    // The guard against the vacuous pass above. Five stylesheets and two documents between them
-    // name the two scripts, two stylesheets and three faces at minimum.
-    assert.ok(checked >= 7, `expected the consoles to name several assets, found ${checked}`);
+    // The guard against the vacuous pass above. The document and its three stylesheets between them
+    // name five scripts, three stylesheets and three faces at minimum.
+    assert.ok(checked >= 7, `expected the console to name several assets, found ${checked}`);
   });
 
   /**
-   * THE THREE FACES ARE SERVED ONCE, TO BOTH CONSOLES.
+   * THE THREE FACES ARE SERVED ONCE.
    *
-   * They were bundled into `/app/fonts/` by vite, which meant the old console at `/` had no
-   * webfonts at all and giving it the same three would have put a second identical copy in the
-   * image. They are checked in under `public/fonts` now and referenced by absolute path from both
-   * stylesheets. This asserts the OLD paths are gone, because a stale allowlist entry pointing at a
-   * file vite no longer emits is a 500 on a path nothing requests — invisible until it is not.
+   * Vite used to bundle a second copy into `/app/fonts/` for the React console, which meant the
+   * console at `/` had no webfonts at all and giving it the same three would have put 112 KB of
+   * duplicate typeface in the image. There is one console and one copy now, checked into
+   * `public/fonts` and referenced by absolute path — but the count stays asserted, because a stale
+   * allowlist entry pointing at a file that is not there is a 500 on a path nothing requests,
+   * invisible until it is not.
    */
-  test('the fonts live at /fonts and no longer under /app', async () => {
+  test('the three faces are served once, from /fonts', async () => {
     const { SERVED_PATHS } = await import('../src/http/routes/ui.ts');
     const fonts = SERVED_PATHS.filter((p) => p.endsWith('.woff2'));
     assert.equal(fonts.length, 3, 'three faces, latin wght only — see sync-fonts.mjs');
-    for (const p of fonts) assert.ok(p.startsWith('/fonts/'), `${p} should be shared, not under /app`);
-
-    const css = (await get('/app/app.css')).body;
-    assert.doesNotMatch(css, /\/app\/fonts\//, 'the React console still bundles its own copy');
+    for (const p of fonts) assert.ok(p.startsWith('/fonts/'), `${p} should be at /fonts, not ${p}`);
   });
 
   test('nothing outside the allowlist resolves, however it is spelled', async () => {

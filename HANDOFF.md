@@ -354,9 +354,8 @@ workers/agent/    worker agent, Appium supervisor,      345 tests
                   automation gateway, Cuttlefish backend,
                   physical devices, tunnel
 deploy/           deploy scripts and their checks         41 tests
-apps/api/public/  the web console (served by the API at /)
-apps/console/     the React console at /app — sign-in,    79 tests
-                  the gate, the device screen
+apps/api/public/  THE console — sign-in + ten screens, served
+                  by the API at /, no build step
 apps/api/migrations/  038 of them; 038 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records

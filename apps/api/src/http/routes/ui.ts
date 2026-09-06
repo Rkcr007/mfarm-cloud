@@ -102,21 +102,15 @@ const FILES: Record<string, { file: string; type: string }> = {
   '/profiles.js': { file: 'profiles.js', type: 'text/javascript; charset=utf-8' },
 
   /**
-   * `/app` IS RETIRED, and these paths are gone rather than left serving something.
+   * `/app` IS GONE, and the redirect for it lives below rather than here.
    *
-   * The React console was built to become the front door and never got there: it is two screens —
-   * a sign-in and a live device view — against the ten this console has. For a while both were
-   * served, on the theory that a cutover would be one line here when it reached parity.
+   * The React console that served these paths was two screens — a sign-in and a live device view —
+   * against this console's ten, and while both were served the good sign-in screen landed on the
+   * preview instead of on the product. It is deleted now, source and build stage and all.
    *
-   * What that actually produced was the two halves crossed over. The new sign-in screen landed on
-   * `/app`, so the good front door led to a two-screen preview marked "Preview build", while the
-   * product people use sat behind the old form at `/`. Somebody signing in at `/app/signin` arrived
-   * at a page with no navigation, no fleet, no runs, and no way to sign out — and no reason to
-   * believe they had reached the wrong console rather than a broken one.
-   *
-   * So the sign-in design moved to `/` where the product is, and `/app` redirects there instead of
-   * being a second door people can fall through. The React code is still in the tree and still
-   * builds; what is gone is the ability to LAND on it. Restoring it is this block again.
+   * The redirect outlives it on purpose: a bookmark does not expire when a directory does, and
+   * somebody who saved `/app/devices` should arrive at the console rather than at a 404 or, worse,
+   * at the 401 the authenticate-by-default rule gives to any path this file does not name.
    */
 
   /**
@@ -146,12 +140,17 @@ const FILES: Record<string, { file: string; type: string }> = {
 export const SERVED_PATHS = Object.keys(FILES);
 
 /**
- * Everything the retired React console used to answer, pointed at the console that exists.
+ * Everything the deleted React console used to answer, pointed at the console that exists.
  *
- * 308 rather than 301: permanent-and-cacheable is the wrong promise for a path we intend to give
- * back when `/app` reaches parity, and a 301 in somebody's browser cache is close to unrevocable.
- * 308 also preserves the method, which matters for nothing here today and would matter the moment
- * one of these is hit by anything but a GET.
+ * 308 rather than 301, still: a 301 is cached by the browser more or less forever, and "forever" is
+ * the wrong promise for a path this project has already changed its mind about once. 308 also
+ * preserves the method, which matters for nothing here today and would matter the moment one of
+ * these is hit by anything but a GET.
+ *
+ * These are not files, so they are not in `FILES` — but they ARE in `UI_PATHS`, which is what
+ * exempts them from the authenticate-by-default rule. Without that the redirect exists and nobody
+ * is allowed to receive it: `/app` answers 401, and the person who bookmarked it is told their
+ * credentials are missing by a route whose only job is to point at the front door.
  */
 const RETIRED = ['/app', '/app/', '/app/signin', '/app/devices', '/app/app.js', '/app/app.css'];
 

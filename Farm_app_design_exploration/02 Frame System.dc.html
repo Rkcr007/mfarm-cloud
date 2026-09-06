@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:#08080A;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;color:#F1F1F1;-webkit-font-smoothing:antialiased}
+a{color:#A290DA;text-decoration:none}a:hover{color:#C4B6EC}
+.wrap{max-width:1180px;margin:0 auto;padding:0 56px}
+.sec{padding:64px 0;border-top:1px solid #16161A}
+.h2{margin:0 0 6px;font:600 26px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em}
+.lede{margin:0 0 38px;max-width:700px;font:400 13.5px/1.7 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty}
+.h3{margin:0 0 16px;font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;text-transform:uppercase}
+.hdr{display:grid;gap:16px;padding:0 0 10px;font:500 10px/1.3 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;text-transform:uppercase;border-bottom:1px solid #1F1F22}
+.row{display:grid;gap:16px;align-items:center;padding:11px 0;border-top:1px solid #131316}
+.tk{font:400 11px/1.5 'JetBrains Mono',monospace;color:#C4C4C4;overflow-wrap:anywhere}
+.val{font:400 10.5px/1.5 'JetBrains Mono',monospace;color:#8A8A8A}
+.note{font:400 11.5px/1.55 'Instrument Sans',sans-serif;color:#787878;text-wrap:pretty}
+.card{background:#0D0D0F;border:1px solid #1F1F22;border-radius:12px;padding:26px 28px}
+.code{font:400 11px/1.75 'JetBrains Mono',monospace;color:#A8A8A8;background:#050506;border:1px solid #1A1A1C;border-radius:10px;padding:18px 20px;overflow-x:auto;white-space:pre}
+.flag{display:inline-block;padding:3px 7px;border-radius:5px;background:rgba(232,163,14,.07);border:1px solid rgba(232,163,14,.26);font:500 9px/1.3 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em}
+.stagebg{background:radial-gradient(120% 70% at 50% 0%,#16130F 0%,#0B0A09 62%,#08080A 100%)}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+@keyframes mfPulse{0%,100%{opacity:.35}50%{opacity:1}}
+</style>
+</helmet>
+
+<div class="wrap">
+
+<div style="padding:76px 0 4px">
+  <div style="font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.16em;color:#8A8A8A;margin-bottom:20px">MFARM CONSOLE · 02</div>
+  <h1 style="margin:0 0 14px;font:700 46px/1.05 'Bricolage Grotesque',sans-serif;letter-spacing:-.035em">The frame system</h1>
+  <p style="margin:0;max-width:680px;font:400 15px/1.65 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">Ceramic direction, built as a function of reported geometry. Four profiles today and a rule for the fifth. The frame is an MFARM asset and may be as premium as we can make it; the screen is the device's own framebuffer and is never simulated.</p>
+</div>
+
+<div class="sec" style="border-top:none">
+  <h2 class="h2">Two objects, one rule</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:26px">
+    <div class="card">
+      <div style="font:600 14px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:9px">The frame</div>
+      <div class="note">Chassis, bezel, corner radius, cutout, side rails, edge highlight, contact shadow. Ours to draw. Everything premium about the session screen lives here.</div>
+    </div>
+    <div class="card" style="border-color:rgba(224,80,95,.24)">
+      <div style="font:600 14px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:9px">The screen</div>
+      <div class="note">The real-time framebuffer from the running Android instance. Every pixel comes from the device. No placeholder wallpaper, no mocked status bar, no fake app.</div>
+    </div>
+  </div>
+  <div class="card" style="border-color:rgba(117,94,184,.24);background:rgba(117,94,184,.05)">
+    <div style="font:600 13.5px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px">The implementation rule that keeps them separate</div>
+    <div class="note" style="max-width:760px">The frame is <span style="color:#D4D4D4">additive around</span> the panel box, never drawn over it. Bezel is padding on the chassis; rails are positioned outside the chassis edge; the contact shadow is a sibling below it. The only element that overlaps the panel is the punch-hole, which is physically accurate — a real camera does occlude pixels, and Android reserves that region. It must be centred and sized from geometry so it never lands on status-bar content. The current frame fails this: in the reference capture the panel's own edge clips the status-bar clock.</div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Geometry drives everything</h2>
+  <p class="lede">Nothing is hand-placed per device. The console already knows panel resolution, density, dp width and a profile id; every dimension below is derived from those. Values are given as a ratio of rendered panel width, plus the resolved pixel value at a 300px render — scale linearly for any stage size.</p>
+
+  <div class="hdr" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div>Dimension</div><div>X1 Pro</div><div>X1</div><div>Unprofiled</div><div>Physical</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">bezel</div><div class="val">.020w · 6px</div><div class="val">.030w · 9px</div><div class="val">.040w · 12px</div><div class="val">.012w · 3.5px</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">panel radius</div><div class="val">.110w · 33px</div><div class="val">.087w · 26px</div><div class="val">.020w · 6px</div><div class="val">.067w · 20px</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">chassis radius</div><div class="val">panel + bezel</div><div class="val">panel + bezel</div><div class="val">panel + bezel</div><div class="val">panel + bezel</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">cutout</div><div class="val">.037w punch</div><div class="val">.043w punch</div><div class="val">none</div><div class="val">.033w punch</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">cutout inset</div><div class="val">.030w from top</div><div class="val">.032w</div><div class="val">—</div><div class="val">.026w</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">rails</div><div class="val">power + volume, curved</div><div class="val">power + volume, flat</div><div class="val">none</div><div class="val">power + volume, squared</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">edge highlight</div><div class="val">1px, warm, full</div><div class="val">1px, warm, .6α</div><div class="val">1px, neutral, .35α</div><div class="val">1px, warm, full</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr 1fr"><div class="tk">aspect</div><div class="val">from panel px</div><div class="val">from panel px</div><div class="val">from panel px</div><div class="val">from panel px</div></div>
+
+  <p class="note" style="max-width:720px;margin-top:22px">Panel aspect ratio is <span class="tk">reportedWidth / reportedHeight</span>, always. A 720×1280 device is visibly stubbier than a 1080×2340 one, and it must be — screen shape is the reason someone chose a device, so the frame is where that difference becomes visible before the user starts testing.</p>
+
+  <div class="card" style="margin-top:30px">
+    <div class="h3" style="margin-bottom:14px">Resolving a profile</div>
+    <div class="code">frameFor(device) {
+  const p = profiles[device.profileId];          // real profile table
+  if (device.tier === 'physical')  return physicalFrame(device, p);
+  if (!p)                          return neutralFrame(device);   // geometry only
+  return virtualFrame(device, p);                                 // X1 Pro | X1
+}
+
+// every frame returns the same shape, so the stage never branches
+{ bezel, panelRadius, chassisRadius, cutout, cutoutInset,
+  rails: [...], chassisFill, edgeHighlight, aspect }</div>
+    <div class="note" style="margin-top:14px">One return shape for all four cases means the session stage has no per-device conditionals — add a profile row and a new device gets a correct frame with no frontend change. <span class="flag">CONFIRM</span> the profile table exposes dp width and a tier discriminator alongside panel geometry.</div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">The family</h2>
+  <p class="lede">Same material language, four honest treatments. The step down from Pro to standard is legible without being punitive; the unprofiled fallback looks deliberate rather than broken; the physical handset is unmistakably a different kind of thing.</p>
+
+  <div class="card stagebg" style="padding:52px 40px 40px">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:40px;align-items:end">
+
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="position:relative;padding:6px;border-radius:39px;background:linear-gradient(160deg,#6B6058 0%,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A 100%);box-shadow:0 1px 0 rgba(255,240,225,.2) inset,0 2px 3px rgba(0,0,0,.7),0 20px 36px -8px rgba(0,0,0,.78),0 50px 90px -22px rgba(0,0,0,.9)">
+          <div style="position:absolute;inset:2px;border-radius:37px;box-shadow:0 0 0 1px rgba(255,235,215,.1) inset;pointer-events:none"></div>
+          <div style="position:absolute;top:74px;right:-1px;width:3px;height:30px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+          <div style="position:absolute;top:112px;right:-1px;width:3px;height:54px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+          <div style="position:relative;width:172px;border-radius:33px;overflow:hidden;background:#000">
+            <img src="ref/panel-x1pro.png" alt="live panel" style="display:block;width:172px;height:373px;object-fit:cover;object-position:top">
+            <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6.4px;height:6.4px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.14)"></div>
+            <div style="position:absolute;inset:0;background:linear-gradient(202deg,rgba(255,246,235,.07),rgba(255,255,255,0) 50%);mix-blend-mode:screen"></div>
+          </div>
+        </div>
+        <div style="width:166px;height:22px;margin-top:-4px;border-radius:50%;background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.7),rgba(0,0,0,0) 74%);filter:blur(6px)"></div>
+        <div style="margin-top:14px;font:600 13.5px/1 'Bricolage Grotesque',sans-serif">MFARM X1 Pro</div>
+        <div style="margin-top:7px;font:400 9.5px/1.6 'JetBrains Mono',monospace;color:#6A6A6A;text-align:center">1080×2340 · 450dpi<br>384 dp · bezel .020w</div>
+        <div style="margin-top:10px;padding:3px 8px;border-radius:999px;background:rgba(117,94,184,.16);border:1px solid rgba(117,94,184,.42);font:500 9px/1.4 'JetBrains Mono',monospace;color:#A290DA;letter-spacing:.05em">FLAGSHIP</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="position:relative;padding:8px;border-radius:34px;background:linear-gradient(160deg,#514A44 0%,#2C2724 14%,#1A1716 40%,#151211 66%,#332E29 90%,#544C45 100%);box-shadow:0 1px 0 rgba(255,240,225,.13) inset,0 2px 3px rgba(0,0,0,.68),0 16px 30px -8px rgba(0,0,0,.74),0 40px 74px -22px rgba(0,0,0,.88)">
+          <div style="position:absolute;inset:2px;border-radius:32px;box-shadow:0 0 0 1px rgba(255,235,215,.06) inset;pointer-events:none"></div>
+          <div style="position:absolute;top:76px;right:-1px;width:2.5px;height:28px;border-radius:1px;background:linear-gradient(90deg,#63594F,#2C2825)"></div>
+          <div style="position:absolute;top:112px;right:-1px;width:2.5px;height:50px;border-radius:1px;background:linear-gradient(90deg,#63594F,#2C2825)"></div>
+          <div style="position:relative;width:172px;border-radius:26px;overflow:hidden;background:#050506">
+            <div style="width:172px;height:373px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:0 20px;text-align:center;background:radial-gradient(70% 44% at 50% 44%,#100E0D,#050506 78%)">
+              <div style="font:400 9.5px/1.6 'JetBrains Mono',monospace;color:#787878">Idle</div>
+              <div style="font:400 8.5px/1.6 'JetBrains Mono',monospace;color:#5A5A5A">snapshot clean · ready to allocate</div>
+            </div>
+            <div style="position:absolute;top:5.5px;left:50%;transform:translateX(-50%);width:7.4px;height:7.4px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.09)"></div>
+          </div>
+        </div>
+        <div style="width:160px;height:20px;margin-top:-4px;border-radius:50%;background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.62),rgba(0,0,0,0) 74%);filter:blur(6px)"></div>
+        <div style="margin-top:14px;font:600 13.5px/1 'Bricolage Grotesque',sans-serif">MFARM X1</div>
+        <div style="margin-top:7px;font:400 9.5px/1.6 'JetBrains Mono',monospace;color:#6A6A6A;text-align:center">1080×2340 · 480dpi<br>360 dp · bezel .030w</div>
+        <div style="margin-top:10px;padding:3px 8px;border-radius:999px;background:#191919;border:1px solid #2B2B2E;font:500 9px/1.4 'JetBrains Mono',monospace;color:#8A8A8A;letter-spacing:.05em">STANDARD</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="position:relative;padding:11px;border-radius:17px;background:linear-gradient(160deg,#2A2724,#1C1A19 50%,#232120);box-shadow:0 1px 0 rgba(255,245,235,.05) inset,0 8px 16px -6px rgba(0,0,0,.6),0 22px 40px -18px rgba(0,0,0,.8)">
+          <div style="position:relative;width:172px;border-radius:6px;overflow:hidden;background:#050506">
+            <div style="width:172px;height:306px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:0 18px;text-align:center">
+              <div style="font:400 9.5px/1.6 'JetBrains Mono',monospace;color:#787878">No live view</div>
+              <div style="font:400 8.5px/1.6 'JetBrains Mono',monospace;color:#5A5A5A">geometry known, model unknown</div>
+            </div>
+          </div>
+        </div>
+        <div style="width:150px;height:16px;margin-top:-2px;border-radius:50%;background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.5),rgba(0,0,0,0) 76%);filter:blur(6px)"></div>
+        <div style="margin-top:14px;font:600 13.5px/1 'Bricolage Grotesque',sans-serif;color:#C4C4C4">Unprofiled device</div>
+        <div style="margin-top:7px;font:400 9.5px/1.6 'JetBrains Mono',monospace;color:#6A6A6A;text-align:center">720×1280 · 320dpi<br>no profile row</div>
+        <div style="margin-top:10px;padding:3px 8px;border-radius:999px;background:rgba(232,163,14,.06);border:1px solid rgba(232,163,14,.24);font:500 9px/1.4 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em">NO PROFILE</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="position:relative;padding:4px;border-radius:24px;background:linear-gradient(158deg,#7E7469 0%,#33302B 16%,#1E1C19 44%,#191715 68%,#443E37 92%,#6E655C 100%);box-shadow:0 1px 0 rgba(255,245,230,.24) inset,0 2px 3px rgba(0,0,0,.72),0 20px 36px -8px rgba(0,0,0,.78),0 50px 90px -22px rgba(0,0,0,.9)">
+          <div style="position:absolute;inset:1.5px;border-radius:22px;box-shadow:0 0 0 1px rgba(255,240,220,.12) inset;pointer-events:none"></div>
+          <div style="position:absolute;top:82px;right:-1.5px;width:3px;height:26px;border-radius:1px;background:linear-gradient(90deg,#8A8075,#312E29)"></div>
+          <div style="position:absolute;top:116px;right:-1.5px;width:3px;height:48px;border-radius:1px;background:linear-gradient(90deg,#8A8075,#312E29)"></div>
+          <div style="position:relative;width:172px;border-radius:20px;overflow:hidden;background:#050506">
+            <div style="width:172px;height:369px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:0 20px;text-align:center">
+              <div style="font:400 9.5px/1.6 'JetBrains Mono',monospace;color:#EE7C88">Out of the pool</div>
+              <div style="font:400 8.5px/1.6 'JetBrains Mono',monospace;color:#5A5A5A">quarantined 2d ago · needs somebody to look at it</div>
+            </div>
+            <div style="position:absolute;top:4.5px;left:50%;transform:translateX(-50%);width:5.7px;height:5.7px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,220,.14)"></div>
+          </div>
+        </div>
+        <div style="width:166px;height:22px;margin-top:-4px;border-radius:50%;background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.7),rgba(0,0,0,0) 74%);filter:blur(6px)"></div>
+        <div style="margin-top:14px;font:600 13.5px/1 'Bricolage Grotesque',sans-serif">SM-S918B</div>
+        <div style="margin-top:7px;font:400 9.5px/1.6 'JetBrains Mono',monospace;color:#6A6A6A;text-align:center">1440×3088 · physical<br>true proportions</div>
+        <div style="margin-top:10px;padding:3px 8px;border-radius:999px;background:rgba(127,160,216,.1);border:1px solid rgba(127,160,216,.32);font:500 9px/1.4 'JetBrains Mono',monospace;color:#7FA0D8;letter-spacing:.05em">REAL DEVICE</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:22px">
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:9px">Why the unprofiled frame has no cutout</div>
+      <div class="note">Because we do not know where its camera is. Drawing one would be inventing data, and the whole point of the neutral chassis is that it is honest about what the farm knows: geometry, nothing more. It reads as a deliberate industrial enclosure rather than a failed phone.</div>
+    </div>
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:9px">Why the physical handset looks different</div>
+      <div class="note">It is a different kind of object — a real machine somebody can unplug, with a different reset story and no snapshot. Squarer corners, the thinnest bezel in the family, a warmer rail, and the <span class="tk">REAL DEVICE</span> badge. Nobody should ever mistake which they are holding.</div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Panel states</h2>
+  <p class="lede">Four states, and depth is one of the variables. The shadow is shallow until the data plane attaches, so the device visibly becomes physical at the moment it becomes real.</p>
+  <div class="card stagebg" style="padding:48px 40px 36px">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:36px;align-items:end">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+        <div style="position:relative;padding:5px;border-radius:33px;background:linear-gradient(160deg,#6B6058,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A);box-shadow:0 1px 0 rgba(255,240,225,.2) inset,0 4px 10px -4px rgba(0,0,0,.5)">
+          <div style="position:relative;width:150px;height:325px;border-radius:28px;overflow:hidden;background:#020203">
+            <div style="position:absolute;inset:0;background:radial-gradient(80% 40% at 30% 8%,rgba(255,250,240,.035),rgba(255,255,255,0) 70%)"></div>
+            <div style="position:absolute;top:4.5px;left:50%;transform:translateX(-50%);width:5.5px;height:5.5px;border-radius:50%;background:#0A0A10;box-shadow:0 0 0 1px rgba(255,240,225,.07)"></div>
+          </div>
+        </div>
+        <div style="text-align:center"><div style="font:500 10px/1 'JetBrains Mono',monospace;color:#8A8A8A;letter-spacing:.06em">OFF</div><div class="note" style="margin-top:7px;font-size:10.5px">flat elevation<br>glass reflects the room</div></div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+        <div style="position:relative;padding:5px;border-radius:33px;background:linear-gradient(160deg,#6B6058,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A);box-shadow:0 1px 0 rgba(255,240,225,.2) inset,0 8px 18px -6px rgba(0,0,0,.6)">
+          <div style="position:relative;width:150px;height:325px;border-radius:28px;overflow:hidden;background:#020203">
+            <div style="position:absolute;inset:0;background:radial-gradient(60% 34% at 50% 48%,rgba(150,165,215,.17),rgba(20,24,40,.05) 62%,rgba(0,0,0,0) 84%);animation:mfPulse 2.2s ease-in-out infinite"></div>
+            <div style="position:absolute;top:4.5px;left:50%;transform:translateX(-50%);width:5.5px;height:5.5px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.1)"></div>
+          </div>
+        </div>
+        <div style="text-align:center"><div style="font:500 10px/1 'JetBrains Mono',monospace;color:#8A8A8A;letter-spacing:.06em">WAKING</div><div class="note" style="margin-top:7px;font-size:10.5px">snapshot restoring<br>the only pulse allowed</div></div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+        <div style="position:relative;padding:5px;border-radius:33px;background:linear-gradient(160deg,#6B6058,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A);box-shadow:0 1px 0 rgba(255,240,225,.2) inset,0 2px 3px rgba(0,0,0,.7),0 20px 36px -8px rgba(0,0,0,.78),0 50px 90px -22px rgba(0,0,0,.9)">
+          <div style="position:relative;width:150px;border-radius:28px;overflow:hidden;background:#000">
+            <img src="ref/panel-x1pro.png" alt="live panel" style="display:block;width:150px;height:325px;object-fit:cover;object-position:top">
+            <div style="position:absolute;top:4.5px;left:50%;transform:translateX(-50%);width:5.5px;height:5.5px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.14)"></div>
+            <div style="position:absolute;inset:0;background:linear-gradient(202deg,rgba(255,246,235,.07),rgba(255,255,255,0) 50%);mix-blend-mode:screen"></div>
+          </div>
+        </div>
+        <div style="text-align:center"><div style="display:flex;align-items:center;justify-content:center;gap:6px"><span style="width:5px;height:5px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span><span style="font:500 10px/1 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.06em">LIVE</span></div><div class="note" style="margin-top:7px;font-size:10.5px">full elevation lands<br>real pixels only</div></div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+        <div style="position:relative;padding:5px;border-radius:33px;background:linear-gradient(160deg,#544C46,#2C2724 14%,#1A1716 40%,#151211 66%,#332E29 90%,#544C45);box-shadow:0 1px 0 rgba(255,240,225,.13) inset,0 8px 18px -6px rgba(0,0,0,.6)">
+          <div style="position:relative;width:150px;height:325px;border-radius:28px;overflow:hidden;background:#050506;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:0 18px;text-align:center">
+            <div style="font:500 9.5px/1.5 'JetBrains Mono',monospace;color:#E8A30E">No live view</div>
+            <div style="font:400 8.5px/1.65 'JetBrains Mono',monospace;color:#5A5A5A">Declares no <span style="text-decoration:line-through;color:#4A4A4A">screen-stream</span>. Input, logcat, install and WebDriver still work.</div>
+            <div style="position:absolute;top:4.5px;left:50%;transform:translateX(-50%);width:5.5px;height:5.5px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.1)"></div>
+          </div>
+        </div>
+        <div style="text-align:center"><div style="font:500 10px/1 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.06em">NO SIGNAL</div><div class="note" style="margin-top:7px;font-size:10.5px">a sentence, never<br>a black rectangle</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sec" style="padding-bottom:96px">
+  <h2 class="h2">Implementation</h2>
+  <p class="lede">The whole frame is six nested elements and no images. It costs one paint and never composites over the panel, which matters because rendering is software and frame rate is the proof the session is healthy.</p>
+  <div class="code">&lt;div class="mf-device" data-profile="x1-pro" data-state="live"&gt;
+  &lt;div class="mf-chassis"&gt;              &lt;!-- padding: bezel; radius: chassisRadius --&gt;
+    &lt;i class="mf-edge"&gt;&lt;/i&gt;             &lt;!-- inset 2px, 1px warm highlight ring --&gt;
+    &lt;i class="mf-rail" data-rail="power"&gt;&lt;/i&gt;
+    &lt;i class="mf-rail" data-rail="volume"&gt;&lt;/i&gt;
+    &lt;div class="mf-glass"&gt;              &lt;!-- radius: panelRadius; overflow: hidden --&gt;
+      &lt;video class="mf-panel"&gt;&lt;/video&gt;  &lt;!-- the framebuffer. nothing else in here --&gt;
+      &lt;i class="mf-cutout"&gt;&lt;/i&gt;
+      &lt;i class="mf-sheen"&gt;&lt;/i&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+  &lt;i class="mf-contact"&gt;&lt;/i&gt;            &lt;!-- sibling, below. the grounded shadow --&gt;
+&lt;/div&gt;
+
+.mf-chassis  { background: linear-gradient(160deg, ...ceramic stops);
+               box-shadow: var(--e-device); transition: box-shadow var(--m-settle) var(--ease-out); }
+[data-state="off"] .mf-chassis,
+[data-state="waking"] .mf-chassis { box-shadow: var(--e-device-flat); }
+.mf-sheen    { background: linear-gradient(202deg, rgba(255,246,235,.07), transparent 50%);
+               mix-blend-mode: screen; opacity: var(--glass-sheen); pointer-events: none; }
+.mf-panel    { display: block; width: 100%; aspect-ratio: var(--panel-aspect); }</div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:26px">
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:9px">Performance rules</div>
+      <div class="note">No <span class="tk">backdrop-filter</span> anywhere near the stage. No animated <span class="tk">box-shadow</span> or <span class="tk">filter</span> while the stream is live — the two shadow states cross-fade once, on attach, and never again. <span class="tk">mf-sheen</span> is a static gradient, not a moving highlight. The panel element itself gets no transform, so the video layer stays on its own compositor layer.</div>
+    </div>
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:9px">The sheen tradeoff <span class="flag">DECIDE</span></div>
+      <div class="note">The glass sheen tints real pixels by 6–7% at the top edge. It is most of what makes the frame read as glass rather than a hole. Ship it as <span class="tk">--glass-sheen</span> defaulting to <span class="tk">.07</span>, with a settings toggle to <span class="tk">0</span> for anyone doing visual comparison work, where a tint over the framebuffer is unacceptable.</div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1300,&quot;height&quot;:1600}}"></script>
+</body>
+</html>

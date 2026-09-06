@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:#08080A;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;color:#F1F1F1;-webkit-font-smoothing:antialiased}
+a{color:#A290DA;text-decoration:none}a:hover{color:#C4B6EC}
+.wrap{max-width:1240px;margin:0 auto;padding:0 40px}
+.sec{padding:56px 0;border-top:1px solid #16161A}
+.h2{margin:0 0 6px;font:600 26px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em}
+.lede{margin:0 0 30px;max-width:720px;font:400 13.5px/1.7 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty}
+.note{font:400 11.5px/1.55 'Instrument Sans',sans-serif;color:#787878;text-wrap:pretty}
+.card{background:#0D0D0F;border:1px solid #1F1F22;border-radius:12px;padding:22px 24px}
+.frame{border:1px solid #1F1F22;border-radius:12px;overflow:hidden;background:#08080A}
+.cap{display:flex;align-items:baseline;gap:10px;margin:0 0 12px}
+.capid{font:500 10.5px/1 'JetBrains Mono',monospace;padding:4px 8px;background:#755EB8;color:#fff;border-radius:5px;letter-spacing:.05em}
+.capt{font:600 14px/1.2 'Bricolage Grotesque',sans-serif}
+.lbl{font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8A8A}
+.btn{padding:8px 12px;border-radius:8px;background:#131315;border:1px solid #2B2B2E;font:500 11px/1 'Instrument Sans',sans-serif;color:#C4C4C4;text-align:center}
+.pri{padding:8px 12px;border-radius:8px;background:#755EB8;font:500 11px/1 'Instrument Sans',sans-serif;color:#fff;text-align:center}
+.chip{padding:3px 7px;border-radius:5px;background:#191919;border:1px solid #242427;font:400 9px/1.3 'JetBrains Mono',monospace;color:#C4C4C4}
+.chipoff{padding:3px 7px;border-radius:5px;background:transparent;border:1px solid #1A1A1C;font:400 9px/1.3 'JetBrains Mono',monospace;color:#4A4A4A;text-decoration:line-through}
+.mono{font:400 10.5px/1.5 'JetBrains Mono',monospace;color:#C4C4C4}
+.flag{display:inline-block;padding:3px 7px;border-radius:5px;background:rgba(232,163,14,.07);border:1px solid rgba(232,163,14,.26);font:500 9px/1.3 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+@keyframes mfPulse{0%,100%{opacity:.35}50%{opacity:1}}
+</style>
+</helmet>
+
+<div class="wrap">
+
+<div style="padding:76px 0 4px">
+  <div style="font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.16em;color:#8A8A8A;margin-bottom:20px">MFARM CONSOLE · 05</div>
+  <h1 style="margin:0 0 14px;font:700 46px/1.05 'Bricolage Grotesque',sans-serif;letter-spacing:-.035em">The rest of the console</h1>
+  <p style="margin:0;max-width:700px;font:400 15px/1.65 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">Sign-in, the catalogue, device detail, and the pages that are about evidence and administration rather than control.</p>
+</div>
+
+<div class="sec" style="border-top:none">
+  <div class="cap"><span class="capid">01</span><span class="capt">Sign-in</span></div>
+  <p class="lede">Served to anyone, so it is told nothing about the fleet. That constraint is an asset: with no numbers to show, the page can be about what the product is. The left half is the only marketing surface in the console — this is where the ten-second judgement happens.</p>
+  <div class="frame" style="display:grid;grid-template-columns:1.15fr 1fr;min-height:560px">
+    <div style="padding:52px 48px;background:radial-gradient(120% 90% at 20% 0%,#16130F 0%,#0B0A09 58%,#08080A 100%);display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden">
+      <div style="position:absolute;right:-90px;top:70px;opacity:.5">
+        <div style="position:relative;padding:6px;border-radius:39px;background:linear-gradient(160deg,#6B6058,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A);box-shadow:0 2px 3px rgba(0,0,0,.7),0 20px 36px -8px rgba(0,0,0,.78),0 50px 90px -22px rgba(0,0,0,.9);transform:rotate(-8deg)">
+          <div style="width:196px;height:425px;border-radius:33px;overflow:hidden;background:#000"><img src="ref/panel-x1pro.png" alt="" style="display:block;width:196px;height:425px;object-fit:cover;object-position:top;opacity:.85"></div>
+        </div>
+      </div>
+      <div style="position:relative">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:44px">
+          <div style="width:24px;height:24px;border-radius:7px;background:linear-gradient(150deg,#8A74D6,#5A47A0);display:flex;align-items:center;justify-content:center;font:600 11px/1 'Bricolage Grotesque',sans-serif">M</div>
+          <span style="font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.15em;color:#C4C4C4">MFARM</span>
+          <div style="display:flex;align-items:center;gap:5px;margin-left:6px;padding:3px 8px;border-radius:999px;background:rgba(111,203,99,.10);border:1px solid rgba(111,203,99,.28)"><span style="width:4px;height:4px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span><span style="font:500 8.5px/1.3 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.06em">FARM UP</span></div>
+        </div>
+        <h2 style="margin:0 0 16px;font:700 34px/1.12 'Bricolage Grotesque',sans-serif;letter-spacing:-.032em;max-width:330px">Real Android devices, on your own infrastructure.</h2>
+        <p style="margin:0;max-width:310px;font:400 13px/1.7 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">Point your existing Appium or WebdriverIO suite at one more URL. The farm allocates a device, resets it between runs, and meters what you used. Or take one by hand and drive it in the browser.</p>
+      </div>
+      <div style="position:relative;padding:15px 16px;border-radius:10px;background:rgba(13,13,15,.7);border:1px solid #1F1F22;max-width:330px;backdrop-filter:blur(2px)">
+        <div class="lbl" style="margin-bottom:10px">POINT A SUITE HERE</div>
+        <div style="font:400 10.5px/1.6 'JetBrains Mono',monospace;color:#C4C4C4;word-break:break-all">https://farm.mfarm.dev/wd/hub</div>
+        <div class="note" style="margin-top:8px">Standard WebDriver. No agent to install, no SDK.</div>
+      </div>
+    </div>
+    <div style="padding:52px 44px;display:flex;flex-direction:column;justify-content:center;border-left:1px solid #16161A;background:#0A0A0C">
+      <h3 style="margin:0 0 8px;font:600 20px/1.2 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em">Sign in</h3>
+      <div class="note" style="margin-bottom:26px">This farm has no email. Your administrator sets your password and passes it on.</div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <div style="font:500 10px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;margin-bottom:8px">EMAIL</div>
+          <div style="padding:11px 13px;border-radius:9px;background:#08080A;border:1px solid #242427;font:400 11.5px/1 'JetBrains Mono',monospace;color:#C4C4C4">admin@mfarm.local</div>
+        </div>
+        <div>
+          <div style="font:500 10px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;margin-bottom:8px">PASSWORD</div>
+          <div style="padding:11px 13px;border-radius:9px;background:#08080A;border:1px solid rgba(224,80,95,.42);box-shadow:0 0 0 2px rgba(224,80,95,.09);font:400 11.5px/1 'JetBrains Mono',monospace;color:#C4C4C4">••••••••••••</div>
+          <div style="display:flex;align-items:flex-start;gap:7px;margin-top:9px">
+            <span style="flex:none;width:13px;height:13px;border-radius:50%;background:rgba(224,80,95,.12);border:1px solid rgba(224,80,95,.5);display:flex;align-items:center;justify-content:center;font:500 8px/1 'JetBrains Mono',monospace;color:#EE7C88;margin-top:1px">!</span>
+            <span style="font:400 11px/1.5 'Instrument Sans',sans-serif;color:#EE7C88">That password does not match this account.</span>
+          </div>
+        </div>
+        <div class="pri" style="padding:11px;margin-top:6px">Sign in</div>
+      </div>
+      <div class="note" style="margin-top:26px;padding-top:20px;border-top:1px solid #16161A">Sessions last 12 hours. Signing in from a new browser does not sign you out elsewhere.</div>
+    </div>
+  </div>
+  <p class="note" style="margin-top:14px;max-width:760px">The error is inline and attached to the field it concerns, not a toast — it is a correction, not a notification. The device peeking in from the right is the product's own hardware, cropped and slightly rotated, at 50% opacity so it reads as material rather than a screenshot.</p>
+</div>
+
+<div class="sec">
+  <div class="cap"><span class="capid">02</span><span class="capt">Catalogue — the Fleet's product lens</span></div>
+  <p class="lede">The fleet advertised as products, driven by the real profile table. This is the buyer's page and also the page an engineer uses to choose a screen size. It answers "what can I test on" before "what is free right now".</p>
+  <div class="frame" style="padding:34px 34px 30px;background:radial-gradient(120% 60% at 50% 0%,#131110 0%,#0A0A0B 62%,#08080A 100%)">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:22px">
+      <div style="border-radius:14px;background:#0D0D0F;border:1px solid #1F1F22;padding:26px 26px 24px;display:grid;grid-template-columns:1fr 152px;gap:22px;align-items:center">
+        <div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+            <span style="padding:3px 8px;border-radius:999px;background:rgba(117,94,184,.16);border:1px solid rgba(117,94,184,.42);font:500 9px/1.3 'JetBrains Mono',monospace;color:#A290DA;letter-spacing:.05em">FLAGSHIP</span>
+            <span style="display:flex;align-items:center;gap:5px;font:400 10.5px/1 'JetBrains Mono',monospace;color:#7FD873"><span style="width:4.5px;height:4.5px;border-radius:50%;background:#6FCB63"></span>2 of 2 free</span>
+          </div>
+          <h3 style="margin:0 0 9px;font:600 22px/1.1 'Bricolage Grotesque',sans-serif;letter-spacing:-.025em">MFARM X1 Pro</h3>
+          <p class="note" style="margin:0 0 18px;max-width:250px">The flagship tier. Highest resolution and the full capability set, including live view, UI inspection and screenshots.</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;padding-top:16px;border-top:1px solid #1A1A1C">
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">SCREEN</div><div class="mono">1080 × 2340</div></div>
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">DENSITY</div><div class="mono">450 dpi</div></div>
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">LAYOUT WIDTH</div><div class="mono">384 dp</div></div>
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">ANDROID</div><div class="mono">17</div></div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:16px">
+            <span class="chip">screen-stream</span><span class="chip">ui-hierarchy</span><span class="chip">screenshot</span><span class="chip">logcat</span><span class="chip">webdriver</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:18px"><div class="pri" style="padding:9px 16px">Start one</div><div class="btn" style="padding:9px 14px">Full specification</div></div>
+        </div>
+        <div style="display:flex;justify-content:center">
+          <div style="position:relative;padding:5px;border-radius:33px;background:linear-gradient(160deg,#6B6058,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A);box-shadow:0 1px 0 rgba(255,240,225,.2) inset,0 2px 3px rgba(0,0,0,.7),0 18px 32px -8px rgba(0,0,0,.76),0 44px 80px -22px rgba(0,0,0,.88)">
+            <div style="position:absolute;inset:2px;border-radius:31px;box-shadow:0 0 0 1px rgba(255,235,215,.1) inset"></div>
+            <div style="position:absolute;top:60px;right:-1px;width:2.5px;height:26px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+            <div style="position:absolute;top:92px;right:-1px;width:2.5px;height:46px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+            <div style="position:relative;width:140px;border-radius:28px;overflow:hidden;background:#000">
+              <img src="ref/panel-x1pro.png" alt="MFARM X1 Pro" style="display:block;width:140px;height:303px;object-fit:cover;object-position:top">
+              <div style="position:absolute;top:4px;left:50%;transform:translateX(-50%);width:5.2px;height:5.2px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.14)"></div>
+              <div style="position:absolute;inset:0;background:linear-gradient(202deg,rgba(255,246,235,.07),rgba(255,255,255,0) 50%);mix-blend-mode:screen"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="border-radius:14px;background:#0D0D0F;border:1px solid #1F1F22;padding:26px 26px 24px;display:grid;grid-template-columns:1fr 152px;gap:22px;align-items:center">
+        <div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+            <span style="padding:3px 8px;border-radius:999px;background:#191919;border:1px solid #2B2B2E;font:500 9px/1.3 'JetBrains Mono',monospace;color:#8A8A8A;letter-spacing:.05em">STANDARD</span>
+            <span style="display:flex;align-items:center;gap:5px;font:400 10.5px/1 'JetBrains Mono',monospace;color:#E8A30E"><span style="width:4.5px;height:4.5px;border-radius:50%;background:#E8A30E"></span>0 of 2 free</span>
+          </div>
+          <h3 style="margin:0 0 9px;font:600 22px/1.1 'Bricolage Grotesque',sans-serif;letter-spacing:-.025em">MFARM X1</h3>
+          <p class="note" style="margin:0 0 18px;max-width:250px">Same panel, higher density — so a narrower layout at 360 dp. The tier to test on when you care about smaller phones.</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;padding-top:16px;border-top:1px solid #1A1A1C">
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">SCREEN</div><div class="mono">1080 × 2340</div></div>
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">DENSITY</div><div class="mono">480 dpi</div></div>
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">LAYOUT WIDTH</div><div class="mono">360 dp</div></div>
+            <div><div style="font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:6px">ANDROID</div><div class="mono">17</div></div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:16px">
+            <span class="chip">screen-stream</span><span class="chip">ui-hierarchy</span><span class="chip">screenshot</span><span class="chip">logcat</span><span class="chip">webdriver</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:18px"><div class="btn" style="padding:9px 16px">Join queue · 2 ahead</div><div class="btn" style="padding:9px 14px">Full specification</div></div>
+        </div>
+        <div style="display:flex;justify-content:center">
+          <div style="position:relative;padding:7px;border-radius:30px;background:linear-gradient(160deg,#514A44,#2C2724 14%,#1A1716 40%,#151211 66%,#332E29 90%,#544C45);box-shadow:0 1px 0 rgba(255,240,225,.13) inset,0 14px 26px -8px rgba(0,0,0,.7),0 36px 66px -22px rgba(0,0,0,.85)">
+            <div style="position:absolute;inset:2px;border-radius:28px;box-shadow:0 0 0 1px rgba(255,235,215,.06) inset"></div>
+            <div style="position:absolute;top:62px;right:-1px;width:2px;height:24px;border-radius:1px;background:linear-gradient(90deg,#63594F,#2C2825)"></div>
+            <div style="position:absolute;top:92px;right:-1px;width:2px;height:42px;border-radius:1px;background:linear-gradient(90deg,#63594F,#2C2825)"></div>
+            <div style="position:relative;width:140px;height:303px;border-radius:23px;overflow:hidden;background:#050506;display:flex;align-items:center;justify-content:center">
+              <div style="font:400 9px/1.6 'JetBrains Mono',monospace;color:#5A5A5A;text-align:center;padding:0 18px">all in use<br>next free ~12m</div>
+              <div style="position:absolute;top:4.5px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.09)"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;margin-top:20px;padding:16px 20px;border-radius:12px;background:#0A0A0C;border:1px solid #16161A">
+      <div style="flex:none;padding:3px;border-radius:9px;background:linear-gradient(158deg,#7E7469,#33302B 20%,#1E1C19 56%,#443E37)"><div style="width:34px;height:74px;border-radius:7px;background:#050506"></div></div>
+      <div style="flex:1">
+        <div style="display:flex;align-items:center;gap:9px;margin-bottom:6px"><span style="font:600 14px/1.2 'Bricolage Grotesque',sans-serif">Physical handsets</span><span style="padding:2px 7px;border-radius:999px;background:rgba(127,160,216,.1);border:1px solid rgba(127,160,216,.32);font:500 8.5px/1.3 'JetBrains Mono',monospace;color:#7FA0D8">1 IN THE FARM</span></div>
+        <div class="note" style="max-width:640px">Real phones plugged into a real machine. They cannot be reset from a snapshot — only apps are cleared between sessions — and they are named by their own model number, not an MFARM tier. Currently one <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#C4C4C4">SM-S918B</span>, out of the pool.</div>
+      </div>
+      <div class="btn">See it</div>
+    </div>
+  </div>
+  <p class="note" style="margin-top:14px;max-width:760px"><span class="flag">CONFIRM</span> The catalogue needs the profile table to expose marketing-facing fields — tier label, prose description, and the capability list per profile rather than per device. You confirmed a real profile table with specs and geometry; if the prose lives nowhere, it is a one-column addition.</p>
+</div>
+
+<div class="sec">
+  <div class="cap"><span class="capid">03</span><span class="capt">Device detail — quarantine and recovery</span></div>
+  <p class="lede">The operator's page. Its whole job is to state what is wrong, what has been tried, and precisely what an action will and will not do.</p>
+  <div class="frame" style="padding:28px 30px">
+    <div style="display:grid;grid-template-columns:1fr 320px;gap:22px;align-items:start">
+      <div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px">
+          <div>
+            <div style="font:400 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.12em;color:#5A5A5A;margin-bottom:10px">FLEET / DEVICE</div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+              <h3 style="margin:0;font:600 23px/1.1 'Bricolage Grotesque',sans-serif;letter-spacing:-.025em">SM-S918B</h3>
+              <span style="padding:3px 8px;border-radius:999px;background:rgba(127,160,216,.1);border:1px solid rgba(127,160,216,.32);font:500 9px/1.3 'JetBrains Mono',monospace;color:#7FA0D8;letter-spacing:.05em">REAL DEVICE</span>
+            </div>
+            <div class="mono" style="color:#5A5A5A">23bea2e5 · physical · lab</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;background:rgba(224,80,95,.07);border:1px solid rgba(224,80,95,.30)"><span style="width:5px;height:5px;border-radius:50%;background:#E0505F"></span><span style="font:500 10px/1 'JetBrains Mono',monospace;color:#EE7C88;letter-spacing:.05em">QUARANTINED</span></div>
+        </div>
+
+        <div style="padding:18px 20px;border-radius:11px;background:rgba(224,80,95,.05);border:1px solid rgba(224,80,95,.24);margin-bottom:18px">
+          <div style="font:600 15px/1.25 'Bricolage Grotesque',sans-serif;color:#F0A0A8;margin-bottom:9px">Out of the pool since 2 September</div>
+          <div class="note" style="max-width:560px;margin-bottom:14px">Taken out by <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#C4C4C4">admin@mfarm.local</span> with the note "adb keeps dropping mid-session". The allocator will not hand this device to anybody while it is quarantined.</div>
+          <div style="padding:14px 15px;border-radius:9px;background:#0D0D0F;border:1px solid #242427">
+            <div style="font:500 11.5px/1.4 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:10px">Authorising recovery does one thing</div>
+            <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:13px">
+              <div style="display:flex;gap:8px;align-items:flex-start"><span style="flex:none;color:#7FD873;font:400 10px/1.6 'JetBrains Mono',monospace">→</span><span class="note">Permits <span style="color:#C4C4C4">one</span> recovery attempt: the host restarts the device and runs a health check.</span></div>
+              <div style="display:flex;gap:8px;align-items:flex-start"><span style="flex:none;color:#EE7C88;font:400 10px/1.6 'JetBrains Mono',monospace">×</span><span class="note">It does <span style="color:#C4C4C4">not</span> return the device to the pool. Only a passing health check does that.</span></div>
+              <div style="display:flex;gap:8px;align-items:flex-start"><span style="flex:none;color:#EE7C88;font:400 10px/1.6 'JetBrains Mono',monospace">×</span><span class="note">It does <span style="color:#C4C4C4">not</span> clear the quarantine note or its history.</span></div>
+              <div style="display:flex;gap:8px;align-items:flex-start"><span style="flex:none;color:#EE7C88;font:400 10px/1.6 'JetBrains Mono',monospace">×</span><span class="note">If the check fails, the device stays out and the failure is recorded below.</span></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:8px;background:rgba(111,203,99,.06);border:1px solid rgba(111,203,99,.24);margin-bottom:14px">
+              <span style="width:4.5px;height:4.5px;border-radius:50%;background:#6FCB63"></span>
+              <span style="font:400 11px/1.45 'Instrument Sans',sans-serif;color:#7FD873">No session can be started on this device until a check passes.</span>
+            </div>
+            <div style="display:flex;gap:8px"><div style="padding:9px 14px;border-radius:8px;background:#B32333;font:500 11.5px/1 'Instrument Sans',sans-serif;color:#fff">Authorise one recovery attempt</div><div class="btn" style="padding:9px 14px">Cancel</div></div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 24px;padding:18px 20px;border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22;margin-bottom:18px">
+          <div style="display:flex;flex-direction:column">
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #151517"><span class="note">Platform</span><span class="mono">android 16</span></div>
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #151517"><span class="note">Screen</span><span class="mono">1440 × 3088</span></div>
+            <div style="display:flex;justify-content:space-between;padding:8px 0"><span class="note">Reset story</span><span class="mono">install-reset</span></div>
+          </div>
+          <div style="display:flex;flex-direction:column">
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #151517"><span class="note">Tier</span><span class="mono">physical</span></div>
+            <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #151517"><span class="note">Host</span><span class="mono">lab-host-02</span></div>
+            <div style="display:flex;justify-content:space-between;padding:8px 0"><span class="note">Last seen</span><span class="mono">2d ago</span></div>
+          </div>
+        </div>
+
+        <div class="lbl" style="margin-bottom:11px">CAPABILITIES</div>
+        <div style="display:flex;flex-wrap:wrap;gap:5px">
+          <span class="chip">app-install</span><span class="chip">webdriver</span><span class="chip">install-reset</span><span class="chip">logcat</span><span class="chip">screenshot</span><span class="chip">ui-hierarchy</span><span class="chip">input-datachannel</span>
+          <span class="chipoff">screen-stream</span><span class="chipoff">snapshot-reset</span><span class="chipoff">session-reset</span>
+        </div>
+        <div class="note" style="margin-top:11px">Struck-through capabilities are declared absent by the device. Controls that depend on them are visible and disabled in the cockpit rail, never removed.</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div class="card" style="padding:18px 19px">
+          <div class="lbl" style="margin-bottom:14px">QUARANTINE HISTORY</div>
+          <div style="display:flex;flex-direction:column;gap:15px">
+            <div style="display:flex;gap:10px"><span style="flex:none;width:5px;height:5px;border-radius:50%;background:#E0505F;margin-top:5px"></span><div><div style="font:400 11px/1.45 'Instrument Sans',sans-serif;color:#C4C4C4">Taken out of service</div><div class="note" style="margin-top:4px">"adb keeps dropping mid-session"</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:5px">2 Sep · admin@mfarm.local</div></div></div>
+            <div style="display:flex;gap:10px"><span style="flex:none;width:5px;height:5px;border-radius:50%;background:#E8A30E;margin-top:5px"></span><div><div style="font:400 11px/1.45 'Instrument Sans',sans-serif;color:#C4C4C4">Health check failed</div><div class="note" style="margin-top:4px">device did not answer adb within 30s</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:5px">2 Sep · automatic</div></div></div>
+            <div style="display:flex;gap:10px"><span style="flex:none;width:5px;height:5px;border-radius:50%;background:#6FCB63;margin-top:5px"></span><div><div style="font:400 11px/1.45 'Instrument Sans',sans-serif;color:#C4C4C4">Returned to the pool</div><div class="note" style="margin-top:4px">after a passing check</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:5px">18 Aug · automatic</div></div></div>
+          </div>
+        </div>
+        <div class="card" style="padding:18px 19px">
+          <div class="lbl" style="margin-bottom:12px">WEBDRIVER ENDPOINT</div>
+          <div style="display:flex;align-items:center;gap:7px;padding:8px 10px;border-radius:8px;background:#08080A;border:1px solid #242427"><span style="flex:1;font:400 10px/1.4 'JetBrains Mono',monospace;color:#C4C4C4;word-break:break-all">https://farm.mfarm.dev/wd/hub</span></div>
+          <div class="note" style="margin-top:9px">Available again once the device is back in the pool.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="note" style="margin-top:14px;max-width:760px">The consequence list is the pattern worth keeping from the current console, and it gets more prominent here rather than less. The destructive button keeps <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#C4C4C4">--bad-solid</span> in both themes and is not softened by a quiet variant — quarantine and release exist to be used correctly, not gently.</p>
+</div>
+
+<div class="sec">
+  <div class="cap"><span class="capid">04</span><span class="capt">Apps</span></div>
+  <p class="lede">The build library, and the one place that explains the action lifecycle — because "there is no running state" is a thing users need told once, properly.</p>
+  <div class="frame" style="padding:28px 30px">
+    <div style="display:grid;grid-template-columns:1fr 300px;gap:22px;align-items:start">
+      <div>
+        <h3 style="margin:0 0 8px;font:600 23px/1.1 'Bricolage Grotesque',sans-serif;letter-spacing:-.025em">Apps</h3>
+        <div style="font:400 12.5px/1.5 'Instrument Sans',sans-serif;color:#8A8A8A;margin-bottom:20px">4 builds · you are holding <span style="color:#7FD873">MFARM X1 Pro</span>, so any of these can be installed now.</div>
+        <div style="padding:22px;border-radius:11px;border:1px dashed #303033;background:#0A0A0C;text-align:center;margin-bottom:18px">
+          <div style="font:500 12.5px/1.4 'Instrument Sans',sans-serif;color:#C4C4C4;margin-bottom:5px">Drop an APK here</div>
+          <div class="note">Or click to choose. Signed release and debug builds both work.</div>
+        </div>
+        <div style="border-radius:11px;border:1px solid #1F1F22;overflow:hidden;background:#0D0D0F">
+          <div style="display:grid;grid-template-columns:1.6fr 1fr .8fr 112px;gap:14px;padding:11px 16px;background:#0A0A0C;border-bottom:1px solid #1F1F22;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A"><div>BUILD</div><div>PACKAGE</div><div>ON DEVICE</div><div></div></div>
+          <div style="display:grid;grid-template-columns:1.6fr 1fr .8fr 112px;gap:14px;padding:13px 16px;border-bottom:1px solid #151517;align-items:center">
+            <div><div style="font:500 12px/1.3 'Instrument Sans',sans-serif">Alaan staging</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">99.99.99 · 42.1 MB · minSdk 26</div></div>
+            <div class="mono" style="font-size:9.5px;word-break:break-all">com.alaanpay.spender.staging</div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:4.5px;height:4.5px;border-radius:50%;background:#6FCB63"></span><span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#7FD873">installed</span></div>
+            <div class="btn" style="padding:7px 10px">Reinstall</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1.6fr 1fr .8fr 112px;gap:14px;padding:13px 16px;border-bottom:1px solid #151517;align-items:center">
+            <div><div style="font:500 12px/1.3 'Instrument Sans',sans-serif">Medishop</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">2.4.0 · 18.7 MB · minSdk 24</div></div>
+            <div class="mono" style="font-size:9.5px;word-break:break-all">com.way2automation.medishop</div>
+            <div style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#6A6A6A">not installed</div>
+            <div class="pri" style="padding:7px 10px">Install</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1.6fr 1fr .8fr 112px;gap:14px;padding:13px 16px;align-items:center">
+            <div><div style="font:500 12px/1.3 'Instrument Sans',sans-serif">Spender debug</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">99.99.98 · 51.3 MB · minSdk 26</div></div>
+            <div class="mono" style="font-size:9.5px;word-break:break-all">com.alaanpay.spender.debug</div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:4.5px;height:4.5px;border-radius:50%;background:#E0505F"></span><span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#EE7C88">failed 2d ago</span></div>
+            <div class="btn" style="padding:7px 10px">Retry</div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="padding:18px 19px">
+        <div class="lbl" style="margin-bottom:15px">HOW AN ACTION GOES</div>
+        <div style="display:flex;flex-direction:column;gap:0;margin-bottom:16px">
+          <div style="display:flex;gap:11px;align-items:center;padding:10px 0"><div style="flex:none;width:15px;height:15px;border-radius:50%;border:1px solid rgba(232,163,14,.42);background:rgba(232,163,14,.1)"></div><div><div style="font:500 11.5px/1.3 'Instrument Sans',sans-serif;color:#F1F1F1">Queued</div><div class="note" style="margin-top:3px">waiting for the worker's heartbeat</div></div></div>
+          <div style="width:1px;height:12px;background:#242427;margin-left:7px"></div>
+          <div style="display:flex;gap:11px;align-items:center;padding:10px 0"><div style="flex:none;width:15px;height:15px;border-radius:50%;border:1px solid rgba(111,203,99,.42);background:rgba(111,203,99,.12);display:flex;align-items:center;justify-content:center;font:500 8.5px/1 'JetBrains Mono',monospace;color:#7FD873">✓</div><div><div style="font:500 11.5px/1.3 'Instrument Sans',sans-serif;color:#F1F1F1">Succeeded</div><div class="note" style="margin-top:3px">or failed, with the reason</div></div></div>
+        </div>
+        <div class="note" style="padding-top:15px;border-top:1px solid #1F1F22">There is deliberately no <span style="color:#C4C4C4">running</span> state. The worker reports an outcome, never a start, so a spinner in between would be showing you something nobody observed.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="cap"><span class="capid">05</span><span class="capt">Runs — the evidence screen</span></div>
+  <p class="lede">The one page that is about diagnosis rather than control. Test outcomes come from the suite, never from the farm, and the page says so where it matters.</p>
+  <div class="frame" style="padding:28px 30px">
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:20px">
+      <div>
+        <h3 style="margin:0 0 8px;font:600 23px/1.1 'Bricolage Grotesque',sans-serif;letter-spacing:-.025em">Run 1782257</h3>
+        <div class="mono" style="color:#8A8A8A">started 00:04 · spanned 21m 40s · 3 sessions</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;background:rgba(224,80,95,.07);border:1px solid rgba(224,80,95,.30)"><span style="width:5px;height:5px;border-radius:50%;background:#E0505F"></span><span style="font:500 10px/1 'JetBrains Mono',monospace;color:#EE7C88;letter-spacing:.05em">4 FAILED</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:20px">
+      <div style="padding:15px 16px;border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 24px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">62</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:8px">tests</div></div>
+      <div style="padding:15px 16px;border-radius:11px;background:#0D0D0F;border:1px solid rgba(224,80,95,.24)"><div style="font:600 24px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;color:#EE7C88;font-variant-numeric:tabular-nums">4</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:8px">failed</div></div>
+      <div style="padding:15px 16px;border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 24px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">3</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:8px">sessions</div></div>
+      <div style="padding:15px 16px;border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 15px/1.2 'Bricolage Grotesque',sans-serif;letter-spacing:-.01em">Alaan staging</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:8px">99.99.99</div></div>
+      <div style="padding:15px 16px;border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 24px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">21:40</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:8px">span</div></div>
+    </div>
+    <div style="border-radius:11px;border:1px solid #1F1F22;overflow:hidden;background:#0D0D0F">
+      <div style="display:grid;grid-template-columns:1.4fr 1fr .9fr .9fr 100px;gap:14px;padding:11px 16px;background:#0A0A0C;border-bottom:1px solid #1F1F22;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A"><div>SESSION</div><div>DEVICE</div><div>TESTS</div><div>HELD</div><div></div></div>
+      <div style="display:grid;grid-template-columns:1.4fr 1fr .9fr .9fr 100px;gap:14px;padding:13px 16px;border-bottom:1px solid #151517;align-items:center;background:rgba(224,80,95,.03)">
+        <div class="mono">3b97a8de</div>
+        <div style="font:500 11.5px/1.3 'Instrument Sans',sans-serif">MFARM X1 Pro</div>
+        <div style="font:400 11px/1 'Instrument Sans',sans-serif;color:#EE7C88">4 of 21 failed</div>
+        <div class="mono" style="color:#8A8A8A">7:12</div>
+        <div style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#A290DA">evidence</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1.4fr 1fr .9fr .9fr 100px;gap:14px;padding:13px 16px;border-bottom:1px solid #151517;align-items:center">
+        <div class="mono">7c21ab04</div>
+        <div style="font:500 11.5px/1.3 'Instrument Sans',sans-serif">MFARM X1</div>
+        <div style="font:400 11px/1 'Instrument Sans',sans-serif;color:#7FD873">21 passed</div>
+        <div class="mono" style="color:#8A8A8A">6:48</div>
+        <div style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#A290DA">evidence</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1.4fr 1fr .9fr .9fr 100px;gap:14px;padding:13px 16px;align-items:center">
+        <div class="mono">bb40d1e7</div>
+        <div style="font:500 11.5px/1.3 'Instrument Sans',sans-serif;color:#C4C4C4">Unprofiled device</div>
+        <div style="font:400 11px/1 'Instrument Sans',sans-serif;color:#7FD873">20 passed</div>
+        <div class="mono" style="color:#8A8A8A">7:40</div>
+        <div style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#A290DA">evidence</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:14px 16px;border-radius:10px;background:#0A0A0C;border:1px solid #16161A">
+      <span style="flex:none;width:14px;height:14px;border-radius:50%;background:#191919;border:1px solid #2B2B2E;display:flex;align-items:center;justify-content:center;font:500 8.5px/1 'JetBrains Mono',monospace;color:#8A8A8A;margin-top:1px">i</span>
+      <div class="note" style="max-width:700px">Pass and fail counts come from your suite over the WebDriver connection. The farm does not run your tests and cannot judge them — if a run shows no outcomes, the suite did not report any, and that is not something the console can fix.</div>
+    </div>
+  </div>
+</div>
+
+<div class="sec" style="padding-bottom:96px">
+  <div class="cap"><span class="capid">06</span><span class="capt">Health, and the organisation pages</span></div>
+  <p class="lede">Health's most valuable panel is the one that says what the console cannot see. Agents, Team and Settings are short pages whose job is to be unambiguous about consequences.</p>
+  <div style="display:grid;grid-template-columns:1.35fr 1fr;gap:18px">
+    <div class="frame" style="padding:24px 26px">
+      <h3 style="margin:0 0 18px;font:600 20px/1.1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em">Health</h3>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:11px;margin-bottom:18px">
+        <div style="padding:14px 15px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 22px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">4 <span style="font-size:13px;color:#6A6A6A">/ 5</span></div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:7px">devices ready</div></div>
+        <div style="padding:14px 15px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 22px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">1</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:7px">session active</div></div>
+        <div style="padding:14px 15px;border-radius:10px;background:#0D0D0F;border:1px solid rgba(224,80,95,.24)"><div style="font:600 22px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;color:#EE7C88;font-variant-numeric:tabular-nums">2</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:7px">failed actions · 24h</div></div>
+      </div>
+      <div class="lbl" style="margin-bottom:11px">PER DEVICE</div>
+      <div style="border-radius:10px;border:1px solid #1F1F22;overflow:hidden;background:#0D0D0F">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid #151517"><div style="display:flex;align-items:center;gap:9px"><span style="width:5px;height:5px;border-radius:50%;background:#6FCB63"></span><span style="font:500 11.5px/1 'Instrument Sans',sans-serif">MFARM X1 Pro</span></div><span class="mono" style="color:#6A6A6A">check passed 4m ago</span></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid #151517"><div style="display:flex;align-items:center;gap:9px"><span style="width:5px;height:5px;border-radius:50%;background:#6FCB63"></span><span style="font:500 11.5px/1 'Instrument Sans',sans-serif">MFARM X1</span></div><span class="mono" style="color:#6A6A6A">check passed 6m ago</span></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px"><div style="display:flex;align-items:center;gap:9px"><span style="width:5px;height:5px;border-radius:50%;background:#E0505F"></span><span style="font:500 11.5px/1 'Instrument Sans',sans-serif">SM-S918B</span></div><span class="mono" style="color:#EE7C88">check failed 2d ago</span></div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:18px">
+      <div class="card" style="border-color:rgba(232,163,14,.24);background:rgba(232,163,14,.04)">
+        <div class="lbl" style="color:#E8A30E;margin-bottom:12px">WHAT THIS PAGE CANNOT SEE</div>
+        <div class="note" style="margin-bottom:11px">Worker heartbeat and host state are not readable from the console. A dead host does not appear here directly — it shows up indirectly, as devices leaving <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#C4C4C4">READY</span> without anybody quarantining them.</div>
+        <div class="note">Keeping this panel is the point. An observability page that implies it sees everything is worse than one that names its blind spot.</div>
+      </div>
+      <div class="card">
+        <div class="lbl" style="margin-bottom:12px">SETTINGS · A KEY, SHOWN ONCE</div>
+        <div style="padding:13px 14px;border-radius:9px;background:#08080A;border:1px solid rgba(117,94,184,.3);margin-bottom:11px">
+          <div style="font:400 10px/1.6 'JetBrains Mono',monospace;color:#C4C4C4;word-break:break-all">mf_live_7Kq2xW9pLm4TvB8nRs3JhY6dF1zA</div>
+          <div style="display:flex;gap:7px;margin-top:11px"><div class="pri" style="padding:6px 12px;font-size:10.5px">Copy</div><div class="btn" style="padding:6px 12px;font-size:10.5px">Done</div></div>
+        </div>
+        <div class="note">Inline, not a modal — a dialog invites dismissal, and this value never appears again. The panel stays until you press Done.</div>
+      </div>
+      <div class="card">
+        <div class="lbl" style="margin-bottom:12px">TEAM · ADDING SOMEONE</div>
+        <div class="note">There is no email on this farm, so you set the password and pass it on yourself. The dialog says that plainly rather than implying an invitation was sent.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1340,&quot;height&quot;:1600}}"></script>
+</body>
+</html>
