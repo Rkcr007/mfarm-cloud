@@ -19,17 +19,28 @@ written.
 
 ## Open
 
+**Nothing, as of 2026-09-06** — twenty-five recorded, twenty-five closed.
+
+That is a statement about this list, not about the console. Every entry here was found by USING the
+thing: clicking every control, reading every sentence on a real farm, watching a real device arrive.
+Not one came from the test suite, which was green throughout. An empty register means the last pass
+found everything it found — the next hour of use is what says whether it is empty.
+
+One thing is deliberately not on this list because it is not a defect: **the farm's SM-S918B row is
+still nine days stale**, and it corrects itself the moment a current agent registers that phone.
+`npx @mfarm/agent` on the machine it is plugged into, and nothing else.
+
 | # | Sev | Area | What | Found |
 |---|---|---|---|---|
-| D2 | S3 | Device detail | **The stated cause was wrong — see below.** `Screen` reads "not reported" on the farm's SM-S918B. The agent has read a handset's panel with `wm size` / `wm density` since `c00114f` (2026-08-24), `physical.ts` falls back to a real geometry so the field can never be empty, and `agent.ts` sends `info.screen` for every tier — the two Cuttlefish devices arrive through that same line. The handset's row has simply not been written since its host last beat on **2026-08-29**, eight days before this was recorded. **Closing it needs the handset plugged into a host running a current agent** — hardware, not code. | farm screenshot |
-| D18 | **S2** | Deploy | A merged, CI-green, released commit is not on the farm until someone runs `mfarm-deploy.sh`, and nothing reports the gap. PR #102's fixes were released at 11:34 and served at 13:08, discovered only by reading `docker ps` for another reason. The console's build badge shows what IS serving; nothing shows what SHOULD be. | reading the running image |
-| D19 | S3 | Deploy | Both boxes' git checkouts drift silently from `main` and nothing notices. `mfarm-cp` was on a **detached HEAD at 886cb47**; `mfarm-lab` was **66 commits behind**, on PR #81. The lab's checkout is not decorative — the worker unit and the boot unit both execute from it, so the farm was running agent code from 66 commits ago. | starting the lab |
-| D20 | S4 | Deploy | `mfarm-farm.service` on the lab still declares `Environment=CF_INSTANCES=2`, and the farm runs **four** devices from `CF_INSTANCES=4` in `deploy/.state/worker.env`. Since the D13 fix the device host exits before `farm-up.sh` reads that variable, so the unit's value is now inert as well as wrong — a declaration that contradicts the running system and no longer does anything. | reading the unit while verifying D13 |
 
 ## Fixed, awaiting verification on the farm
 
 | # | Sev | What | How it was found |
 |---|---|---|---|
+| D2 | S3 | "Screen: not reported" read as a fact about the device when it was a fact about the FARM — the row had not been written since its host stopped beating on 2026-08-29. `GET /v1/devices` now carries `hostLastSeenAt` (a system-pool read keyed to what RLS already allowed, never a join — migration 002 revokes `hosts` from `mfarm_app`), and a blank geometry says "last heard from this device 9d ago" where the host is silent, and stays a bare "not reported" where it is beating. **The stated cause was always false** — see the note below. The handset's own row corrects itself the moment a current agent registers it: `npx @mfarm/agent` on that machine, nothing else. | farm screenshot |
+| D18 | **S2** | Nothing reported the gap between a released commit and a deployed one. `deploy/check-deployed.sh` answers "is this farm running main?" for the image, the control plane's checkout and the device host's — and `verify-live.sh`, the script already run after every `instances start`, now asks it too. `unknown` never scores as up to date, which is the assertion that matters: a check that goes green on a farm it could not reach is worse than no check. | reading the running image |
+| D19 | S3 | Both checkouts drifted silently — `mfarm-cp` on a detached HEAD, `mfarm-lab` 66 commits behind on the tree the worker and boot unit both `ExecStart` from. Same check, and the device host's line is labelled "worker runs this" because that is the drift which changes what the DEVICES do. A stopped lab is reported as stopped, never as up to date. | starting the lab |
+| D20 | S4 | `mfarm-farm.service` lived only on the VM, which is how it came to declare `CF_INSTANCES=2` on a host running four devices — inert since the device-host guard, and contradicted by the fleet. The unit is `deploy/mfarm-farm.service` now, installed by `deploy/install-farm-service.sh`, with no `CF_INSTANCES` at all: how many devices a host runs is the worker's business and lives in `deploy/.state/worker.env`. | reading the unit while verifying D13 |
 | D5 | S3 | Fleet rows carried a `Details` button beside a device name that links to the same page — two controls, one destination, on every in-use row. The name is the only link now. | clicking every control |
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
@@ -56,6 +67,31 @@ a negative control: reverted to the previous console, 16 of the 20 fail. The fou
 way are the "must not offer" guards — an empty library, a busy row, a host-sourced quarantine, a
 member without the admin route — which are absence assertions and correctly hold in both
 directions.
+
+### FIXED — the agent no longer restarts to withdraw a capability (ADR-0027)
+
+The outage underneath migration 038 is gone, and the fix was almost entirely deletion.
+
+**The protocol change ADR-0003 called "not yet made" shipped on 2026-09-01.** `POST /workers/heartbeat`
+reconciles the per-device automation map the agent had always been sending: an endpoint that
+disappears strips `webdriver` from that device, one that appears puts it back, host-scoped, never
+touching `state`. `http.test.ts` has covered all of it since.
+
+**Nothing removed the drain it replaced, and the comment justifying it outlived the constraint by
+five days.** `index.ts` went on saying "capabilities are written at registration only… That needs
+the heartbeat to carry capabilities." It carried them already. So one device's Appium exiting still
+drained and exited the whole agent — every backend stopped, all four devices cold-booted, thirteen
+minutes — and that is what produced the escalation 038 now guards against.
+
+`onHealth` withdraws in place and stops there; there is no grace window, because a window was only
+ever a hedge against the cost of withdrawing and that cost is now one field in a beat already being
+sent. A permanent Appium failure does not drain either: the device keeps install, launch, logcat,
+screenshot and the live view, none of which need Appium. **A device ARRIVING still re-registers** —
+the heartbeat reconciles devices it knows and cannot create one.
+
+`agent.test.ts` gains the end-to-end assertion the deletion rests on: withdraw an endpoint at
+runtime, and the next beat strips `webdriver` from that device only, leaves the sibling advertised,
+leaves the device READY, and restores it on a later beat.
 
 ### FIXED — a silent host no longer burns a device's reset budget (migration 038)
 
@@ -110,7 +146,7 @@ coming", and the reason the design puts an outcome on this row.
 
 ---
 
-### D2 is the one that was not a defect
+### D2 is the one that was not a defect — and what was fixed instead
 
 Recorded as "the worker registers no `screen` for real devices". It does, and has since twelve days
 before the note was written. Three hops were read and all three carry it — `discovery.ts` reads the

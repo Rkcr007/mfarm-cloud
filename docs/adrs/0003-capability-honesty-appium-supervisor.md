@@ -97,7 +97,15 @@ mints a fresh worker token per call and requires keeping `WORKER_REGISTRATION_TO
 process lifetime, directly against the environment-allowlist hardening. Silently defeating
 quarantine is a worse bug than the one being fixed.
 
-### What is implemented, and what the protocol still needs
+### SUPERSEDED BY ADR-0027 — the protocol change below was made on 2026-09-01
+
+Everything in this section describes how withdrawal worked before that date. The heartbeat now
+reconciles the per-device automation map, so a capability is withdrawn **in place**, per device, on
+the next beat; `APPIUM_UNHEALTHY_GRACE_MS` and the drain-and-exit are gone. The decision above is
+unchanged — only this mechanism is. See ADR-0027, and note that the comment justifying the drain
+outlived the constraint by five days and cost a thirteen-minute farm outage.
+
+### What was implemented, and what the protocol still needed (historical)
 
 Implemented: the supervisor fires `onHealthChange` from a single state writer, and a sustained
 unhealthy period (`APPIUM_UNHEALTHY_GRACE_MS`, default 60s) makes the agent **drain and exit

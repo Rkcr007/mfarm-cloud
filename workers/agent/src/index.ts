@@ -412,21 +412,35 @@ function createSupervisors(
 }
 
 /**
- * How long this host may keep advertising `webdriver` after its Appium stops being ready.
+ * WITHDRAWAL IS IN PLACE NOW, AND THE GRACE WINDOW IS GONE WITH THE DRAIN IT EXISTED TO DELAY.
  *
- * ADR-0003 decision 3 says an unhealthy supervisor withdraws the capability. There is no way to do
- * that in place: `POST /workers/heartbeat` ignores its body, and the only endpoint that writes
- * capabilities is `POST /workers/register`, which is disqualified as a runtime operation — see the
- * comment on withdrawTimer. So withdrawal means draining and exiting, and the grace window is the
- * knob that decides when a temporary outage becomes a lie worth restarting the agent over.
+ * This file used to carry `UNHEALTHY_GRACE_MS`, and the reasoning behind it was: "there is no way
+ * to withdraw a capability in place — `POST /workers/heartbeat` ignores its body, and the only
+ * endpoint that writes capabilities is `POST /workers/register`. So withdrawal means draining and
+ * exiting." That was true when ADR-0003 was written. **It stopped being true on 2026-09-01**, when
+ * the heartbeat began reconciling the per-device automation map it had always been sent: an
+ * endpoint that disappears from `devices` strips `webdriver` from that device, and one that appears
+ * puts it back. Per device, on the next beat, with nothing restarted.
  *
- * 60s is chosen to survive exactly one ordinary crash-and-recover: a few seconds of backoff plus a
- * cold start that the ADR estimates at ~30s. Below that, every routine Appium restart bounces the
- * whole agent and takes the host's interactive sessions with it — decision 5's crash-loop objection,
- * one level up. Above it, the host is knowingly advertising a capability it cannot serve. Raise it
- * on a host where Appium is slow to boot; lower it on a host that only serves WebDriver.
+ * The comment outlived the constraint by five days and cost a farm outage on 2026-09-05. One
+ * device's Appium exited; the grace window expired; the agent drained — which stops EVERY backend on
+ * the host and cold-boots all of them — and for the thirteen minutes that took, the host performed
+ * no resets at all. The control plane counted three stalled resets against a device nobody had
+ * offered one to and escalated it out of the pool. Migration 038 stops that costing a device
+ * permanently; deleting the drain is what stops the outage.
+ *
+ * SO THERE IS NOTHING LEFT TO DELAY. `onHealth` already calls `setAutomationEndpoint` on every
+ * transition, in both directions — withdrawal was ALREADY immediate and the drain was pure
+ * additional damage on top of it. A grace window was only ever a hedge against the cost of
+ * withdrawing; withdrawing now costs one field in a beat that was being sent anyway, so the honest
+ * behaviour is the immediate one. A device whose Appium is restarting genuinely cannot serve
+ * WebDriver for those few seconds, and ADR-0003 exists to say so rather than to round it down.
+ *
+ * WHAT STILL DRAINS, and must: a device ARRIVING. `hosts.capabilities` and the device list are
+ * written by registration and by nothing else — the heartbeat reconciles devices it already knows,
+ * it cannot create one — so a newly plugged phone still becomes visible by re-registering. See the
+ * USB hot-plug block below, which is unchanged.
  */
-const UNHEALTHY_GRACE_MS = Number(process.env.APPIUM_UNHEALTHY_GRACE_MS ?? 60_000);
 
 /** A drain that hangs is a host that never releases its devices, so it gets a hard deadline. */
 const DRAIN_TIMEOUT_MS = Number(process.env.AGENT_DRAIN_TIMEOUT_MS ?? 30_000);
@@ -1065,52 +1079,41 @@ async function main(): Promise<void> {
   // re-registers truthfully on the way in because resolveAutomationEndpoints runs again against an
   // Appium that is still down. Crude, but it is a real withdrawal rather than a promise, and it is
   // the same mechanism the permanent-failure path already used.
-  const withdrawTimers = new Map<string, NodeJS.Timeout>();
   const supervisorFor = new Map(supervisors.map((s) => [s.localId, s]));
-  /** The devices that registered WITH an endpoint — the only ones with anything to withdraw. */
-  const advertisedWebdriver = new Set(Object.keys(automationEndpoints));
 
   onHealth = (localId: string, healthy: boolean): void => {
     const sup = supervisorFor.get(localId);
     if (!sup) return;
-    // Keeps registration and the heartbeat payload honest even while the wire cannot carry the
-    // change yet: if anything re-registers this agent, it will not re-assert a dead capability.
-    // The url is the GATEWAY's path for this device, not Appium's own address — the gateway is what
-    // the control plane was told about, and it keeps listening either way.
+    /**
+     * THIS ONE CALL IS THE WHOLE WITHDRAWAL, and it always was.
+     *
+     * It changes what the agent reports, and the heartbeat carries that map on every beat — so the
+     * control plane strips `webdriver` from this device within one beat, and puts it back the same
+     * way when Appium returns. Nothing is restarted and no other device on this host is touched.
+     *
+     * The url is the GATEWAY's path for this device, not Appium's own address: the gateway is what
+     * the control plane was told about, and it keeps listening either way.
+     */
     agent.setAutomationEndpoint(
       localId,
       healthy ? gatewayBase(gatewayPort, localId) : undefined,
     );
 
-    // This device registered without `webdriver` because its Appium was not ready in time. There is
-    // nothing to withdraw, and bouncing the agent over a capability it never claimed would be pure
-    // downtime — but the recovery is also not picked up, because only registration writes
-    // capabilities. Say so once, rather than leaving idle WebDriver capacity to be discovered.
-    if (!advertisedWebdriver.has(localId)) {
-      if (healthy) {
-        console.warn(
-          `[agent] Appium for ${localId} is ready, but this device registered without ` +
-          '`webdriver` and capabilities are only sent at registration — restart the agent to ' +
-          'start taking WebDriver sessions on it.',
-        );
-      }
-      return;
-    }
-
     if (healthy) {
-      const t = withdrawTimers.get(localId);
-      if (t) {
-        clearTimeout(t);
-        withdrawTimers.delete(localId);
-        console.log(`[agent] Appium for ${localId} is ready again within the grace window — staying up`);
-      }
+      /**
+       * AND RECOVERY IS AUTOMATIC, including for a device that registered WITHOUT `webdriver`
+       * because its Appium was slow to start. That case used to print "restart the agent to start
+       * taking WebDriver sessions on it", which was true under registration-only capabilities and
+       * is not any more — the beat that carries the endpoint adds the capability.
+       */
+      console.log(`[agent] Appium for ${localId} is ready — \`webdriver\` advertised again on the next beat`);
       return;
     }
 
     console.warn(
-      `[agent] Appium for ${localId} is no longer ready (state: ${sup.state}) while that device ` +
-      'advertises `webdriver`. WebDriver sessions allocated to it will fail at the proxy hop. ' +
-      `Withdrawing by draining in ${UNHEALTHY_GRACE_MS}ms unless it recovers first.`,
+      `[agent] Appium for ${localId} is no longer ready (state: ${sup.state}) — withdrawing ` +
+      '`webdriver` for that device on the next heartbeat. Every other device on this host, and ' +
+      'every live session, is unaffected.',
     );
     /**
      * §18. This is the moment a test is about to fail for a reason that is not the test's fault.
@@ -1120,22 +1123,6 @@ async function main(): Promise<void> {
      * party that knows Appium went away, and this is the only place it knows it.
      */
     agent.reportIncident(localId, 'appium-failure', `Appium became unready (state: ${sup.state})`);
-    // Still a whole-agent drain, for the reason in the block comment above: capabilities are written
-    // at registration only, so one device's `webdriver` cannot be withdrawn without re-registering
-    // the host. Per-device endpoints make the RE-registration honest — the agent returns advertising
-    // only the devices whose Appium is actually up — but they do not make withdrawal in-place
-    // possible. That needs the heartbeat to carry capabilities.
-    if (!withdrawTimers.has(localId)) {
-      const timer = setTimeout(() => {
-        console.error(
-          `[agent] Appium for ${localId} has been unready for ${UNHEALTHY_GRACE_MS}ms — draining to ` +
-          'withdraw `webdriver`. The agent re-registers without it while that Appium stays down.',
-        );
-        void shutdown('appium-unhealthy', 1);
-      }, UNHEALTHY_GRACE_MS);
-      timer.unref?.();
-      withdrawTimers.set(localId, timer);
-    }
   };
 
   onGiveUp = (localId: string, reason: string): void => {
@@ -1144,9 +1131,19 @@ async function main(): Promise<void> {
     // Flushed before the drain below can exit the process, or the incident explaining WHY this host
     // went away dies with it — which is precisely the case somebody will be trying to reconstruct.
     void agent.flush();
-    if (!advertisedWebdriver.has(localId)) return; // never advertised it; already honest
-    console.error(`[agent] ${localId} registered \`webdriver\` and can no longer serve it — draining`);
-    void shutdown('appium-permanent-failure', 1);
+    /**
+     * NO DRAIN HERE EITHER. `onHealth` has already withdrawn the endpoint, so the next beat takes
+     * `webdriver` off this device and the allocator stops choosing it for WebDriver work.
+     *
+     * The device is NOT otherwise broken: install, launch, logcat, screenshot, the live view and
+     * the data plane all run without Appium. Taking the whole host down — every other device with
+     * it — because one device's automation server will not come back is a far larger outage than
+     * the capability it was protecting.
+     */
+    console.error(
+      `[agent] ${localId} can no longer serve \`webdriver\`; it stays in the fleet for everything ` +
+      'else. Fix Appium on this host to get WebDriver back on it — no restart needed.',
+    );
   };
 
   drainAndRestart = (reason: string): void => { void shutdown(reason, 0, true); };

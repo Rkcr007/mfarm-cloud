@@ -3243,3 +3243,54 @@ describe('the defects an hour of using it found', () => {
     });
   });
 });
+
+/**
+ * D2 — WHY A FIELD IS BLANK, which is a different fact from the field being blank.
+ *
+ * The defect was recorded as "the worker registers no `screen` for real devices". It does, and has
+ * since twelve days before that was written. The farm's handset shows nothing because its row has
+ * not been written since its host stopped beating — so the console was reporting a nine-day-old
+ * silence as though it had asked the device this morning.
+ */
+describe('a blank geometry says whether anybody has asked lately', () => {
+  const handset = (hostLastSeenAt: string | undefined) => ({
+    id: 'dev-1', region: 'lab', platform: 'android', tier: 'physical',
+    model: 'SM-S918B', osVersion: '16', state: 'READY', dedicated: false,
+    capabilities: ['app-install', 'logcat', 'screenshot'],
+    ...(hostLastSeenAt ? { hostLastSeenAt } : {}),
+  });
+
+  test('a silent host turns "not reported" into "we have not heard from it"', () => {
+    seed({ name: 'fleet' });
+    mod.state.sessions = []; mod.state.held = null;
+    mod.state.devices = [handset(new Date(Date.now() - 9 * 86_400_000).toISOString())];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.match(text, /not reported/);
+    assert.match(text, /last heard from this device/,
+      'otherwise a stale row and a device that reports nothing look identical');
+  });
+
+  /** A beating host means the blank really is about the device, and must not be excused. */
+  test('a host that is beating gets no excuse printed for it', () => {
+    seed({ name: 'fleet' });
+    mod.state.sessions = []; mod.state.held = null;
+    mod.state.devices = [handset(new Date().toISOString())];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.match(text, /not reported/);
+    assert.doesNotMatch(text, /last heard from this device/,
+      'this device genuinely is not reporting geometry, and that is the thing to go and look at');
+  });
+
+  test('device detail says it in place, beside the blank rather than four rows below', () => {
+    seed({ name: 'device', id: 'dev-1' });
+    const d = handset(new Date(Date.now() - 9 * 86_400_000).toISOString());
+    // BOTH, because the screen MERGES the polled row under the detail read and the seeded poll row
+    // carries a geometry. Setting only the detail leaves the fixture describing a device whose
+    // geometry is present, which is not the case under test — and the assertion then fails for a
+    // reason that has nothing to do with the code.
+    mod.state.devices = [d];
+    mod.state.deviceDetail = { id: 'dev-1', device: d, loaded: true };
+    assert.match(textOf(mod.SCREENS.device()), /not reported — last heard from this device/);
+  });
+});
+

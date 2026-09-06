@@ -146,6 +146,33 @@ describe('the device list carries what Health needs per device (D1)', () => {
   });
 });
 
+describe('the list says how old its own answer is (D2)', () => {
+  /**
+   * A blank geometry and a silent host are opposite problems — plug the machine back in, or go and
+   * look at the device — and the list could not tell them apart. The farm's handset read "not
+   * reported" for nine days while its host had been gone the whole time.
+   */
+  test('a device whose host has not beaten carries the last time it was heard from', async () => {
+    const id = await seedDevice(`stale-${randomUUID()}`);
+    const when = new Date(Date.now() - 9 * 86_400_000).toISOString();
+    await withSystem((c) => c.query(
+      'UPDATE hosts SET last_heartbeat_at = $2 WHERE id = $1', [hostId, when]));
+
+    const d = (await list()).find((x) => x.id === id);
+    assert.ok(d?.hostLastSeenAt, 'without this the console cannot say why a field is blank');
+    assert.equal(new Date(d.hostLastSeenAt as string).toISOString(), when);
+  });
+
+  /** A beating host still answers, so "not reported" there really is about the device. */
+  test('it is present for a healthy host too, so the console never has to guess', async () => {
+    await withSystem((c) => c.query('UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1', [hostId]));
+    const id = await seedDevice(`fresh-${randomUUID()}`);
+    const d = (await list()).find((x) => x.id === id);
+    assert.ok(d?.hostLastSeenAt);
+    assert.ok(Date.now() - new Date(d.hostLastSeenAt as string).getTime() < 60_000);
+  });
+});
+
 describe('a physical device registers its panel (the claim under D2)', () => {
   /**
    * END TO END, through the real registration route: agent payload -> upsert -> tenant list.

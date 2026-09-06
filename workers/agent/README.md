@@ -29,7 +29,6 @@ npm start         # requires the env below
 | `AUTOMATION_GATEWAY_PORT` | no | port the ADR-0004 automation gateway listens on, default 8090 |
 | `AUTOMATION_ADVERTISE_BASE` | no | full public base url of the gateway, e.g. `https://worker-1.example:8443`. Wins over `APPIUM_ADVERTISE_HOST`; set it for a TLS deployment |
 | `APPIUM_ENV_PASSTHROUGH` | no | extra env var names Appium may inherit; it gets an allowlist, not `process.env` |
-| `APPIUM_UNHEALTHY_GRACE_MS` | no | how long this host may still advertise `webdriver` after Appium stops answering before the agent drains to withdraw it, default 60000 |
 | `AGENT_DRAIN_TIMEOUT_MS` | no | hard deadline on a drain, default 30000 |
 | `AUTOMATION_ENDPOINT` | no | escape hatch for an externally-managed Appium; ignored when `APPIUM_ENABLED` is set |
 
@@ -217,11 +216,11 @@ in-place way to do that: the control plane writes `hosts.capabilities` at regist
 else, the heartbeat ignores its body, and re-registering would also force `state = 'UP'` and clear
 any quarantine. So withdrawal is a drain and a non-zero exit, letting the process supervisor restart
 the agent into an honest registration. That now happens for a **transient** outage too, not only a
-permanent one: if Appium is unready for longer than `APPIUM_UNHEALTHY_GRACE_MS` (default 60s, sized
-to survive one ordinary crash plus cold start) while this host advertises `webdriver`, the agent
-drains. Recovery inside the window cancels it. The heartbeat also carries the current capability set
-already, which is inert until the control plane reads it — that is the real fix, and it is a
-protocol change.
+permanent one: an Appium that stops answering makes the agent withdraw `webdriver` **for that
+device**, on the next heartbeat and in place — no restart, no effect on the host's other devices
+or its live sessions, and it comes back the same way when Appium does (ADR-0027). Everything that
+does not need Appium — install, launch, logcat, screenshot, the live view — keeps working on that
+device throughout.
 
 **Appium's environment is an allowlist, not an inheritance.** The agent's own environment holds
 `WORKER_REGISTRATION_TOKEN`, the credential that enrolls hosts fleet-wide; an automation server that
