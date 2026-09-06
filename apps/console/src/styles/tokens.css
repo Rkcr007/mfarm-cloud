@@ -100,6 +100,61 @@
   --r-lg:  14px;
   --r-pill: 999px;
 
+  /* --- the sign-in screen ------------------------------------------------------------------- */
+  /**
+   * WHY THESE ARE A SECOND PALETTE AND NOT THE ONE ABOVE.
+   *
+   * The sign-in design was drawn against `apps/api/public/design-tokens.css` — the SHARED file, the
+   * one the vanilla console at `/` links and the one this console's own header has always said it
+   * "is meant to import rather than keep a second vocabulary". It does not import it, and it cannot
+   * be made to in this change: the two files collide on `--r-md` (9px there, 10px here), `--r-lg`
+   * (12px / 14px) and `--warn` (#E8A30E / #FFC46B), so importing it would silently restyle every
+   * radius and every warning pill on the device screen. That is a console-wide change and this was
+   * a sign-in screen.
+   *
+   * So the design's values are carried across by hand instead. EVERY HEX BELOW IS A VERBATIM COPY
+   * of a token that already exists in `design-tokens.css` under the name in the trailing comment —
+   * checked, not assumed. The two files are the same palette until somebody edits one of them, and
+   * the fix for that is the import, which belongs in its own change with the collisions resolved.
+   *
+   * They are `--si-*` rather than merged into the ground/ink/accent scales above because they are
+   * NOT this console's tokens: `--accent` is #7C5CFF and the sign-in accent is #755EB8. Two values
+   * for one name is how a palette drifts a hex at a time; two names is how it stays checkable.
+   */
+  --si-accent:       #755EB8;                    /* design-tokens --mf-accent */
+  --si-accent-hover: #8A74D6;                    /* design-tokens --b-focus — same hex, other role */
+  --si-accent-press: #6A54A8;                    /* NEW — the artifact's :active, in neither file */
+  --si-accent-line:  rgba(162, 144, 218, .42);   /* NEW — the artifact's button border */
+  --si-accent-text:  #C4B6EC;                    /* NEW — the artifact's accent-on-dark type */
+
+  --si-ink:        #F1F1F1;   /* design-tokens --t-primary */
+  --si-ink-2:      #C4C4C4;   /* design-tokens --t-secondary */
+  --si-ink-3:      #9A9A9A;   /* NEW here — design-tokens has this hex only in its light theme */
+  --si-ink-4:      #D8D8D8;   /* NEW — status-bar and popover values, brighter than --si-ink-2 */
+  --si-ink-label:  #8A8A8A;   /* design-tokens --t-label */
+  --si-ink-help:   #787878;   /* design-tokens --t-help */
+  --si-ink-micro:  #4A4A52;   /* NEW — the SELF-HOSTED / v2.4 footer */
+  /* The diagram's two type colours. Violet-biased greys, and only the diagram uses them. */
+  --si-ink-mono:   #9A93A8;   /* NEW */
+  --si-ink-mono-2: #8A8296;   /* NEW */
+
+  --si-ok:        #6FCB63;   /* design-tokens --ok-dot */
+  --si-ok-text:   #7FD873;   /* design-tokens --ok-text */
+  --si-bad-text:  #EE7C88;   /* design-tokens --bad-text */
+
+  /**
+   * The three faces the artifact names, resolved to the SELF-HOSTED families this console already
+   * declares in `base.css`. The artifact asks for 'Bricolage Grotesque' / 'Instrument Sans' /
+   * 'JetBrains Mono' off Google Fonts; these are the same three faces from `/fonts/*`, which is
+   * what the CSP (`font-src 'self'`) permits and what "self-hosted" is supposed to mean.
+   */
+  --si-font-display: var(--font-display);
+  --si-font-ui:      var(--font-ui);
+  --si-font-mono:    var(--font-mono);
+
+  /* The artifact's 4px radius, which this console's shape scale does not have. */
+  --r-xs: 4px;
+
   /* --- motion -------------------------------------------------------------------------------- */
   /* Fast enough to feel like a response, slow enough to be seen. Nothing on the session screen
      animates while the device is streaming — the eye belongs on the device. */
