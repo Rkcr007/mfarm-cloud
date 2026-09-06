@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:#08080A;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;color:#F1F1F1;-webkit-font-smoothing:antialiased}
+a{color:#A290DA;text-decoration:none}a:hover{color:#C4B6EC}
+input{font-family:'JetBrains Mono',monospace}
+input::placeholder{color:#3E3E42}
+@keyframes mfPulse{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes mfDrift{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-64px,-64px,0)}}
+@keyframes mfReq{0%{opacity:0;left:0}3%{opacity:1}12%{opacity:1}14%,100%{opacity:0;left:100%}}
+@keyframes mfNodeReq{0%,1%{background:#131315;border-color:#26262A;box-shadow:none}4%{background:#8A74D6;border-color:#A290DA;box-shadow:0 0 0 5px rgba(117,94,184,.14),0 0 16px rgba(130,108,214,.5)}20%,94%{background:#2A2440;border-color:#453A69;box-shadow:none}100%{background:#131315;border-color:#26262A}}
+@keyframes mfSegV{0%,11%{opacity:0;transform:translateY(var(--mf-from))}22%,94%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(var(--mf-from))}}
+@keyframes mfSegH{0%,11%{opacity:0;transform:translateX(var(--mf-from))}22%,94%{opacity:1;transform:translateX(0)}100%{opacity:0;transform:translateX(var(--mf-from))}}
+@keyframes mfPart{0%,11%{opacity:0}22%,94%{opacity:1}100%{opacity:0}}
+@keyframes mfVirt{0%,11%{opacity:0;transform:scale(.9)}22%,94%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.9)}}
+@keyframes mfScan{0%,11%{opacity:0}18%{opacity:.7}30%,100%{opacity:0}}
+@keyframes mfScreen{0%,23%{opacity:0}34%,94%{opacity:1}100%{opacity:0}}
+@keyframes mfChrome{0%,26%{opacity:0}36%,94%{opacity:1}100%{opacity:0}}
+@keyframes mfTile{0%,33%{opacity:0;transform:translate(-50%,-150px) scale(.86)}38%{opacity:1}44%,94%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-150px) scale(.86)}}
+@keyframes mfRipple{0%,42%{opacity:0;transform:translate(-50%,-50%) scale(.4)}44%{opacity:.5}54%{opacity:0;transform:translate(-50%,-50%) scale(5)}100%{opacity:0;transform:translate(-50%,-50%) scale(.4)}}
+@keyframes mfRipple2{0%,52%{opacity:0;transform:translate(-50%,-50%) scale(.4)}54%{opacity:.5}64%{opacity:0;transform:translate(-50%,-50%) scale(5)}100%{opacity:0;transform:translate(-50%,-50%) scale(.4)}}
+@keyframes mfMeter{0%,22%{width:0%}68%,94%{width:100%}100%{width:0%}}
+@keyframes mfTick{0%,59%{opacity:0;transform:scale(.5)}64%{opacity:1;transform:scale(1.12)}68%,94%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.5)}}
+@keyframes mfShip{0%,66%{opacity:0;left:0}69%{opacity:1}77%{opacity:1}79%,100%{opacity:0;left:100%}}
+@keyframes mfProd{0%,76%{background:#131315;border-color:#26262A;box-shadow:none}80%{background:#8A74D6;border-color:#A290DA;box-shadow:0 0 0 5px rgba(117,94,184,.14),0 0 16px rgba(130,108,214,.5)}86%,94%{background:#2A2440;border-color:#453A69;box-shadow:none}100%{background:#131315;border-color:#26262A}}
+@keyframes mfMarket{0%,85%{background:#131315;border-color:#26262A;box-shadow:none}90%{background:#4C8F44;border-color:#6FCB63;box-shadow:0 0 0 5px rgba(111,203,99,.13),0 0 16px rgba(111,203,99,.45)}94%{background:#243A22;border-color:#3C6238;box-shadow:none}100%{background:#131315;border-color:#26262A}}
+@keyframes mfLive{0%,87%{opacity:0;transform:translateY(6px)}91%,95%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(6px)}}
+@keyframes mfWire{0%,4%{background:#1A1A1E}12%{background:#403768}24%,94%{background:#26222E}100%{background:#1A1A1E}}
+@keyframes mfWire2{0%,68%{background:#1A1A1E}74%{background:#403768}84%,94%{background:#26222E}100%{background:#1A1A1E}}
+@keyframes mfBeat{0%{color:#8A8296}2%{color:#C4B6EC}13%{color:#C4B6EC}17%,100%{color:#8A8296}}
+@keyframes mfIn{0%{opacity:0;transform:translateY(10px) scale(.985)}100%{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes mfNotif{0%{opacity:0;transform:translateY(-16px) scale(.96)}100%{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes mfFade{0%{opacity:0}100%{opacity:1}}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</helmet>
+
+<div style="height:100vh;position:relative;overflow:hidden;display:flex;flex-direction:column;background:radial-gradient(130% 100% at 12% -10%,#15121C 0%,#0B0A0D 55%,#08080A 100%)">
+
+  <div style="position:absolute;inset:-80px;opacity:.5;background-image:linear-gradient(#101014 1px,transparent 1px),linear-gradient(90deg,#101014 1px,transparent 1px);background-size:64px 64px;animation:mfDrift 26s linear infinite"></div>
+  <div style="position:absolute;inset:0;background:radial-gradient(64% 54% at 50% 50%,rgba(117,94,184,.13) 0%,transparent 72%)"></div>
+
+  <div style="position:relative;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:clamp(12px,2.2vh,24px) 34px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:11px">
+        <div style="width:25px;height:25px;border-radius:7px;background:linear-gradient(150deg,#8A74D6,#5A47A0);display:flex;align-items:center;justify-content:center;font:600 11px/1 'Bricolage Grotesque',sans-serif">M</div>
+        <span style="font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.16em;color:#C4C4C4">MFARM</span>
+      </div>
+      <div style="flex:none;white-space:nowrap;display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:rgba(111,203,99,.09);border:1px solid rgba(111,203,99,.26)">
+        <span style="flex:none;width:4px;height:4px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span>
+        <span style="white-space:nowrap;font:500 8.5px/1.3 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.07em">FARM REACHABLE</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+      <button onClick="{{ openPricing }}" style="{{ pricingBtnStyle }}" style-hover="border-color:#3A3A40;color:#F1F1F1">Pay as you use</button>
+      <button onClick="{{ openSignin }}" style="padding:8px 15px;border-radius:8px;background:#755EB8;border:1px solid rgba(162,144,218,.42);font:500 11px/1.2 'Instrument Sans',sans-serif;color:#fff;cursor:pointer;white-space:nowrap" style-hover="background:#8A74D6" style-active="background:#6A54A8">Sign in</button>
+    </div>
+  </div>
+
+  <div style="position:relative;z-index:2;padding:0 34px">
+    <div style="max-width:560px">
+      <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:clamp(8px,1.4vh,16px)">
+        <span style="display:inline-flex;white-space:nowrap;padding:4px 9px;border-radius:6px;background:rgba(19,19,21,.72);border:1px solid #26262A;font:500 9px/1.3 'JetBrains Mono',monospace;letter-spacing:.09em;color:#C4C4C4">iOS</span>
+        <span style="display:inline-flex;white-space:nowrap;padding:4px 9px;border-radius:6px;background:rgba(19,19,21,.72);border:1px solid #26262A;font:500 9px/1.3 'JetBrains Mono',monospace;letter-spacing:.09em;color:#C4C4C4">ANDROID</span>
+        <span style="display:inline-flex;white-space:nowrap;padding:4px 9px;border-radius:6px;background:rgba(117,94,184,.14);border:1px solid rgba(162,144,218,.38);font:500 9px/1.3 'JetBrains Mono',monospace;letter-spacing:.09em;color:#C4B6EC">BUILD YOUR OWN</span>
+      </div>
+      <h1 style="margin:0 0 clamp(7px,1.2vh,13px);font:700 clamp(23px,2.9vw,38px)/1.08 'Bricolage Grotesque',sans-serif;letter-spacing:-.035em;text-wrap:pretty">Define the device your test needs. Run it as an org.</h1>
+      <p style="margin:0;max-width:410px;font:400 13px/1.7 'Instrument Sans',sans-serif;color:#9A9A9A;text-wrap:pretty">Compose a device from its spec, point your existing suite at one URL, and pay for the device-minutes you use.</p>
+    </div>
+  </div>
+
+  <div style="position:relative;z-index:1;flex:1;display:flex;align-items:center;justify-content:center;padding:clamp(6px,1.6vh,16px) 22px 0;min-height:0;overflow:hidden">
+    <div style="width:100%;max-width:1420px;margin:0 auto;display:flex;align-items:center;gap:0">
+
+      <div style="flex:0 1 auto;min-width:0;width:112px">
+        <div style="width:13px;height:13px;border-radius:4px;border:1px solid #26262A;background:#131315;animation:mfNodeReq 18s linear infinite"></div>
+        <div style="margin-top:12px;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.14em;color:#9A93A8">ORG SUITE</div>
+        <div style="margin-top:7px;font:400 9.5px/1.55 'JetBrains Mono',monospace;color:#8A8296">POST /session<br>3 devices</div>
+      </div>
+
+      <div style="position:relative;flex:1;min-width:20px;height:1px;background:#1A1A1E;animation:mfWire 18s linear infinite">
+        <div style="position:absolute;top:-2px;left:0;width:48px;height:4px;border-radius:2px;background:linear-gradient(90deg,transparent,#A290DA 60%,#EDE7FF);box-shadow:0 0 14px rgba(162,144,218,.75);animation:mfReq 18s cubic-bezier(.4,0,.2,1) infinite"></div>
+      </div>
+
+      <div style="flex:none;margin:0 14px">
+        <div style="display:flex;align-items:flex-end;gap:22px">
+
+          <div style="width:max-content">
+            <div style="position:relative;height:clamp(150px,27vh,236px);aspect-ratio:116/236">
+              <div style="position:absolute;inset:0;border-radius:26px;background:linear-gradient(146deg,#8E8681 0%,#4A443F 16%,#2B2724 42%,#211E1C 62%,#5D564F 88%,#332F2B 100%);box-shadow:0 22px 44px -20px rgba(0,0,0,.9),0 0 0 1px rgba(255,240,225,.05);animation:mfSegV 18s cubic-bezier(.2,.9,.2,1) infinite;--mf-from:-96px"></div>
+              <div style="position:absolute;inset:3px;border-radius:23px;background:#0A0A0C;animation:mfSegV 18s cubic-bezier(.2,.9,.2,1) infinite;--mf-from:-96px"></div>
+              <div style="position:absolute;inset:5px;border-radius:21px;overflow:hidden;background:radial-gradient(80% 56% at 50% 26%,rgba(150,182,232,.30) 0%,rgba(60,74,102,.13) 48%,rgba(6,6,10,0) 80%),#05050A;animation:mfScreen 18s ease-out infinite">
+                <div style="position:absolute;left:0;right:0;top:0;height:34%;background:linear-gradient(180deg,rgba(198,214,240,.18),transparent);animation:mfScan 18s ease-out infinite"></div>
+                <div style="position:absolute;left:11px;right:11px;top:10px;display:flex;align-items:center;justify-content:space-between;animation:mfChrome 18s ease-out infinite">
+                  <span style="font:500 6.5px/1 'JetBrains Mono',monospace;color:#B9C4D6">9:41</span>
+                  <span style="display:flex;align-items:center;gap:3px">
+                    <span style="width:9px;height:5px;border-radius:1.5px;border:.5px solid rgba(185,196,214,.7)"></span>
+                  </span>
+                </div>
+                <div style="position:absolute;left:50%;bottom:6px;transform:translateX(-50%);width:38px;height:3px;border-radius:2px;background:rgba(220,228,240,.5);animation:mfChrome 18s ease-out infinite"></div>
+              </div>
+              <div style="position:absolute;top:11px;left:50%;transform:translateX(-50%);width:34px;height:10px;border-radius:6px;background:#050508;box-shadow:0 0 0 .5px rgba(255,240,225,.07);animation:mfPart 18s ease-out infinite"></div>
+              <div style="position:absolute;left:-1.5px;top:22%;width:2px;height:6.8%;border-radius:2px;background:linear-gradient(180deg,#6E665F,#332F2B);animation:mfPart 18s ease-out infinite"></div>
+              <div style="position:absolute;left:-1.5px;top:33%;width:2px;height:11%;border-radius:2px;background:linear-gradient(180deg,#6E665F,#332F2B);animation:mfPart 18s ease-out infinite"></div>
+              <div style="position:absolute;right:-1.5px;top:29.6%;width:2px;height:14.4%;border-radius:2px;background:linear-gradient(180deg,#6E665F,#332F2B);animation:mfPart 18s ease-out infinite"></div>
+              <div style="position:absolute;left:50%;top:18.6%;width:33%;aspect-ratio:1;border-radius:11px;background:linear-gradient(150deg,#8A74D6,#5A47A0);box-shadow:0 6px 16px -5px rgba(0,0,0,.85),0 0 0 1px rgba(162,144,218,.34);display:flex;align-items:center;justify-content:center;font:600 14px/1 'Bricolage Grotesque',sans-serif;color:#fff;animation:mfTile 18s cubic-bezier(.2,.9,.2,1) infinite">A</div>
+              <div style="position:absolute;left:50%;top:60%;width:24px;height:24px;border-radius:50%;border:1px solid rgba(162,144,218,.75);animation:mfRipple 18s cubic-bezier(.3,0,.6,1) infinite"></div>
+              <div style="position:absolute;left:50%;top:60%;width:24px;height:24px;border-radius:50%;border:1px solid rgba(162,144,218,.75);animation:mfRipple2 18s cubic-bezier(.3,0,.6,1) infinite"></div>
+            </div>
+            <div style="margin-top:13px;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.13em;color:#9A93A8">iOS</div>
+            <div style="margin-top:5px;font:400 9px/1.5 'JetBrains Mono',monospace;color:#8A8296">iOS 18 · 6.3in · 460ppi</div>
+          </div>
+
+          <div style="width:max-content">
+            <div style="position:relative;height:clamp(160px,28.8vh,252px);aspect-ratio:116/252">
+              <div style="position:absolute;inset:0;border-radius:15px;background:linear-gradient(146deg,#7C7A78 0%,#3E3D3C 14%,#232322 44%,#1B1B1B 64%,#54524F 90%,#2C2B2A 100%);box-shadow:0 22px 44px -20px rgba(0,0,0,.9),0 0 0 1px rgba(240,240,245,.05);animation:mfSegV 18s cubic-bezier(.2,.9,.2,1) infinite;animation-delay:.45s;--mf-from:252px"></div>
+              <div style="position:absolute;inset:2.5px;border-radius:13px;background:#08080A;animation:mfSegV 18s cubic-bezier(.2,.9,.2,1) infinite;animation-delay:.45s;--mf-from:252px"></div>
+              <div style="position:absolute;inset:4px;border-radius:12px;overflow:hidden;background:radial-gradient(80% 56% at 50% 26%,rgba(150,182,232,.30) 0%,rgba(60,74,102,.13) 48%,rgba(6,6,10,0) 80%),#05050A;animation:mfScreen 18s ease-out infinite;animation-delay:.45s">
+                <div style="position:absolute;left:0;right:0;top:0;height:34%;background:linear-gradient(180deg,rgba(198,214,240,.18),transparent);animation:mfScan 18s ease-out infinite;animation-delay:.45s"></div>
+                <div style="position:absolute;left:9px;right:9px;top:8px;display:flex;align-items:center;justify-content:space-between;animation:mfChrome 18s ease-out infinite;animation-delay:.45s">
+                  <span style="font:500 6.5px/1 'JetBrains Mono',monospace;color:#B9C4D6">9:41</span>
+                  <span style="width:9px;height:5px;border-radius:1.5px;border:.5px solid rgba(185,196,214,.7)"></span>
+                </div>
+                <div style="position:absolute;left:0;right:0;bottom:5px;display:flex;align-items:center;justify-content:center;gap:16px;animation:mfChrome 18s ease-out infinite;animation-delay:.45s">
+                  <span style="width:6px;height:6px;border:1px solid rgba(220,228,240,.45)"></span>
+                  <span style="width:6px;height:6px;border-radius:50%;border:1px solid rgba(220,228,240,.45)"></span>
+                  <span style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:6px solid rgba(220,228,240,.45)"></span>
+                </div>
+              </div>
+              <div style="position:absolute;top:9px;left:50%;transform:translateX(-50%);width:7px;height:7px;border-radius:50%;background:#04040A;box-shadow:0 0 0 .5px rgba(240,240,245,.12),inset 0 0 2px rgba(120,150,200,.5);animation:mfPart 18s ease-out infinite;animation-delay:.45s"></div>
+              <div style="position:absolute;right:-1.5px;top:25.4%;width:2px;height:7.1%;border-radius:2px;background:linear-gradient(180deg,#64625F,#2C2B2A);animation:mfPart 18s ease-out infinite;animation-delay:.45s"></div>
+              <div style="position:absolute;right:-1.5px;top:35.7%;width:2px;height:11.9%;border-radius:2px;background:linear-gradient(180deg,#64625F,#2C2B2A);animation:mfPart 18s ease-out infinite;animation-delay:.45s"></div>
+              <div style="position:absolute;left:50%;top:17.5%;width:33%;aspect-ratio:1;border-radius:11px;background:linear-gradient(150deg,#8A74D6,#5A47A0);box-shadow:0 6px 16px -5px rgba(0,0,0,.85),0 0 0 1px rgba(162,144,218,.34);display:flex;align-items:center;justify-content:center;font:600 14px/1 'Bricolage Grotesque',sans-serif;color:#fff;animation:mfTile 18s cubic-bezier(.2,.9,.2,1) infinite;animation-delay:.45s">A</div>
+              <div style="position:absolute;left:50%;top:60%;width:24px;height:24px;border-radius:50%;border:1px solid rgba(162,144,218,.75);animation:mfRipple 18s cubic-bezier(.3,0,.6,1) infinite"></div>
+              <div style="position:absolute;left:50%;top:60%;width:24px;height:24px;border-radius:50%;border:1px solid rgba(162,144,218,.75);animation:mfRipple2 18s cubic-bezier(.3,0,.6,1) infinite"></div>
+            </div>
+            <div style="margin-top:13px;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.13em;color:#9A93A8">ANDROID</div>
+            <div style="margin-top:5px;font:400 9px/1.5 'JetBrains Mono',monospace;color:#8A8296">Android 15 · 6.8in · 120Hz</div>
+          </div>
+
+          <div style="width:max-content">
+            <div style="position:relative;height:clamp(141px,25.4vh,222px);aspect-ratio:116/222;animation:mfVirt 18s cubic-bezier(.2,.9,.2,1) infinite;animation-delay:.9s">
+              <div style="position:absolute;inset:0;border:1px dashed #453A69;border-radius:18px;background:rgba(42,36,64,.14)"></div>
+              <div style="position:absolute;inset:7px;border-radius:12px;overflow:hidden;background:radial-gradient(80% 56% at 50% 26%,rgba(162,144,218,.24) 0%,rgba(60,50,102,.12) 50%,rgba(6,6,10,0) 82%),#06060C;animation:mfScreen 18s ease-out infinite;animation-delay:.9s">
+                <div style="position:absolute;left:0;right:0;top:0;height:34%;background:linear-gradient(180deg,rgba(196,182,236,.16),transparent);animation:mfScan 18s ease-out infinite;animation-delay:.9s"></div>
+              </div>
+              <div style="position:absolute;left:50%;top:19.8%;width:33%;aspect-ratio:1;border-radius:11px;background:linear-gradient(150deg,#8A74D6,#5A47A0);box-shadow:0 6px 16px -5px rgba(0,0,0,.85),0 0 0 1px rgba(162,144,218,.34);display:flex;align-items:center;justify-content:center;font:600 14px/1 'Bricolage Grotesque',sans-serif;color:#fff;animation:mfTile 18s cubic-bezier(.2,.9,.2,1) infinite;animation-delay:.9s">A</div>
+              <div style="position:absolute;left:50%;top:60%;width:24px;height:24px;border-radius:50%;border:1px solid rgba(162,144,218,.75);animation:mfRipple 18s cubic-bezier(.3,0,.6,1) infinite"></div>
+              <div style="position:absolute;left:50%;top:60%;width:24px;height:24px;border-radius:50%;border:1px solid rgba(162,144,218,.75);animation:mfRipple2 18s cubic-bezier(.3,0,.6,1) infinite"></div>
+              <div style="position:absolute;top:-9px;right:-8px;padding:3px 7px;border-radius:5px;background:rgba(10,10,12,.92);border:1px solid rgba(162,144,218,.42);font:500 8px/1 'JetBrains Mono',monospace;letter-spacing:.08em;color:#C4B6EC">CUSTOM</div>
+            </div>
+            <div style="margin-top:13px;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.13em;color:#9A93A8">VIRTUAL</div>
+            <div style="margin-top:5px;font:400 9px/1.5 'JetBrains Mono',monospace;color:#8A8296">your spec · built on demand</div>
+          </div>
+
+        </div>
+
+        <div style="margin-top:clamp(12px,2vh,22px);display:flex;align-items:center;gap:12px">
+          <div style="flex:1;height:2px;border-radius:2px;background:#17171B;overflow:hidden"><div style="height:100%;border-radius:2px;background:linear-gradient(90deg,#4C4173,#A290DA);animation:mfMeter 18s linear infinite"></div></div>
+          <div style="flex:none;display:flex;align-items:center;gap:7px;padding:4px 9px 4px 6px;border-radius:999px;background:rgba(8,8,10,.9);border:1px solid rgba(111,203,99,.4);animation:mfTick 18s cubic-bezier(.2,.9,.2,1) infinite">
+            <span style="width:14px;height:14px;border-radius:50%;background:rgba(111,203,99,.14);border:1px solid rgba(111,203,99,.55);display:flex;align-items:center;justify-content:center;font:500 7.5px/1 'JetBrains Mono',monospace;color:#7FD873">✓</span>
+            <span style="font:500 8.5px/1 'JetBrains Mono',monospace;letter-spacing:.06em;color:#7FD873">142 PASSED · 3 DEVICES</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="position:relative;flex:1;min-width:20px;height:1px;background:#1A1A1E;animation:mfWire2 18s linear infinite">
+        <div style="position:absolute;top:-8px;left:0;display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:6px;background:rgba(10,10,12,.92);border:1px solid rgba(162,144,218,.34);animation:mfShip 18s cubic-bezier(.4,0,.2,1) infinite">
+          <span style="width:5px;height:5px;border-radius:2px;background:#A290DA"></span>
+          <span style="font:500 8px/1 'JetBrains Mono',monospace;letter-spacing:.06em;color:#C4B6EC">release</span>
+        </div>
+      </div>
+
+      <div style="flex:0 1 auto;min-width:0;width:84px">
+        <div style="width:13px;height:13px;border-radius:4px;border:1px solid #26262A;background:#131315;animation:mfProd 18s linear infinite"></div>
+        <div style="margin-top:12px;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.14em;color:#9A93A8">PROD</div>
+        <div style="margin-top:7px;font:400 9.5px/1.5 'JetBrains Mono',monospace;color:#8A8296">promoted</div>
+      </div>
+
+      <div style="flex:none;width:26px;height:1px;background:#26222E"></div>
+
+      <div style="flex:0 1 auto;min-width:0;width:118px">
+        <div style="width:13px;height:13px;border-radius:4px;border:1px solid #26262A;background:#131315;animation:mfMarket 18s linear infinite"></div>
+        <div style="margin-top:12px;font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.14em;color:#9A93A8">MARKET</div>
+        <div style="margin-top:7px;display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;background:rgba(111,203,99,.09);border:1px solid rgba(111,203,99,.28);animation:mfLive 18s ease-out infinite">
+          <span style="width:4px;height:4px;border-radius:50%;background:#6FCB63"></span>
+          <span style="font:500 8.5px/1 'JetBrains Mono',monospace;letter-spacing:.07em;color:#7FD873">LIVE FOR USERS</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div style="position:relative;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:clamp(10px,1.8vh,20px) 34px clamp(12px,2vh,22px);flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:13px;flex-wrap:wrap">
+      <span style="white-space:nowrap;font:400 9px/1.4 'JetBrains Mono',monospace;letter-spacing:.08em;color:#8A8296">METERED WHILE RUNNING</span>
+      <span style="width:14px;height:1px;background:#1F1F22"></span>
+      <span style="white-space:nowrap;font:500 9.5px/1.4 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8296;animation:mfBeat 18s linear infinite">01 REQUEST</span>
+      <span style="width:14px;height:1px;background:#1F1F22"></span>
+      <span style="white-space:nowrap;font:500 9.5px/1.4 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8296;animation:mfBeat 18s linear infinite;animation-delay:2.1s">02 BUILD DEVICES</span>
+      <span style="width:14px;height:1px;background:#1F1F22"></span>
+      <span style="white-space:nowrap;font:500 9.5px/1.4 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8296;animation:mfBeat 18s linear infinite;animation-delay:6s">03 INSTALL</span>
+      <span style="width:14px;height:1px;background:#1F1F22"></span>
+      <span style="white-space:nowrap;font:500 9.5px/1.4 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8296;animation:mfBeat 18s linear infinite;animation-delay:8s">04 EXECUTE · METERED</span>
+      <span style="width:14px;height:1px;background:#1F1F22"></span>
+      <span style="white-space:nowrap;font:500 9.5px/1.4 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8296;animation:mfBeat 18s linear infinite;animation-delay:11.9s">05 SHIP</span>
+      <span style="width:14px;height:1px;background:#1F1F22"></span>
+      <span style="white-space:nowrap;font:500 9.5px/1.4 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8296;animation:mfBeat 18s linear infinite;animation-delay:15.3s">06 LIVE</span>
+    </div>
+    <div style="white-space:nowrap;font:400 9.5px/1.5 'JetBrains Mono',monospace;color:#8A8296;letter-spacing:.06em">ILLUSTRATIVE · SELF-HOSTED · v2.4</div>
+  </div>
+
+  <sc-if value="{{ overlayOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;inset:0;z-index:20;background:rgba(4,4,6,.62);backdrop-filter:blur(2px);animation:mfFade .18s ease-out both" onClick="{{ close }}"></div>
+  </sc-if>
+
+  <sc-if value="{{ signinOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;inset:0;z-index:21;display:flex;align-items:center;justify-content:center;padding:18px;pointer-events:none">
+      <div style="pointer-events:auto;position:relative;width:336px;max-width:100%;animation:mfIn .24s cubic-bezier(.2,.9,.2,1) both">
+        <button onClick="{{ close }}" style="position:absolute;top:-14px;right:-14px;z-index:2;width:30px;height:30px;border-radius:9px;background:rgba(10,10,12,.94);border:1px solid #33333A;color:#C4C4C4;font:400 13px/1 'Instrument Sans',sans-serif;cursor:pointer" style-hover="border-color:#4A4A52;color:#fff">✕</button>
+
+        <div style="position:relative;border-radius:44px;padding:4px;background:linear-gradient(146deg,#8E8681 0%,#4A443F 15%,#2B2724 42%,#211E1C 62%,#5D564F 88%,#332F2B 100%);box-shadow:0 34px 70px -24px rgba(0,0,0,.95),0 0 0 1px rgba(255,240,225,.06)">
+          <div style="position:absolute;left:-2px;top:96px;width:3px;height:24px;border-radius:3px;background:linear-gradient(180deg,#6E665F,#332F2B)"></div>
+          <div style="position:absolute;left:-2px;top:134px;width:3px;height:40px;border-radius:3px;background:linear-gradient(180deg,#6E665F,#332F2B)"></div>
+          <div style="position:absolute;right:-2px;top:120px;width:3px;height:52px;border-radius:3px;background:linear-gradient(180deg,#6E665F,#332F2B)"></div>
+
+          <div style="position:relative;border-radius:40px;overflow:hidden;background:radial-gradient(90% 46% at 50% 0%,rgba(117,94,184,.20) 0%,transparent 66%),#0A0A0C;padding:11px 20px 14px">
+
+            <div style="display:flex;align-items:center;justify-content:space-between;height:22px">
+              <span style="font:500 10.5px/1 'JetBrains Mono',monospace;color:#D8D8D8;padding-left:6px">9:41</span>
+              <span style="display:flex;align-items:center;gap:5px;padding-right:6px">
+                <span style="display:flex;align-items:flex-end;gap:1.5px">
+                  <span style="width:2.5px;height:4px;border-radius:1px;background:#D8D8D8"></span>
+                  <span style="width:2.5px;height:6px;border-radius:1px;background:#D8D8D8"></span>
+                  <span style="width:2.5px;height:8px;border-radius:1px;background:#D8D8D8"></span>
+                  <span style="width:2.5px;height:10px;border-radius:1px;background:rgba(216,216,216,.35)"></span>
+                </span>
+                <span style="position:relative;width:16px;height:9px;border-radius:2.5px;border:1px solid rgba(216,216,216,.6);padding:1px">
+                  <span style="display:block;width:70%;height:100%;border-radius:1.5px;background:#D8D8D8"></span>
+                </span>
+              </span>
+            </div>
+
+            <div style="position:absolute;top:12px;left:50%;transform:translateX(-50%);width:82px;height:24px;border-radius:14px;background:#040406;box-shadow:0 0 0 .5px rgba(255,240,225,.08)"></div>
+
+            <div style="margin-top:18px;padding:11px 12px;border-radius:15px;background:rgba(30,30,34,.82);border:1px solid rgba(255,255,255,.07);display:flex;align-items:flex-start;gap:10px;animation:mfNotif .5s cubic-bezier(.2,.9,.2,1) .12s both">
+              <div style="flex:none;width:26px;height:26px;border-radius:8px;background:linear-gradient(150deg,#8A74D6,#5A47A0);display:flex;align-items:center;justify-content:center;font:600 11px/1 'Bricolage Grotesque',sans-serif;color:#fff">M</div>
+              <div style="min-width:0;flex:1">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
+                  <span style="font:600 10.5px/1.3 'Instrument Sans',sans-serif;letter-spacing:.02em;color:#F1F1F1">MFARM</span>
+                  <span style="flex:none;font:400 9px/1.3 'JetBrains Mono',monospace;color:#8A8A8A">now</span>
+                </div>
+                <div style="margin-top:3px;font:400 11px/1.45 'Instrument Sans',sans-serif;color:#C4C4C4;text-wrap:pretty">Your admin set a password for this account. Sign in to reach the farm.</div>
+              </div>
+            </div>
+
+            <div style="margin-top:22px">
+              <h2 style="margin:0 0 6px;font:600 22px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.025em">Sign in</h2>
+              <div style="font:400 11.5px/1.5 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">farm.mfarm.dev</div>
+            </div>
+
+            <div style="margin-top:20px;border-radius:14px;overflow:hidden;background:rgba(20,20,23,.9);border:1px solid #26262A">
+              <div style="display:flex;align-items:center;gap:10px;padding:12px 13px">
+                <span style="flex:none;font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;width:52px">EMAIL</span>
+                <input type="email" value="{{ email }}" onChange="{{ onEmail }}" placeholder="you@mfarm.local" style="flex:1;min-width:0;padding:0;background:transparent;border:0;font:400 12px/1.3 'JetBrains Mono',monospace;color:#F1F1F1;outline:none">
+              </div>
+              <div style="height:1px;background:#242427"></div>
+              <div style="display:flex;align-items:center;gap:10px;padding:12px 13px">
+                <span style="flex:none;font:500 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;width:52px">PASSWORD</span>
+                <input type="password" value="{{ password }}" onChange="{{ onPassword }}" placeholder="••••••••••••" style="flex:1;min-width:0;padding:0;background:transparent;border:0;font:400 12px/1.3 'JetBrains Mono',monospace;color:#F1F1F1;outline:none">
+              </div>
+            </div>
+
+            <sc-if value="{{ error }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;align-items:flex-start;gap:8px;margin-top:11px;padding:9px 11px;border-radius:11px;background:rgba(224,80,95,.09);border:1px solid rgba(224,80,95,.32)">
+                <span style="flex:none;width:14px;height:14px;border-radius:50%;background:rgba(224,80,95,.14);border:1px solid rgba(224,80,95,.5);display:flex;align-items:center;justify-content:center;font:500 8px/1 'JetBrains Mono',monospace;color:#EE7C88;margin-top:1px">!</span>
+                <span style="font:400 11px/1.45 'Instrument Sans',sans-serif;color:#EE7C88">{{ error }}</span>
+              </div>
+            </sc-if>
+
+            <button onClick="{{ onSubmit }}" style="margin-top:16px;width:100%;padding:13px;border-radius:13px;background:#755EB8;border:1px solid rgba(162,144,218,.42);font:500 12.5px/1 'Instrument Sans',sans-serif;color:#fff;cursor:pointer" style-hover="background:#8A74D6" style-active="background:#6A54A8">Sign in</button>
+            <div style="margin-top:11px;text-align:center;font:400 10.5px/1.5 'Instrument Sans',sans-serif;color:#787878">Sessions last 12 hours</div>
+
+            <div style="margin-top:18px;padding-top:12px;border-top:1px solid #1A1A1E;display:flex;align-items:center;justify-content:space-between;gap:10px">
+              <span style="font:400 9px/1.4 'JetBrains Mono',monospace;letter-spacing:.09em;color:#4A4A52">SELF-HOSTED</span>
+              <span style="font:400 9px/1.4 'JetBrains Mono',monospace;letter-spacing:.09em;color:#4A4A52">v2.4</span>
+            </div>
+
+            <div style="margin:14px auto 0;width:110px;height:4px;border-radius:3px;background:rgba(220,228,240,.45)"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ pricingOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;top:74px;right:34px;z-index:21;width:100%;max-width:334px;padding:13px 14px 14px;border-radius:17px;background:rgba(30,30,34,.9);border:1px solid rgba(255,255,255,.08);box-shadow:0 26px 56px -20px rgba(0,0,0,.9);backdrop-filter:blur(18px);animation:mfNotif .34s cubic-bezier(.2,.9,.2,1) both">
+      <div style="display:flex;align-items:flex-start;gap:11px">
+        <div style="flex:none;width:28px;height:28px;border-radius:8px;background:linear-gradient(150deg,#8A74D6,#5A47A0);display:flex;align-items:center;justify-content:center;font:600 12px/1 'Bricolage Grotesque',sans-serif;color:#fff">M</div>
+        <div style="min-width:0;flex:1">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">
+            <span style="font:600 11px/1.3 'Instrument Sans',sans-serif;letter-spacing:.02em;color:#F1F1F1">USAGE</span>
+            <span style="flex:none;font:400 9px/1.3 'JetBrains Mono',monospace;color:#8A8A8A">now</span>
+          </div>
+          <div style="margin-top:4px;font:400 11.5px/1.5 'Instrument Sans',sans-serif;color:#D8D8D8;text-wrap:pretty">You are billed per device-minute — nothing else.</div>
+        </div>
+        <button onClick="{{ close }}" style="flex:none;width:22px;height:22px;border-radius:7px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);color:#9A9A9A;font:400 11px/1 'Instrument Sans',sans-serif;cursor:pointer" style-hover="color:#fff;border-color:rgba(255,255,255,.2)">✕</button>
+      </div>
+      <div style="margin-top:13px;padding-top:12px;border-top:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+          <span style="font:400 11.5px/1.5 'Instrument Sans',sans-serif;color:#9A9A9A">Metering starts</span>
+          <span style="font:400 10.5px/1.5 'JetBrains Mono',monospace;color:#D8D8D8">on allocation</span>
+        </div>
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+          <span style="font:400 11.5px/1.5 'Instrument Sans',sans-serif;color:#9A9A9A">Metering stops</span>
+          <span style="font:400 10.5px/1.5 'JetBrains Mono',monospace;color:#D8D8D8">on release</span>
+        </div>
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+          <span style="font:400 11.5px/1.5 'Instrument Sans',sans-serif;color:#9A9A9A">Billed to</span>
+          <span style="font:400 10.5px/1.5 'JetBrains Mono',monospace;color:#D8D8D8">the organisation</span>
+        </div>
+      </div>
+      <div style="margin-top:14px;padding-top:13px;border-top:1px solid #16161A;font:400 11px/1.6 'Instrument Sans',sans-serif;color:#787878;text-wrap:pretty">Queued requests are not metered. Your admin can see per-team usage in the organisation view.</div>
+    </div>
+  </sc-if>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;errorState&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;States&quot;},&quot;openOnLoad&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;none&quot;,&quot;signin&quot;,&quot;pricing&quot;],&quot;default&quot;:&quot;none&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;States&quot;}}">
+class Component extends DCLogic {
+  state = { email: "", password: "", error: "", overlay: null, touched: false };
+
+  componentDidMount() {
+    this._esc = e => { if (e.key === "Escape") this.setState({ overlay: null, touched: true }); };
+    window.addEventListener("keydown", this._esc);
+  }
+  componentWillUnmount() { window.removeEventListener("keydown", this._esc); }
+
+  renderVals() {
+    const boot = this.props.openOnLoad;
+    const o = this.state.touched || !boot || boot === "none" ? this.state.overlay : boot;
+    const err = this.props.errorState ? "That password does not match this account." : this.state.error;
+    const base = "width:100%;padding:11px 13px;border-radius:9px;background:#08080A;font:400 11.5px/1.3 'JetBrains Mono',monospace;color:#F1F1F1;outline:none;";
+    const ghost = a => "padding:8px 13px;border-radius:8px;background:" + (a ? "rgba(19,19,21,.9)" : "rgba(19,19,21,.62)") +
+      ";border:1px solid " + (a ? "#3A3A40" : "#26262A") +
+      ";font:500 11px/1.2 'Instrument Sans',sans-serif;color:" + (a ? "#F1F1F1" : "#C4C4C4") + ";cursor:pointer;white-space:nowrap";
+    const open = k => () => this.setState({ overlay: o === k ? null : k, touched: true });
+    return {
+      email: this.state.email,
+      password: this.state.password,
+      error: err,
+      overlayOpen: !!o,
+      signinOpen: o === "signin",
+      pricingOpen: o === "pricing",
+      pricingBtnStyle: ghost(o === "pricing"),
+      pwStyle: base + (err
+        ? "border:1px solid rgba(224,80,95,.42);box-shadow:0 0 0 2px rgba(224,80,95,.09)"
+        : "border:1px solid #242427"),
+      openSignin: open("signin"),
+      openPricing: open("pricing"),
+      close: () => this.setState({ overlay: null, touched: true }),
+      onEmail: e => this.setState({ email: e.target.value, error: "" }),
+      onPassword: e => this.setState({ password: e.target.value, error: "" }),
+      onSubmit: () => {
+        if (!this.state.email.trim()) return this.setState({ error: "Enter the email your administrator gave you." });
+        if (!this.state.password) return this.setState({ error: "Enter your password." });
+        this.setState({ error: "" });
+      }
+    };
+  }
+}
+
+</script>
+</body>
+</html>

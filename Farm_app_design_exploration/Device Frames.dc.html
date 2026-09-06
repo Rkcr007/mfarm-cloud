@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:#08080A;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;color:#F1F1F1;-webkit-font-smoothing:antialiased}
+a{color:#A290DA;text-decoration:none}a:hover{color:#C4B6EC}
+.dv-turn{padding:56px 60px 48px;border-bottom:1px solid #16161A;scroll-margin-top:16px}
+.dv-thd{display:flex;align-items:baseline;gap:12px;margin:0 0 8px}
+.dv-tid{font:600 10px/1 'JetBrains Mono',monospace;padding:5px 8px;background:#755EB8;color:#fff;border-radius:5px;letter-spacing:.06em}
+.dv-tname{font:600 15px/1.2 'Instrument Sans',sans-serif;color:#F1F1F1}
+.dv-tsub{margin:0 0 34px;max-width:760px;font:400 13.5px/1.65 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty}
+.dv-opts{display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start}
+.dv-opt{flex:none;display:flex;flex-direction:column;gap:12px;scroll-margin-top:16px}
+.dv-oid{font:500 10.5px/1 'JetBrains Mono',monospace;padding:4px 7px;background:#191919;color:#C4C4C4;border-radius:5px}
+.dv-olabel{display:flex;align-items:baseline;gap:9px;font:400 12px/1.4 'Instrument Sans',sans-serif;color:#8A8A8A}
+.dv-card{max-width:100%;background:#0D0D0F;border:1px solid #1F1F22;border-radius:14px;overflow:hidden}
+.dv-opt:target .dv-oid{background:#755EB8;color:#fff}
+.dv-next{margin:34px 0 0;font:400 12.5px/1.6 'Instrument Sans',sans-serif;color:#6A6A6A}
+@keyframes mfPulse{0%,100%{opacity:.35}50%{opacity:1}}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</helmet>
+
+<section class="dv-turn" id="t1">
+<div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">Device frame system — material directions</span></div>
+<p class="dv-tsub">Every frame here is additive: the chassis, rails, cutout and shadow live outside the panel box, so no bezel geometry ever clips the framebuffer. The X1 Pro panel is a real capture from the live farm — the other tiers show honest states, because the farm has no video for them. Pick a material direction and I will build the family, the states and the bring-up choreography on it.</p>
+<div class="dv-opts">
+
+  <div class="dv-opt" id="1a">
+    <div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>Machined — anodised rail, cold specular</div>
+    <div class="dv-card" style="width:420px;padding:56px 0 44px;display:flex;flex-direction:column;align-items:center;gap:0;background:radial-gradient(120% 80% at 50% 0%,#131317 0%,#0A0A0C 60%,#08080A 100%)">
+      <div style="position:relative;padding:6px;border-radius:36px;background:linear-gradient(155deg,#4A4A52 0%,#22222A 14%,#15151B 40%,#101015 62%,#2E2E36 88%,#54545C 100%);box-shadow:0 1px 0 rgba(255,255,255,.16) inset,0 -1px 0 rgba(255,255,255,.06) inset,0 2px 3px rgba(0,0,0,.7),0 18px 34px -8px rgba(0,0,0,.8),0 44px 80px -20px rgba(0,0,0,.9),0 0 0 1px rgba(0,0,0,.6)">
+        <div style="position:absolute;inset:2px;border-radius:34px;box-shadow:0 0 0 1px rgba(255,255,255,.1) inset;pointer-events:none"></div>
+        <div style="position:absolute;top:112px;right:-2px;width:3px;height:34px;border-radius:2px;background:linear-gradient(90deg,#5E5E68,#2A2A32);box-shadow:0 1px 2px rgba(0,0,0,.8)"></div>
+        <div style="position:absolute;top:158px;right:-2px;width:3px;height:62px;border-radius:2px;background:linear-gradient(90deg,#5E5E68,#2A2A32);box-shadow:0 1px 2px rgba(0,0,0,.8)"></div>
+        <div style="position:absolute;top:130px;left:-2px;width:3px;height:44px;border-radius:2px;background:linear-gradient(270deg,#4E4E58,#242429)"></div>
+        <div style="position:relative;width:300px;border-radius:30px;overflow:hidden;background:#000;box-shadow:0 0 0 1px rgba(0,0,0,.9) inset">
+          <img src="ref/panel-x1pro.png" alt="live device panel" style="display:block;width:300px;height:650px;object-fit:cover;object-position:top">
+          <div style="position:absolute;inset:0;border-radius:30px;box-shadow:0 0 22px rgba(0,0,0,.55) inset;pointer-events:none"></div>
+          <div style="position:absolute;top:9px;left:50%;transform:translateX(-50%);width:11px;height:11px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.13),0 0 6px rgba(0,0,0,.9);pointer-events:none"></div>
+          <div style="position:absolute;inset:0;background:linear-gradient(196deg,rgba(255,255,255,.075) 0%,rgba(255,255,255,.028) 26%,rgba(255,255,255,0) 46%);mix-blend-mode:screen;pointer-events:none"></div>
+        </div>
+      </div>
+      <div style="width:300px;height:26px;margin-top:-6px;border-radius:50%;background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.75),rgba(0,0,0,0) 72%);filter:blur(5px)"></div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:7px;margin-top:16px">
+        <div style="font:600 16px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.01em">MFARM X1 Pro</div>
+        <div style="display:flex;align-items:center;gap:8px;font:400 10.5px/1 'JetBrains Mono',monospace;color:#6A6A6A">
+          <span>1080 × 2340</span><span style="color:#333">·</span><span>450 dpi</span><span style="color:#333">·</span><span>384 dp</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:4px;padding:4px 9px 4px 7px;border-radius:20px;background:rgba(111,203,99,.10);border:1px solid rgba(111,203,99,.28)">
+          <span style="width:5px;height:5px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span>
+          <span style="font:500 10px/1 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.05em">LIVE · 50 FPS</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dv-opt" id="1b">
+    <div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>Ceramic — warm graphite, soft diffuse edge</div>
+    <div class="dv-card" style="width:420px;padding:56px 0 44px;display:flex;flex-direction:column;align-items:center;background:radial-gradient(120% 80% at 50% 0%,#16130F 0%,#0B0A09 62%,#08080A 100%)">
+      <div style="position:relative;padding:7px;border-radius:40px;background:linear-gradient(160deg,#6B6058 0%,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A 100%);box-shadow:0 1px 0 rgba(255,240,225,.2) inset,0 2px 3px rgba(0,0,0,.7),0 20px 36px -8px rgba(0,0,0,.78),0 50px 90px -22px rgba(0,0,0,.9),0 0 0 1px rgba(0,0,0,.55)">
+        <div style="position:absolute;inset:2.5px;border-radius:38px;box-shadow:0 0 0 1px rgba(255,235,215,.09) inset;pointer-events:none"></div>
+        <div style="position:absolute;top:114px;right:-1px;width:3px;height:32px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+        <div style="position:absolute;top:156px;right:-1px;width:3px;height:58px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+        <div style="position:relative;width:300px;border-radius:33px;overflow:hidden;background:#000">
+          <img src="ref/panel-x1pro.png" alt="live device panel" style="display:block;width:300px;height:650px;object-fit:cover;object-position:top">
+          <div style="position:absolute;inset:0;border-radius:33px;box-shadow:0 0 28px rgba(0,0,0,.5) inset;pointer-events:none"></div>
+          <div style="position:absolute;top:9px;left:50%;transform:translateX(-50%);width:11px;height:11px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.14);pointer-events:none"></div>
+          <div style="position:absolute;inset:0;background:linear-gradient(202deg,rgba(255,246,235,.07) 0%,rgba(255,246,235,.022) 30%,rgba(255,255,255,0) 50%);mix-blend-mode:screen;pointer-events:none"></div>
+        </div>
+      </div>
+      <div style="width:290px;height:30px;margin-top:-8px;border-radius:50%;background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.7),rgba(0,0,0,0) 74%);filter:blur(7px)"></div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:7px;margin-top:16px">
+        <div style="font:600 16px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.01em">MFARM X1 Pro</div>
+        <div style="display:flex;align-items:center;gap:8px;font:400 10.5px/1 'JetBrains Mono',monospace;color:#6A6A6A">
+          <span>1080 × 2340</span><span style="color:#333">·</span><span>450 dpi</span><span style="color:#333">·</span><span>384 dp</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:4px;padding:4px 9px 4px 7px;border-radius:20px;background:rgba(111,203,99,.10);border:1px solid rgba(111,203,99,.28)">
+          <span style="width:5px;height:5px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span>
+          <span style="font:500 10px/1 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.05em">LIVE · 50 FPS</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dv-opt" id="1c">
+    <div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a>The family — geometry drives the frame</div>
+    <div class="dv-card" style="width:820px;padding:44px 40px 36px;background:radial-gradient(120% 70% at 50% 0%,#111116 0%,#0A0A0C 64%,#08080A 100%)">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:36px;align-items:end">
+
+        <div style="display:flex;flex-direction:column;align-items:center">
+          <div style="position:relative;padding:4px;border-radius:22px;background:linear-gradient(155deg,#4A4A52,#1A1A20 38%,#101015 64%,#4E4E56);box-shadow:0 1px 0 rgba(255,255,255,.14) inset,0 10px 20px -4px rgba(0,0,0,.8),0 26px 46px -14px rgba(0,0,0,.9)">
+            <div style="position:absolute;top:62px;right:-1.5px;width:2.5px;height:34px;border-radius:2px;background:linear-gradient(90deg,#5E5E68,#2A2A32)"></div>
+            <div style="position:relative;width:150px;border-radius:19px;overflow:hidden;background:#000">
+              <img src="ref/panel-x1pro.png" alt="live device panel" style="display:block;width:150px;height:325px;object-fit:cover;object-position:top">
+              <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.14)"></div>
+              <div style="position:absolute;inset:0;background:linear-gradient(196deg,rgba(255,255,255,.07),rgba(255,255,255,0) 46%);mix-blend-mode:screen"></div>
+            </div>
+          </div>
+          <div style="margin-top:16px;font:600 12.5px/1 'Bricolage Grotesque',sans-serif">MFARM X1 Pro</div>
+          <div style="margin-top:6px;font:400 9.5px/1.5 'JetBrains Mono',monospace;color:#5A5A5A;text-align:center">1080×2340 · 450dpi<br>384 dp · 6px bezel</div>
+          <div style="margin-top:9px;padding:3px 7px;border-radius:5px;background:rgba(117,94,184,.16);border:1px solid rgba(117,94,184,.42);font:500 9px/1 'JetBrains Mono',monospace;color:#A290DA;letter-spacing:.05em">FLAGSHIP</div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;align-items:center">
+          <div style="position:relative;padding:6.5px;border-radius:19px;background:linear-gradient(155deg,#3A3A40,#1A1A1E 40%,#131317 66%,#3C3C42);box-shadow:0 1px 0 rgba(255,255,255,.1) inset,0 8px 16px -4px rgba(0,0,0,.78),0 22px 40px -14px rgba(0,0,0,.88)">
+            <div style="position:absolute;top:60px;right:-1px;width:2px;height:30px;border-radius:1px;background:#44444C"></div>
+            <div style="position:relative;width:150px;border-radius:13px;overflow:hidden;background:#050506;display:flex;align-items:center;justify-content:center">
+              <div style="width:150px;height:325px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:0 16px;text-align:center;background:radial-gradient(70% 50% at 50% 42%,#0C0C10,#050506 78%)">
+                <div style="width:22px;height:22px;border-radius:6px;border:1px solid #2E2E33;display:flex;align-items:center;justify-content:center;font:400 11px/1 'JetBrains Mono',monospace;color:#5A5A5A">—</div>
+                <div style="font:400 9px/1.45 'JetBrains Mono',monospace;color:#6A6A6A">Idle · snapshot clean</div>
+              </div>
+              <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6.5px;height:6.5px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.1)"></div>
+            </div>
+          </div>
+          <div style="margin-top:16px;font:600 12.5px/1 'Bricolage Grotesque',sans-serif">MFARM X1</div>
+          <div style="margin-top:6px;font:400 9.5px/1.5 'JetBrains Mono',monospace;color:#5A5A5A;text-align:center">1080×2340 · 480dpi<br>360 dp · 9px bezel</div>
+          <div style="margin-top:9px;padding:3px 7px;border-radius:5px;background:#191919;border:1px solid #2B2B2E;font:500 9px/1 'JetBrains Mono',monospace;color:#8A8A8A;letter-spacing:.05em">STANDARD</div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;align-items:center">
+          <div style="position:relative;padding:9px;border-radius:14px;background:linear-gradient(160deg,#26262A,#191919 50%,#202024);box-shadow:0 1px 0 rgba(255,255,255,.06) inset,0 6px 14px -4px rgba(0,0,0,.7),0 18px 34px -16px rgba(0,0,0,.85)">
+            <div style="position:relative;width:150px;border-radius:6px;overflow:hidden;background:#050506">
+              <div style="width:150px;height:267px;display:flex;align-items:center;justify-content:center;padding:0 14px;text-align:center">
+                <div style="font:400 9px/1.5 'JetBrains Mono',monospace;color:#787878">No live view</div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:16px;font:600 12.5px/1 'Bricolage Grotesque',sans-serif;color:#C4C4C4">Unprofiled device</div>
+          <div style="margin-top:6px;font:400 9.5px/1.5 'JetBrains Mono',monospace;color:#5A5A5A;text-align:center">720×1280 · 320dpi<br>declares no <span style="text-decoration:line-through;color:#4A4A4A">screen-stream</span></div>
+          <div style="margin-top:9px;padding:3px 7px;border-radius:5px;background:rgba(232,163,14,.06);border:1px solid rgba(232,163,14,.24);font:500 9px/1 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em">NO PROFILE</div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;align-items:center">
+          <div style="position:relative;padding:3.5px;border-radius:13px;background:linear-gradient(155deg,#6E6A62,#2A2823 30%,#1A1917 62%,#5E5A52);box-shadow:0 1px 0 rgba(255,255,255,.18) inset,0 10px 20px -4px rgba(0,0,0,.8),0 26px 46px -14px rgba(0,0,0,.9)">
+            <div style="position:absolute;top:70px;right:-1.5px;width:2.5px;height:26px;border-radius:2px;background:linear-gradient(90deg,#7A756B,#2E2C28)"></div>
+            <div style="position:absolute;top:102px;right:-1.5px;width:2.5px;height:48px;border-radius:2px;background:linear-gradient(90deg,#7A756B,#2E2C28)"></div>
+            <div style="position:relative;width:150px;border-radius:10px;overflow:hidden;background:#050506">
+              <div style="width:150px;height:322px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:0 18px;text-align:center">
+                <div style="font:400 9px/1.5 'JetBrains Mono',monospace;color:#EE7C88">Out of the pool</div>
+                <div style="font:400 8.5px/1.5 'JetBrains Mono',monospace;color:#5A5A5A">quarantined · needs<br>somebody to look at it</div>
+              </div>
+              <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.12)"></div>
+            </div>
+          </div>
+          <div style="margin-top:16px;font:600 12.5px/1 'Bricolage Grotesque',sans-serif">SM-S918B</div>
+          <div style="margin-top:6px;font:400 9.5px/1.5 'JetBrains Mono',monospace;color:#5A5A5A;text-align:center">1440×3088 · physical<br>true proportions</div>
+          <div style="margin-top:9px;padding:3px 7px;border-radius:5px;background:rgba(127,160,216,.1);border:1px solid rgba(127,160,216,.32);font:500 9px/1 'JetBrains Mono',monospace;color:#7FA0D8;letter-spacing:.05em">REAL DEVICE</div>
+        </div>
+
+      </div>
+      <p style="margin:34px 0 0;padding-top:22px;border-top:1px solid #16161A;font:400 12px/1.65 'Instrument Sans',sans-serif;color:#787878;max-width:660px;text-wrap:pretty">Bezel thickness, corner radius, rail count and cutout size are all functions of the reported dp width and density — nothing is hand-placed per device. An unprofiled device gets the neutral chassis: no cutout, no rails, one radius, because inventing them would be inventing data.</p>
+    </div>
+  </div>
+
+  <div class="dv-opt" id="1d">
+    <div class="dv-olabel"><a class="dv-oid" href="#1d">1d</a>Panel states — off · waking · live · no signal</div>
+    <div class="dv-card" style="width:820px;padding:44px 40px 36px;background:radial-gradient(120% 70% at 50% 0%,#111116 0%,#0A0A0C 64%,#08080A 100%)">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:36px;align-items:end">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+          <div style="position:relative;padding:4px;border-radius:22px;background:linear-gradient(155deg,#4A4A52,#1A1A20 38%,#101015 64%,#4E4E56);box-shadow:0 1px 0 rgba(255,255,255,.14) inset,0 6px 14px -4px rgba(0,0,0,.7)">
+            <div style="position:relative;width:150px;height:325px;border-radius:19px;overflow:hidden;background:#020203">
+              <div style="position:absolute;inset:0;background:radial-gradient(80% 40% at 30% 8%,rgba(255,255,255,.035),rgba(255,255,255,0) 70%)"></div>
+              <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#0A0A10;box-shadow:0 0 0 1px rgba(255,255,255,.07)"></div>
+            </div>
+          </div>
+          <div style="font:400 10px/1 'JetBrains Mono',monospace;color:#6A6A6A;letter-spacing:.05em">OFF</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+          <div style="position:relative;padding:4px;border-radius:22px;background:linear-gradient(155deg,#4A4A52,#1A1A20 38%,#101015 64%,#4E4E56);box-shadow:0 1px 0 rgba(255,255,255,.14) inset,0 8px 18px -4px rgba(0,0,0,.75)">
+            <div style="position:relative;width:150px;height:325px;border-radius:19px;overflow:hidden;background:#020203">
+              <div style="position:absolute;inset:0;background:radial-gradient(60% 34% at 50% 48%,rgba(140,160,220,.16),rgba(20,24,40,.05) 60%,rgba(0,0,0,0) 82%);animation:mfPulse 2.2s ease-in-out infinite"></div>
+              <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.1)"></div>
+            </div>
+          </div>
+          <div style="font:400 10px/1 'JetBrains Mono',monospace;color:#8A8A8A;letter-spacing:.05em">WAKING</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+          <div style="position:relative;padding:4px;border-radius:22px;background:linear-gradient(155deg,#4A4A52,#1A1A20 38%,#101015 64%,#4E4E56);box-shadow:0 1px 0 rgba(255,255,255,.14) inset,0 12px 24px -4px rgba(0,0,0,.82),0 30px 54px -16px rgba(0,0,0,.9)">
+            <div style="position:relative;width:150px;border-radius:19px;overflow:hidden;background:#000">
+              <img src="ref/panel-x1pro.png" alt="live device panel" style="display:block;width:150px;height:325px;object-fit:cover;object-position:top">
+              <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.14)"></div>
+              <div style="position:absolute;inset:0;background:linear-gradient(196deg,rgba(255,255,255,.07),rgba(255,255,255,0) 46%);mix-blend-mode:screen"></div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="width:5px;height:5px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span><span style="font:400 10px/1 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.05em">LIVE</span></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:14px">
+          <div style="position:relative;padding:4px;border-radius:22px;background:linear-gradient(155deg,#3E3E46,#1A1A20 38%,#101015 64%,#42424A);box-shadow:0 1px 0 rgba(255,255,255,.1) inset,0 8px 18px -4px rgba(0,0,0,.75)">
+            <div style="position:relative;width:150px;height:325px;border-radius:19px;overflow:hidden;background:#050506;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:0 20px;text-align:center">
+              <div style="font:400 9.5px/1.5 'JetBrains Mono',monospace;color:#787878">No live view</div>
+              <div style="font:400 8.5px/1.55 'JetBrains Mono',monospace;color:#5A5A5A">Declares no <span style="text-decoration:line-through;color:#4A4A4A">screen-stream</span>. Input, logcat, install and WebDriver still work.</div>
+              <div style="position:absolute;top:5px;left:50%;transform:translateX(-50%);width:6px;height:6px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.1)"></div>
+            </div>
+          </div>
+          <div style="font:400 10px/1 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em">NO SIGNAL</div>
+        </div>
+      </div>
+      <p style="margin:34px 0 0;padding-top:22px;border-top:1px solid #16161A;font:400 12px/1.65 'Instrument Sans',sans-serif;color:#787878;max-width:660px;text-wrap:pretty">Depth is a state, not decoration: the shadow is shallow while the device is off, and lands fully only once the data plane is attached. No signal is a sentence, never a black rectangle.</p>
+    </div>
+  </div>
+
+  <div class="dv-opt" id="1e">
+    <div class="dv-olabel"><a class="dv-oid" href="#1e">1e</a>Bring-up choreography — scrub the six real events</div>
+    <div class="dv-card" style="width:820px;padding:0;background:radial-gradient(120% 70% at 30% 0%,#121217 0%,#0A0A0C 64%,#08080A 100%)">
+      <div style="display:grid;grid-template-columns:340px 1fr;gap:0;align-items:stretch">
+        <div style="padding:48px 0 40px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-right:1px solid #16161A">
+          <div style="position:relative;padding:6px;border-radius:36px;transition:opacity .7s cubic-bezier(.22,1,.36,1),transform .9s cubic-bezier(.22,1,.36,1),box-shadow 1s cubic-bezier(.22,1,.36,1),filter .7s ease;opacity:{{ frameOpacity }};transform:{{ frameTransform }};filter:{{ frameFilter }};box-shadow:{{ frameShadow }};background:linear-gradient(155deg,#4A4A52 0%,#22222A 14%,#15151B 40%,#101015 62%,#2E2E36 88%,#54545C 100%)">
+            <div style="position:absolute;inset:2px;border-radius:34px;box-shadow:0 0 0 1px rgba(255,255,255,.1) inset;pointer-events:none"></div>
+            <div style="position:absolute;top:96px;right:-2px;width:3px;height:30px;border-radius:2px;background:linear-gradient(90deg,#5E5E68,#2A2A32)"></div>
+            <div style="position:absolute;top:136px;right:-2px;width:3px;height:54px;border-radius:2px;background:linear-gradient(90deg,#5E5E68,#2A2A32)"></div>
+            <div style="position:relative;width:232px;border-radius:30px;overflow:hidden;background:#000">
+              <img src="ref/panel-x1pro.png" alt="live device panel" style="display:block;width:232px;height:503px;object-fit:cover;object-position:top;transition:opacity .8s ease;opacity:{{ panelOpacity }}">
+              <div style="position:absolute;inset:0;background:radial-gradient(60% 34% at 50% 46%,rgba(140,160,220,.18),rgba(0,0,0,0) 78%);transition:opacity .6s ease;opacity:{{ wakeOpacity }};pointer-events:none"></div>
+              <div style="position:absolute;top:8px;left:50%;transform:translateX(-50%);width:9px;height:9px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,255,255,.13);pointer-events:none"></div>
+              <div style="position:absolute;inset:0;background:linear-gradient(196deg,rgba(255,255,255,.075),rgba(255,255,255,0) 46%);mix-blend-mode:screen;transition:opacity .8s ease;opacity:{{ sheenOpacity }};pointer-events:none"></div>
+              <div style="position:absolute;left:50%;width:42px;height:42px;border-radius:11px;background:linear-gradient(150deg,#8A74D6,#5A47A0);box-shadow:0 8px 20px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.14) inset;transition:opacity .5s ease,transform .95s cubic-bezier(.22,1,.36,1);opacity:{{ iconOpacity }};transform:{{ iconTransform }};pointer-events:none"></div>
+            </div>
+          </div>
+          <div style="width:232px;height:24px;margin-top:-4px;border-radius:50%;transition:opacity .9s ease;opacity:{{ groundOpacity }};background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.75),rgba(0,0,0,0) 72%);filter:blur(5px)"></div>
+          <div style="margin-top:20px;font:400 10px/1 'JetBrains Mono',monospace;color:#5A5A5A;transition:opacity .5s ease;opacity:{{ captionOpacity }}">{{ caption }}</div>
+        </div>
+
+        <div style="padding:40px 40px 36px">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px">
+            <div style="font:600 20px/1.2 'Bricolage Grotesque',sans-serif;letter-spacing:-.015em">{{ headline }}</div>
+            <div style="font:400 10px/1 'JetBrains Mono',monospace;color:#5A5A5A">{{ phaseLabel }}</div>
+          </div>
+          <div style="font:400 12px/1.6 'Instrument Sans',sans-serif;color:#787878;margin-bottom:26px">{{ subhead }}</div>
+
+          <div style="display:flex;flex-direction:column;gap:2px;margin-bottom:28px">
+            <sc-for list="{{ steps }}" as="step" hint-placeholder-count="6">
+              <div style="display:flex;gap:12px;align-items:flex-start;padding:11px 12px;border-radius:9px;transition:background .4s ease,opacity .4s ease;background:{{ step.bg }};opacity:{{ step.opacity }}">
+                <div style="flex:none;width:16px;height:16px;margin-top:1px;border-radius:50%;display:flex;align-items:center;justify-content:center;font:500 9px/1 'JetBrains Mono',monospace;transition:all .4s ease;border:1px solid {{ step.markBorder }};background:{{ step.markBg }};color:{{ step.markColor }}">{{ step.mark }}</div>
+                <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+                  <div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif;color:{{ step.titleColor }}">{{ step.title }}</div>
+                  <div style="font:400 10px/1.5 'JetBrains Mono',monospace;color:{{ step.noteColor }}">{{ step.note }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="padding:14px 15px;border-radius:10px;background:rgba(117,94,184,.07);border:1px solid rgba(117,94,184,.22);font:400 11.5px/1.6 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">Every beat is driven by a confirmed event. Steps 5 and 6 wait on the worker's next heartbeat — an interval the console cannot see inside — so they breathe rather than fill. Nothing here is on a timer.</div>
+
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:24px;align-items:center">
+            <button onClick="{{ replay }}" style="padding:9px 15px;border-radius:8px;border:1px solid #2B2B2E;background:#131315;color:#F1F1F1;font:500 11.5px/1 'Instrument Sans',sans-serif;cursor:pointer;transition:border-color .2s ease,background .2s ease" style-hover="border-color:#454548;background:#191919">Replay</button>
+            <button onClick="{{ next }}" style="padding:9px 15px;border-radius:8px;border:1px solid rgba(117,94,184,.5);background:#755EB8;color:#fff;font:500 11.5px/1 'Instrument Sans',sans-serif;cursor:pointer;transition:filter .2s ease" style-hover="filter:brightness(1.12)">Next event</button>
+            <button onClick="{{ showQueued }}" style="padding:9px 15px;border-radius:8px;border:1px solid #2B2B2E;background:transparent;color:#C4C4C4;font:500 11.5px/1 'Instrument Sans',sans-serif;cursor:pointer;transition:border-color .2s ease" style-hover="border-color:#454548">Queued</button>
+            <button onClick="{{ showFailed }}" style="padding:9px 15px;border-radius:8px;border:1px solid #4A2436;background:transparent;color:#EE7C88;font:500 11.5px/1 'Instrument Sans',sans-serif;cursor:pointer;transition:border-color .2s ease" style-hover="border-color:#7A3A50">No video</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+<p class="dv-next">Try next: "build the session screen on <a class="dv-oid" href="#1a">1a</a>" · "warmer, closer to <a class="dv-oid" href="#1b">1b</a> but keep the cold rail" · "show me the capacity surface"</p>
+</section>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1780,&quot;height&quot;:1500}}">
+const STEPS = [
+  ["Acquiring a device from the farm", "the allocator picks and claims one"],
+  ["Device ready", "host restored the clean snapshot"],
+  ["Attaching to the device", "data-plane socket open"],
+  ["Live view", "video stream negotiated"],
+  ["Installing Alaan staging 99.99.99", "queued for the worker's next heartbeat"],
+  ["Opening com.alaanpay.spender.staging", "launched on the device"],
+];
+
+class Component extends DCLogic {
+  state = { phase: 0, mode: "normal" };
+
+  componentDidMount() { this.timer = setTimeout(() => this.run(), 500); }
+  componentWillUnmount() { clearTimeout(this.timer); clearTimeout(this.tick); }
+
+  run() {
+    clearTimeout(this.tick);
+    const step = () => {
+      this.setState(s => {
+        if (s.mode !== "normal" || s.phase >= 6) return s;
+        return { phase: s.phase + 1 };
+      }, () => { if (this.state.mode === "normal" && this.state.phase < 6) this.tick = setTimeout(step, 1100); });
+    };
+    this.tick = setTimeout(step, 400);
+  }
+
+  renderVals() {
+    const { phase, mode } = this.state;
+    const failed = mode === "failed";
+    const queued = mode === "queued";
+    const p = queued ? 0 : phase;
+
+    const steps = STEPS.map((s, i) => {
+      let st = "pending";
+      if (queued) st = i === 0 ? "waiting" : "pending";
+      else if (failed && i === 3) st = "failed";
+      else if (failed && i > 3) st = "blocked";
+      else if (i < p) st = "done";
+      else if (i === p) st = i >= 4 ? "waiting" : "active";
+
+      const map = {
+        done:    { mark: "✓", markBg: "rgba(111,203,99,.12)", markBorder: "rgba(111,203,99,.42)", markColor: "#7FD873", titleColor: "#D4D4D4", noteColor: "#5A5A5A", bg: "transparent", opacity: 1 },
+        active:  { mark: "", markBg: "rgba(117,94,184,.2)", markBorder: "rgba(117,94,184,.7)", markColor: "#A290DA", titleColor: "#F1F1F1", noteColor: "#8A8A8A", bg: "rgba(117,94,184,.06)", opacity: 1 },
+        waiting: { mark: "", markBg: "rgba(232,163,14,.1)", markBorder: "rgba(232,163,14,.4)", markColor: "#E8A30E", titleColor: "#F1F1F1", noteColor: "#A8862E", bg: "rgba(232,163,14,.04)", opacity: 1 },
+        failed:  { mark: "×", markBg: "rgba(224,80,95,.12)", markBorder: "rgba(224,80,95,.5)", markColor: "#EE7C88", titleColor: "#F0A0A8", noteColor: "#B0616B", bg: "rgba(224,80,95,.05)", opacity: 1 },
+        blocked: { mark: "–", markBg: "transparent", markBorder: "#242427", markColor: "#4A4A4A", titleColor: "#6A6A6A", noteColor: "#4A4A4A", bg: "transparent", opacity: .5 },
+        pending: { mark: "", markBg: "transparent", markBorder: "#242427", markColor: "#4A4A4A", titleColor: "#8A8A8A", noteColor: "#4A4A4A", bg: "transparent", opacity: .62 },
+      };
+      const v = map[st];
+      let note = s[1];
+      if (st === "failed") note = "this device declares no screen-stream — everything else still works";
+      if (st === "blocked") note = "not attempted";
+      if (queued && i === 0) note = "no device free — you are 2nd in line";
+      return { title: s[0], note, ...v };
+    });
+
+    const headline = queued ? "Waiting for a device"
+      : failed ? "Up, without video"
+      : p >= 6 ? "MFARM X1 Pro is yours" : "Bringing up MFARM X1 Pro";
+    const subhead = queued ? "Two ahead of you. The farm hands over the moment one frees; the page moves by itself."
+      : failed ? "The device attached and accepts input, install and WebDriver. It just has no screen to stream."
+      : p >= 6 ? "Session 3b97a8de · lease 60:00 · the frame you watched arrive is the frame you are holding."
+      : (STEPS[Math.min(p, 5)][0]);
+
+    return {
+      steps, headline, subhead,
+      phaseLabel: queued ? "QUEUED · POS 2" : failed ? "STEP 4 OF 6 · FAILED" : `STEP ${Math.min(p + 1, 6)} OF 6`,
+      caption: p >= 3 || failed ? "MFARM X1 Pro · 1080 × 2340 · Android 17" : "acquiring…",
+      captionOpacity: queued ? 0.35 : 1,
+      frameOpacity: queued ? 0.22 : p >= 1 ? 1 : 0.06,
+      frameTransform: queued ? "scale(.965)" : p >= 1 ? "scale(1)" : "scale(.955)",
+      frameFilter: queued ? "blur(3px)" : p >= 1 ? "blur(0px)" : "blur(9px)",
+      frameShadow: p >= 3 && !queued
+        ? "0 1px 0 rgba(255,255,255,.16) inset,0 2px 3px rgba(0,0,0,.7),0 18px 34px -8px rgba(0,0,0,.8),0 44px 80px -20px rgba(0,0,0,.9)"
+        : "0 1px 0 rgba(255,255,255,.1) inset,0 4px 10px -4px rgba(0,0,0,.5)",
+      panelOpacity: failed ? 0 : (p >= 4 ? 1 : 0),
+      wakeOpacity: !queued && p >= 2 && p < 4 ? 1 : 0,
+      sheenOpacity: p >= 4 && !failed ? 1 : 0,
+      groundOpacity: p >= 3 && !queued ? 1 : 0,
+      iconOpacity: !queued && !failed && p === 5 ? 1 : 0,
+      iconTransform: p >= 5 ? "translate(-50%,230px) scale(1)" : "translate(-50%,-60px) scale(.6)",
+      replay: () => this.setState({ phase: 0, mode: "normal" }, () => this.run()),
+      next: () => { clearTimeout(this.tick); this.setState(s => ({ mode: "normal", phase: Math.min(s.phase + 1, 6) })); },
+      showQueued: () => { clearTimeout(this.tick); this.setState({ mode: "queued", phase: 0 }); },
+      showFailed: () => { clearTimeout(this.tick); this.setState({ mode: "failed", phase: 3 }); },
+    };
+  }
+}
+
+</script>
+</body>
+</html>

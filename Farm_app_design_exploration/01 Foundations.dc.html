@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:#08080A;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;color:#F1F1F1;-webkit-font-smoothing:antialiased}
+a{color:#A290DA;text-decoration:none}a:hover{color:#C4B6EC}
+.wrap{max-width:1180px;margin:0 auto;padding:0 56px}
+.sec{padding:64px 0;border-top:1px solid #16161A}
+.h2{margin:0 0 6px;font:600 26px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em}
+.lede{margin:0 0 38px;max-width:700px;font:400 13.5px/1.7 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty}
+.h3{margin:0 0 16px;font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#6A6A6A;text-transform:uppercase}
+.row{display:grid;grid-template-columns:196px 168px 168px 1fr;gap:16px;align-items:center;padding:8px 0;border-top:1px solid #131316}
+.row:first-of-type{border-top:none}
+.hdr{display:grid;grid-template-columns:196px 168px 168px 1fr;gap:16px;padding:0 0 10px;font:500 10px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;text-transform:uppercase;border-bottom:1px solid #1F1F22}
+.tk{font:400 11px/1.4 'JetBrains Mono',monospace;color:#C4C4C4;overflow-wrap:anywhere;word-break:normal}
+.val{display:flex;align-items:center;gap:9px;font:400 10.5px/1 'JetBrains Mono',monospace;color:#8A8A8A}
+.sw{flex:none;width:22px;height:22px;border-radius:5px;box-shadow:0 0 0 1px rgba(255,255,255,.09) inset,0 1px 2px rgba(0,0,0,.4)}
+.note{font:400 11.5px/1.5 'Instrument Sans',sans-serif;color:#787878;text-wrap:pretty}
+.card{background:#0D0D0F;border:1px solid #1F1F22;border-radius:12px;padding:26px 28px}
+.flag{display:inline-block;padding:3px 7px;border-radius:5px;background:rgba(232,163,14,.07);border:1px solid rgba(232,163,14,.26);font:500 9px/1.3 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em;vertical-align:middle}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</helmet>
+
+<div class="wrap">
+
+<div style="padding:76px 0 4px">
+  <div style="display:flex;align-items:center;gap:11px;margin-bottom:22px">
+    <div style="width:26px;height:26px;border-radius:7px;background:linear-gradient(150deg,#8A74D6,#5A47A0);box-shadow:0 0 0 1px rgba(255,255,255,.14) inset;display:flex;align-items:center;justify-content:center;font:600 12px/1 'Bricolage Grotesque',sans-serif;color:#fff">M</div>
+    <div style="font:600 12px/1 'JetBrains Mono',monospace;letter-spacing:.16em;color:#8A8A8A">MFARM CONSOLE</div>
+  </div>
+  <h1 style="margin:0 0 14px;font:700 46px/1.05 'Bricolage Grotesque',sans-serif;letter-spacing:-.035em;max-width:760px">Foundations</h1>
+  <p style="margin:0;max-width:660px;font:400 15px/1.65 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">Colour, type, space, elevation, icons and motion, in both themes, expressed so they can be implemented directly. Token names match the ones already in <span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#C4C4C4">design-tokens.css</span> wherever one exists, so this lands as an evolution of that file rather than a replacement. Additions are marked.</p>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:26px">
+    <div style="padding:5px 10px;border-radius:6px;background:#131315;border:1px solid #2B2B2E;font:400 10.5px/1.4 'JetBrains Mono',monospace;color:#8A8A8A">ceramic direction</div>
+    <div style="padding:5px 10px;border-radius:6px;background:#131315;border:1px solid #2B2B2E;font:400 10.5px/1.4 'JetBrains Mono',monospace;color:#8A8A8A">dark + light</div>
+    <div style="padding:5px 10px;border-radius:6px;background:#131315;border:1px solid #2B2B2E;font:400 10.5px/1.4 'JetBrains Mono',monospace;color:#8A8A8A">3 densities</div>
+    <div style="padding:5px 10px;border-radius:6px;background:#131315;border:1px solid #2B2B2E;font:400 10.5px/1.4 'JetBrains Mono',monospace;color:#8A8A8A">motion disableable</div>
+  </div>
+</div>
+
+<div class="sec" style="border-top:none">
+  <h2 class="h2">The one idea</h2>
+  <p class="lede">The console is a neutral desk. The device is the warm object sitting on it. Every surface in the UI stays chromatically quiet so that the phone — the only thing with material, temperature and depth — is the thing your eye lands on. That is what buys the premium read without a single gradient in the chrome.</p>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px">
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:8px">Quiet chrome</div>
+      <div class="note">Surfaces carry no chroma. One accent, used only for the primary action and selection. Semantic colour never appears except to describe a real state.</div>
+    </div>
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:8px">Depth is a state</div>
+      <div class="note">Elevation is not styling. A device's shadow is shallow until its data plane attaches, and lands when it does. A panel lifts when it becomes interactive. Nothing floats decoratively.</div>
+    </div>
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:8px">Register separates prose from machine</div>
+      <div class="note">Anything the farm generated — ids, URLs, ABIs, log lines — is mono, selectable, copyable. Anything MFARM wrote to a human is sans. The reader always knows which they are looking at.</div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Colour</h2>
+  <p class="lede">Dark is primary. Light is a true peer, not a filter: it re-derives every value against a warm off-white ground so that hairlines stay visible and the accent keeps its 4.5:1 on white. Semantic colours darken in light theme to hold contrast — they are never the same hex in both.</p>
+
+  <h3 class="h3">Surfaces</h3>
+  <div class="hdr"><div>Token</div><div>Dark</div><div>Light</div><div>Where it goes</div></div>
+  <div class="row"><div class="tk">--s-app</div><div class="val"><span class="sw" style="background:#08080A"></span>#08080A</div><div class="val"><span class="sw" style="background:#FBFBFA"></span>#FBFBFA</div><div class="note">The page ground behind everything</div></div>
+  <div class="row"><div class="tk">--s-chrome</div><div class="val"><span class="sw" style="background:#050506"></span>#050506</div><div class="val"><span class="sw" style="background:#FFFFFF"></span>#FFFFFF</div><div class="note">Top bar — recedes in dark, advances in light</div></div>
+  <div class="row"><div class="tk">--s-nav</div><div class="val"><span class="sw" style="background:#0A0A0C"></span>#0A0A0C</div><div class="val"><span class="sw" style="background:#F6F6F5"></span>#F6F6F5</div><div class="note">Sidebar</div></div>
+  <div class="row"><div class="tk">--s-card</div><div class="val"><span class="sw" style="background:#0D0D0F"></span>#0D0D0F</div><div class="val"><span class="sw" style="background:#FFFFFF"></span>#FFFFFF</div><div class="note">Every panel, card and dock</div></div>
+  <div class="row"><div class="tk">--s-inset</div><div class="val"><span class="sw" style="background:#050506"></span>#050506</div><div class="val"><span class="sw" style="background:#F2F2F1"></span>#F2F2F1</div><div class="note">Recessed wells: logcat, code blocks, the device stage</div></div>
+  <div class="row"><div class="tk">--s-overlay</div><div class="val"><span class="sw" style="background:#101012"></span>#101012</div><div class="val"><span class="sw" style="background:#FFFFFF"></span>#FFFFFF</div><div class="note">Dialogs, command palette, toasts</div></div>
+  <div class="row"><div class="tk">--s-btn</div><div class="val"><span class="sw" style="background:#131315"></span>#131315</div><div class="val"><span class="sw" style="background:#FFFFFF"></span>#FFFFFF</div><div class="note">Secondary button face</div></div>
+  <div class="row"><div class="tk">--s-chip</div><div class="val"><span class="sw" style="background:#191919"></span>#191919</div><div class="val"><span class="sw" style="background:#F0F0EF"></span>#F0F0EF</div><div class="note">Capability chips, filter pills, badges</div></div>
+  <div class="row"><div class="tk">--s-scrim <span class="flag">NEW</span></div><div class="val"><span class="sw" style="background:#000;opacity:.66"></span>rgba(0,0,0,.66)</div><div class="val"><span class="sw" style="background:#3A3A38;opacity:.34"></span>rgba(30,30,28,.34)</div><div class="note">Behind dialogs and the palette</div></div>
+
+  <h3 class="h3" style="margin-top:44px">Borders</h3>
+  <div class="hdr"><div>Token</div><div>Dark</div><div>Light</div><div>Where it goes</div></div>
+  <div class="row"><div class="tk">--b-card</div><div class="val"><span class="sw" style="background:#1F1F22"></span>#1F1F22</div><div class="val"><span class="sw" style="background:#E6E6E4"></span>#E6E6E4</div><div class="note">Panel edge — the workhorse hairline</div></div>
+  <div class="row"><div class="tk">--b-chrome</div><div class="val"><span class="sw" style="background:#191919"></span>#191919</div><div class="val"><span class="sw" style="background:#EDEDEB"></span>#EDEDEB</div><div class="note">Top bar and sidebar separators</div></div>
+  <div class="row"><div class="tk">--b-field</div><div class="val"><span class="sw" style="background:#242427"></span>#242427</div><div class="val"><span class="sw" style="background:#DCDCD9"></span>#DCDCD9</div><div class="note">Inputs, selects, copy fields</div></div>
+  <div class="row"><div class="tk">--b-btn</div><div class="val"><span class="sw" style="background:#2B2B2E"></span>#2B2B2E</div><div class="val"><span class="sw" style="background:#D4D4D1"></span>#D4D4D1</div><div class="note">Secondary button outline</div></div>
+  <div class="row"><div class="tk">--b-row</div><div class="val"><span class="sw" style="background:#151517"></span>#151517</div><div class="val"><span class="sw" style="background:#EFEFED"></span>#EFEFED</div><div class="note">Table row divider — quieter than a card edge</div></div>
+  <div class="row"><div class="tk">--b-overlay</div><div class="val"><span class="sw" style="background:#2E2E31"></span>#2E2E31</div><div class="val"><span class="sw" style="background:#D8D8D5"></span>#D8D8D5</div><div class="note">Dialog edge, which must read above the scrim</div></div>
+  <div class="row"><div class="tk">--b-dash</div><div class="val"><span class="sw" style="background:#303033"></span>#303033</div><div class="val"><span class="sw" style="background:#CFCFCC"></span>#CFCFCC</div><div class="note">Drop zones — the only dashed stroke in the system</div></div>
+  <div class="row"><div class="tk">--b-hover</div><div class="val"><span class="sw" style="background:#3A3A3D"></span>#3A3A3D</div><div class="val"><span class="sw" style="background:#BFBFBB"></span>#BFBFBB</div><div class="note">Hover on anything with an outline</div></div>
+  <div class="row"><div class="tk">--b-focus <span class="flag">NEW</span></div><div class="val"><span class="sw" style="background:#8A74D6"></span>#8A74D6</div><div class="val"><span class="sw" style="background:#5A45A0"></span>#5A45A0</div><div class="note">2px focus ring, offset 2px. Keyboard only, never suppressed</div></div>
+
+  <h3 class="h3" style="margin-top:44px">Text</h3>
+  <div class="hdr"><div>Token</div><div>Dark</div><div>Light</div><div>Where it goes</div></div>
+  <div class="row"><div class="tk">--t-primary</div><div class="val"><span class="sw" style="background:#F1F1F1"></span>#F1F1F1</div><div class="val"><span class="sw" style="background:#141414"></span>#141414</div><div class="note">Headings, device names, the number that matters</div></div>
+  <div class="row"><div class="tk">--t-body</div><div class="val"><span class="sw" style="background:#D4D4D4"></span>#D4D4D4</div><div class="val"><span class="sw" style="background:#3A3A3A"></span>#3A3A3A</div><div class="note">Prose and table values</div></div>
+  <div class="row"><div class="tk">--t-label</div><div class="val"><span class="sw" style="background:#8A8A8A"></span>#8A8A8A</div><div class="val"><span class="sw" style="background:#6E6E6E"></span>#6E6E6E</div><div class="note">Field labels and section keys</div></div>
+  <div class="row"><div class="tk">--t-help</div><div class="val"><span class="sw" style="background:#787878"></span>#787878</div><div class="val"><span class="sw" style="background:#7E7E7E"></span>#7E7E7E</div><div class="note">The explanatory sentence under a control</div></div>
+  <div class="row"><div class="tk">--t-caption</div><div class="val"><span class="sw" style="background:#6A6A6A"></span>#6A6A6A</div><div class="val"><span class="sw" style="background:#8C8C8C"></span>#8C8C8C</div><div class="note">Timestamps and geometry strings</div></div>
+  <div class="row"><div class="tk">--t-micro</div><div class="val"><span class="sw" style="background:#5A5A5A"></span>#5A5A5A</div><div class="val"><span class="sw" style="background:#9A9A9A"></span>#9A9A9A</div><div class="note">The quietest legible tier. Never load-bearing</div></div>
+  <div class="row"><div class="tk">--t-strike <span class="flag">NEW</span></div><div class="val"><span class="sw" style="background:#4A4A4A"></span>#4A4A4A</div><div class="val"><span class="sw" style="background:#AFAFAB"></span>#AFAFAB</div><div class="note">A capability the device does not declare. Struck through, present, dimmed — never removed</div></div>
+
+  <h3 class="h3" style="margin-top:44px">Accent and semantic</h3>
+  <div class="hdr"><div>Token</div><div>Dark</div><div>Light</div><div>Where it goes</div></div>
+  <div class="row"><div class="tk">--mf-accent</div><div class="val"><span class="sw" style="background:#755EB8"></span>#755EB8</div><div class="val"><span class="sw" style="background:#5A45A0"></span>#5A45A0</div><div class="note">One primary action per screen, and selection</div></div>
+  <div class="row"><div class="tk">--mf-accent-soft</div><div class="val"><span class="sw" style="background:#1A1622"></span>rgba(117,94,184,.16)</div><div class="val"><span class="sw" style="background:#EDEAF6"></span>rgba(90,69,160,.10)</div><div class="note">Selected nav item, active tab</div></div>
+  <div class="row"><div class="tk">--ok-dot / --ok-text</div><div class="val"><span class="sw" style="background:#6FCB63"></span>#6FCB63 · #7FD873</div><div class="val"><span class="sw" style="background:#3E9B33"></span>#3E9B33 · #2F7F27</div><div class="note">Ready, available, succeeded, lease active</div></div>
+  <div class="row"><div class="tk">--warn</div><div class="val"><span class="sw" style="background:#E8A30E"></span>#E8A30E</div><div class="val"><span class="sw" style="background:#A8730A"></span>#A8730A</div><div class="note">Waiting on something unobservable, queued, degraded</div></div>
+  <div class="row"><div class="tk">--bad-dot / --bad-text</div><div class="val"><span class="sw" style="background:#E0505F"></span>#E0505F · #EE7C88</div><div class="val"><span class="sw" style="background:#C8303F"></span>#C8303F · #B02231</div><div class="note">Failed, quarantined, out of the pool</div></div>
+  <div class="row"><div class="tk">--bad-solid</div><div class="val"><span class="sw" style="background:#B32333"></span>#B32333</div><div class="val"><span class="sw" style="background:#B32333"></span>#B32333</div><div class="note">Destructive confirm button. Identical in both themes on purpose — this one does not soften</div></div>
+  <div class="row"><div class="tk">--info</div><div class="val"><span class="sw" style="background:#7FA0D8"></span>#7FA0D8</div><div class="val"><span class="sw" style="background:#3E6BAE"></span>#3E6BAE</div><div class="note">Physical device badge, neutral informational</div></div>
+
+  <div class="card" style="margin-top:38px;border-color:rgba(117,94,184,.22);background:rgba(117,94,184,.05)">
+    <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px">The rule that outranks the palette</div>
+    <div class="note" style="max-width:720px">Colour never carries meaning alone. Every state in the markup is a dot <span style="color:#C4C4C4">plus</span> a label <span style="color:#C4C4C4">plus</span> a timestamp. If you can delete the colour and the sentence still tells you what happened and when, the state is built correctly. This is why the light theme can re-derive every hex without any state becoming ambiguous.</div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Type</h2>
+  <p class="lede">Three families, three jobs, self-hosted as woff2 — no external origin, per the CSP. All three are already in the codebase.</p>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;margin-bottom:38px">
+    <div class="card">
+      <div style="font:600 34px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.03em;margin-bottom:14px">Aa</div>
+      <div style="font:600 12px/1 'JetBrains Mono',monospace;color:#A290DA;letter-spacing:.06em;margin-bottom:8px">--f-display</div>
+      <div style="font:500 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:6px">Bricolage Grotesque</div>
+      <div class="note">Page titles, device names, dialog headings, stat numbers. Optical sizing on, tight tracking. Never below 13px and never for body copy.</div>
+    </div>
+    <div class="card">
+      <div style="font:500 34px/1 'Instrument Sans',sans-serif;letter-spacing:-.02em;margin-bottom:14px">Aa</div>
+      <div style="font:600 12px/1 'JetBrains Mono',monospace;color:#A290DA;letter-spacing:.06em;margin-bottom:8px">--f-ui</div>
+      <div style="font:500 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:6px">Instrument Sans</div>
+      <div class="note">Everything MFARM wrote to a human: labels, buttons, prose, help text, empty states, dialog bodies. The default.</div>
+    </div>
+    <div class="card">
+      <div style="font:400 34px/1 'JetBrains Mono',monospace;margin-bottom:14px">Aa</div>
+      <div style="font:600 12px/1 'JetBrains Mono',monospace;color:#A290DA;letter-spacing:.06em;margin-bottom:8px">--f-mono</div>
+      <div style="font:500 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:6px">JetBrains Mono</div>
+      <div class="note">Everything the machine produced: ids, URLs, packages, ABIs, geometry, log lines, capability names, timestamps. Always selectable.</div>
+    </div>
+  </div>
+
+  <div class="hdr" style="grid-template-columns:150px 1fr 200px"><div>Role</div><div>Specimen</div><div>Spec</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">display-xl</div><div style="font:700 40px/1.05 'Bricolage Grotesque',sans-serif;letter-spacing:-.035em">Bringing up X1 Pro</div><div class="val">40 / 42 · 700 · -3.5%</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">display-lg</div><div style="font:600 26px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em">Devices</div><div class="val">26 / 30 · 600 · -2%</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">display-md</div><div style="font:600 18px/1.25 'Bricolage Grotesque',sans-serif;letter-spacing:-.015em">MFARM X1 Pro</div><div class="val">18 / 22 · 600 · -1.5%</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">stat</div><div style="font:600 32px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.03em;font-variant-numeric:tabular-nums">4 <span style="font-size:18px;color:#8A8A8A">of 5 ready</span></div><div class="val">32 / 32 · 600 · tabular</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">body</div><div style="font:400 13.5px/1.65 'Instrument Sans',sans-serif;color:#D4D4D4;max-width:520px">The allocator picks a ready device on this tier; it cannot be pinned to one.</div><div class="val">13.5 / 22 · 400</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">ui-strong</div><div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif">Start MFARM X1 Pro</div><div class="val">12.5 / 17 · 500</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">label</div><div style="font:500 10px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A">CAPABILITIES</div><div class="val">10 / 10 · 500 · +10%</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">machine</div><div style="font:400 11.5px/1.5 'JetBrains Mono',monospace;color:#C4C4C4">3b97a8de-6304-44a3-8998-500a629522ec</div><div class="val">11.5 / 17 · 400</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 200px"><div class="tk">log</div><div style="font:400 11px/1.55 'JetBrains Mono',monospace;color:#8A8A8A">09-04 00:09:01.608 I adbd service requested</div><div class="val">11 / 17 · 400 · tabular</div></div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Space, radius, elevation</h2>
+  <p class="lede">A 4px base. Density is a real axis — the three modes scale padding and gap only, never type size, so a compact console loses whitespace but never legibility.</p>
+
+  <h3 class="h3">Density</h3>
+  <div class="hdr" style="grid-template-columns:150px 1fr 1fr 1fr"><div>Token</div><div>compact</div><div>comfortable</div><div>airy</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr"><div class="tk">--mf-cp</div><div class="val">11px</div><div class="val">15px</div><div class="val">21px</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr"><div class="tk">--mf-rp</div><div class="val">10px</div><div class="val">13px</div><div class="val">16px</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr"><div class="tk">--mf-gap</div><div class="val">12px</div><div class="val">16px</div><div class="val">22px</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr 1fr"><div class="tk">--mf-navw</div><div class="val">198px</div><div class="val">198px</div><div class="val">216px</div></div>
+
+  <h3 class="h3" style="margin-top:44px">Radius <span class="flag">NEW SCALE</span></h3>
+  <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:8px">
+    <div style="display:flex;flex-direction:column;gap:9px;align-items:center"><div style="width:70px;height:52px;background:#191919;border:1px solid #2B2B2E;border-radius:4px"></div><div class="val" style="font-size:10px">--r-xs · 4</div></div>
+    <div style="display:flex;flex-direction:column;gap:9px;align-items:center"><div style="width:70px;height:52px;background:#191919;border:1px solid #2B2B2E;border-radius:6px"></div><div class="val" style="font-size:10px">--r-sm · 6</div></div>
+    <div style="display:flex;flex-direction:column;gap:9px;align-items:center"><div style="width:70px;height:52px;background:#191919;border:1px solid #2B2B2E;border-radius:9px"></div><div class="val" style="font-size:10px">--r-md · 9</div></div>
+    <div style="display:flex;flex-direction:column;gap:9px;align-items:center"><div style="width:70px;height:52px;background:#191919;border:1px solid #2B2B2E;border-radius:12px"></div><div class="val" style="font-size:10px">--r-lg · 12</div></div>
+    <div style="display:flex;flex-direction:column;gap:9px;align-items:center"><div style="width:70px;height:52px;background:#191919;border:1px solid #2B2B2E;border-radius:16px"></div><div class="val" style="font-size:10px">--r-xl · 16</div></div>
+    <div style="display:flex;flex-direction:column;gap:9px;align-items:center"><div style="width:70px;height:52px;background:#191919;border:1px solid #2B2B2E;border-radius:999px"></div><div class="val" style="font-size:10px">--r-pill</div></div>
+  </div>
+  <p class="note" style="max-width:700px;margin-top:14px">Chips and status pills take <span class="tk">--r-pill</span>; buttons and fields <span class="tk">--r-md</span>; panels <span class="tk">--r-lg</span>; the stage and dialogs <span class="tk">--r-xl</span>. The device chassis is the one exception — its radius is computed from reported geometry, not picked from this scale.</p>
+
+  <h3 class="h3" style="margin-top:44px">Elevation <span class="flag">NEW</span></h3>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:18px">
+    <div style="display:flex;flex-direction:column;gap:12px"><div style="height:74px;border-radius:12px;background:#0D0D0F;border:1px solid #1F1F22"></div><div class="tk">--e-0</div><div class="note">Flat. Panels at rest — a hairline is the whole treatment.</div></div>
+    <div style="display:flex;flex-direction:column;gap:12px"><div style="height:74px;border-radius:12px;background:#101012;border:1px solid #2B2B2E;box-shadow:0 2px 6px -2px rgba(0,0,0,.5)"></div><div class="tk">--e-1</div><div class="note">Hover and dropdowns. Barely there.</div></div>
+    <div style="display:flex;flex-direction:column;gap:12px"><div style="height:74px;border-radius:12px;background:#101012;border:1px solid #2E2E31;box-shadow:0 8px 20px -6px rgba(0,0,0,.65),0 2px 4px -1px rgba(0,0,0,.5)"></div><div class="tk">--e-2</div><div class="note">Command palette, popovers, toasts.</div></div>
+    <div style="display:flex;flex-direction:column;gap:12px"><div style="height:74px;border-radius:12px;background:#101012;border:1px solid #2E2E31;box-shadow:0 18px 44px -10px rgba(0,0,0,.75),0 4px 10px -2px rgba(0,0,0,.55)"></div><div class="tk">--e-3</div><div class="note">Modal dialogs over the scrim.</div></div>
+  </div>
+  <div class="card" style="margin-top:22px">
+    <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px">--e-device · the one expensive shadow</div>
+    <div class="note" style="max-width:760px;margin-bottom:12px">The device gets a three-layer shadow plus a contact ellipse, because it is the only object in the product that should read as physical. It is also the only shadow that changes with state: shallow while the device is off or queued, full once the data plane attaches.</div>
+    <div style="font:400 11px/1.7 'JetBrains Mono',monospace;color:#8A8A8A;background:#050506;border:1px solid #1A1A1C;border-radius:9px;padding:14px 16px;overflow-x:auto">--e-device-flat: 0 1px 0 rgba(255,240,225,.2) inset, 0 4px 10px -4px rgba(0,0,0,.5);<br>--e-device:      0 1px 0 rgba(255,240,225,.2) inset, 0 2px 3px rgba(0,0,0,.7),<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0 20px 36px -8px rgba(0,0,0,.78), 0 50px 90px -22px rgba(0,0,0,.9);</div>
+    <div class="note" style="margin-top:12px">In light theme the inset highlight stays warm-white but the cast layers lose opacity roughly by half — a phone on a bright desk has a shorter shadow.</div>
+  </div>
+  <p class="note" style="max-width:700px;margin-top:22px">Nothing else in the console gets a shadow. No shadow is ever animated over the live stage: rendering is software and frame rate is the proof the session is healthy, so compositing cost near the panel is a bug, not a style choice.</p>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Icons</h2>
+  <p class="lede">Lucide, self-hosted as an inline sprite. It is ISC-licensed, ships as clean 24px geometry on a 2px grid, and its line quality matches the calm register. The current console draws its glyphs from Unicode characters, which is why the chrome reads as unfinished — those are the highest-leverage twenty replacements in the product.</p>
+  <div class="hdr" style="grid-template-columns:1fr 1fr"><div>Today</div><div>Lucide name</div></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 40px">
+    <div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">▶ Launch</div><div class="tk">play</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">■ Devices</div><div class="tk">smartphone</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">✚ Apps</div><div class="tk">package</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">☰ Sessions</div><div class="tk">monitor-play</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">▤ Runs</div><div class="tk">list-checks</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">⋮ Queue</div><div class="tk">layers</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">◎ Health</div><div class="tk">activity</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">☍ Agents</div><div class="tk">link-2</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">● Team</div><div class="tk">users</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">⚙ Settings</div><div class="tk">settings</div></div>
+    </div>
+    <div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">⏻ power</div><div class="tk">power</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">volume ± </div><div class="tk">volume-2 · volume-1</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">↺ ↻ rotate</div><div class="tk">rotate-ccw · rotate-cw</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">◀ ● ■ nav</div><div class="tk">chevron-left · circle · square</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">screenshot</div><div class="tk">camera</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">ui-hierarchy</div><div class="tk">scan-search</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">zoom ± · fullscreen</div><div class="tk">zoom-in · zoom-out · maximize</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">copy</div><div class="tk">copy · check</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">quarantine · release</div><div class="tk">shield-alert · shield-check</div></div>
+      <div class="row" style="grid-template-columns:1fr 1fr"><div class="val" style="color:#6A6A6A">✓ × outcomes</div><div class="tk">check · x · minus</div></div>
+    </div>
+  </div>
+  <p class="note" style="max-width:700px;margin-top:26px">16px in nav and rails, 14px inline with label text, 20px in empty states. Stroke 1.75 at 16px and below, 2 above. Icons take the colour of the text they sit with and never carry meaning without one — an icon-only control always has a tooltip and an <span class="tk">aria-label</span>.</p>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Motion</h2>
+  <p class="lede">Motion in MFARM has one job: to show a real machine changing state. Every duration below is a transition between two confirmed states, never a depiction of progress the console cannot observe.</p>
+
+  <div class="hdr" style="grid-template-columns:170px 110px 1fr"><div>Token</div><div>Duration</div><div>Used for</div></div>
+  <div class="row" style="grid-template-columns:170px 110px 1fr"><div class="tk">--m-instant</div><div class="val">90ms</div><div class="note">Press feedback, checkbox, chip toggle</div></div>
+  <div class="row" style="grid-template-columns:170px 110px 1fr"><div class="tk">--m-fast</div><div class="val">160ms</div><div class="note">Hover, focus ring, tooltip</div></div>
+  <div class="row" style="grid-template-columns:170px 110px 1fr"><div class="tk">--m-base</div><div class="val">240ms</div><div class="note">Panel open, tab change, toast in</div></div>
+  <div class="row" style="grid-template-columns:170px 110px 1fr"><div class="tk">--m-slow</div><div class="val">400ms</div><div class="note">Dialog, palette, nav collapse, step state change</div></div>
+  <div class="row" style="grid-template-columns:170px 110px 1fr"><div class="tk">--m-arrive</div><div class="val">700ms</div><div class="note">The device frame materialising, the screen waking</div></div>
+  <div class="row" style="grid-template-columns:170px 110px 1fr"><div class="tk">--m-settle</div><div class="val">900ms</div><div class="note">Shadow landing, the frame transitioning into the session layout</div></div>
+
+  <div class="hdr" style="grid-template-columns:170px 1fr 1fr;margin-top:44px"><div>Easing</div><div>Curve</div><div>When</div></div>
+  <div class="row" style="grid-template-columns:170px 1fr 1fr"><div class="tk">--ease-out</div><div class="val">cubic-bezier(.22, 1, .36, 1)</div><div class="note">Almost everything. Arrivals and state changes</div></div>
+  <div class="row" style="grid-template-columns:170px 1fr 1fr"><div class="tk">--ease-in-out</div><div class="val">cubic-bezier(.4, 0, .2, 1)</div><div class="note">Things that move and stay, like a collapsing rail</div></div>
+  <div class="row" style="grid-template-columns:170px 1fr 1fr"><div class="tk">--ease-emphatic</div><div class="val">cubic-bezier(.16, 1, .3, 1)</div><div class="note">The device arriving. Used once per session, deliberately</div></div>
+  <div class="row" style="grid-template-columns:170px 1fr 1fr"><div class="tk">--mf-pulse</div><div class="val">2.2s ease-in-out infinite</div><div class="note">The only loop in the system: a live dot, and a step waiting on something unobservable</div></div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:38px">
+    <div class="card" style="border-color:rgba(111,203,99,.24);background:rgba(111,203,99,.04)">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px;color:#7FD873">Legitimate motion</div>
+      <div class="note">A step turning from pending to done when its event lands. A shadow deepening on attach. Real pixels fading up when the stream negotiates. A percentage moving because a percentage arrived. A dot pulsing to say a connection is alive right now.</div>
+    </div>
+    <div class="card" style="border-color:rgba(224,80,95,.26);background:rgba(224,80,95,.04)">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px;color:#EE7C88">Motion that would be a lie</div>
+      <div class="note">A bar that fills on a timer. A checkmark that lands before the worker confirms. A spinner on an action whose only reportable states are queued and finished. An ETA the allocator never gave us. Any of these turns the console's core asset into a liability.</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:22px">
+    <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px">Disabling it</div>
+    <div class="note" style="max-width:760px">The existing <span class="tk">data-liveness="still"</span> setting and <span class="tk">prefers-reduced-motion</span> both resolve to the same thing: <span class="tk">--mf-pulse: 0s</span> and every duration to <span class="tk">1ms</span>. Nothing is conveyed by motion alone, so the console with all motion removed loses no information — a step that was pulsing amber still reads <span style="color:#C4C4C4">waiting on the worker's next heartbeat</span> in words.</div>
+  </div>
+</div>
+
+<div class="sec" style="padding-bottom:96px">
+  <h2 class="h2">Open assumptions</h2>
+  <p class="lede">Recorded here rather than buried, because a developer will hit them.</p>
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div class="card" style="display:grid;grid-template-columns:150px 1fr;gap:20px;align-items:start;padding:18px 20px">
+      <div><span class="flag">ASSUMPTION</span></div>
+      <div class="note"><span style="color:#D4D4D4">Allocation is class-only.</span> The picker promises a class, not a unit, and the handover moment names what you actually got. If pinning becomes possible the picker can promise a model and the substitution flow disappears — say the word and I will respec it.</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:150px 1fr;gap:20px;align-items:start;padding:18px 20px">
+      <div><span class="flag">CONFIRM ENDPOINT</span></div>
+      <div class="note"><span style="color:#D4D4D4">Five telemetry sources.</span> Snapshot-restore progress, install byte progress, stream negotiation sub-states, queue position and ETA, and worker heartbeat timing. Each one is used in the bring-up design and each is marked at the point of use. Where one turns out not to exist, that beat degrades to the honest waiting state rather than the panel breaking.</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:150px 1fr;gap:20px;align-items:start;padding:18px 20px">
+      <div><span class="flag">NET-NEW</span></div>
+      <div class="note"><span style="color:#D4D4D4">Light theme.</span> Every value above is specified, but no component in either console currently reads a theme. Expect a pass to remove hardcoded hexes before it can be switched on.</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:150px 1fr;gap:20px;align-items:start;padding:18px 20px">
+      <div><span class="flag">FONTS</span></div>
+      <div class="note">This document loads the three families from a font CDN so you can read it. Production must self-host the same woff2 files, which the codebase already does. No design here depends on a weight outside 400–700.</div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1300,&quot;height&quot;:1600}}"></script>
+</body>
+</html>

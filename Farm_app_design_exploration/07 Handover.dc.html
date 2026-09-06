@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:#08080A;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;color:#F1F1F1;-webkit-font-smoothing:antialiased}
+a{color:#A290DA;text-decoration:none}a:hover{color:#C4B6EC}
+.wrap{max-width:1180px;margin:0 auto;padding:0 48px}
+.sec{padding:58px 0;border-top:1px solid #16161A}
+.h2{margin:0 0 6px;font:600 26px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em}
+.lede{margin:0 0 30px;max-width:720px;font:400 13.5px/1.7 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty}
+.h3{margin:0 0 15px;font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;text-transform:uppercase}
+.note{font:400 11.5px/1.55 'Instrument Sans',sans-serif;color:#787878;text-wrap:pretty}
+.card{background:#0D0D0F;border:1px solid #1F1F22;border-radius:12px;padding:22px 24px}
+.hdr{display:grid;gap:14px;padding:0 0 10px;font:500 10px/1.3 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;text-transform:uppercase;border-bottom:1px solid #1F1F22}
+.row{display:grid;gap:14px;align-items:start;padding:11px 0;border-top:1px solid #131316}
+.tk{font:400 10.5px/1.55 'JetBrains Mono',monospace;color:#C4C4C4;overflow-wrap:anywhere}
+.was{font:400 11.5px/1.55 'Instrument Sans',sans-serif;color:#6A6A6A;text-decoration:line-through}
+.now{font:400 11.5px/1.55 'Instrument Sans',sans-serif;color:#D4D4D4}
+.flag{display:inline-block;padding:3px 7px;border-radius:5px;background:rgba(232,163,14,.07);border:1px solid rgba(232,163,14,.26);font:500 9px/1.3 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em}
+.ok{display:inline-block;padding:3px 7px;border-radius:5px;background:rgba(111,203,99,.08);border:1px solid rgba(111,203,99,.26);font:500 9px/1.3 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.05em}
+.new{display:inline-block;padding:3px 7px;border-radius:5px;background:rgba(117,94,184,.12);border:1px solid rgba(117,94,184,.34);font:500 9px/1.3 'JetBrains Mono',monospace;color:#A290DA;letter-spacing:.05em}
+.code{font:400 10.5px/1.75 'JetBrains Mono',monospace;color:#A8A8A8;background:#050506;border:1px solid #1A1A1C;border-radius:10px;padding:16px 18px;overflow-x:auto;white-space:pre}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</helmet>
+
+<div class="wrap">
+
+<div style="padding:76px 0 4px">
+  <div style="font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.16em;color:#8A8A8A;margin-bottom:20px">MFARM CONSOLE · 07</div>
+  <h1 style="margin:0 0 14px;font:700 46px/1.05 'Bricolage Grotesque',sans-serif;letter-spacing:-.035em">Handover</h1>
+  <p style="margin:0;max-width:700px;font:400 15px/1.65 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">What to build, in what order, with what props, and every user-facing string rewritten. Read this alongside documents 01 to 06.</p>
+</div>
+
+<div class="sec" style="border-top:none">
+  <h2 class="h2">The package</h2>
+  <div class="hdr" style="grid-template-columns:230px 1fr"><div>Document</div><div>What a developer takes from it</div></div>
+  <div class="row" style="grid-template-columns:230px 1fr"><div class="tk">01 Foundations</div><div class="note">The token file. Colour in both themes on your existing names, type scale, density, radius, elevation, icon mapping, motion durations and curves.</div></div>
+  <div class="row" style="grid-template-columns:230px 1fr"><div class="tk">02 Frame System</div><div class="note">The device component. Geometry ratios per profile, the <span class="tk">frameFor()</span> resolver, four panel states, the six-element DOM and its performance rules.</div></div>
+  <div class="row" style="grid-template-columns:230px 1fr"><div class="tk">03 Capacity and IA</div><div class="note">The routing decision, both directions built, and the substitution flow.</div></div>
+  <div class="row" style="grid-template-columns:230px 1fr"><div class="tk">04 Session and Bring-up</div><div class="note">The motion spec keyed to the six events, and the cockpit in four states.</div></div>
+  <div class="row" style="grid-template-columns:230px 1fr"><div class="tk">05 Screens</div><div class="note">Sign-in, catalogue, device detail, apps, runs, health, organisation.</div></div>
+  <div class="row" style="grid-template-columns:230px 1fr"><div class="tk">06 Shell and Components</div><div class="note">Chrome, palette, dialogs, toasts, and the seven primitives with measurements.</div></div>
+  <div class="row" style="grid-template-columns:230px 1fr"><div class="tk">07 Handover</div><div class="note">This. Inventory, copy deck, build order, open decisions.</div></div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Component inventory</h2>
+  <p class="lede">Named so both codebases can consume the same contract. Props are given in the shape a React component would take; the vanilla console reads the same fields off its view model.</p>
+
+  <div class="hdr" style="grid-template-columns:180px 1fr 120px"><div>Component</div><div>Props · states</div><div>Status</div></div>
+
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">DeviceFrame</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ profileId, panelW, panelH, dpi, dpWidth, tier, state, size, sheen }</div>
+      <div class="note"><span class="tk">state</span>: off · waking · live · nosignal · ended. <span class="tk">size</span>: any rendered width; every dimension derives from it. <span class="tk">tier</span>: virtual · physical, and drives which chassis fill and rail set is used.</div>
+    </div>
+    <div><span class="new">NEW</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">DeviceStage</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ device, stream, controls, zoom, fullscreen }</div>
+      <div class="note">Owns the frame plus the ground shadow and the keyboard-target indicator. Must not unmount between bring-up and session — this is the continuity requirement.</div>
+    </div>
+    <div><span class="new">NEW</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">BringUpSequence</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ steps[], mode, telemetry }</div>
+      <div class="note"><span class="tk">mode</span>: normal · queued · degraded. Each step: <span class="tk">{ id, label, note, outcome, at }</span> where outcome is pending · waiting · done · failed · skipped. <span class="tk">waiting</span> is the state with no observable interior and is the only one that pulses.</div>
+    </div>
+    <div><span class="new">NEW</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">CapabilityMatrix</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ declared[], all[] }</div>
+      <div class="note">Renders every capability in <span class="tk">all</span>; those absent from <span class="tk">declared</span> are struck through. Absences are never filtered out — this is enforced by taking both lists rather than one.</div>
+    </div>
+    <div><span class="ok">EXISTS</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">StatusPill</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ tone, label, at }</div>
+      <div class="note"><span class="tk">at</span> is required, not optional. A pill without a timestamp does not render — that is how "colour never alone" becomes structural instead of a guideline.</div>
+    </div>
+    <div><span class="ok">EXISTS</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">RailControl</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ icon, label, requires, declared, onPress }</div>
+      <div class="note">If <span class="tk">requires</span> is not in <span class="tk">declared</span> the control renders dashed and inert with a tooltip naming the missing capability. It cannot be constructed in an enabled state without the capability — the constraint lives in the component.</div>
+    </div>
+    <div><span class="new">NEW</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">ConsequenceDialog</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ title, body, does[], doesNot[], safety, confirmLabel, requireReason }</div>
+      <div class="note">Both dialog patterns are this one component. <span class="tk">doesNot</span> and <span class="tk">safety</span> are what make it the pattern worth keeping.</div>
+    </div>
+    <div><span class="ok">EXISTS</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">StreamPanel</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ fps, fpsHistory, bitrate, rtt, path }</div>
+      <div class="note"><span class="tk">fpsHistory</span> is the small bar sparkline — last 8 samples. <span class="flag">CONFIRM</span> whether history is retained or must be accumulated client-side.</div>
+    </div>
+    <div><span class="new">NEW</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">SubstitutionNotice</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ asked, got, reason, onKeep, onRequeue }</div>
+      <div class="note">Shown at handover when the allocated device's geometry differs from the requested class. Blocks nothing, dismisses only by choosing.</div>
+    </div>
+    <div><span class="new">NEW</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">CommandPalette</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ groups[], query }</div>
+      <div class="note">Groups are <span class="tk">GO TO</span> and <span class="tk">DO</span>, never interleaved. Device results carry a <span class="tk">DeviceFrame</span> at 12px width and the free count.</div>
+    </div>
+    <div><span class="ok">EXISTS</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:180px 1fr 120px">
+    <div class="tk">FleetTable</div>
+    <div>
+      <div class="tk" style="margin-bottom:6px">{ devices[], lens, onAction }</div>
+      <div class="note"><span class="tk">lens</span>: capacity · catalogue · live · waiting. One data source, four presentations. Only needed if direction B is chosen.</div>
+    </div>
+    <div><span class="new">NEW · IF B</span></div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Copy deck</h2>
+  <p class="lede">Every user-facing string that changes. The rule underneath all of it: a device is addressed by what it is, and internal vocabulary — tier, cuttlefish, fence, host id, region code — belongs in a details panel or a copyable field, never in a button or a heading.</p>
+
+  <div class="hdr" style="grid-template-columns:150px 1fr 1fr"><div>Where</div><div>Today</div><div>Rewritten</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">device card · action</div><div class="was">Start a session on tier cuttlefish</div><div class="now">Start MFARM X1 Pro</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">device card · note</div><div class="was">The allocator picks a ready device on this tier; it cannot be pinned to one.</div><div class="now">The farm picks a free X1 Pro. If none is free when you press this, you will be queued.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">capacity line</div><div class="was">3 free on tier cuttlefish</div><div class="now">3 of 4 MFARM X1 Pro free</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">top bar</div><div class="was">4/4 ready · Queue 0 · Holding fake-2</div><div class="now">4 of 5 ready · nobody waiting · Holding MFARM X1 Pro</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">unprofiled device</div><div class="was">cuttlefish</div><div class="now">Unprofiled device <span class="note" style="display:block">named by what we know, not by the stack</span></div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">bring-up · step 1</div><div class="was">Acquiring a device from the farm</div><div class="now">Acquiring a device from the farm <span class="note" style="display:block">unchanged — it is already right</span></div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">bring-up · step 4</div><div class="was">Connecting the live view</div><div class="now">Connecting the live view <span class="note" style="display:block">on failure: "This device declares no screen-stream. That is a property of the device, not a fault."</span></div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">bring-up · footer</div><div class="was">Every line above is a real state change reported by the control plane or the device — nothing here is on a timer.</div><div class="now">Keep verbatim. It is the single best sentence in the product and it earns the whole sequence.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">queued</div><div class="was">Queue 4</div><div class="now">Second in line. The earlier lease ends in about 12 minutes, and the farm hands over the moment it does — this page moves on by itself.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">substitution</div><div class="was">—</div><div class="now">You asked for an X1 Pro. You have an unprofiled device. Its screen is 720 × 1280, not 1080 × 2340. Everything works, but any layout you are testing will render differently.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">cockpit · tools</div><div class="was">Every verb is queued and carried down on the worker's next heartbeat — usually within 10 seconds.</div><div class="now">Each verb is queued and carried down on the worker's next heartbeat, usually within 10 seconds. You will see the outcome, not a progress bar.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">no live view</div><div class="was">(black panel)</div><div class="now">No live view. This device declares no screen-stream. Input, logcat, install and WebDriver still work.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">quarantine · action</div><div class="was">Release quarantine</div><div class="now">Authorise one recovery attempt</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">quarantine · safety</div><div class="was">Only a passing health check returns the device to the pool.</div><div class="now">Keep verbatim, and keep it green and immediately above the button.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">API loss</div><div class="was">Connection lost</div><div class="now">Lost the connection to the farm. Showing what we last knew, from 40 seconds ago. Retrying.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">runs · empty</div><div class="was">No test results</div><div class="now">Your suite has not reported any outcomes. The farm does not run your tests and cannot judge them.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">health · blind spot</div><div class="was">(absent)</div><div class="now">Worker heartbeat and host state are not readable from here. A dead host shows up indirectly, as devices leaving READY without anybody quarantining them.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">team · add</div><div class="was">Invite a member</div><div class="now">Add someone. There is no email on this farm, so you set the password and pass it on yourself.</div></div>
+  <div class="row" style="grid-template-columns:150px 1fr 1fr"><div class="tk">session ended</div><div class="was">Session ended</div><div class="now">Released by you at 00:24, after 16 minutes. The device was reset from its clean snapshot and is back in the pool.</div></div>
+
+  <div class="card" style="margin-top:26px">
+    <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px">Where technical terms are still allowed</div>
+    <div class="note" style="max-width:780px">Session id, WebDriver URL, data-plane URL, package name, ABI, geometry, capability names, log lines, host id, tier. All of them presented as machine text: mono, selectable, in a copy field or a details table. The register itself tells the reader this came from the machine rather than from us — which is why they can stay.</div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">Build order</h2>
+  <p class="lede">Sequenced so each stage is shippable on its own and nothing waits on an undecided question.</p>
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">1</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">Tokens and type</div><div class="note">Land 01 as an evolution of <span class="tk">design-tokens.css</span>. Self-host the three families. Add the radius, elevation and motion scales. Nothing visual changes yet except type.</div></div>
+      <div class="note">no blockers</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">2</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">Icons and primitives</div><div class="note">Lucide sprite in, twenty Unicode glyphs out. Then the seven primitives from 06. This is the change that stops the console looking unfinished, and it touches every screen at once.</div></div>
+      <div class="note">no blockers</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">3</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">DeviceFrame and DeviceStage</div><div class="note">The headline job. Build the resolver against the profile table and render it everywhere a device appears — cockpit, catalogue, table rows, palette results. One component, five sizes.</div></div>
+      <div class="note">needs profile table fields</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">4</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">The copy pass</div><div class="note">Every string in the deck above. Cheap, high-visibility, and independent of everything else. Worth shipping before the layout work rather than after.</div></div>
+      <div class="note">no blockers</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">5</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">The cockpit</div><div class="note">Four states from 04, the new StreamPanel, and the capability-driven rail. The stage is already built by stage 3, so this is layout and panels.</div></div>
+      <div class="note">stage 3</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">6</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">Bring-up choreography</div><div class="note">The motion spec. Do it after the cockpit so the frame can transition into a layout that already exists. Each <span class="flag">CONFIRM</span> beat ships with its fallback first and its progressive version once the endpoint is verified.</div></div>
+      <div class="note">stage 5 · telemetry</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">7</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">Fleet, catalogue, substitution</div><div class="note">The IA change, once you have chosen. Old routes become redirects and the <span class="tk">G</span> shortcuts become lens shortcuts, so nothing a current user knows stops working.</div></div>
+      <div class="note">IA decision</div>
+    </div>
+    <div class="card" style="display:grid;grid-template-columns:38px 1fr 150px;gap:18px;align-items:start;padding:18px 20px">
+      <div style="font:600 17px/1 'Bricolage Grotesque',sans-serif;color:#A290DA">8</div>
+      <div><div style="font:500 13px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">Light theme</div><div class="note">Last, because it needs a pass to remove hardcoded hexes from every component. The values are all specified; the work is mechanical.</div></div>
+      <div class="note">stages 1–7</div>
+    </div>
+  </div>
+</div>
+
+<div class="sec" style="padding-bottom:96px">
+  <h2 class="h2">Open decisions</h2>
+  <p class="lede">Nothing in the package is blocked on these, but each one changes something specific.</p>
+  <div class="hdr" style="grid-template-columns:200px 1fr 1fr"><div>Decision</div><div>Assumed</div><div>What changes if not</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Which console is production</div><div class="note">Both specced. Tokens as CSS custom properties, components as a contract either can read.</div><div class="note">If it is the React console, the inventory becomes the build list directly and the vanilla console gets redirects.</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Allocator pinning</div><div class="note">Class-only, permanently.</div><div class="note">If pinning is possible the picker promises a specific unit, <span class="tk">SubstitutionNotice</span> is not needed, and the catalogue can list individual devices.</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Snapshot-restore progress</div><div class="note">Exists. Step 2's wake glow tracks it.</div><div class="note">Glow pulses on the 2.2s loop instead. No layout change.</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Install byte progress</div><div class="note">Exists. The build tile's travel maps to bytes.</div><div class="note">Tile waits outside the frame and lands on confirmation. The queued panel in 04 becomes the whole design.</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Queue position and ETA</div><div class="note">Exists. "Second in line, about 12 minutes."</div><div class="note">Copy drops to "the farm hands over when a lease ends". Position without ETA still works; neither would leave only "you are in line".</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Stream negotiation sub-states</div><div class="note">Exists. Shown as machine text under step 4.</div><div class="note">Step 4 shows only its outcome. Nothing else moves.</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Catalogue prose</div><div class="note">A description column on the profile table.</div><div class="note">One-column migration, or the catalogue shows specs without prose — weaker as a sales surface, still useful for choosing a screen size.</div></div>
+  <div class="row" style="grid-template-columns:200px 1fr 1fr"><div class="tk">Glass sheen over real pixels</div><div class="note">On at <span class="tk">.07</span>, with a settings toggle to zero.</div><div class="note">Off by default costs most of the glass read. The toggle matters either way for visual-comparison work.</div></div>
+
+  <div class="card" style="margin-top:30px;border-color:rgba(224,80,95,.24)">
+    <div style="font:600 13.5px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px;color:#F0A0A8">One thing that is not open</div>
+    <div class="note" style="max-width:800px">The frames stay MFARM's. No other manufacturer's badge, trade dress, camera-island layout or model name, on any tier — that is ADR-0017 and it is also what separates a premium product from a counterfeit one on a commercial surface. The physical <span class="tk">SM-S918B</span> is the sole exception and only because it genuinely is that device: drawing its real proportions is accurate representation, and it is labelled with its own model number rather than an MFARM tier.</div>
+  </div>
+</div>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:1600}}"></script>
+</body>
+</html>

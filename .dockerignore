@@ -8,6 +8,12 @@ node_modules
 deploy/.env
 deploy/backups
 
+# Build output of the DELETED React console. Nothing produces this any more, but a developer whose
+# tree predates the removal still has it on disk — and with the console build stage gone, `COPY
+# apps/api` would bake 264 KB of unreachable JavaScript into their image with nothing saying so. It
+# was gitignored, which kept it out of commits and did nothing about the build context.
+apps/api/public/app
+
 # Local agent/vector state — machine-specific, regenerated, never a build input.
 .claude-flow
 .swarm

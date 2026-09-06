@@ -22,10 +22,6 @@ deploy/.state/
 # Session scratch: worktrees, checkpoints, local agent config. Never part of a release.
 .claude/
 
-# Built by `npm run build --workspace apps/console`, and by the console stage in
-# apps/api/Dockerfile. Never committed: a checked-in build artifact goes stale silently the first
-# time somebody edits a component and does not rebuild.
-apps/api/public/app/
 
 # macOS writes one of these into any directory somebody opens in Finder. It is not the project's,
 # it changes on its own, and left untracked it sits in every `git status` until someone adds it by

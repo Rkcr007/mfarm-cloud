@@ -1,13 +1,29 @@
 ---
 id: ADR-0022
 title: The React console shares live.js rather than reimplementing it
-status: Accepted
+status: Obsolete
 date: 2026-09-02
 authors:
   - Claude Code
 tags: [console, live-view, webrtc, react, duplication]
 extends: [ADR-0007]
 ---
+
+## Obsolete on 2026-09-06 — the console this was about is deleted
+
+The decision was right and it is simply no longer load-bearing. The React console at `/app` never
+reached parity: it was two screens against the console at `/` and its ten, and while both were
+served the new sign-in screen landed on the two-screen preview instead of on the product. `/app` is
+retired and `apps/console/` is deleted.
+
+**Nothing about `live.js` changed.** It is still one file, still unbuilt, still loaded by the console
+at `/`, and still the only implementation of Cuttlefish signalling in the repo — which is the
+property this ADR was defending. What is gone is the second consumer that made "shared, not ported"
+a decision anybody had to make.
+
+Read it for the reasoning, not for the shape of the tree: the `apps/console/src` paths below no
+longer exist, and the Dockerfile no longer has the console stage whose narrowed build context is
+described here.
 
 ## Context
 

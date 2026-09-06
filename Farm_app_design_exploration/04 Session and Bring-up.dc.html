@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:#08080A;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif;color:#F1F1F1;-webkit-font-smoothing:antialiased}
+a{color:#A290DA;text-decoration:none}a:hover{color:#C4B6EC}
+.wrap{max-width:1240px;margin:0 auto;padding:0 40px}
+.sec{padding:60px 0;border-top:1px solid #16161A}
+.h2{margin:0 0 6px;font:600 26px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em}
+.lede{margin:0 0 34px;max-width:720px;font:400 13.5px/1.7 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty}
+.note{font:400 11.5px/1.55 'Instrument Sans',sans-serif;color:#787878;text-wrap:pretty}
+.card{background:#0D0D0F;border:1px solid #1F1F22;border-radius:12px;padding:24px 26px}
+.frame{border:1px solid #1F1F22;border-radius:12px;overflow:hidden;background:#08080A}
+.cap{display:flex;align-items:baseline;gap:10px;margin:0 0 13px}
+.capid{font:500 10.5px/1 'JetBrains Mono',monospace;padding:4px 8px;background:#755EB8;color:#fff;border-radius:5px;letter-spacing:.05em}
+.capt{font:600 14px/1.2 'Bricolage Grotesque',sans-serif}
+.lbl{font:500 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.12em;color:#8A8A8A}
+.hdr{display:grid;gap:14px;padding:0 0 10px;font:500 10px/1.3 'JetBrains Mono',monospace;letter-spacing:.1em;color:#8A8A8A;text-transform:uppercase;border-bottom:1px solid #1F1F22}
+.row{display:grid;gap:14px;align-items:start;padding:12px 0;border-top:1px solid #131316}
+.tk{font:400 10.5px/1.5 'JetBrains Mono',monospace;color:#C4C4C4;overflow-wrap:anywhere}
+.flag{display:inline-block;padding:3px 7px;border-radius:5px;background:rgba(232,163,14,.07);border:1px solid rgba(232,163,14,.26);font:500 9px/1.3 'JetBrains Mono',monospace;color:#E8A30E;letter-spacing:.05em}
+.btn{padding:8px 12px;border-radius:8px;background:#131315;border:1px solid #2B2B2E;font:500 11px/1 'Instrument Sans',sans-serif;color:#C4C4C4;text-align:center}
+.rail{width:34px;height:34px;border-radius:9px;background:#131315;border:1px solid #242427;display:flex;align-items:center;justify-content:center;font:400 12px/1 'JetBrains Mono',monospace;color:#C4C4C4}
+.raildim{width:34px;height:34px;border-radius:9px;background:transparent;border:1px dashed #242427;display:flex;align-items:center;justify-content:center;font:400 12px/1 'JetBrains Mono',monospace;color:#3A3A3A}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+@keyframes mfPulse{0%,100%{opacity:.35}50%{opacity:1}}
+</style>
+</helmet>
+
+<div class="wrap">
+
+<div style="padding:76px 0 4px">
+  <div style="font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.16em;color:#8A8A8A;margin-bottom:20px">MFARM CONSOLE · 04</div>
+  <h1 style="margin:0 0 14px;font:700 46px/1.05 'Bricolage Grotesque',sans-serif;letter-spacing:-.035em">Bring-up and the session</h1>
+  <p style="margin:0;max-width:700px;font:400 15px/1.65 'Instrument Sans',sans-serif;color:#8A8A8A;text-wrap:pretty">The two screens the product is judged on. A device arriving, and a device in your hands. The frame that arrives is the frame you end up holding — it transitions into the session layout rather than reloading there.</p>
+</div>
+
+<div class="sec" style="border-top:none">
+  <h2 class="h2">The choreography</h2>
+  <p class="lede">Six real events, each with its own beat. The device assembles as the farm brings it up. Nothing animates ahead of confirmation, and the two steps whose interiors we cannot see behave differently from the four we can.</p>
+
+  <div class="hdr" style="grid-template-columns:34px 1.3fr 1.5fr 1fr 96px"><div>#</div><div>Event</div><div>What moves</div><div>Timing</div><div>Source</div></div>
+  <div class="row" style="grid-template-columns:34px 1.3fr 1.5fr 1fr 96px">
+    <div class="tk" style="color:#A290DA">01</div>
+    <div><div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1">Acquiring a device</div><div class="note" style="margin-top:3px">the allocator claims one</div></div>
+    <div class="note">Chassis resolves out of blur — <span class="tk">opacity .06→1</span>, <span class="tk">scale .955→1</span>, <span class="tk">blur 9px→0</span>. Screen stays off. Shadow flat.</div>
+    <div class="tk">700ms<br><span style="color:#5A5A5A">--ease-emphatic</span></div>
+    <div class="note" style="color:#7FD873">confirmed</div>
+  </div>
+  <div class="row" style="grid-template-columns:34px 1.3fr 1.5fr 1fr 96px">
+    <div class="tk" style="color:#A290DA">02</div>
+    <div><div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1">Device ready</div><div class="note" style="margin-top:3px">clean snapshot restored</div></div>
+    <div class="note">Screen wakes: a centred cool glow ramps up behind the glass. If snapshot-restore progress exists, the glow's radius tracks it instead of pulsing.</div>
+    <div class="tk">700ms<br><span style="color:#5A5A5A">--ease-out</span></div>
+    <div class="note"><span class="flag">CONFIRM</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:34px 1.3fr 1.5fr 1fr 96px">
+    <div class="tk" style="color:#A290DA">03</div>
+    <div><div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1">Attaching</div><div class="note" style="margin-top:3px">data-plane socket opens</div></div>
+    <div class="note">Depth lands. <span class="tk">--e-device-flat → --e-device</span> and the contact ellipse fades in. This is the beat where the device becomes a physical object.</div>
+    <div class="tk">900ms<br><span style="color:#5A5A5A">--ease-out</span></div>
+    <div class="note" style="color:#7FD873">confirmed</div>
+  </div>
+  <div class="row" style="grid-template-columns:34px 1.3fr 1.5fr 1fr 96px">
+    <div class="tk" style="color:#A290DA">04</div>
+    <div><div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1">Live view</div><div class="note" style="margin-top:3px">stream negotiates</div></div>
+    <div class="note">Real pixels cross-fade up over the wake glow; the glass sheen fades in with them. Sub-states (ICE, codec) read as a line of machine text under the step, not as motion.</div>
+    <div class="tk">800ms<br><span style="color:#5A5A5A">--ease-out</span></div>
+    <div class="note"><span class="flag">CONFIRM</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:34px 1.3fr 1.5fr 1fr 96px">
+    <div class="tk" style="color:#E8A30E">05</div>
+    <div><div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1">Installing the build</div><div class="note" style="margin-top:3px">queued, then confirmed</div></div>
+    <div class="note">The build's tile travels from above the frame down into the screen and lands. <span style="color:#E8A30E">While queued the step breathes amber</span> and the tile waits outside the frame — it does not enter until the worker confirms. With byte progress, the tile's travel maps to bytes.</div>
+    <div class="tk">950ms travel<br><span style="color:#5A5A5A">--ease-emphatic</span></div>
+    <div class="note"><span class="flag">CONFIRM</span></div>
+  </div>
+  <div class="row" style="grid-template-columns:34px 1.3fr 1.5fr 1fr 96px">
+    <div class="tk" style="color:#E8A30E">06</div>
+    <div><div style="font:500 12.5px/1.35 'Instrument Sans',sans-serif;color:#F1F1F1">Opening the package</div><div class="note" style="margin-top:3px">launched on the device</div></div>
+    <div class="note">Nothing is drawn — the app appearing <span style="color:#C4C4C4">is</span> the animation, and it arrives in the framebuffer on its own. Then the whole composition settles into the session layout.</div>
+    <div class="tk">900ms settle<br><span style="color:#5A5A5A">--ease-out</span></div>
+    <div class="note" style="color:#7FD873">confirmed</div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:30px">
+    <div class="card" style="border-color:rgba(232,163,14,.24);background:rgba(232,163,14,.04)">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px;color:#E8A30E">Steps 5 and 6 are different, and look different</div>
+      <div class="note">The worker reports an outcome, never a start, and its heartbeat is up to ten seconds away. There is nothing to fill, so these beats <span style="color:#C4C4C4">breathe</span> — the amber mark pulses on the 2.2s system loop and the note says exactly what is being waited on. A filling bar here would be the one lie that discredits the other five.</div>
+    </div>
+    <div class="card">
+      <div style="font:600 13px/1.3 'Bricolage Grotesque',sans-serif;margin-bottom:10px">Degradation, if a telemetry source is not there</div>
+      <div class="note">Each <span class="flag">CONFIRM</span> beat has a fallback that is already the design's resting state: no restore progress means the wake glow pulses instead of tracking; no byte progress means the tile waits outside the frame and lands on confirmation; no negotiation sub-states means the step shows only its outcome. Nothing breaks, and nothing invents.</div>
+    </div>
+  </div>
+  <p class="note" style="margin-top:20px;max-width:760px">The one continuity rule: the stage element is never unmounted between bring-up and session. The frame animates from its bring-up position and scale into its session position. If it reloads, the illusion that you watched <span style="color:#C4C4C4">this</span> device arrive is gone, and with it most of the value of the sequence.</p>
+</div>
+
+<div class="sec">
+  <div class="cap"><span class="capid">S1</span><span class="capt">Live and streaming</span></div>
+  <p class="lede">The device is the visual focus and everything else is a rail around it. Secondary panels are quiet by construction: hairline, no fill, label in mono, values right-aligned.</p>
+
+  <div class="frame">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:0 18px;height:46px;background:#050506;border-bottom:1px solid #191919">
+      <div style="display:flex;align-items:center;gap:16px">
+        <div style="display:flex;align-items:center;gap:9px"><div style="width:20px;height:20px;border-radius:6px;background:linear-gradient(150deg,#8A74D6,#5A47A0);display:flex;align-items:center;justify-content:center;font:600 10px/1 'Bricolage Grotesque',sans-serif">M</div><span style="font:600 11px/1 'JetBrains Mono',monospace;letter-spacing:.14em;color:#D4D4D4">MFARM</span></div>
+        <div style="width:1px;height:16px;background:#242427"></div>
+        <div style="display:flex;align-items:center;gap:7px"><span style="width:5px;height:5px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span><span style="font:500 11px/1 'Instrument Sans',sans-serif;color:#D4D4D4">Holding MFARM X1 Pro</span></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:7px;background:#0D0D0F;border:1px solid #242427;width:210px"><span style="font:400 11px/1 'Instrument Sans',sans-serif;color:#5A5A5A;flex:1">Search or run a command</span><span style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#6A6A6A;padding:2px 5px;background:#191919;border-radius:4px">⌘K</span></div>
+        <div style="display:flex;align-items:center;gap:7px"><div style="width:20px;height:20px;border-radius:50%;background:#2B2B2E;display:flex;align-items:center;justify-content:center;font:600 9px/1 'Instrument Sans',sans-serif;color:#C4C4C4">A</div><span style="font:400 11px/1 'JetBrains Mono',monospace;color:#8A8A8A">admin@mfarm.local</span></div>
+      </div>
+    </div>
+
+    <div style="padding:24px 28px 28px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px">
+        <div>
+          <div style="font:400 9.5px/1 'JetBrains Mono',monospace;letter-spacing:.12em;color:#5A5A5A;margin-bottom:10px">FLEET / SESSION</div>
+          <h2 style="margin:0 0 8px;font:600 25px/1.1 'Bricolage Grotesque',sans-serif;letter-spacing:-.025em">MFARM X1 Pro</h2>
+          <div style="display:flex;align-items:center;gap:9px">
+            <span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#8A8A8A">3b97a8de</span>
+            <span style="color:#2B2B2E">·</span>
+            <span style="font:400 11.5px/1 'Instrument Sans',sans-serif;color:#8A8A8A">Android 17 · 1080 × 2340</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:9px">
+          <div style="display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;background:rgba(111,203,99,.10);border:1px solid rgba(111,203,99,.28)"><span style="width:5px;height:5px;border-radius:50%;background:#6FCB63;animation:mfPulse 2.2s ease-in-out infinite"></span><span style="font:500 10px/1 'JetBrains Mono',monospace;color:#7FD873;letter-spacing:.05em">LIVE · 50 FPS</span></div>
+          <div class="btn" style="border-color:#4A2436;color:#EE7C88">Release <span style="color:#7A3A50;font-family:'JetBrains Mono',monospace;font-size:9.5px">R</span></div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22;margin-bottom:18px">
+        <span style="font:500 11px/1 'Instrument Sans',sans-serif;color:#7FD873">Lease active</span>
+        <div style="flex:1;height:3px;border-radius:2px;background:#1A1A1C;overflow:hidden"><div style="width:99%;height:3px;background:linear-gradient(90deg,#5A47A0,#8A74D6)"></div></div>
+        <span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#C4C4C4;font-variant-numeric:tabular-nums">59:30 remaining</span>
+        <div style="padding:4px 9px;border-radius:6px;background:#131315;border:1px solid #2B2B2E;font:500 10px/1.3 'Instrument Sans',sans-serif;color:#8A8A8A">Extend</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:52px 1fr 292px;gap:16px;align-items:start">
+
+        <div style="display:flex;flex-direction:column;gap:14px;padding:11px 9px;border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22">
+          <div style="display:flex;flex-direction:column;gap:5px"><div class="rail">⏻</div><div class="rail">◂)</div><div class="rail">◃)</div></div>
+          <div style="height:1px;background:#1A1A1C"></div>
+          <div style="display:flex;flex-direction:column;gap:5px"><div class="rail">↺</div><div class="rail">↻</div></div>
+          <div style="height:1px;background:#1A1A1C"></div>
+          <div style="display:flex;flex-direction:column;gap:5px"><div class="rail">‹</div><div class="rail">○</div><div class="rail">□</div></div>
+          <div style="height:1px;background:#1A1A1C"></div>
+          <div style="display:flex;flex-direction:column;gap:5px"><div class="rail">▤</div><div class="rail">⌗</div></div>
+          <div style="height:1px;background:#1A1A1C"></div>
+          <div style="display:flex;flex-direction:column;gap:5px"><div class="rail">＋</div><div class="rail">－</div><div class="rail">⛶</div></div>
+        </div>
+
+        <div style="border-radius:12px;background:radial-gradient(120% 70% at 50% 0%,#16130F 0%,#0B0A09 62%,#08080A 100%);border:1px solid #1A1A1C;padding:30px 0 22px;display:flex;flex-direction:column;align-items:center">
+          <div style="position:relative;padding:6px;border-radius:39px;background:linear-gradient(160deg,#6B6058 0%,#332E2A 12%,#1C1917 38%,#161311 64%,#3B342E 90%,#6E635A 100%);box-shadow:0 1px 0 rgba(255,240,225,.2) inset,0 2px 3px rgba(0,0,0,.7),0 20px 36px -8px rgba(0,0,0,.78),0 50px 90px -22px rgba(0,0,0,.9)">
+            <div style="position:absolute;inset:2px;border-radius:37px;box-shadow:0 0 0 1px rgba(255,235,215,.1) inset;pointer-events:none"></div>
+            <div style="position:absolute;top:82px;right:-1px;width:3px;height:32px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+            <div style="position:absolute;top:124px;right:-1px;width:3px;height:58px;border-radius:3px;background:linear-gradient(90deg,#7A6E64,#332E29)"></div>
+            <div style="position:relative;width:196px;border-radius:33px;overflow:hidden;background:#000">
+              <img src="ref/panel-x1pro.png" alt="live device panel" style="display:block;width:196px;height:425px;object-fit:cover;object-position:top">
+              <div style="position:absolute;top:6px;left:50%;transform:translateX(-50%);width:7.3px;height:7.3px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.14)"></div>
+              <div style="position:absolute;inset:0;background:linear-gradient(202deg,rgba(255,246,235,.07),rgba(255,255,255,0) 50%);mix-blend-mode:screen;pointer-events:none"></div>
+            </div>
+          </div>
+          <div style="width:188px;height:24px;margin-top:-5px;border-radius:50%;background:radial-gradient(50% 100% at 50% 0%,rgba(0,0,0,.7),rgba(0,0,0,0) 74%);filter:blur(6px)"></div>
+          <div style="display:flex;align-items:center;gap:7px;margin-top:14px;padding:5px 10px;border-radius:999px;background:#0D0D0F;border:1px solid #242427">
+            <span style="width:4.5px;height:4.5px;border-radius:50%;background:#6FCB63"></span>
+            <span style="font:400 10px/1 'JetBrains Mono',monospace;color:#8A8A8A">keyboard → device</span>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div style="border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22;padding:15px 16px">
+            <div class="lbl" style="margin-bottom:13px">THE BUILD</div>
+            <div style="padding:10px 12px;border-radius:8px;background:#08080A;border:1px solid #242427;margin-bottom:9px">
+              <div style="font:500 12px/1.3 'Instrument Sans',sans-serif;color:#F1F1F1">Alaan staging</div>
+              <div style="font:400 10px/1.5 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">99.99.99 · com.alaanpay.spender.staging</div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">
+              <div style="padding:8px;border-radius:8px;background:#755EB8;text-align:center;font:500 11px/1 'Instrument Sans',sans-serif;color:#fff">Install</div>
+              <div class="btn">Launch</div>
+              <div class="btn">Uninstall</div>
+              <div class="btn">Open apps</div>
+            </div>
+            <div class="note" style="margin-top:10px">Each verb is queued and carried down on the worker's next heartbeat, usually within 10 seconds. You will see the outcome, not a progress bar.</div>
+          </div>
+
+          <div style="border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22;padding:15px 16px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px"><div class="lbl">STREAM</div><span style="font:500 9px/1.3 'JetBrains Mono',monospace;color:#7FD873;padding:2px 6px;border-radius:999px;background:rgba(111,203,99,.1);border:1px solid rgba(111,203,99,.26)">HEALTHY</span></div>
+            <div style="display:flex;align-items:flex-end;gap:14px;margin-bottom:14px">
+              <div><div style="font:600 26px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">50</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:5px">fps</div></div>
+              <div style="flex:1;display:flex;align-items:flex-end;gap:2px;height:30px">
+                <div style="flex:1;height:64%;background:#2E2A38;border-radius:1px"></div><div style="flex:1;height:78%;background:#2E2A38;border-radius:1px"></div><div style="flex:1;height:70%;background:#2E2A38;border-radius:1px"></div><div style="flex:1;height:88%;background:#3A3448;border-radius:1px"></div><div style="flex:1;height:82%;background:#3A3448;border-radius:1px"></div><div style="flex:1;height:94%;background:#4A4060;border-radius:1px"></div><div style="flex:1;height:86%;background:#4A4060;border-radius:1px"></div><div style="flex:1;height:100%;background:#755EB8;border-radius:1px"></div>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:0">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid #151517"><span style="font:400 11px/1 'Instrument Sans',sans-serif;color:#8A8A8A">Bitrate</span><span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#C4C4C4;font-variant-numeric:tabular-nums">2475 kbit/s</span></div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid #151517"><span style="font:400 11px/1 'Instrument Sans',sans-serif;color:#8A8A8A">Round trip</span><span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#C4C4C4;font-variant-numeric:tabular-nums">34 ms</span></div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-top:1px solid #151517"><span style="font:400 11px/1 'Instrument Sans',sans-serif;color:#8A8A8A">Media path</span><span style="display:flex;align-items:center;gap:5px"><span style="width:4.5px;height:4.5px;border-radius:50%;background:#6FCB63"></span><span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#C4C4C4">direct</span></span></div>
+            </div>
+            <div class="note" style="margin-top:11px">Rendering is software, so frame rate tracks how busy the host is. <span style="color:#C4C4C4">direct</span> means media is peer-to-peer; <span style="color:#C4C4C4">relayed (TURN)</span> means it goes through the relay and costs egress.</div>
+          </div>
+
+          <div style="border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22;padding:15px 16px">
+            <div class="lbl" style="margin-bottom:13px">BIND A SUITE</div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div><div style="font:400 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:5px">WEBDRIVER</div><div style="display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:7px;background:#08080A;border:1px solid #242427"><span style="flex:1;font:400 10px/1 'JetBrains Mono',monospace;color:#C4C4C4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">https://farm.mfarm.dev/wd/hub</span><span style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#8A8A8A">copy</span></div></div>
+              <div><div style="font:400 9px/1 'JetBrains Mono',monospace;letter-spacing:.1em;color:#5A5A5A;margin-bottom:5px">SESSION ID</div><div style="display:flex;align-items:center;gap:7px;padding:7px 9px;border-radius:7px;background:#08080A;border:1px solid #242427"><span style="flex:1;font:400 10px/1 'JetBrains Mono',monospace;color:#C4C4C4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">3b97a8de-6304-44a3-8998-500a6295</span><span style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#8A8A8A">copy</span></div></div>
+            </div>
+            <div class="note" style="margin-top:10px">Bind to this exact device with <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#C4C4C4">mfarm:bindSessionId</span>. The data-plane token lasts 120s — reopen this page to mint a fresh one.</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 292px;gap:16px;margin-top:16px;align-items:start">
+        <div style="border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:11px;padding:12px 15px;border-bottom:1px solid #1F1F22">
+            <div class="lbl">LOGCAT</div>
+            <div style="flex:1;display:flex;align-items:center;gap:8px;padding:5px 9px;border-radius:7px;background:#08080A;border:1px solid #242427;max-width:230px"><span style="font:400 10.5px/1 'Instrument Sans',sans-serif;color:#5A5A5A">Filter</span></div>
+            <div style="display:flex;gap:3px"><span style="padding:3px 7px;border-radius:5px;background:rgba(117,94,184,.18);border:1px solid rgba(117,94,184,.34);font:500 9px/1.3 'JetBrains Mono',monospace;color:#C4B6EC">ALL</span><span style="padding:3px 7px;border-radius:5px;background:#131315;border:1px solid #242427;font:400 9px/1.3 'JetBrains Mono',monospace;color:#8A8A8A">E</span><span style="padding:3px 7px;border-radius:5px;background:#131315;border:1px solid #242427;font:400 9px/1.3 'JetBrains Mono',monospace;color:#8A8A8A">W</span><span style="padding:3px 7px;border-radius:5px;background:#131315;border:1px solid #242427;font:400 9px/1.3 'JetBrains Mono',monospace;color:#8A8A8A">I</span><span style="padding:3px 7px;border-radius:5px;background:#131315;border:1px solid #242427;font:400 9px/1.3 'JetBrains Mono',monospace;color:#8A8A8A">D</span></div>
+            <div style="flex:1"></div>
+            <span style="font:400 10px/1 'JetBrains Mono',monospace;color:#5A5A5A">357 / 357 lines</span>
+            <div style="padding:4px 9px;border-radius:6px;background:#131315;border:1px solid #2B2B2E;font:500 10px/1.3 'Instrument Sans',sans-serif;color:#8A8A8A">Pause</div>
+          </div>
+          <div style="padding:12px 15px;background:#050506;font:400 10.5px/1.85 'JetBrains Mono',monospace;font-variant-numeric:tabular-nums">
+            <div style="color:#5A5A5A">09-04 00:09:00.340 <span style="color:#7FA0D8">D</span> <span style="color:#8A8A8A">AiSealSystemService</span> <span style="color:#A8A8A8">Connecting to AiSeal internal service</span></div>
+            <div style="color:#5A5A5A">09-04 00:09:00.965 <span style="color:#6FCB63">I</span> <span style="color:#8A8A8A">WifiService</span> <span style="color:#A8A8A8">getConnectionInfo uid=10061</span></div>
+            <div style="color:#5A5A5A">09-04 00:09:01.346 <span style="color:#7FA0D8">D</span> <span style="color:#8A8A8A">AiSealSystemService</span> <span style="color:#A8A8A8">AiSeal internal service not yet available; trying again</span></div>
+            <div style="color:#5A5A5A">09-04 00:09:01.608 <span style="color:#6FCB63">I</span> <span style="color:#8A8A8A">adbd</span> <span style="color:#A8A8A8">service requested 'shell,raw:cut -d. -f1 /proc/uptime'</span></div>
+            <div style="color:#5A5A5A">09-04 00:09:02.351 <span style="color:#7FA0D8">D</span> <span style="color:#8A8A8A">AiSealSystemService</span> <span style="color:#A8A8A8">Connecting to AiSeal internal service</span></div>
+          </div>
+          <div class="note" style="padding:11px 15px;border-top:1px solid #1F1F22">Streamed straight off the device over the same connection as the screen. This dock stores nothing — the whole log is kept as an artifact when the device is released.</div>
+        </div>
+
+        <div style="border-radius:11px;background:#0D0D0F;border:1px solid #1F1F22;padding:15px 16px">
+          <div class="lbl" style="margin-bottom:14px">ACTIONS ON THIS SESSION</div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;gap:9px"><span style="flex:none;width:5px;height:5px;border-radius:50%;background:#6FCB63;margin-top:5px"></span><div><div style="font:400 11px/1.45 'Instrument Sans',sans-serif;color:#C4C4C4">Installed <span style="font-family:'JetBrains Mono',monospace;font-size:10px">Alaan staging 99.99.99</span></div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">succeeded · 00:14</div></div></div>
+            <div style="display:flex;gap:9px"><span style="flex:none;width:5px;height:5px;border-radius:50%;background:#6FCB63;margin-top:5px"></span><div><div style="font:400 11px/1.45 'Instrument Sans',sans-serif;color:#C4C4C4">Opened <span style="font-family:'JetBrains Mono',monospace;font-size:10px">com.alaanpay.spender.staging</span></div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">succeeded · 00:16</div></div></div>
+          </div>
+          <div style="height:1px;background:#1A1A1C;margin:15px 0"></div>
+          <div class="lbl" style="margin-bottom:11px">EVIDENCE</div>
+          <div class="note">The log and a final screenshot are collected when this device is released and reset.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <h2 class="h2">The other three states</h2>
+  <p class="lede">Same layout, same frame, no reload between them.</p>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+    <div>
+      <div class="cap"><span class="capid" style="background:#E8A30E;color:#0A0A0C">S2</span><span class="capt">Attached, no video available</span></div>
+      <div class="frame" style="padding:26px 24px;background:radial-gradient(120% 70% at 50% 0%,#16130F 0%,#0B0A09 62%,#08080A 100%)">
+        <div style="display:grid;grid-template-columns:44px 1fr;gap:14px;align-items:start">
+          <div style="display:flex;flex-direction:column;gap:11px;padding:9px 5px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22">
+            <div style="display:flex;flex-direction:column;gap:4px"><div class="rail" style="width:30px;height:30px;font-size:11px">⏻</div><div class="rail" style="width:30px;height:30px;font-size:11px">◂)</div></div>
+            <div style="height:1px;background:#1A1A1C"></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><div class="rail" style="width:30px;height:30px;font-size:11px">‹</div><div class="rail" style="width:30px;height:30px;font-size:11px">○</div><div class="rail" style="width:30px;height:30px;font-size:11px">□</div></div>
+            <div style="height:1px;background:#1A1A1C"></div>
+            <div style="display:flex;flex-direction:column;gap:4px"><div class="raildim" style="width:30px;height:30px;font-size:11px">▤</div><div class="raildim" style="width:30px;height:30px;font-size:11px">＋</div><div class="raildim" style="width:30px;height:30px;font-size:11px">⛶</div></div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:center">
+            <div style="position:relative;padding:5px;border-radius:33px;background:linear-gradient(160deg,#544C46,#2C2724 14%,#1A1716 40%,#151211 66%,#332E29 90%,#544C45);box-shadow:0 1px 0 rgba(255,240,225,.13) inset,0 8px 18px -6px rgba(0,0,0,.6)">
+              <div style="position:relative;width:158px;height:342px;border-radius:28px;overflow:hidden;background:#050506;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;padding:0 20px;text-align:center">
+                <div style="width:26px;height:26px;border-radius:8px;border:1px solid #33302B;display:flex;align-items:center;justify-content:center;font:400 12px/1 'JetBrains Mono',monospace;color:#E8A30E">◌</div>
+                <div style="font:500 10.5px/1.4 'Instrument Sans',sans-serif;color:#E8A30E">No live view</div>
+                <div style="font:400 9px/1.65 'JetBrains Mono',monospace;color:#5A5A5A">This device declares no <span style="text-decoration:line-through;color:#4A4A4A">screen-stream</span>.</div>
+                <div style="position:absolute;top:4.5px;left:50%;transform:translateX(-50%);width:5.5px;height:5.5px;border-radius:50%;background:#05050a;box-shadow:0 0 0 1px rgba(255,240,225,.1)"></div>
+              </div>
+            </div>
+            <div style="margin-top:15px;padding:11px 13px;border-radius:9px;background:rgba(232,163,14,.05);border:1px solid rgba(232,163,14,.24);max-width:250px">
+              <div style="font:500 11px/1.45 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">Everything else works</div>
+              <div class="note">Input, keyboard, install, launch, logcat and WebDriver are all live. Screenshot, zoom and fullscreen are struck through in the rail because they need the stream.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="note" style="margin-top:14px">Depth stays shallow — there is no glass to catch light. Controls the device cannot honour are visible and struck through, never hidden, so the absence is explained by something you can see.</p>
+    </div>
+
+    <div>
+      <div class="cap"><span class="capid" style="background:#755EB8">S3</span><span class="capt">An action in flight</span></div>
+      <div class="frame" style="padding:26px 24px;background:radial-gradient(120% 70% at 50% 0%,#16130F 0%,#0B0A09 62%,#08080A 100%)">
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div style="padding:14px 15px;border-radius:10px;background:rgba(232,163,14,.05);border:1px solid rgba(232,163,14,.26)">
+            <div style="display:flex;align-items:flex-start;gap:11px">
+              <div style="flex:none;width:16px;height:16px;border-radius:50%;border:1px solid rgba(232,163,14,.5);background:rgba(232,163,14,.1);margin-top:1px;animation:mfPulse 2.2s ease-in-out infinite"></div>
+              <div>
+                <div style="font:500 12.5px/1.4 'Instrument Sans',sans-serif;color:#F1F1F1;margin-bottom:5px">Installing Alaan staging 99.99.99</div>
+                <div style="font:400 10.5px/1.6 'JetBrains Mono',monospace;color:#A8862E">Queued for the worker's next heartbeat</div>
+                <div class="note" style="margin-top:8px">There is no running state for this. The worker reports an outcome when it is done, so the console shows you a queued verb and then a result — never a bar.</div>
+              </div>
+            </div>
+          </div>
+          <div style="padding:14px 15px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22">
+            <div class="lbl" style="margin-bottom:12px">WITH BYTE PROGRESS <span class="flag">CONFIRM</span></div>
+            <div style="display:flex;align-items:center;gap:11px;margin-bottom:9px">
+              <span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#C4C4C4;font-variant-numeric:tabular-nums">18.4 / 42.1 MB</span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#1A1A1C;overflow:hidden"><div style="width:44%;height:3px;background:linear-gradient(90deg,#5A47A0,#8A74D6)"></div></div>
+              <span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#8A8A8A">44%</span>
+            </div>
+            <div class="note">Only if the endpoint exists. A percentage is legitimate the moment a real percentage arrives — and only then. Absent it, the panel above is the design.</div>
+          </div>
+          <div style="padding:14px 15px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22">
+            <div class="lbl" style="margin-bottom:12px">OUTCOME</div>
+            <div style="display:flex;align-items:flex-start;gap:11px">
+              <div style="flex:none;width:16px;height:16px;border-radius:50%;border:1px solid rgba(111,203,99,.42);background:rgba(111,203,99,.12);display:flex;align-items:center;justify-content:center;font:500 9px/1 'JetBrains Mono',monospace;color:#7FD873;margin-top:1px">✓</div>
+              <div><div style="font:500 12.5px/1.4 'Instrument Sans',sans-serif;color:#F1F1F1">Installed</div><div style="font:400 10.5px/1.5 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">confirmed by worker · 00:14 · 8.2s after queueing</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="note" style="margin-top:14px">The rail and stage do not change while an action is in flight. Only the action panel and the activity feed move — the device is not doing anything visually different, so pretending otherwise would be motion without a referent.</p>
+    </div>
+  </div>
+
+  <div style="margin-top:30px">
+    <div class="cap"><span class="capid" style="background:#2B2B2E">S4</span><span class="capt">After it ended</span></div>
+    <div class="frame" style="padding:28px 30px">
+      <div style="display:grid;grid-template-columns:1fr 340px;gap:26px;align-items:start">
+        <div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+            <h3 style="margin:0;font:600 21px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em">MFARM X1 Pro</h3>
+            <span style="padding:4px 9px;border-radius:999px;background:#191919;border:1px solid #2B2B2E;font:500 9.5px/1.3 'JetBrains Mono',monospace;color:#8A8A8A;letter-spacing:.05em">ENDED</span>
+          </div>
+          <div style="font:400 12.5px/1.6 'Instrument Sans',sans-serif;color:#8A8A8A;max-width:520px;margin-bottom:22px">Released by you at 00:24, after 16 minutes. The device was reset from its clean snapshot and is back in the pool. The live view and controls are gone; what the session produced is kept.</div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">
+            <div style="padding:13px 14px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 22px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">16:04</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:7px">held for</div></div>
+            <div style="padding:13px 14px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 22px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">4</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:7px">actions</div></div>
+            <div style="padding:13px 14px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 22px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;font-variant-numeric:tabular-nums">2</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:7px">artifacts</div></div>
+            <div style="padding:13px 14px;border-radius:10px;background:#0D0D0F;border:1px solid #1F1F22"><div style="font:600 22px/1 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em">reset</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:7px">from snapshot</div></div>
+          </div>
+          <div class="lbl" style="margin-bottom:11px">EVIDENCE</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:9px;background:#0D0D0F;border:1px solid #1F1F22"><span style="font:400 11px/1 'JetBrains Mono',monospace;color:#8A8A8A">▤</span><div style="flex:1"><div style="font:500 11.5px/1.3 'Instrument Sans',sans-serif;color:#F1F1F1">logcat.txt</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">357 lines · 41 KB</div></div><span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#A290DA">download</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:9px;background:#0D0D0F;border:1px solid #1F1F22"><span style="font:400 11px/1 'JetBrains Mono',monospace;color:#8A8A8A">▣</span><div style="flex:1"><div style="font:500 11.5px/1.3 'Instrument Sans',sans-serif;color:#F1F1F1">final-screenshot.png</div><div style="font:400 9.5px/1 'JetBrains Mono',monospace;color:#5A5A5A;margin-top:4px">1080 × 2340 · taken at release</div></div><span style="font:400 10.5px/1 'JetBrains Mono',monospace;color:#A290DA">download</span></div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;padding:26px 0;border-radius:12px;background:#0A0A0C;border:1px solid #16161A">
+          <div style="position:relative;padding:5px;border-radius:31px;background:linear-gradient(160deg,#403A36,#252220 16%,#171514 44%,#141212 68%,#2A2622 92%,#3E3833);box-shadow:0 1px 0 rgba(255,240,225,.07) inset,0 4px 10px -4px rgba(0,0,0,.5);opacity:.72">
+            <div style="position:relative;width:140px;height:303px;border-radius:26px;overflow:hidden;background:#020203">
+              <div style="position:absolute;inset:0;background:radial-gradient(80% 40% at 30% 8%,rgba(255,250,240,.03),rgba(255,255,255,0) 70%)"></div>
+              <div style="position:absolute;top:4px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:#0A0A10;box-shadow:0 0 0 1px rgba(255,240,225,.05)"></div>
+            </div>
+          </div>
+          <div style="margin-top:18px;font:400 10px/1.6 'JetBrains Mono',monospace;color:#5A5A5A;text-align:center">device returned to the pool<br>00:24 · reset confirmed</div>
+          <div class="btn" style="margin-top:16px;background:#755EB8;border-color:rgba(117,94,184,.5);color:#fff">Start another X1 Pro</div>
+        </div>
+      </div>
+    </div>
+    <p class="note" style="margin-top:14px;max-width:760px">The frame stays, dimmed and dark, at flat elevation. It is the same element it has been since bring-up. Keeping it — rather than replacing the stage with an empty card — is what makes the ended session read as a device you gave back instead of a page that expired.</p>
+  </div>
+</div>
+
+<div class="sec" style="padding-bottom:96px">
+  <h2 class="h2">Queued, and failed</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+    <div class="card" style="border-color:rgba(232,163,14,.24)">
+      <div class="lbl" style="color:#E8A30E;margin-bottom:16px">NOTHING FREE — YOU ARE IN LINE</div>
+      <div style="display:flex;align-items:center;gap:20px;margin-bottom:18px">
+        <div style="position:relative;padding:4px;border-radius:22px;background:linear-gradient(160deg,#3E3934,#232120 20%,#171514 56%,#2A2622);opacity:.3;filter:blur(2.5px)">
+          <div style="width:86px;height:186px;border-radius:18px;background:#050506"></div>
+        </div>
+        <div>
+          <div style="font:600 20px/1.15 'Bricolage Grotesque',sans-serif;letter-spacing:-.02em;margin-bottom:8px">Second in line</div>
+          <div class="note" style="margin-bottom:10px">Two X1 Pro leases are running. The earlier one ends in about 12 minutes, and the farm hands over the moment it does — this page moves on by itself.</div>
+          <div style="font:400 10px/1.6 'JetBrains Mono',monospace;color:#5A5A5A">position 2 · asked at 00:07<br>no device claimed yet</div>
+        </div>
+      </div>
+      <div class="note" style="padding-top:14px;border-top:1px solid #1F1F22">The frame is present but unresolved — blurred, dim, no shadow. It has not been allocated, so it is not yet a real object. Nothing about it firms up until step 1 confirms. <span class="flag">CONFIRM</span> the ETA needs queue position and lease expiry; without it the copy is "hands over when a lease ends".</div>
+    </div>
+    <div class="card" style="border-color:rgba(224,80,95,.26)">
+      <div class="lbl" style="color:#EE7C88;margin-bottom:16px">STEP 4 FAILED — LEGITIMATELY</div>
+      <div style="display:flex;flex-direction:column;gap:9px;margin-bottom:16px">
+        <div style="display:flex;gap:10px;align-items:center"><div style="flex:none;width:15px;height:15px;border-radius:50%;border:1px solid rgba(111,203,99,.42);background:rgba(111,203,99,.12);display:flex;align-items:center;justify-content:center;font:500 8.5px/1 'JetBrains Mono',monospace;color:#7FD873">✓</div><span style="font:400 11.5px/1 'Instrument Sans',sans-serif;color:#8A8A8A">Acquired · ready · attached</span></div>
+        <div style="display:flex;gap:10px;align-items:flex-start;padding:11px 12px;border-radius:8px;background:rgba(224,80,95,.05);border:1px solid rgba(224,80,95,.22)"><div style="flex:none;width:15px;height:15px;border-radius:50%;border:1px solid rgba(224,80,95,.5);background:rgba(224,80,95,.12);display:flex;align-items:center;justify-content:center;font:500 8.5px/1 'JetBrains Mono',monospace;color:#EE7C88;margin-top:1px">×</div><div><div style="font:500 11.5px/1.35 'Instrument Sans',sans-serif;color:#F0A0A8">No live view</div><div class="note" style="margin-top:4px">This device declares no <span style="font-family:'JetBrains Mono',monospace;font-size:10px;text-decoration:line-through;color:#4A4A4A">screen-stream</span>. That is a property of the device, not a fault.</div></div></div>
+        <div style="display:flex;gap:10px;align-items:center;opacity:.5"><div style="flex:none;width:15px;height:15px;border-radius:50%;border:1px solid #242427;display:flex;align-items:center;justify-content:center;font:500 8.5px/1 'JetBrains Mono',monospace;color:#4A4A4A">–</div><span style="font:400 11.5px/1 'Instrument Sans',sans-serif;color:#6A6A6A">Install · open — continued anyway</span></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <div style="padding:8px 13px;border-radius:8px;background:#755EB8;font:500 11.5px/1 'Instrument Sans',sans-serif;color:#fff">Use it without video</div>
+        <div class="btn">Release and try another</div>
+      </div>
+      <div class="note" style="padding-top:14px;border-top:1px solid #1F1F22">The choreography stops advancing and the composition settles anyway — the frame keeps its flat elevation and shows the honest empty panel instead of live pixels. Two real options, no dead end, and nothing about it reads as an error in MFARM.</div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1340,&quot;height&quot;:1600}}"></script>
+</body>
+</html>

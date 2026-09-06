@@ -282,18 +282,12 @@ jobs:
 
           echo "RLS enforcement verified."
 
-      # BEFORE the tests, because the API's allowlist test serves `/app/*` and those files do not
-      # exist until this runs. `apps/api/public/app/` is gitignored on purpose — a committed build
-      # artifact goes stale the first time somebody edits a component and forgets to rebuild — so
-      # this step is what puts the console on disk for both the tests and, separately, the image.
+      # THE CONSOLE BUILD STEP THAT USED TO BE HERE IS GONE with the React console it built. The
+      # console at `/` is plain files under `apps/api/public/` — served exactly as they sit on disk,
+      # no build step, nothing to go stale between an edit and a deploy.
       #
-      # It is also the only thing that typechecks the console: `npm run typecheck` at the root does
-      # not reach it, because the console has its own tsconfig and its own compiler options.
-      - name: Build the console
-        run: npm run build --workspace apps/console
-
-      # Deliberately three separate steps rather than one `&&` chain: on a red build the step name
-      # in the UI should already say whether it was the console, the schema, the tests, or the types.
+      # Deliberately separate steps rather than one `&&` chain: on a red build the step name in the
+      # UI should already say whether it was the schema, the tests, or the types.
       - name: Run tests
         run: npm test
 

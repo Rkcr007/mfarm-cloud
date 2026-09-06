@@ -31,42 +31,6 @@ COPY apps/api/package.json apps/api/
 # runtime image.
 RUN npm ci --omit=dev
 
-# ---------------------------------------------------------------- console
-
-# Its own stage, with dev dependencies, so vite and react never reach the runtime image.
-FROM node:22-alpine AS console
-
-WORKDIR /app
-COPY package.json package-lock.json ./
-COPY packages/protocol/package.json packages/protocol/
-COPY apps/api/package.json apps/api/
-COPY apps/console/package.json apps/console/
-
-# The full install, unlike the deps stage: a bundler IS a dev dependency.
-RUN npm ci
-
-COPY apps/console ./apps/console
-
-# THE SHARED LIVE VIEW (ADR-0022). The React console does not reimplement Cuttlefish's signalling —
-# it imports `live.js`, the same file the old console loads unbuilt, so the two cannot drift. That
-# import crosses a package boundary, so both files have to be in THIS stage's context or the build
-# fails here and nowhere else.
-#
-# Named explicitly rather than copying all of `apps/api/public`, for two reasons: that directory
-# also holds the 200 KB old console, which this stage has no use for; and a narrow copy makes the
-# dependency visible, so anyone who adds a second cross-package import gets a build error naming the
-# file instead of a bundle that silently lost its types.
-#
-# THIS LINE IS WHY RELEASE FAILED ON 2026-09-02 WHILE CI WAS GREEN. CI runs the same
-# `npm run build --workspace apps/console` against a FULL checkout, where the import resolves; only
-# the image build has a narrowed context. `live.d.ts` is not optional — without it the module still
-# resolves through `live.js` and every callback parameter becomes an implicit `any`, which `strict`
-# rejects (TS7006).
-COPY apps/api/public/live.js apps/api/public/live.d.ts ./apps/api/public/
-
-# Emits `apps/api/public/app/` — fixed filenames, no hashing, so the API's allowlist can name them.
-RUN npm run build --workspace apps/console
-
 # ---------------------------------------------------------------- runtime
 
 FROM node:22-alpine AS runtime
@@ -91,9 +55,14 @@ COPY --from=deps /app ./
 COPY packages/protocol ./packages/protocol
 COPY apps/api ./apps/api
 
-# AFTER `apps/api`, because that copy would otherwise land on top of it. `public/app` is gitignored
-# and absent from the build context, so this is the only thing that puts the console in the image.
-COPY --from=console /app/apps/api/public/app ./apps/api/public/app
+# THE CONSOLE NEEDS NO BUILD STAGE. There used to be one here: a second `npm ci` with the full dev
+# tree, a vite build, and a copy of its 264 KB of output into this image. It built the React console
+# at `/app`, which is retired — the console is `apps/api/public/`, plain files the API serves exactly
+# as they sit on disk, and they arrive with the `COPY apps/api` above.
+#
+# That is worth more than the build time it saves. A console with no build step cannot be one commit
+# stale, cannot fail in the image and pass in CI because the contexts differ, and cannot need a
+# `.d.ts` beside a `.js` for a cross-package import — all three of which happened while it existed.
 
 # The app library's blobs (migration 014) and session artifacts (migration 019). Created in the
 # image, owned by `node`, and that ownership is the entire reason this line exists: Docker seeds a

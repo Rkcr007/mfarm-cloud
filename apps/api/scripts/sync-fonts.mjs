@@ -3,7 +3,7 @@
  *
  * THE FACES ARE COMMITTED, not built, and that is the decision this script exists to make
  * survivable. Both consoles reference them by absolute path — the old one through
- * `design-tokens.css`, the new one through `apps/console/src/styles/base.css` — and the API serves
+ * `design-tokens.css` — and the API serves
  * them from an allowlist of literal paths. A file produced by a build step could not be named by
  * that allowlist without the build having run first, which would make `npm test` in a fresh
  * checkout depend on a vite invocation to serve a typeface.
