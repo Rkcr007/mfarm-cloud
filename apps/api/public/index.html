@@ -96,7 +96,13 @@
   <!-- Scrim. A real button so it is dismissible without a mouse; visually it is the dimmed page. -->
   <button type="button" class="si-scrim" id="si-scrim" aria-label="Close" hidden></button>
 
-  <div class="si-modal-layer" id="si-modal-layer">
+  <!--
+    `hidden` from the start. The modal is no longer what you arrive at: the page introduces itself,
+    the pipeline runs one lap, and then it invites you in. Defaulting to shut in the MARKUP rather
+    than closing it from script means the landing surface is what paints on the first frame even if
+    console.js is still parsing.
+  -->
+  <div class="si-modal-layer" id="si-modal-layer" hidden>
     <div class="si-modal" role="dialog" aria-modal="true" aria-labelledby="si-title">
       <button type="button" class="si-close" id="si-close" aria-label="Close"><span data-icon="x" data-icon-size="13"></span></button>
 
