@@ -25,16 +25,16 @@ written.
 | D18 | **S2** | Deploy | A merged, CI-green, released commit is not on the farm until someone runs `mfarm-deploy.sh`, and nothing reports the gap. PR #102's fixes were released at 11:34 and served at 13:08, discovered only by reading `docker ps` for another reason. The console's build badge shows what IS serving; nothing shows what SHOULD be. | reading the running image |
 | D19 | S3 | Deploy | Both boxes' git checkouts drift silently from `main` and nothing notices. `mfarm-cp` was on a **detached HEAD at 886cb47**; `mfarm-lab` was **66 commits behind**, on PR #81. The lab's checkout is not decorative — the worker unit and the boot unit both execute from it, so the farm was running agent code from 66 commits ago. | starting the lab |
 | D20 | S4 | Deploy | `mfarm-farm.service` on the lab still declares `Environment=CF_INSTANCES=2`, and the farm runs **four** devices from `CF_INSTANCES=4` in `deploy/.state/worker.env`. Since the D13 fix the device host exits before `farm-up.sh` reads that variable, so the unit's value is now inert as well as wrong — a declaration that contradicts the running system and no longer does anything. | reading the unit while verifying D13 |
-| D21 | **S2** | Device detail | A device whose reset budget is exhausted is **invisible and unrecoverable in the console**. `resetEscalation` has been on both API projections since migration 032; the console renders it in exactly one place — the Health line added for D1 — and nowhere on the device's own page, which is the page you open to act on it. `POST /devices/:id/clear-reset-escalation` exists and has **no UI at all**: recovering MFARM X1 during this session needed `curl`. The device sits in CLEANING, out of the pool, and nothing on screen says it will not come back on its own. | exploratory session |
-| D22 | **S2** | Fleet / Live | The **Live** lens lists ended sessions — 50 of 50 rows read `ENDED` — while the lens's own badge counts only live ones, so the tab shows no number above a full table. `screenSessionsBody()` renders every session in `state.sessions`; nothing filters to the live states the badge is computed from. | exploratory session |
-| D23 | **S2** | Cockpit / logcat | The default log scope hides everything. On a session where the build was installed, launched and visibly on screen, **"This app" matched 0 of 270 lines** — the pane read "0 / 260 lines · 260 hidden". Every tag on this device class is a system one (`adbd`, `logd`, `WifiService`, `SatelliteController`); there is no `ActivityManager` line at all, which is the fallback `visibleLog`'s comment says the name-match relies on. "Everything" shows 261/261, so the workaround is on the page — but the default is the broken one. | exploratory session |
-| D24 | S3 | Cockpit | For **~7–12 seconds after confirming Release & reset**, the cockpit keeps rendering a live session with a full 14-button rail — Power, Home, Screenshot, Install — against a device that is being wiped. `releaseSession` refreshes `devices` and `sessions` and calls `render()` immediately, but never `state.detail`, and `screenCockpit` prefers `state.detail`. The poll corrects it only once the detail is >10s stale. Measured: `mode=session` at t+2s and t+7s, `mode=ended` at t+12s. | exploratory session |
-| D25 | S4 | Cockpit (ended) | The ended card states one fact as two numbers: the lead reads "after 7 seconds" beside a stat reading "00:06 held for". `lengthInWords` rounds and `clock` floors, so a 6.5s session disagrees with itself on the same card. | exploratory session |
 
 ## Fixed, awaiting verification on the farm
 
 | # | Sev | What | How it was found |
 |---|---|---|---|
+| D21 | **S2** | An escalated device was invisible and unrecoverable in the console. Device detail now carries its own amber panel — what gave up, when, how many attempts, why the device still reads CLEANING rather than QUARANTINED — with an admin-gated **Resume recovery** behind the same confirm shape the quarantine release uses. The Fleet row stops claiming "Snapshot restore in progress" about a restore that gave up. | exploratory session |
+| D22 | **S2** | The Fleet's Live lens listed every session, 50 of 50 ENDED, under a badge counting only live ones. `liveSessions()` is now one predicate and BOTH the badge and the table are derived from it, so they cannot describe different sets again. `#/sessions` keeps every row — it is the history. | exploratory session |
+| D23 | **S2** | The cockpit's log defaulted to a scope that matched 0 of 270 lines on a healthy session. The default is `all`; the scope stays as a narrowing you turn on. And an empty pane now says why it is empty, naming the package — the counter already admitted it was filtering and that was not enough, because the thing a person looks at is the pane. | exploratory session |
+| D24 | S3 | `releaseSession` refreshed devices and sessions, called `render()`, and never refreshed `state.detail` — which `screenCockpit` prefers. So the confirm repainted a live cockpit with fourteen enabled controls aimed at a device being wiped, for ~7–12s. It awaits the detail before rendering now. | exploratory session |
+| D25 | S4 | "after 7 seconds" beside "00:06 held for" on one card. `lengthInWords` rounded where `clock` truncates; both floor now, so the two forms the design asks for agree. | exploratory session |
 | D5 | S3 | Fleet rows carried a `Details` button beside a device name that links to the same page — two controls, one destination, on every in-use row. The name is the only link now. | clicking every control |
 | D6 | S3 | The Apps empty state offered "Go to Devices" pointing at `#/devices`. The route redirects so it worked, but the surface has been called Fleet since the IA change. | clicking every control |
 | D7 | **S2** | "Find machine" with an empty code field returned silently — no error, no hint, nothing moved. Pressing the button before filling the field is the first thing a person does, and no test covers it. | clicking every control |
@@ -62,7 +62,27 @@ way are the "must not offer" guards — an empty library, a busy row, a host-sou
 member without the admin route — which are absence assertions and correctly hold in both
 directions.
 
-### Not a console defect: cf-4's reset escalates whenever Appium restarts
+### FIXED — a silent host no longer burns a device's reset budget (migration 038)
+
+`count_stalled_resets` counted an attempt against any CLEANING device past the timeout, with no
+check that its host was there to be offered one. Migration 038 adds that check: the host must have
+beaten inside the same window the reset is judged over.
+
+**The two mechanisms were both firing on one outage, and only one of them heals.** A silence
+quarantine is undone by the next heartbeat — the evidence for it is falsifiable, which is migration
+016's whole point. A reset escalation is deliberately terminal and waits for a human. Letting a host
+outage produce the non-self-healing one meant every agent restart permanently cost a device.
+
+It does NOT make the budget forgiving: a host that is beating and failing to reset burns its budget
+exactly as before, which is the case 032 was written for. Three tests, including the contrast.
+
+**Still open underneath it:** the agent drains and EXITS to withdraw a capability, which stops every
+backend on the host and cold-boots all of them — thirteen minutes of no resets because one device's
+Appium stopped. 038 stops that costing a device permanently; it does not stop the outage. Withdrawal
+in place needs a protocol change (`POST /workers/heartbeat` ignores its body, and only `register`
+writes capabilities — ADR-0003 decision 3).
+
+### How it was found: cf-4's reset escalated whenever Appium restarted
 
 Found while exploring, and the more serious finding of the session. **MFARM X1 (`cf-4`) burned two
 full reset budgets in thirty minutes** — timed out at 19:56 and 20:00, escalated at 20:03, having

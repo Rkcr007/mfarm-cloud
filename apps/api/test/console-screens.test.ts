@@ -3042,3 +3042,204 @@ describe('the two defects that were waiting on data', () => {
     });
   });
 });
+
+/**
+ * WHAT THE EXPLORATORY PASS FOUND — D21 to D25.
+ *
+ * None of these came from the integration; they came from using the console for an hour with
+ * exceptions and failed requests instrumented. Every test renders the screen and reads the tree.
+ */
+describe('the defects an hour of using it found', () => {
+  /* ----------------------------------------------------------------- D21 */
+
+  /**
+   * A device whose reset budget is spent sits in CLEANING forever. `resetEscalation` has been on
+   * both API projections since migration 032 and the console rendered it nowhere except the Health
+   * line — not on the page you open to act on it, and with no control to clear it. Recovering
+   * `cf-4` on the farm needed `curl`.
+   */
+  describe('an escalated device can be seen and resumed', () => {
+    const escalated = (extra: Record<string, unknown> = {}) => ({
+      state: 'CLEANING',
+      resetEscalation: { at: new Date(Date.now() - 12 * 60_000).toISOString(), reason: 'reset did not complete after 3 attempts', attempts: 3 },
+      ...extra,
+    });
+
+    test('device detail says the reset gave up, and offers to resume it', () => {
+      const { device } = seed({ name: 'device', id: 'dev-1' });
+      mod.state.deviceDetail = { id: 'dev-1', device: { ...device, ...escalated() }, loaded: true };
+      const text = textOf(mod.SCREENS.device());
+      assert.match(text, /reset gave up/i, 'the page a person opens to act on it said nothing at all');
+      assert.match(text, /Resume recovery/);
+    });
+
+    /** It is not a quarantine, and the page has to say why it still reads CLEANING. */
+    test('it explains why the device is still CLEANING rather than quarantined', () => {
+      const { device } = seed({ name: 'device', id: 'dev-1' });
+      mod.state.deviceDetail = { id: 'dev-1', device: { ...device, ...escalated() }, loaded: true };
+      const text = textOf(mod.SCREENS.device());
+      assert.match(text, /not quarantined/i);
+    });
+
+    test('a member is not offered an admin-only route', () => {
+      const { device } = seed({ name: 'device', id: 'dev-1' });
+      mod.state.me = { ...mod.state.me, role: 'member' };
+      mod.state.deviceDetail = { id: 'dev-1', device: { ...device, ...escalated() }, loaded: true };
+      const text = textOf(mod.SCREENS.device());
+      assert.doesNotMatch(text, /Resume recovery\b(?!.*needs an admin)/);
+      assert.match(text, /needs an admin/);
+    });
+
+    test('a healthy device gets no panel at all', () => {
+      const { device } = seed({ name: 'device', id: 'dev-1' });
+      mod.state.deviceDetail = { id: 'dev-1', device, loaded: true };
+      assert.doesNotMatch(textOf(mod.SCREENS.device()), /reset gave up/i);
+    });
+
+    /**
+     * AND THE FLEET ROW STOPS CLAIMING A RESTORE IS RUNNING. `CLEANING`'s note is "Snapshot restore
+     * in progress", which is precisely wrong once the budget is spent.
+     */
+    test('the fleet row does not claim a restore is in progress', () => {
+      seed({ name: 'fleet' });
+      mod.state.sessions = [];
+      mod.state.held = null;
+      mod.state.devices = [{ ...mod.state.devices[0], ...escalated() }];
+      const text = textOf(mod.SCREENS.fleet());
+      assert.match(text, /its reset gave up/);
+      assert.doesNotMatch(text, /Snapshot restore in progress/);
+    });
+  });
+
+  /* ----------------------------------------------------------------- D22 */
+
+  /**
+   * The Live lens listed fifty ENDED sessions under a tab whose badge counted only live ones — two
+   * answers to one question from two places.
+   */
+  describe('the Live lens lists live sessions', () => {
+    const mixed = () => {
+      seed({ name: 'fleet' });
+      mod.state.lens = 'live';
+      mod.state.sessions = [
+        { ...mod.state.sessions[0], id: 'live-1', state: 'ACTIVE', deviceId: 'dev-1' },
+        { ...mod.state.sessions[0], id: 'done-1', state: 'ENDED', deviceId: 'dev-1', endedAt: new Date().toISOString() },
+        { ...mod.state.sessions[0], id: 'done-2', state: 'ENDED', deviceId: 'dev-1', endedAt: new Date().toISOString() },
+      ];
+      return textOf(mod.SCREENS.fleet());
+    };
+
+    test('an ended session is not listed under Live', () => {
+      const t = mixed();
+      assert.match(t, /live-1/, 'the live one is there');
+      assert.doesNotMatch(t, /done-1/, 'an ended session is not a live one');
+      assert.doesNotMatch(t, /done-2/);
+    });
+
+    /** `#/sessions` IS the history and must keep every row. */
+    test('the Sessions screen still shows everything', () => {
+      mixed();
+      mod.state.route = { name: 'sessions', id: null };
+      const t = textOf(mod.SCREENS.sessions());
+      assert.match(t, /live-1/);
+      assert.match(t, /done-1/, 'the history screen is not the live lens');
+    });
+  });
+
+  /* ----------------------------------------------------------------- D23 */
+
+  /**
+   * "This app" matched 0 of 270 lines on a session with the build installed, launched and on
+   * screen: every tag a Cuttlefish instance emits is a system one, and there is no
+   * `ActivityManager` line — the fallback the scope was written to rely on.
+   */
+  describe('the log does not default to a filter that hides everything', () => {
+    /**
+     * A FRESH MODULE INSTANCE, because `state` is a shared mutable singleton and by the time this
+     * file reaches here several earlier tests have set `state.log.scope` themselves. Reading the
+     * live object would assert whatever the last one left behind — it passed against the UNFIXED
+     * console for exactly that reason, which is how this test got rewritten.
+     *
+     * ESM caches by URL, so a query string gives a genuinely separate instance with pristine state.
+     */
+    test('the default scope shows the log', async () => {
+      const fresh = await import(`${pathToFileURL(SHIMMED).href}?default-scope`);
+      clearInterval(fresh.state.poll);
+      clearInterval(fresh.state.tick);
+      assert.equal(fresh.state.log.scope, 'all',
+        'a default that can hide 100% of a healthy log is the defect, not the filter');
+    });
+
+    /**
+     * AND WHY THE DEFAULT MATTERS, with the lines a Cuttlefish instance actually emits. Not one of
+     * them names the package — there is no `ActivityManager` line at all — so the app scope hides
+     * the entire log on a session where the build is installed, launched and on screen.
+     */
+    test('a real device log names no package, so the app scope would hide all of it', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.log = {
+        ...mod.state.log, scope: 'app', filter: '', level: 'ALL',
+        lines: [
+          { time: 't', level: 'D', tag: 'AiSealSystemService', message: 'not yet available', raw: 'D AiSealSystemService not yet available' },
+          { time: 't', level: 'I', tag: 'adbd', message: 'shell', raw: 'I adbd shell' },
+          { time: 't', level: 'I', tag: 'WifiService', message: 'scan', raw: 'I WifiService scan' },
+        ],
+      };
+      assert.equal(mod.visibleLog().length, 0,
+        'this is the observed farm behaviour the default was changed for');
+    });
+
+    test('with the default scope, system lines survive', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.log = {
+        ...mod.state.log, scope: 'all', filter: '', level: 'ALL',
+        lines: [
+          { time: '09-05 20:13:22.365', level: 'D', tag: 'AiSealSystemService', message: 'not yet available', raw: 'D AiSealSystemService not yet available' },
+          { time: '09-05 20:13:22.432', level: 'I', tag: 'adbd', message: 'shell', raw: 'I adbd shell' },
+        ],
+      };
+      assert.equal(mod.visibleLog().length, 2, 'these are exactly the lines a real device emits');
+    });
+
+    /** The scope still works where it can — this is a narrowing, not a broken control. */
+    test('choosing the app scope still narrows to lines that name it', () => {
+      seed({ name: 'cockpit', id: 'sess-1' });
+      mod.state.log = {
+        ...mod.state.log, scope: 'app', filter: '', level: 'ALL',
+        lines: [
+          { time: 't', level: 'I', tag: 'ActivityManager', message: 'Start com.acme.app', raw: 'I ActivityManager Start com.acme.app' },
+          { time: 't', level: 'I', tag: 'adbd', message: 'shell', raw: 'I adbd shell' },
+        ],
+      };
+      assert.equal(mod.visibleLog().length, 1);
+    });
+  });
+
+  /* ----------------------------------------------------------------- D25 */
+
+  /**
+   * The ended card stated one fact as two numbers: "after 7 seconds" beside "00:06 held for",
+   * because one rounded and the other truncated.
+   */
+  describe('one fact is one number', () => {
+    // `lengthInWords` is not exported, and a test that reaches for it with `?.() ?? 'expected'`
+    // passes whether or not the function exists — which is the exact shape this file has already
+    // been burned by twice. The rendering test below is the real one.
+
+    test('the ended card does not print two different lengths', () => {
+      const { session } = seed({ name: 'cockpit', id: 'sess-1' });
+      const started = new Date(Date.now() - 6500);
+      const done = {
+        ...session, state: 'ENDED',
+        startedAt: started.toISOString(), endedAt: new Date().toISOString(), endReason: 'client_request',
+      };
+      mod.state.sessions = [done];
+      mod.state.detail = { ...done, dataPlane: null, ice: null, fetchedAt: Date.now() };
+      const text = textOf(mod.SCREENS.cockpit());
+      const words = text.match(/after (\d+) seconds/)?.[1];
+      const clock = text.match(/00:(\d\d)/)?.[1];
+      assert.ok(words && clock, `expected both forms on the card, got ${JSON.stringify(text.slice(0, 300))}`);
+      assert.equal(Number(words), Number(clock), 'one card, one fact, one number');
+    });
+  });
+});
