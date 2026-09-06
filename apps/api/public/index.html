@@ -155,7 +155,17 @@
             could not run and Chrome's own "Please fill out this field" bubble appeared instead —
             wrong copy, wrong position, and not the red row the design puts inside the modal.
           -->
-          <form id="signin-form" autocomplete="on" novalidate>
+          <!--
+            `method="post"` matters even though this form never navigates.
+            It has no `action`, so the default method is GET — and if console.js ever fails to run
+            (a parse error, a blocked script, an extension), the browser would submit this form
+            itself and put the password in a query string: in the address bar, in history, in the
+            Referer of the next request, and in every proxy log between here and the box. Today the
+            CSP's `form-action 'none'` is the only thing stopping that, which makes one header the
+            single point of failure for a credential. POST costs one word and makes the failure
+            mode safe on its own.
+          -->
+          <form id="signin-form" method="post" autocomplete="on" novalidate>
             <div class="si-fields">
               <div class="si-field">
                 <!-- Decorative. The accessible name is the visually-hidden label beside it. -->
