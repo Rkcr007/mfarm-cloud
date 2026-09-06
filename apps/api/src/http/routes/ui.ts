@@ -217,5 +217,12 @@ export async function uiRoutes(app: FastifyInstance): Promise<void> {
   }
 }
 
-/** The console's paths, so the server can exempt them from the authenticate-by-default rule. */
-export const UI_PATHS = Object.keys(FILES);
+/**
+ * The console's paths, so the server can exempt them from the authenticate-by-default rule.
+ *
+ * THE RETIRED PATHS ARE IN HERE TOO, and leaving them out is a bug with a confusing symptom: the
+ * auth hook runs before the route handler, so `/app` answered 401 instead of redirecting, and the
+ * person who bookmarked it got "Missing or invalid credentials" for a page that is only trying to
+ * send them to the front door. A redirect nobody is allowed to receive is not a redirect.
+ */
+export const UI_PATHS = [...Object.keys(FILES), ...RETIRED];

@@ -7254,7 +7254,7 @@ function showSignin(message) {
 /* ---------------------------------------------------------------- the sign-in screen's overlays
  *
  * Two, and only ever one open: the sign-in modal and the "Pay as you use" popover. Both close on
- * the backdrop, on their own ✕, and on Escape.
+ * the backdrop, on their own close button, and on Escape.
  *
  * THE MODAL IS OPEN ON ARRIVAL. This is the page you land on when you are not signed in, so
  * arriving with the form shut would make everybody's first action finding the button that opens the
@@ -7570,7 +7570,7 @@ function renderSigninDiagram() {
       h('div', { class: 'si-meterrow' },
         h('div', { class: 'si-meter' }, h('div', { class: 'si-meter-fill' })),
         h('div', { class: 'si-passed' },
-          h('span', { class: 'si-passed-mark', text: '✓' }),
+          h('span', { class: 'si-passed-mark' }, icon('check', 9)),
           h('span', { class: 'si-passed-text', text: '142 PASSED · 3 DEVICES' })))),
 
     h('div', { class: 'si-wire si-wire-out' },
