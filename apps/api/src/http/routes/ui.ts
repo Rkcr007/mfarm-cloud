@@ -107,6 +107,23 @@ const FILES: Record<string, { file: string; type: string }> = {
    */
   '/app': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
   '/app/': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
+  /**
+   * THE REACT CONSOLE'S SCREENS, each serving the same document.
+   *
+   * It routes on `location.pathname` (see `apps/console/src/app/routes.ts`), which is what makes
+   * `/app/signin` a link somebody can send and a page somebody can reload. This table is an
+   * allowlist and not a fallback, so every screen needs a line: the alternative — a catch-all under
+   * `/app/` — is exactly the wildcard this table exists to avoid, and a path that is not here does
+   * not 404, it falls through to the authenticated API routes and answers 401, which is how the
+   * missing `/profiles.js` entry once turned the whole console into a blank page.
+   *
+   * A NEW SCREEN IN THE CONSOLE IS A NEW LINE HERE. `ui.test.ts` derives its coverage from
+   * `SERVED_PATHS`, so a line added without its file fails the suite; nothing fails when a route is
+   * added to the console and forgotten here, because the console reaches it by pushState and only a
+   * reload or a shared link ever asks the server for it.
+   */
+  '/app/signin': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
+  '/app/devices': { file: 'app/index.html', type: 'text/html; charset=utf-8' },
   '/app/app.js': { file: 'app/app.js', type: 'text/javascript; charset=utf-8' },
   '/app/app.css': { file: 'app/app.css', type: 'text/css; charset=utf-8' },
 

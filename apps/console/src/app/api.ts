@@ -1,9 +1,9 @@
 /**
  * The farm, as this console talks to it.
  *
- * Same-origin and cookie-authenticated. There is no sign-in here yet: the cookie is minted by the
- * old console at `/`, and `GET /v1/auth/me` hands the CSRF token back so a reloaded page can
- * recover it — which its own comment in `routes/auth.ts` says is exactly what it is for.
+ * Same-origin and cookie-authenticated. `POST /v1/auth/login` mints the cookie and `GET
+ * /v1/auth/me` hands the CSRF token back so a reloaded page can recover it — which its own comment
+ * in `routes/auth.ts` says is exactly what it is for.
  */
 
 export interface Device {
@@ -87,6 +87,39 @@ export interface Me {
   org: { id: string; name: string; slug: string; maxConcurrent: number };
   role: string;
   csrfToken?: string;
+}
+
+/**
+ * Sign in.
+ *
+ * THE SESSION IS THE COOKIE, and this function does not see it. `routes/auth.ts` sets an HttpOnly
+ * cookie on this response, which is the point of doing it that way: nothing in this bundle can
+ * read it, so nothing in this bundle can leak it. The only thing that comes back to script is the
+ * CSRF token, and it is kept exactly where `whoami` already keeps it — the module-level `csrf`
+ * above, in memory. Not `localStorage`: a token in storage outlives the tab, survives a sign-out
+ * this page never saw, and is readable by any script that gets a foothold on the origin. A page
+ * reload drops it and `whoami` recovers it, which is the whole reason the API returns it there too.
+ *
+ * NO `org`. The endpoint accepts one and the old console never sends one either; login picks the
+ * membership and `/v1/auth/me` reports which. Adding a field the sign-in screen has no control for
+ * would be inventing a parameter nobody set.
+ */
+export async function login(email: string, password: string): Promise<LoginResult> {
+  const out = await request<LoginResult>('/v1/auth/login', {
+    method: 'POST',
+    // Trimmed here as well as in the screen, because the API trims too and a caller that disagrees
+    // with the server about what the email is produces a "wrong password" for a leading space.
+    body: JSON.stringify({ email: email.trim(), password }),
+  });
+  if (out.csrfToken) csrf = out.csrfToken;
+  return out;
+}
+
+export interface LoginResult {
+  user: { id: string; email: string };
+  orgId: string;
+  csrfToken?: string;
+  expiresAt: string;
 }
 
 /** Also the sign-in check: a 401 here is what "not signed in" means for this console. */

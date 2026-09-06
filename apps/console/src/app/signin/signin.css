@@ -1,0 +1,1023 @@
+/**
+ * The sign-in screen.
+ *
+ * REBUILT FROM `Farm_app_design_exploration/Sign In.dc.html`, whose every value — hex, font stack,
+ * size, radius, spacing, keyframe, easing curve — is lifted verbatim. That artifact is a design
+ * file and not shippable code: it renders through a `<x-dc>` runtime, declares its markup as inline
+ * `style` attributes and pulls three faces off Google Fonts. None of that crossed over. What
+ * crossed over is the numbers.
+ *
+ * THE PALETTE IS THE SHARED ONE, NOT THIS CONSOLE'S. The artifact was drawn against
+ * `apps/api/public/design-tokens.css` — the vanilla console's vocabulary, where the accent is
+ * `#755EB8` and the ground is `#08080A`. The React console at `/app` has never imported that file;
+ * it has its own `styles/tokens.css`, where the accent is `#7C5CFF` and the ground is `#08070C`.
+ * Those are different products' worth of difference on a full-bleed dark surface, so the design's
+ * values are carried in as `--si-*` tokens in this console's own `:root` rather than approximated
+ * with the tokens that were already there. See the note above them in `styles/tokens.css`.
+ *
+ * ONE-OFF VALUES STAY LITERAL, exactly as the artifact has them: the brushed-metal gradient stops,
+ * the per-device geometry percentages, the keyframe colours. A token used once is not a token, and
+ * naming forty of them would make this file harder to check against the artifact rather than
+ * easier — which is the only check that matters here.
+ */
+
+/* ============================================================================ keyframes ======
+ * Verbatim from the artifact. The whole diagram is ONE 18-second loop and every animation below is
+ * a slice of it, which is why they all share that duration and differ only in their percentages —
+ * changing one number in isolation desynchronises the story it tells.
+ */
+@keyframes mfPulse { 0%, 100% { opacity: .35 } 50% { opacity: 1 } }
+@keyframes mfDrift { 0% { transform: translate3d(0, 0, 0) } 100% { transform: translate3d(-64px, -64px, 0) } }
+@keyframes mfReq { 0% { opacity: 0; left: 0 } 3% { opacity: 1 } 12% { opacity: 1 } 14%, 100% { opacity: 0; left: 100% } }
+@keyframes mfNodeReq {
+  0%, 1% { background: #131315; border-color: #26262A; box-shadow: none }
+  4% { background: #8A74D6; border-color: #A290DA; box-shadow: 0 0 0 5px rgba(117, 94, 184, .14), 0 0 16px rgba(130, 108, 214, .5) }
+  20%, 94% { background: #2A2440; border-color: #453A69; box-shadow: none }
+  100% { background: #131315; border-color: #26262A }
+}
+@keyframes mfSegV {
+  0%, 11% { opacity: 0; transform: translateY(var(--mf-from)) }
+  22%, 94% { opacity: 1; transform: translateY(0) }
+  100% { opacity: 0; transform: translateY(var(--mf-from)) }
+}
+@keyframes mfPart { 0%, 11% { opacity: 0 } 22%, 94% { opacity: 1 } 100% { opacity: 0 } }
+@keyframes mfVirt {
+  0%, 11% { opacity: 0; transform: scale(.9) }
+  22%, 94% { opacity: 1; transform: scale(1) }
+  100% { opacity: 0; transform: scale(.9) }
+}
+@keyframes mfScan { 0%, 11% { opacity: 0 } 18% { opacity: .7 } 30%, 100% { opacity: 0 } }
+@keyframes mfScreen { 0%, 23% { opacity: 0 } 34%, 94% { opacity: 1 } 100% { opacity: 0 } }
+@keyframes mfChrome { 0%, 26% { opacity: 0 } 36%, 94% { opacity: 1 } 100% { opacity: 0 } }
+@keyframes mfTile {
+  0%, 33% { opacity: 0; transform: translate(-50%, -150px) scale(.86) }
+  38% { opacity: 1 }
+  44%, 94% { opacity: 1; transform: translate(-50%, 0) scale(1) }
+  100% { opacity: 0; transform: translate(-50%, -150px) scale(.86) }
+}
+@keyframes mfRipple {
+  0%, 42% { opacity: 0; transform: translate(-50%, -50%) scale(.4) }
+  44% { opacity: .5 }
+  54% { opacity: 0; transform: translate(-50%, -50%) scale(5) }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(.4) }
+}
+@keyframes mfRipple2 {
+  0%, 52% { opacity: 0; transform: translate(-50%, -50%) scale(.4) }
+  54% { opacity: .5 }
+  64% { opacity: 0; transform: translate(-50%, -50%) scale(5) }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(.4) }
+}
+@keyframes mfMeter { 0%, 22% { width: 0% } 68%, 94% { width: 100% } 100% { width: 0% } }
+@keyframes mfTick {
+  0%, 59% { opacity: 0; transform: scale(.5) }
+  64% { opacity: 1; transform: scale(1.12) }
+  68%, 94% { opacity: 1; transform: scale(1) }
+  100% { opacity: 0; transform: scale(.5) }
+}
+@keyframes mfShip { 0%, 66% { opacity: 0; left: 0 } 69% { opacity: 1 } 77% { opacity: 1 } 79%, 100% { opacity: 0; left: 100% } }
+@keyframes mfProd {
+  0%, 76% { background: #131315; border-color: #26262A; box-shadow: none }
+  80% { background: #8A74D6; border-color: #A290DA; box-shadow: 0 0 0 5px rgba(117, 94, 184, .14), 0 0 16px rgba(130, 108, 214, .5) }
+  86%, 94% { background: #2A2440; border-color: #453A69; box-shadow: none }
+  100% { background: #131315; border-color: #26262A }
+}
+@keyframes mfMarket {
+  0%, 85% { background: #131315; border-color: #26262A; box-shadow: none }
+  90% { background: #4C8F44; border-color: #6FCB63; box-shadow: 0 0 0 5px rgba(111, 203, 99, .13), 0 0 16px rgba(111, 203, 99, .45) }
+  94% { background: #243A22; border-color: #3C6238; box-shadow: none }
+  100% { background: #131315; border-color: #26262A }
+}
+@keyframes mfLive { 0%, 87% { opacity: 0; transform: translateY(6px) } 91%, 95% { opacity: 1; transform: translateY(0) } 100% { opacity: 0; transform: translateY(6px) } }
+@keyframes mfWire { 0%, 4% { background: #1A1A1E } 12% { background: #403768 } 24%, 94% { background: #26222E } 100% { background: #1A1A1E } }
+@keyframes mfWire2 { 0%, 68% { background: #1A1A1E } 74% { background: #403768 } 84%, 94% { background: #26222E } 100% { background: #1A1A1E } }
+@keyframes mfBeat { 0% { color: #8A8296 } 2% { color: #C4B6EC } 13% { color: #C4B6EC } 17%, 100% { color: #8A8296 } }
+@keyframes mfIn { 0% { opacity: 0; transform: translateY(10px) scale(.985) } 100% { opacity: 1; transform: translateY(0) scale(1) } }
+@keyframes mfNotif { 0% { opacity: 0; transform: translateY(-16px) scale(.96) } 100% { opacity: 1; transform: translateY(0) scale(1) } }
+@keyframes mfFade { 0% { opacity: 0 } 100% { opacity: 1 } }
+
+/* ============================================================================ the surface ====
+ * `100dvh`, not the artifact's `100vh`. The one place a value was deliberately not lifted: on a
+ * phone `100vh` is the viewport WITHOUT the retracted browser chrome, so the footer sits under the
+ * address bar until you scroll. `dvh` is the same number on every desktop viewport the artifact was
+ * drawn against and the correct one everywhere else.
+ */
+.si {
+  height: 100dvh;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(130% 100% at 12% -10%, #15121C 0%, #0B0A0D 55%, #08080A 100%);
+  font-family: var(--si-font-ui);
+  color: var(--si-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Inset by the drift distance so the grid never shows an edge as it travels. */
+.si-grid {
+  position: absolute;
+  inset: -80px;
+  opacity: .5;
+  background-image:
+    linear-gradient(#101014 1px, transparent 1px),
+    linear-gradient(90deg, #101014 1px, transparent 1px);
+  background-size: 64px 64px;
+  animation: mfDrift 26s linear infinite;
+}
+.si-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(64% 54% at 50% 50%, rgba(117, 94, 184, .13) 0%, transparent 72%);
+}
+
+/* ============================================================================ header ========= */
+.si-header {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: clamp(12px, 2.2vh, 24px) 34px;
+  flex-wrap: wrap;
+}
+.si-brandgroup { display: flex; align-items: center; gap: 14px; flex-wrap: wrap }
+.si-brand { display: flex; align-items: center; gap: 11px }
+.si-mark {
+  width: 25px;
+  height: 25px;
+  border-radius: 7px;
+  background: linear-gradient(150deg, #8A74D6, #5A47A0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 600 11px/1 var(--si-font-display);
+}
+.si-wordmark {
+  font: 600 11px/1 var(--si-font-mono);
+  letter-spacing: .16em;
+  color: var(--si-ink-2);
+}
+.si-reach {
+  flex: none;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  background: rgba(111, 203, 99, .09);
+  border: 1px solid rgba(111, 203, 99, .26);
+}
+.si-reach-dot {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--si-ok);
+  animation: mfPulse 2.2s ease-in-out infinite;
+}
+.si-reach-text {
+  white-space: nowrap;
+  font: 500 8.5px/1.3 var(--si-font-mono);
+  color: var(--si-ok-text);
+  letter-spacing: .07em;
+}
+.si-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap }
+
+/* The two header buttons. `--si-ghost-*` is how the artifact's `ghost(active)` helper — which built
+   a style string from a boolean — becomes a state a stylesheet can express. */
+.si-ghost {
+  padding: 8px 13px;
+  border-radius: 8px;
+  background: rgba(19, 19, 21, .62);
+  border: 1px solid #26262A;
+  font: 500 11px/1.2 var(--si-font-ui);
+  color: var(--si-ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.si-ghost:hover { border-color: #3A3A40; color: var(--si-ink) }
+.si-ghost[aria-expanded='true'] {
+  background: rgba(19, 19, 21, .9);
+  border-color: #3A3A40;
+  color: var(--si-ink);
+}
+.si-cta {
+  padding: 8px 15px;
+  border-radius: 8px;
+  background: var(--si-accent);
+  border: 1px solid var(--si-accent-line);
+  font: 500 11px/1.2 var(--si-font-ui);
+  color: var(--accent-ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.si-cta:hover { background: var(--si-accent-hover) }
+.si-cta:active { background: var(--si-accent-press) }
+
+/* ============================================================================ hero =========== */
+.si-hero { position: relative; z-index: 2; padding: 0 34px }
+.si-hero-inner { max-width: 560px }
+.si-tags { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: clamp(8px, 1.4vh, 16px) }
+.si-tag {
+  display: inline-flex;
+  white-space: nowrap;
+  padding: 4px 9px;
+  border-radius: var(--r-sm);
+  background: rgba(19, 19, 21, .72);
+  border: 1px solid #26262A;
+  font: 500 9px/1.3 var(--si-font-mono);
+  letter-spacing: .09em;
+  color: var(--si-ink-2);
+}
+.si-tag-accent {
+  background: rgba(117, 94, 184, .14);
+  border-color: rgba(162, 144, 218, .38);
+  color: var(--si-accent-text);
+}
+.si-h1 {
+  margin: 0 0 clamp(7px, 1.2vh, 13px);
+  font: 700 clamp(23px, 2.9vw, 38px)/1.08 var(--si-font-display);
+  letter-spacing: -.035em;
+  color: var(--si-ink);
+  /* `pretty`, not the `balance` the console's base stylesheet sets on every h1 — this heading is
+     two lines of display type and balancing them would centre the widow rather than avoid it. */
+  text-wrap: pretty;
+}
+.si-lede {
+  margin: 0;
+  max-width: 410px;
+  font: 400 13px/1.7 var(--si-font-ui);
+  color: var(--si-ink-3);
+  text-wrap: pretty;
+}
+
+/* ============================================================================ the diagram ====
+ * request → build → install → execute → ship → live, as one figure. It is decorative: every string
+ * in it is illustrative and the markup marks it `aria-hidden`, so nothing here is announced.
+ */
+.si-diagram {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(6px, 1.6vh, 16px) 22px 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.si-track {
+  width: 100%;
+  max-width: 1420px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.si-node { flex: 0 1 auto; min-width: 0 }
+.si-node-src { width: 112px }
+.si-node-prod { width: 84px }
+.si-node-market { width: 118px }
+.si-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: var(--r-xs);
+  border: 1px solid #26262A;
+  background: #131315;
+}
+.si-dot-req { animation: mfNodeReq 18s linear infinite }
+.si-dot-prod { animation: mfProd 18s linear infinite }
+.si-dot-market { animation: mfMarket 18s linear infinite }
+.si-node-label {
+  margin-top: 12px;
+  font: 500 9.5px/1 var(--si-font-mono);
+  letter-spacing: .14em;
+  color: var(--si-ink-mono);
+}
+.si-node-meta {
+  margin-top: 7px;
+  font: 400 9.5px/1.55 var(--si-font-mono);
+  color: var(--si-ink-mono-2);
+}
+.si-node-meta-tight { line-height: 1.5 }
+
+.si-wire { position: relative; flex: 1; min-width: 20px; height: 1px; background: #1A1A1E }
+.si-wire-in { animation: mfWire 18s linear infinite }
+.si-wire-out { animation: mfWire2 18s linear infinite }
+.si-stub { flex: none; width: 26px; height: 1px; background: #26222E }
+
+.si-packet {
+  position: absolute;
+  top: -2px;
+  left: 0;
+  width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #A290DA 60%, #EDE7FF);
+  box-shadow: 0 0 14px rgba(162, 144, 218, .75);
+  animation: mfReq 18s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+.si-release {
+  position: absolute;
+  top: -8px;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  background: rgba(10, 10, 12, .92);
+  border: 1px solid rgba(162, 144, 218, .34);
+  animation: mfShip 18s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+.si-release-dot { width: 5px; height: 5px; border-radius: 2px; background: #A290DA }
+.si-release-text {
+  font: 500 8px/1 var(--si-font-mono);
+  letter-spacing: .06em;
+  color: var(--si-accent-text);
+}
+
+/* ---------- the three devices --------------------------------------------------------------- */
+.si-stage { flex: none; margin: 0 14px }
+.si-devices { display: flex; align-items: flex-end; gap: 22px }
+.si-dev { width: max-content }
+
+/* Each device's stagger is set once, on the device, and every animated part reads it. The artifact
+   repeats `animation-delay:.45s` on eleven descendants; one variable is the same picture. */
+.si-dev { --si-d: 0s }
+.si-dev-android { --si-d: .45s }
+.si-dev-virtual { --si-d: .9s }
+
+.si-body { position: relative }
+.si-body-ios { height: clamp(150px, 27vh, 236px); aspect-ratio: 116/236 }
+.si-body-android { height: clamp(160px, 28.8vh, 252px); aspect-ratio: 116/252 }
+.si-body-virtual {
+  height: clamp(141px, 25.4vh, 222px);
+  aspect-ratio: 116/222;
+  animation: mfVirt 18s cubic-bezier(.2, .9, .2, 1) var(--si-d) infinite;
+}
+
+.si-shell, .si-inner {
+  position: absolute;
+  animation: mfSegV 18s cubic-bezier(.2, .9, .2, 1) var(--si-d) infinite;
+}
+.si-dev-ios .si-shell, .si-dev-ios .si-inner { --mf-from: -96px }
+.si-dev-android .si-shell, .si-dev-android .si-inner { --mf-from: 252px }
+
+.si-dev-ios .si-shell {
+  inset: 0;
+  border-radius: 26px;
+  background: linear-gradient(146deg, #8E8681 0%, #4A443F 16%, #2B2724 42%, #211E1C 62%, #5D564F 88%, #332F2B 100%);
+  box-shadow: 0 22px 44px -20px rgba(0, 0, 0, .9), 0 0 0 1px rgba(255, 240, 225, .05);
+}
+.si-dev-ios .si-inner { inset: 3px; border-radius: 23px; background: #0A0A0C }
+.si-dev-android .si-shell {
+  inset: 0;
+  border-radius: 15px;
+  background: linear-gradient(146deg, #7C7A78 0%, #3E3D3C 14%, #232322 44%, #1B1B1B 64%, #54524F 90%, #2C2B2A 100%);
+  box-shadow: 0 22px 44px -20px rgba(0, 0, 0, .9), 0 0 0 1px rgba(240, 240, 245, .05);
+}
+.si-dev-android .si-inner { inset: 2.5px; border-radius: 13px; background: #08080A }
+.si-dev-virtual .si-shell {
+  inset: 0;
+  border: 1px dashed #453A69;
+  border-radius: 18px;
+  background: rgba(42, 36, 64, .14);
+  animation: none;
+}
+
+.si-screen {
+  position: absolute;
+  overflow: hidden;
+  animation: mfScreen 18s ease-out var(--si-d) infinite;
+}
+.si-dev-ios .si-screen {
+  inset: 5px;
+  border-radius: 21px;
+  background:
+    radial-gradient(80% 56% at 50% 26%, rgba(150, 182, 232, .30) 0%, rgba(60, 74, 102, .13) 48%, rgba(6, 6, 10, 0) 80%),
+    #05050A;
+}
+.si-dev-android .si-screen {
+  inset: 4px;
+  border-radius: 12px;
+  background:
+    radial-gradient(80% 56% at 50% 26%, rgba(150, 182, 232, .30) 0%, rgba(60, 74, 102, .13) 48%, rgba(6, 6, 10, 0) 80%),
+    #05050A;
+}
+.si-dev-virtual .si-screen {
+  inset: 7px;
+  border-radius: 12px;
+  background:
+    radial-gradient(80% 56% at 50% 26%, rgba(162, 144, 218, .24) 0%, rgba(60, 50, 102, .12) 50%, rgba(6, 6, 10, 0) 82%),
+    #06060C;
+}
+
+.si-scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 34%;
+  background: linear-gradient(180deg, rgba(198, 214, 240, .18), transparent);
+  animation: mfScan 18s ease-out var(--si-d) infinite;
+}
+.si-dev-virtual .si-scan { background: linear-gradient(180deg, rgba(196, 182, 236, .16), transparent) }
+
+.si-status {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  animation: mfChrome 18s ease-out var(--si-d) infinite;
+}
+.si-dev-ios .si-status { left: 11px; right: 11px; top: 10px }
+.si-dev-android .si-status { left: 9px; right: 9px; top: 8px }
+.si-clock { font: 500 6.5px/1 var(--si-font-mono); color: #B9C4D6 }
+.si-batt-mini { display: flex; align-items: center; gap: 3px }
+.si-batt-box { width: 9px; height: 5px; border-radius: 1.5px; border: .5px solid rgba(185, 196, 214, .7) }
+
+.si-homebar {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
+  width: 38px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(220, 228, 240, .5);
+  animation: mfChrome 18s ease-out var(--si-d) infinite;
+}
+.si-navbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  animation: mfChrome 18s ease-out var(--si-d) infinite;
+}
+.si-nav-square { width: 6px; height: 6px; border: 1px solid rgba(220, 228, 240, .45) }
+.si-nav-circle { width: 6px; height: 6px; border-radius: 50%; border: 1px solid rgba(220, 228, 240, .45) }
+.si-nav-tri {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 6px solid rgba(220, 228, 240, .45);
+}
+
+.si-part { position: absolute; animation: mfPart 18s ease-out var(--si-d) infinite }
+.si-notch {
+  top: 11px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 34px;
+  height: 10px;
+  border-radius: var(--r-sm);
+  background: #050508;
+  box-shadow: 0 0 0 .5px rgba(255, 240, 225, .07);
+}
+.si-lens {
+  top: 9px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #04040A;
+  box-shadow: 0 0 0 .5px rgba(240, 240, 245, .12), inset 0 0 2px rgba(120, 150, 200, .5);
+}
+.si-btn-side { width: 2px; border-radius: 2px }
+.si-dev-ios .si-btn-side { background: linear-gradient(180deg, #6E665F, #332F2B) }
+.si-dev-android .si-btn-side { background: linear-gradient(180deg, #64625F, #2C2B2A) }
+
+.si-tile {
+  position: absolute;
+  left: 50%;
+  width: 33%;
+  aspect-ratio: 1;
+  border-radius: 11px;
+  background: linear-gradient(150deg, #8A74D6, #5A47A0);
+  box-shadow: 0 6px 16px -5px rgba(0, 0, 0, .85), 0 0 0 1px rgba(162, 144, 218, .34);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 600 14px/1 var(--si-font-display);
+  color: var(--accent-ink);
+  animation: mfTile 18s cubic-bezier(.2, .9, .2, 1) var(--si-d) infinite;
+}
+.si-dev-ios .si-tile { top: 18.6% }
+.si-dev-android .si-tile { top: 17.5% }
+.si-dev-virtual .si-tile { top: 19.8% }
+
+/* The two taps. No `--si-d` on these, matching the artifact: the ripples land together across all
+   three devices, which is what makes one gesture read as reaching every device at once. */
+.si-ripple {
+  position: absolute;
+  left: 50%;
+  top: 60%;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid rgba(162, 144, 218, .75);
+  animation: mfRipple 18s cubic-bezier(.3, 0, .6, 1) infinite;
+}
+.si-ripple-2 { animation-name: mfRipple2 }
+
+.si-custom {
+  position: absolute;
+  top: -9px;
+  right: -8px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(10, 10, 12, .92);
+  border: 1px solid rgba(162, 144, 218, .42);
+  font: 500 8px/1 var(--si-font-mono);
+  letter-spacing: .08em;
+  color: var(--si-accent-text);
+}
+.si-dev-label {
+  margin-top: 13px;
+  font: 500 9.5px/1 var(--si-font-mono);
+  letter-spacing: .13em;
+  color: var(--si-ink-mono);
+}
+.si-dev-meta { margin-top: 5px; font: 400 9px/1.5 var(--si-font-mono); color: var(--si-ink-mono-2) }
+
+/* ---------- the run meter ------------------------------------------------------------------- */
+.si-meterrow { margin-top: clamp(12px, 2vh, 22px); display: flex; align-items: center; gap: 12px }
+.si-meter { flex: 1; height: 2px; border-radius: 2px; background: #17171B; overflow: hidden }
+.si-meter-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #4C4173, #A290DA);
+  animation: mfMeter 18s linear infinite;
+}
+.si-passed {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px 4px 6px;
+  border-radius: var(--r-pill);
+  background: rgba(8, 8, 10, .9);
+  border: 1px solid rgba(111, 203, 99, .4);
+  animation: mfTick 18s cubic-bezier(.2, .9, .2, 1) infinite;
+}
+.si-passed-mark {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(111, 203, 99, .14);
+  border: 1px solid rgba(111, 203, 99, .55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 7.5px/1 var(--si-font-mono);
+  color: var(--si-ok-text);
+}
+.si-passed-text {
+  font: 500 8.5px/1 var(--si-font-mono);
+  letter-spacing: .06em;
+  color: var(--si-ok-text);
+}
+.si-livepill {
+  margin-top: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border-radius: var(--r-pill);
+  background: rgba(111, 203, 99, .09);
+  border: 1px solid rgba(111, 203, 99, .28);
+  animation: mfLive 18s ease-out infinite;
+}
+.si-livepill-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--si-ok) }
+.si-livepill-text {
+  font: 500 8.5px/1 var(--si-font-mono);
+  letter-spacing: .07em;
+  color: var(--si-ok-text);
+}
+
+/* ============================================================================ footer ========= */
+.si-footer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: clamp(10px, 1.8vh, 20px) 34px clamp(12px, 2vh, 22px);
+  flex-wrap: wrap;
+}
+.si-steps { display: flex; align-items: center; gap: 13px; flex-wrap: wrap }
+.si-steps-lead {
+  white-space: nowrap;
+  font: 400 9px/1.4 var(--si-font-mono);
+  letter-spacing: .08em;
+  color: var(--si-ink-mono-2);
+}
+.si-steps-rule { width: 14px; height: 1px; background: #1F1F22 }
+.si-step {
+  white-space: nowrap;
+  font: 500 9.5px/1.4 var(--si-font-mono);
+  letter-spacing: .12em;
+  color: var(--si-ink-mono-2);
+  animation: mfBeat 18s linear var(--si-d, 0s) infinite;
+}
+.si-legal {
+  white-space: nowrap;
+  font: 400 9.5px/1.5 var(--si-font-mono);
+  color: var(--si-ink-mono-2);
+  letter-spacing: .06em;
+}
+
+/* ============================================================================ overlays ======= */
+.si-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(4, 4, 6, .62);
+  backdrop-filter: blur(2px);
+  border: 0;
+  padding: 0;
+  width: 100%;
+  animation: mfFade .18s ease-out both;
+}
+
+/**
+ * The modal layer SCROLLS, which the artifact's does not.
+ *
+ * The card is a fixed 336px wide and roughly 620px tall, and on a laptop in a call — 1280×620 of
+ * usable viewport — a centred non-scrolling overlay clips the submit button off the bottom with no
+ * way to reach it. `overflow-y:auto` plus `margin:auto` on the card keeps it centred when it fits
+ * and scrolls it when it does not, which is the behaviour the artifact would have had if it had
+ * been drawn at that height.
+ */
+.si-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: none;
+}
+.si-modal {
+  pointer-events: auto;
+  position: relative;
+  width: 336px;
+  max-width: 100%;
+  margin: auto;
+  flex: none;
+  animation: mfIn .24s cubic-bezier(.2, .9, .2, 1) both;
+}
+.si-close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: rgba(10, 10, 12, .94);
+  border: 1px solid #33333A;
+  color: var(--si-ink-2);
+  font: 400 13px/1 var(--si-font-ui);
+  cursor: pointer;
+}
+.si-close:hover { border-color: #4A4A52; color: #fff }
+
+/* ---------- the phone the modal is drawn as ------------------------------------------------- */
+.si-handset {
+  position: relative;
+  border-radius: 44px;
+  padding: 4px;
+  background: linear-gradient(146deg, #8E8681 0%, #4A443F 15%, #2B2724 42%, #211E1C 62%, #5D564F 88%, #332F2B 100%);
+  box-shadow: 0 34px 70px -24px rgba(0, 0, 0, .95), 0 0 0 1px rgba(255, 240, 225, .06);
+}
+.si-handset-btn { position: absolute; width: 3px; border-radius: 3px; background: linear-gradient(180deg, #6E665F, #332F2B) }
+.si-handset-face {
+  position: relative;
+  border-radius: 40px;
+  overflow: hidden;
+  background: radial-gradient(90% 46% at 50% 0%, rgba(117, 94, 184, .20) 0%, transparent 66%), #0A0A0C;
+  padding: 11px 20px 14px;
+}
+.si-statusbar { display: flex; align-items: center; justify-content: space-between; height: 22px }
+.si-statusbar-time { font: 500 10.5px/1 var(--si-font-mono); color: var(--si-ink-4); padding-left: 6px }
+.si-statusbar-right { display: flex; align-items: center; gap: 5px; padding-right: 6px }
+.si-signal { display: flex; align-items: flex-end; gap: 1.5px }
+.si-signal i { width: 2.5px; border-radius: 1px; background: var(--si-ink-4); display: block }
+.si-signal i:nth-child(1) { height: 4px }
+.si-signal i:nth-child(2) { height: 6px }
+.si-signal i:nth-child(3) { height: 8px }
+.si-signal i:nth-child(4) { height: 10px; background: rgba(216, 216, 216, .35) }
+.si-batt {
+  position: relative;
+  width: 16px;
+  height: 9px;
+  border-radius: 2.5px;
+  border: 1px solid rgba(216, 216, 216, .6);
+  padding: 1px;
+}
+.si-batt i { display: block; width: 70%; height: 100%; border-radius: 1.5px; background: var(--si-ink-4) }
+.si-island {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 82px;
+  height: 24px;
+  border-radius: 14px;
+  background: #040406;
+  box-shadow: 0 0 0 .5px rgba(255, 240, 225, .08);
+}
+
+.si-notif {
+  margin-top: 18px;
+  padding: 11px 12px;
+  border-radius: 15px;
+  background: rgba(30, 30, 34, .82);
+  border: 1px solid rgba(255, 255, 255, .07);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  animation: mfNotif .5s cubic-bezier(.2, .9, .2, 1) .12s both;
+}
+.si-notif-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(150deg, #8A74D6, #5A47A0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 600 11px/1 var(--si-font-display);
+  color: var(--accent-ink);
+}
+.si-notif-body { min-width: 0; flex: 1 }
+.si-notif-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px }
+.si-notif-app {
+  font: 600 10.5px/1.3 var(--si-font-ui);
+  letter-spacing: .02em;
+  color: var(--si-ink);
+}
+.si-notif-when { flex: none; font: 400 9px/1.3 var(--si-font-mono); color: var(--si-ink-label) }
+.si-notif-text {
+  margin-top: 3px;
+  font: 400 11px/1.45 var(--si-font-ui);
+  color: var(--si-ink-2);
+  text-wrap: pretty;
+}
+
+.si-head { margin-top: 22px }
+.si-title {
+  margin: 0 0 6px;
+  font: 600 22px/1.15 var(--si-font-display);
+  letter-spacing: -.025em;
+  color: var(--si-ink);
+  text-wrap: pretty;
+}
+.si-host { font: 400 11.5px/1.5 var(--si-font-ui); color: var(--si-ink-label); text-wrap: pretty }
+
+/* ---------- the field group ----------------------------------------------------------------- */
+.si-fields {
+  margin-top: 20px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(20, 20, 23, .9);
+  border: 1px solid #26262A;
+}
+.si-field { display: flex; align-items: center; gap: 10px; padding: 12px 13px }
+.si-field-rule { height: 1px; background: #242427 }
+/**
+ * The mono EMAIL / PASSWORD text.
+ *
+ * `aria-hidden` in the markup and NOT a `<label>`, which is a deliberate split: it is decorative
+ * type in a design that renders a phone, and its 9px letterspaced form is not the accessible name
+ * anybody should be handed. The real labels are visually hidden and sit on the inputs.
+ */
+.si-field-tag {
+  flex: none;
+  font: 500 9px/1 var(--si-font-mono);
+  letter-spacing: .1em;
+  color: var(--si-ink-label);
+  width: 52px;
+}
+.si-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font: 400 12px/1.3 var(--si-font-mono);
+  color: var(--si-ink);
+  outline: none;
+}
+.si-input::placeholder { color: #3E3E42 }
+/* The group is what reads as the control, so the ring goes round the group rather than round a
+   borderless input inside it — and it is drawn with `box-shadow` so it does not resize the row. */
+.si-fields:focus-within { box-shadow: 0 0 0 2px rgba(117, 94, 184, .22) }
+.si-input:focus-visible { outline: none }
+
+/* Screen-reader-only, for the two real labels. */
+.si-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.si-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 11px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: rgba(224, 80, 95, .09);
+  border: 1px solid rgba(224, 80, 95, .32);
+}
+.si-error-mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(224, 80, 95, .14);
+  border: 1px solid rgba(224, 80, 95, .5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 8px/1 var(--si-font-mono);
+  color: var(--si-bad-text);
+  margin-top: 1px;
+}
+.si-error-text { font: 400 11px/1.45 var(--si-font-ui); color: var(--si-bad-text) }
+
+.si-submit {
+  margin-top: 16px;
+  width: 100%;
+  padding: 13px;
+  border-radius: 13px;
+  background: var(--si-accent);
+  border: 1px solid var(--si-accent-line);
+  font: 500 12.5px/1 var(--si-font-ui);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+.si-submit:hover { background: var(--si-accent-hover) }
+.si-submit:active { background: var(--si-accent-press) }
+/**
+ * PENDING, in the artifact's motion language: no spinner, no text change, no layout shift.
+ *
+ * The design has no spinner anywhere and no icon set to take one from, and swapping the label for
+ * "Signing in…" would reflow the button under the cursor at the moment it is being pressed. Opacity
+ * and the cursor carry it, and `aria-busy` on the form is what says it out loud to a screen reader —
+ * the visual change is not the announcement.
+ */
+.si-submit:disabled { opacity: .55; cursor: default }
+.si-submit:disabled:hover { background: var(--si-accent) }
+
+.si-sessions {
+  margin-top: 11px;
+  text-align: center;
+  font: 400 10.5px/1.5 var(--si-font-ui);
+  color: var(--si-ink-help);
+}
+.si-modal-foot {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid #1A1A1E;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.si-modal-foot span { font: 400 9px/1.4 var(--si-font-mono); letter-spacing: .09em; color: var(--si-ink-micro) }
+.si-modal-home { margin: 14px auto 0; width: 110px; height: 4px; border-radius: 3px; background: rgba(220, 228, 240, .45) }
+
+/* ---------- the pricing popover ------------------------------------------------------------- */
+.si-pop {
+  position: fixed;
+  top: 74px;
+  right: 34px;
+  z-index: 21;
+  width: 100%;
+  max-width: 334px;
+  padding: 13px 14px 14px;
+  border-radius: 17px;
+  background: rgba(30, 30, 34, .9);
+  border: 1px solid rgba(255, 255, 255, .08);
+  box-shadow: 0 26px 56px -20px rgba(0, 0, 0, .9);
+  backdrop-filter: blur(18px);
+  animation: mfNotif .34s cubic-bezier(.2, .9, .2, 1) both;
+}
+.si-pop-head { display: flex; align-items: flex-start; gap: 11px }
+.si-pop-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(150deg, #8A74D6, #5A47A0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 600 12px/1 var(--si-font-display);
+  color: var(--accent-ink);
+}
+.si-pop-body { min-width: 0; flex: 1 }
+.si-pop-title { font: 600 11px/1.3 var(--si-font-ui); letter-spacing: .02em; color: var(--si-ink) }
+.si-pop-text {
+  margin-top: 4px;
+  font: 400 11.5px/1.5 var(--si-font-ui);
+  color: var(--si-ink-4);
+  text-wrap: pretty;
+}
+.si-pop-close {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid rgba(255, 255, 255, .09);
+  color: var(--si-ink-3);
+  font: 400 11px/1 var(--si-font-ui);
+  cursor: pointer;
+}
+.si-pop-close:hover { color: #fff; border-color: rgba(255, 255, 255, .2) }
+.si-pop-rows {
+  margin-top: 13px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, .07);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.si-pop-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px }
+.si-pop-k { font: 400 11.5px/1.5 var(--si-font-ui); color: var(--si-ink-3) }
+.si-pop-v { font: 400 10.5px/1.5 var(--si-font-mono); color: var(--si-ink-4) }
+.si-pop-note {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid #16161A;
+  font: 400 11px/1.6 var(--si-font-ui);
+  color: var(--si-ink-help);
+  text-wrap: pretty;
+}
+
+/* ============================================================================ narrow ==========
+ * Fluid to ~900px. The diagram is the part that cannot compress — three device bodies, two wires
+ * and three labelled nodes need about 1100px before the wires collapse to nothing and the phones
+ * start overlapping their own captions. Below that the PROD and MARKET tail is dropped and the
+ * figure keeps the half that carries the sentence: a request reaching three devices.
+ *
+ * It is decorative and `aria-hidden`, so nothing is lost to anybody reading with a screen reader.
+ * The modal is untouched at every width — it is a fixed 336px by design and already narrower than
+ * the smallest viewport this console is used on.
+ */
+@media (max-width: 1100px) {
+  .si-node-prod, .si-node-market, .si-stub, .si-wire-out { display: none }
+}
+@media (max-width: 900px) {
+  .si-header, .si-hero, .si-footer { padding-left: 20px; padding-right: 20px }
+  .si-pop { right: 20px; left: 20px; width: auto; max-width: none }
+  .si-devices { gap: 14px }
+  .si-legal { display: none }
+}
+/* Under this the figure is three thumbnails and a caption nobody can read; the modal is the screen. */
+@media (max-width: 640px) {
+  .si-diagram { display: none }
+}
+
+/**
+ * REDUCED MOTION — the artifact's rule, kept, and scoped to this screen.
+ *
+ * `styles/tokens.css` already collapses every animation in the console to 1ms globally, which stops
+ * this screen too. This is here anyway and it is stricter: `animation:none` rather than a 1ms one,
+ * because a 1ms run of an 18-second keyframe still PAINTS its 0% frame first, and a dozen of the
+ * rules above start from `opacity:0`. The result is a flash of empty diagram on load. `none` skips
+ * to the element's own style, and every element above is authored so that style is its resting
+ * state — which is why this rule can be this blunt.
+ *
+ * Scoped rather than global only so it cannot change what the device stage does; the global rule
+ * still governs that.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .si, .si * { animation: none !important; transition: none !important }
+}
