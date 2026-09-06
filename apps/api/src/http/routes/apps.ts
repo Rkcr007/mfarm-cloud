@@ -5,7 +5,13 @@ import { withTenant, withSystem } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import { appStore, BlobTooLargeError } from '../../appstore.ts';
 import { abiMismatchReason, ApkParseError, readApkMetadata } from '../../apk.ts';
-import type { AppActionKind } from '@mfarm/protocol';
+import type { AppActionKind, CaptureKind } from '@mfarm/protocol';
+import { CAPTURE_KINDS } from '@mfarm/protocol';
+
+/** The verbs that produce evidence rather than acting on an app. One list, in the protocol. */
+function isCaptureKind(k: AppActionKind): k is CaptureKind {
+  return (CAPTURE_KINDS as readonly string[]).includes(k);
+}
 import { LIVE_SESSION_STATES, requestAppAction, type AppActionRow } from '../../appactions.ts';
 import { requireTenant, requireWorker } from '../server.ts';
 import { badRequest, notFound, conflict } from '../errors.ts';
@@ -320,7 +326,7 @@ export async function appRoutes(app: FastifyInstance) {
             // did keeps working and reads the same.
             kind: {
               type: 'string',
-              enum: ['install', 'launch', 'uninstall', 'screenshot'],
+              enum: ['install', 'launch', 'uninstall', 'screenshot', 'logcat'],
               default: 'install',
             },
           },
@@ -336,8 +342,11 @@ export async function appRoutes(app: FastifyInstance) {
       // Per-kind, so the message names the verb. A `screenshot` with an appId is ACCEPTED rather
       // than refused — recording which build was on screen is a reasonable thing to want, and the
       // schema's job is to stop nonsense, not to stop specificity.
-      if (kind !== 'screenshot' && !appId) {
-        throw badRequest(`A \`${kind}\` needs an \`appId\` — the build to act on. Only \`screenshot\` acts on no app.`);
+      // The capture verbs name no app; every app verb does. `CAPTURE_KINDS` is the one place that
+      // set is written down, so this cannot drift from the CHECK in migration 040.
+      if (!isCaptureKind(kind) && !appId) {
+        throw badRequest(`A \`${kind}\` needs an \`appId\` — the build to act on. `
+          + `Only ${CAPTURE_KINDS.map((k) => `\`${k}\``).join(' and ')} act on no app.`);
       }
 
       const row = await withTenant(orgId, async (c) => {
@@ -348,7 +357,10 @@ export async function appRoutes(app: FastifyInstance) {
         // the capability sense — a tier can capture a screen without being able to install
         // anything — so demanding `app-install` for it would refuse the one device that could
         // actually serve it.
-        const needs = kind === 'screenshot' ? 'screenshot' : 'app-install';
+        // A capture verb needs the capability of the same name — a tier can dump a log or grab a
+        // screen without being able to install anything, so demanding `app-install` for one would
+        // refuse the very device that could serve it.
+        const needs = isCaptureKind(kind) ? kind : 'app-install';
         const { rows: pre } = await c.query<{
           state: string; device_id: string | null; capable: boolean | null;
           device_abis: string[] | null; device_model: string | null;

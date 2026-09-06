@@ -159,6 +159,44 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
       });
 
       if (!row) throw notFound('Session');
+
+      /**
+       * A FAILED TEST ASKS FOR ITS OWN EVIDENCE (migration 040).
+       *
+       * This is the moment the control plane learns something went wrong, and until now it did
+       * nothing with it — the only capture was at teardown, after Appium force-stops the app, which
+       * is why the screenshot a person opens to see the failure reliably shows the launcher.
+       *
+       * NEVER FAILS THE RESULT. The whole call is wrapped, and a capture that cannot be requested
+       * is logged and dropped. The suite's report is the thing that matters and it is already
+       * written by the time this runs; evidence is a bonus and must not be able to turn a recorded
+       * failure into a 500 that the reporting hook then retries. `request_capture` already returns
+       * NULL rather than raising for every ordinary decline — no device, wrong fence, no capability,
+       * one already pending — so a throw here means something genuinely unexpected.
+       *
+       * BOTH VERBS, and neither is redundant. The screenshot says what the screen looked like; the
+       * logcat says what the app was saying while it got there, and a crash usually shows in one and
+       * not the other. `request_capture` coalesces each independently, so a session failing thirty
+       * tests requests at most one of each per beat rather than sixty.
+       */
+      if (status === 'failed') {
+        const context = JSON.stringify({ source: 'test-failure', testResultId: row.id, test: row.name });
+        for (const kind of ['screenshot', 'logcat'] as const) {
+          try {
+            const { rows: cap } = await withTenant(orgId, (c) =>
+              c.query<{ id: string | null }>('SELECT request_capture($1,$2,$3,$4::jsonb) AS id',
+                [orgId, sessionId, kind, context]));
+            if (cap[0]?.id) {
+              req.log.info({ sessionId, kind, actionId: cap[0].id, testResultId: row.id },
+                'failed test requested a capture');
+            }
+          } catch (e) {
+            // Warn, not error: nothing is broken for the caller and the result is safely recorded.
+            req.log.warn({ err: e, sessionId, kind }, 'could not request a capture for a failed test');
+          }
+        }
+      }
+
       return reply.code(201).send({ result: resultJson(row) });
     },
   );

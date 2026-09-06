@@ -511,7 +511,7 @@ export async function workerRoutes(app: FastifyInstance) {
         // LEFT JOIN on the build, because `screenshot` names none. As an inner join this silently
         // returned nothing for every screenshot action — the row would stay PENDING, be re-offered
         // on every beat, and be swept as an orphan when the session ended, with no error anywhere.
-        `SELECT i.id, i.kind, i.device_id, i.app_id, i.session_id, i.fence,
+        `SELECT i.id, i.kind, i.device_id, i.app_id, i.session_id, i.fence, i.context,
                 a.sha256, a.size_bytes, a.package_name
            FROM app_actions i
            JOIN devices d         ON d.id = i.device_id
@@ -554,6 +554,17 @@ export async function workerRoutes(app: FastifyInstance) {
           ...(i.app_id ? { appId: i.app_id as string } : {}),
           ...(i.package_name ? { packageName: i.package_name as string } : {}),
           fence: Number(i.fence),
+          /**
+           * Why this action was requested (migration 040), handed to the worker so it can be
+           * copied onto the artifact. Opaque here too: this route neither reads nor validates it.
+           *
+           * OMITTED WHEN EMPTY, so an action requested before 040 — and every install, which has
+           * no context to carry — produces a beat payload byte for byte what it was. The `{}`
+           * default in the schema means the column is never NULL, so the check is on emptiness
+           * rather than on presence.
+           */
+          ...(i.context && Object.keys(i.context as object).length
+            ? { context: i.context as Record<string, unknown> } : {}),
           // Install only. Sent for every kind would be harmless, but a launch that carries a digest
           // invites a worker to think it may fetch one.
           ...(i.kind === 'install'

@@ -36,7 +36,7 @@ What follows is what is missing, in the order to build it.
 
 ---
 
-## S1 — Queue fairness: one org can starve every other
+## S1 — Queue fairness: one org can starve every other — **BUILT (2026-09-07)**
 
 **The defect.** `promote_queued` reads the twenty oldest `QUEUED` sessions *globally*, ordered by
 `created_at`, then skips each one whose org is at `max_concurrent`
@@ -77,55 +77,70 @@ afterwards, one device is free. Today B waits forever; after this B is promoted.
 promoted org, not on a count, so the test states the fairness property rather than an arithmetic
 coincidence.
 
-**Verify on the farm.** Two orgs, four devices, a suite from each. The second org's first session
-starts while the first org's backlog is still draining.
+**Verified.** The test was run against a live Postgres with the **037 function restored**, watched go
+red, then green against 039 — the fix was not taken on trust. The FIFO-within-an-org test is green
+under both, so it states a property rather than agreeing with the change. Migration 039, ADR-0028.
+
+The first draft of the test had the wrong shape: org A released the device that freed, which drops A
+under its cap and makes A legitimately first in line. The shipped version pins A *at* cap with a
+second device — the production situation, where one team's CI queues a hundred jobs and every other
+team stops.
+
+**Still to verify on the farm.** Two orgs, four devices, a suite from each. The second org's first
+session should start while the first org's backlog is still draining.
 
 ---
 
-## S2 — The failure evidence is captured at the wrong moment
+## S2 — The failure evidence is captured at the wrong moment — **BUILT (2026-09-07)**
 
-**The defect.** `captureArtifacts()` (`workers/agent/src/agent.ts:1044`) runs when the device enters
-`CLEANING` — that is, at teardown, after Appium has force-stopped the app under test. So:
+**The defect.** `captureArtifacts()` (`workers/agent/src/agent.ts`) runs when the device enters
+`CLEANING` — at teardown, after Appium has force-stopped the app under test. So the screenshot
+reliably shows the launcher, and the logcat is a whole-session dump (2.55 MB average) with no marker
+for when the failure happened.
 
-- **the screenshot reliably shows the launcher**, not the failing screen. `EXECUTION_MODEL.md` §4.5
-  admits this and `examples/medishop-suite` works around it by screenshotting locally, which every
-  customer would then also have to do;
-- **the logcat is a whole-session dump** with no marker for when the failure happened. At 2.55 MB
-  average that is a haystack shipped in place of a needle.
+**What it turned out to be, which is smaller than this section first said.** The plan proposed a new
+`capture` action on the beat. It was not needed: migration 022 had already added a `screenshot` verb
+to the `app_actions` pipeline **for this exact reason**, and its own header says so. The work was to
+add the second verb, and to make the control plane request both **on its own** off a signal it had
+been receiving and ignoring since migration 021 — the result POST.
 
-Evidence has to be triggered by the failure, not by the release.
+**Schema — migration 040.**
 
-**Schema — migration 040.** Two changes.
+- `app_actions.kind` gains `'logcat'`, and `app_actions_app_required` learns that two verbs name no
+  app rather than one. Both are one line each because 022 converted that column from an enum to
+  `text + CHECK` in anticipation.
+- `app_actions.context jsonb` and `artifacts.context jsonb` — *why* something was captured, carried
+  from the request to the artifact. A failure capture holds
+  `{"source": "test-failure", "testResultId": …, "test": …}`. Without it, a session that fails six
+  tests leaves six unlabelled files with adjacent timestamps.
+- `request_capture(org, session, kind, context)`, `SECURITY DEFINER`, holding the three rules that
+  keep this from making things worse: **coalesce** to one `PENDING` capture per kind per session,
+  **require the capability** so a device that cannot capture never collects an action that fails,
+  and **check the fence** so a late result cannot photograph the next tenant.
+- `artifact_record` gains a tenth argument, with the nine-argument form kept as a forwarder — 037's
+  deploy-window and rollback reasoning, unchanged.
 
-1. `test_results` gains `occurred_at timestamptz` — when the *suite* says the test failed, distinct
-   from `reported_at`, which is when the row reached us. Every later step (the log window, the video
-   offset, the red step) needs the failure's position on the session's clock, and `reported_at` is
-   the wrong clock: a reporter that batches its POSTs collapses ten failures onto one instant.
-2. `artifacts` gains `captured_at timestamptz` and `context jsonb` — what the artifact is *of*.
-   `{"testResultId": ...}` on a failure capture, `{}` on the release sweep. Without it a session
-   with six screenshots is six unlabelled PNGs.
+**Code.** `results.ts` requests both captures on a `failed` result, wrapped so it can never fail the
+report — a result must be recorded whether or not evidence can be taken. `workers.ts` carries
+`context` on the beat, omitted when empty so an older agent's payload is unchanged. The agent gained
+a `logcat` handler and passes `context` through to the upload, reading it and never interpreting it,
+so a new capture source needs no agent release.
 
-**Code.**
+**What was deliberately NOT built.** `test_results.occurred_at` was in the plan and is not here:
+nothing populates or reads it yet. It belongs with S4, where the timeline consumes it.
 
-- `apps/api/src/http/routes/results.ts` — on a `failed` result, record a
-  `test-failed` execution event (new `kind`, see S4) carrying the result id and `occurred_at`.
-- `apps/api/src/http/routes/workers.ts` — the beat's existing `actions` channel gains a
-  `capture` action: `{deviceId, fence, sessionId, kind: 'screenshot'|'logcat', context}`. The
-  control plane already knows a test just failed; the beat is already the way it asks a worker for
-  work. No new endpoint and no new direction of travel — ADR-0006 still holds.
-- `workers/agent/src/agent.ts` — handle `capture` by calling the same `control.screenshot()` and
-  `control.dumpLogcat()` that `captureArtifacts()` calls, with the same swallow-and-log discipline.
-  A capture that fails must never block a release.
+**Verified.** Seven API tests for the bounds (coalescing, the capability rule, a passing test asking
+for nothing, an ended session, malformed context), and two end-to-end tests in
+`workers/agent/test/install.test.ts` running a **real agent against a real control plane** — a
+failure is reported, and both artifacts come back with bytes and the right `testResultId` without
+the test ever asking the worker for anything. The first draft of that test read the artifact list
+straight after `heartbeat()` and saw one of the two; the beat hands work over and returns, so it now
+waits for both actions to settle. That was a race in the test, and it would have read as a flaky
+product.
 
-**The honest limit.** The beat is ten seconds, so a failure-triggered screenshot lands up to ten
-seconds after the assertion — by which time a good suite may have navigated on. This is worth
-shipping anyway (ten seconds late beats "after force-stop") and it is why S3 exists: the command
-trace is what makes a *late* screenshot readable, because it says what happened in between.
-
-**Test.** `apps/api/test/artifacts.test.ts` — a failed result produces a pending capture action on
-the next beat, and the uploaded artifact carries the `testResultId` in `context`.
-
----
+**The honest limit, unchanged from the plan.** The beat is ten seconds, so a failure-triggered
+capture lands up to ten seconds after the assertion. Ten seconds late beats after-force-stop, and
+S3 is what makes a late screenshot readable — the command trace says what happened in between.
 
 ## S3 — There is no step trace, so nothing can be highlighted
 
@@ -305,8 +320,8 @@ host, then the rate limiter.
 
 ## The order, and why
 
-1. **S1 fairness** — a live bug, a contained fix, and the first thing a second org would hit.
-2. **S2 evidence at failure time** — fixes the artifact people already open and find useless.
+1. ~~**S1 fairness**~~ — **done**, migration 039 / ADR-0028.
+2. ~~**S2 evidence at failure time**~~ — **done**, migration 040.
 3. **S3 command trace** — what makes a late screenshot readable, and the only source a step list can
    have that does not require every customer to instrument their suite.
 4. **S4 timeline + screen** — makes S2 and S3 visible; nothing renders any of it today.

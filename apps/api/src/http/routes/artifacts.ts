@@ -48,6 +48,7 @@ interface ArtifactRow {
   filename: string | null;
   created_at: Date;
   expires_at: Date;
+  context: Record<string, unknown>;
 }
 
 function artifactJson(a: ArtifactRow) {
@@ -64,6 +65,14 @@ function artifactJson(a: ArtifactRow) {
     filename: a.filename,
     createdAt: a.created_at.toISOString(),
     expiresAt: a.expires_at.toISOString(),
+    /**
+     * Why this was captured (migration 040). `{}` on a release-time capture, which is most of them.
+     *
+     * Sent always rather than omitted when empty: a screen that has to distinguish "no context" from
+     * "the field is not in this response" is a screen that will get it wrong once, and the column
+     * has a NOT NULL default so there is no third state to represent.
+     */
+    context: a.context ?? {},
   };
 }
 
@@ -93,7 +102,8 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
    * on that device or that device is not on that host, and all three failures are one 409 — telling
    * a worker WHICH of them was wrong lets it probe the rest of the fleet.
    */
-  app.post<{ Params: { id: string }; Querystring: { kind?: string; device?: string; filename?: string } }>(
+  app.post<{ Params: { id: string };
+             Querystring: { kind?: string; device?: string; filename?: string; context?: string } }>(
     '/sessions/:id/artifacts',
     {
       bodyLimit: cfg.artifactMaxUploadBytes,
@@ -105,6 +115,16 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
             kind: { type: 'string', maxLength: 32 },
             device: { type: 'string', maxLength: 64 },
             filename: { type: 'string', maxLength: 256 },
+            /**
+             * Why this artifact was captured (migration 040), echoed back by the worker from the
+             * action that asked for it.
+             *
+             * A QUERY PARAMETER carrying JSON, because the BODY IS THE BYTES — this endpoint takes
+             * an octet-stream and there is nowhere else to put it. Capped hard: it is a label, and
+             * a worker that could write a megabyte of jsonb per artifact has found a way to fill
+             * the control plane's disk with something that is not evidence.
+             */
+            context: { type: 'string', maxLength: 1024 },
           },
         },
       },
@@ -126,6 +146,28 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
         );
       }
 
+      /**
+       * PARSED BEFORE THE BYTES ARE STORED, so a malformed label is a 400 rather than a blob
+       * written to disk and then orphaned by a failing insert.
+       *
+       * A NON-OBJECT IS REFUSED, not coerced. `context` is read back by the run screen as a record
+       * with a `source` — a bare string or an array reaching the column would render as nothing and
+       * be indistinguishable from an artifact that carried no context at all.
+       */
+      let context = '{}';
+      if (req.query.context !== undefined) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(req.query.context);
+        } catch {
+          throw badRequest('context must be a JSON object.');
+        }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw badRequest('context must be a JSON object.');
+        }
+        context = JSON.stringify(parsed);
+      }
+
       let blob;
       try {
         blob = await store.put(body as Readable, cfg.artifactMaxUploadBytes);
@@ -141,9 +183,10 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
       // inside `artifact_record`, which is the whole point of putting the host id in its signature.
       const id = await withSystem(async (c) => {
         const r = await c.query<{ id: string | null }>(
-          `SELECT artifact_record($1,$2,$3,$4,$5,$6,$7,$8, make_interval(hours => $9)) AS id`,
+          `SELECT artifact_record($1,$2,$3,$4,$5,$6,$7,$8, make_interval(hours => $9), $10::jsonb) AS id`,
           [hostId, deviceId, req.params.id, kind, blob.sha256, blob.sizeBytes,
-           CONTENT_TYPE[kind], safeFilename(req.query.filename), cfg.artifactRetentionHours],
+           CONTENT_TYPE[kind], safeFilename(req.query.filename), cfg.artifactRetentionHours,
+           context],
         );
         return r.rows[0]?.id ?? null;
       });

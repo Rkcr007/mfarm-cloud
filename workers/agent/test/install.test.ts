@@ -87,12 +87,19 @@ class FakeDevice extends NoInstallDevice {
 
   constructor(localId: string) {
     super(localId);
-    this.info.capabilities = ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install', 'screenshot'];
+    this.info.capabilities = ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install',
+                              'screenshot', 'logcat'];
   }
 
   /** A real PNG header, so the control plane's content sniffing sees what it expects. */
   async screenshot() {
     return { bytes: Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), contentType: 'image/png' };
+  }
+
+  /** Settable, so a test can make the device say nothing and check that produces no artifact. */
+  logcatText = '01-01 00:00:00.000  E/AndroidRuntime: FATAL EXCEPTION: main\n';
+  async dumpLogcat() {
+    return this.logcatText;
   }
 
   async installApp(apkPath: string) {
@@ -472,6 +479,102 @@ describe('install over the heartbeat', () => {
     const { artifacts } = await json<{ artifacts: Array<{ kind: string }> }>(arts, 200);
     assert.equal(artifacts.filter((a) => a.kind === 'screenshot').length, 1,
       'the capture must reach the artifact store, not just report DONE');
+
+    await agent.shutdown();
+  });
+
+  test('a failed test pulls its own evidence down through the beat', async () => {
+    /**
+     * THE WHOLE OF MIGRATION 040, END TO END, with nothing stubbed but the Android.
+     *
+     * A suite reports a failure to the control plane; the control plane queues a screenshot and a
+     * logcat; the beat carries both to this worker; the worker captures and uploads them; and the
+     * artifacts come back naming the test that caused them.
+     *
+     * Worth running here rather than only against `app.inject()`: the API-side test proves the row
+     * is written, and a row is not evidence. This proves a person can open the picture.
+     */
+    await clearFleet();
+    const device = new FakeDevice(`eviden-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([backendFor(device)], `eviden-${randomUUID().slice(0, 8)}`);
+    await agent.start();
+
+    const sessionId = await allocate();
+
+    const reported = await api(`/v1/sessions/${sessionId}/result`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        status: 'failed', name: 'checkout applies the discount',
+        failure: 'expected 90 but got 100', failureReason: 'assertion-failure',
+      }),
+    });
+    const resultId = (await json<{ result: { id: string } }>(reported, 201)).result.id;
+
+    // Nothing was asked of the worker by the test — the control plane decided on its own that a
+    // failure deserves evidence, which is the entire point of the feature.
+    const queued = await api(`/v1/sessions/${sessionId}/app-actions`);
+    const { actions } = await json<{ actions: Array<{ id: string; kind: string }> }>(queued, 200);
+    assert.deepEqual(actions.map((a) => a.kind).sort(), ['logcat', 'screenshot'],
+      'the control plane should have queued both without being asked');
+
+    await agent.heartbeat();
+    // WAITED FOR, not assumed. The beat hands the work over and returns; the captures run after it.
+    // An earlier version of this test read the artifact list straight after `heartbeat()` and saw
+    // one of the two — which is a race in the test, and would have read as a flaky product.
+    for (const a of actions) {
+      const settledAction = await settled(a.id);
+      assert.equal(settledAction.state, 'DONE', `${a.kind}: ${settledAction.error ?? ''}`);
+    }
+
+    const arts = await api(`/v1/sessions/${sessionId}/artifacts`);
+    const { artifacts } = await json<{ artifacts: Array<{
+      kind: string; sizeBytes: number; context: Record<string, unknown>;
+    }> }>(arts, 200);
+
+    const kinds = artifacts.map((a) => a.kind).sort();
+    assert.deepEqual(kinds, ['logcat', 'screenshot'],
+      `both halves should have been captured, got ${JSON.stringify(kinds)}`);
+
+    for (const a of artifacts) {
+      assert.ok(a.sizeBytes > 0, `${a.kind} must carry bytes, not just a row`);
+      assert.equal(a.context.source, 'test-failure');
+      assert.equal(a.context.testResultId, resultId,
+        `${a.kind} has to name WHICH failure it belongs to — a session that fails six tests `
+        + 'otherwise leaves six unlabelled files');
+      assert.equal(a.context.test, 'checkout applies the discount');
+    }
+
+    await agent.shutdown();
+  });
+
+  test('a device with nothing to say uploads no logcat, and does not report a failure', async () => {
+    /**
+     * A zero-byte artifact cannot be stored — `artifacts.size_bytes` has a `> 0` CHECK — so a quiet
+     * device would turn into a FAILED action that reads as a broken farm. It is not broken. It has
+     * simply said nothing.
+     */
+    await clearFleet();
+    const device = new FakeDevice(`quiet-${randomUUID().slice(0, 8)}`);
+    device.logcatText = '   \n  \n';
+    const agent = makeAgent([backendFor(device)], `quiet-${randomUUID().slice(0, 8)}`);
+    await agent.start();
+
+    const sessionId = await allocate();
+    const queued = await api(`/v1/sessions/${sessionId}/app-actions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'logcat' }),
+    });
+    const actionId = (await json<{ action: { id: string } }>(queued, 202)).action.id;
+
+    await agent.heartbeat();
+    const action = await settled(actionId);
+    assert.equal(action.state, 'DONE', `a quiet device is a success: ${action.error ?? ''}`);
+
+    const arts = await api(`/v1/sessions/${sessionId}/artifacts`);
+    const { artifacts } = await json<{ artifacts: Array<{ kind: string }> }>(arts, 200);
+    assert.equal(artifacts.length, 0, 'nothing to say is not evidence');
 
     await agent.shutdown();
   });
