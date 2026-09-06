@@ -16,7 +16,7 @@ repo except step 2 onwards, and nothing needs a decision except step 6.
 | Machine | What it is | Cost while running |
 |---|---|---|
 | `mfarm-cp` | control plane: Postgres, the API, the console, Caddy (TLS) | ~₹3/hour |
-| `mfarm-lab` | device host: two Cuttlefish Android 17 devices, Appium, the worker, coturn | **~₹65/hour** |
+| `mfarm-lab` | device host: **four** Cuttlefish Android 17 devices, Appium, the worker, coturn | **~₹65/hour** |
 
 The device host is ~95% of the bill, which is why both are stopped when idle. Stopped VMs still bill
 for their disks (~₹42/day); only deleting the disks stops that, and doing so throws away the farm.
@@ -94,13 +94,13 @@ Takes about two minutes. The devices are still booting when it returns.
 ./deploy/farm-check.sh
 ```
 
-It waits up to ten minutes, because two Cuttlefish devices cold boot after a host start and a check
+It waits up to ten minutes, because four Cuttlefish devices cold boot after a host start and a check
 that answers "0 devices" thirty seconds in would say the farm is broken when it is merely starting.
 
 ```
 Control plane
   ✓ API answering on http://127.0.0.1:3000
-  ✓ running commit f57eae7
+  ✓ running commit 303585f
   ✓ public HTTPS reachable at https://34-100-138-213.sslip.io
   ✓ /dp reaches the device host's data plane (426 = websocket only)
 

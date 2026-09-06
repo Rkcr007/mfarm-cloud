@@ -281,7 +281,7 @@ The console's own address is reserved (`mfarm-lab-ip`, 34.100.138.213), so its U
 Encrypt certificate survive a stop. Reserving one for the device host too (~₹250/month) would make
 that reconcile unnecessary, and is worth it if this becomes routine.
 
-`farm-check.sh` waits up to ten minutes, because two Cuttlefish devices cold boot after a host start.
+`farm-check.sh` waits up to ten minutes, because four Cuttlefish devices cold boot after a host start.
 It reports the running commit, the fleet as the CONTROL PLANE sees it, whether `/dp` reaches the
 worker (a 426 is the proof), and whether the relay answers.
 

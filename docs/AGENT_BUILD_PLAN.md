@@ -62,8 +62,10 @@ Built, and **not** to be rebuilt:
 - **The outbound tunnel** — the agent dials the control plane and holds one socket; the console
   multiplexes onto it. Works through NAT with nothing listening on the host. Hardware-verified.
 - **Automation over that same tunnel** (ADR-0011) — `APPIUM_ENABLED=1` now starts on a NAT'd laptop,
-  the gateway binds loopback, and the existing farm stays on its direct path. 822 tests green,
-  **not yet run on hardware.**
+  the gateway binds loopback, and the existing farm stays on its direct path. 822 tests green when
+  this was written; **1441 as of 2026-09-06.** Whether it has since been exercised on a NAT'd host is
+  deliberately not asserted here: the farm's one handset has been behind a machine that stopped
+  beating on 2026-08-29, so nobody has been in a position to find out.
 - **Android device control** — USB discovery, hot-plug, metadata, battery/storage health,
   package-level reset, APK install, launch, logcat, screenshots, UI hierarchy.
 - **The scheduling gate accepts phones** — `session-reset` sits beside `snapshot-reset` in

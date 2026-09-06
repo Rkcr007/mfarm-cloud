@@ -3,8 +3,13 @@
 Everything about this product: what it is, what is built, every decision and why, the roads
 deliberately not taken, and what running it on real hardware taught us that no test could.
 
-Curated 2026-08-24, at `95f6701` / migration 022. **If you read one file, read this one.** Every
-other document is linked from here and none of them needs to be read first.
+Curated 2026-09-06, at `303585f` / migration 038 / ADR-0027. **If you read one file, read this
+one.** Every other document is linked from here and none of them needs to be read first.
+
+Every number below was re-read from the code, the farm or `git` on the day it was written. That is
+not a flourish: the previous curation went thirteen days without one and by the end claimed a
+commit, a migration, a device count and four capabilities that were all wrong. §3 says which
+documents are still worth trusting.
 
 ---
 
@@ -17,10 +22,14 @@ on an emulator on somebody's laptop.
 The devices are **Cuttlefish** virtual Android instances on a Linux host with KVM. The bet is
 "physical-device-like testing at virtual-device economics".
 
-**Live now:** `https://farm.mfarm.dev`, running commit `1920d2f`. **Four virtual devices** —
-*MFARM X1 Pro* and *MFARM X1* (profiled, ADR-0017) plus two unprofiled `cuttlefish` — and one
-physical handset. A second console is served at `/app`: the new React build, device view only,
-alongside the current one at `/` until it reaches parity.
+**Live now:** `https://farm.mfarm.dev`, serving `303585f`. **Four virtual devices** — *MFARM X1
+Pro* and *MFARM X1* (profiled, ADR-0017) plus two unprofiled `cuttlefish` — and **one physical
+handset, `SM-S918B`, which is quarantined**: the machine it is plugged into has not sent a heartbeat
+since 2026-08-29, and its row will correct itself the moment a current agent registers it.
+
+**The console people use is the one at `/`**, which loads `/console.js`. A React build is also
+served at `/app` and is NOT what the Fleet, the cockpit or the bring-up screen render from —
+checked, because a day's work in the wrong file is an easy mistake to make here.
 
 **`mfarm-lab` is stopped between sessions; `mfarm-cp` stays up.** `./deploy/farm-online.sh`
 brings the devices back.
@@ -56,13 +65,15 @@ The two machines are separate on purpose — [ADR-0006](adrs/0006-control-plane-
 
 | Document | What it is |
 |---|---|
-| [../HANDOFF.md](../HANDOFF.md) | The state of play and every known issue. The longest and most load-bearing file in the repo. |
+| [../HANDOFF.md](../HANDOFF.md) | The state of play and the numbered log of every session. **The numbered entries are reliable; its summary sections decay** — they have been audited twice and found carrying seventeen and then twelve stale claims. Quote the log, verify the header. |
 | [START_HERE.md](START_HERE.md) | Closed laptop → a device you can tap, in seven steps. |
 | [EXECUTION_MODEL.md](EXECUTION_MODEL.md) | How a suite actually runs: capabilities, runs, outcomes, artifacts. §4 is the roadmap. |
 | [RUNBOOK.md](RUNBOOK.md) | Start it, ship to it, stop it. The reference under START_HERE. |
 | [RENDER_BASELINE.md](RENDER_BASELINE.md) | What SwiftShader can and cannot test. Measured, not assumed. |
 | [ci.md](ci.md) | Running your suite from CI, with the GitHub Action. |
-| [adrs/](adrs/) | Twenty-two accepted decisions, each with its rejected alternatives (there is no 0013). §5 below summarises them. |
+| [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md), [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md) | The agent and the handset path. Kept current by the ship chain rather than by curation — see the definition of done. |
+| [DEFECTS.md](DEFECTS.md) | Everything found by USING the console rather than by a test, with severity by what it costs a person. Twenty-five recorded, twenty-five closed. |
+| [adrs/](adrs/) | Twenty-six accepted decisions, each with its rejected alternatives (there is no 0013). §5 below summarises them. |
 | [../examples/medishop-suite/README.md](../examples/medishop-suite/README.md) | The worked example: 8 tests, one build, one run, real outcomes. |
 | [../apps/api/README.md](../apps/api/README.md), [../apps/cli/README.md](../apps/cli/README.md), [../workers/agent/README.md](../workers/agent/README.md), [../deploy/README.md](../deploy/README.md) | Per-package detail. |
 
@@ -104,7 +115,32 @@ The two machines are separate on purpose — [ADR-0006](adrs/0006-control-plane-
 - **Failure injection** (`deploy/verify-failure.mjs`) — breaks real things on real hardware and asks
   whether the farm comes back clean
 
+- **Bounded reset recovery** (migration 032, ADR-0019) — a reset that will never succeed stops being
+  retried and says so, with a budget, a ledger and a terminal state an operator can clear
+- **Capability withdrawal in place** (ADR-0027) — an unhealthy Appium costs that device its
+  `webdriver` on the next heartbeat, and nothing restarts
+
 **Not built, and each for a stated reason** — this is §6.
+
+---
+
+## 4a. Where each part actually stands
+
+Read this before planning anything. It is the "what is working and what is not" view, by area, and
+every line was checked on 2026-09-06.
+
+| Area | State | The honest caveat |
+|---|---|---|
+| **Console (UI)** | **Working.** The full design package is implemented on the vanilla console at `/`; Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings all render, in both themes, with zero console exceptions across every surface. | An hour of exploratory use on 2026-09-06 found five defects the 1441-test suite could not. All five are fixed. That ratio is the point: **the suite has never found a console defect.** |
+| **API / control plane** | **Working.** Allocation, leases, fencing, reset, quarantine and its gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 38 migrations, all applied on the farm. | **Single instance only** — rate limiting is in-memory (`server.ts`), so a second API process would silently multiply every limit. That is the one thing blocking horizontal scale. |
+| **WebDriver hub** | **Working**, and hardware-verified: an existing Appium suite migrates with one URL and two capabilities. | — |
+| **Virtual devices (Cuttlefish)** | **Working.** Four on one host, cold boot ~30s, live view 49–53 fps. | The host is one VM, stopped between sessions. A whole-host outage is still a whole-farm outage. |
+| **Physical devices** | **Built, not currently serving.** The agent, pairing (ADR-0014), org-pinning and the data-plane tunnel are all built; the farm's one handset is quarantined behind a machine that stopped beating on 2026-08-29. | Nothing is wrong with the code path — `discovery.ts` reads the panel, `physical.ts` cannot report a device without one. It needs the phone plugged into a host running a current agent. |
+| **Agent** | **Working**, published as `@mfarm/cli`'s sibling and installed per host. | A device ARRIVING still drains and re-registers the agent (the heartbeat reconciles devices it knows and cannot create one). That is the remaining restart, and it is deliberate. |
+| **Deploy / ops** | **Working, with the gaps now instrumented.** `check-deployed.sh` answers "is this farm running main?" for the image and both checkouts, and `verify-live.sh` asks it too. | Deploy is still **manual** — a merged, released commit reaches the farm when somebody runs `mfarm-deploy.sh`. The gap is now reported rather than silent, which is not the same as closed. |
+| **Observability** | **Working.** Prometheus, Grafana, alert rules, host heartbeat and tunnel metrics. | No worker-side metrics: the agent reports incidents, not gauges. |
+| **Video / recording** | **Not built, deliberately** — §6. Costed, and unbuilt until it can record only failures. | — |
+| **Execution timeline in the console** | **Not built.** The events are recorded and served; no screen renders them. | The one genuinely missing console screen from `AutomationExecutionPlan.md` §3. |
 
 ---
 
@@ -303,24 +339,59 @@ gcloud compute instances stop mfarm-lab --zone asia-south1-c   # it bills by the
 
 ---
 
-## 11. What is next
+## 11. What is next, in priority order
 
-1. **Physical Android devices** — decided 2026-08-24,
-   [ADR-0008](adrs/0008-physical-devices-behind-the-existing-agent.md). This reverses what §4 of
-   `E2E_MVP_PLAN.md` and Phase 7 of `product_guide_v2.md` said, on purpose and on instruction.
-   Milestone 0 is built and green but **has never run on hardware**: agent enrollment tokens,
-   org-pinned devices, and a data-plane tunnel the agent dials out so a phone on a NAT'd laptop is
-   reachable. The gate before anything is built on top of it is that the EXISTING Cuttlefish farm
-   still passes `verify-live.sh` and `verify-webdriver.mjs` through that tunnel.
-2. **The execution model is done through §4.8.** §4.1–§4.5 plus the timeline, the live stream and
-   the declared end are all built and hardware-verified. Video stays unbuilt until it records only
-   failures. What is genuinely left from `AutomationExecutionPlan.md` is a console screen to render
-   the timeline (§3), bounded device retry with the metering question answered explicitly (§11/§34),
-   and **bounded escalation for a stuck reset** — today it is re-offered on every heartbeat forever,
-   which is precisely the unbounded retry that document's own §11 warns against. That last one is a
-   decision, not code.
-3. **The honest next question is still not a capability** — it is whether a two-device farm with a
-   working execution model is worth putting in front of a second team.
-4. **Standing constraints:** multi-instance is blocked by in-memory rate limiting; publishing is
-   blocked because every package is `"private": true`; observability has no host metrics and no
-   worker-side metrics.
+Re-derived 2026-09-06 against the code, not carried forward. The previous version of this section
+claimed four things that were already built and one that was already published — see §3's note on
+why a list like this needs re-deriving rather than editing.
+
+### 1. Decide whether a four-device farm goes in front of a second team
+
+**This is still not a capability question, and it is still the only one that matters.** The
+execution model works, the console has been used hard and its defects are closed, and the farm has
+run real suites. What has never happened is somebody who did not build it trying to use it for a
+day. Everything below is smaller than this.
+
+### 2. Deploy is manual, and that is now the largest operational gap (D18)
+
+A merged, CI-green, released commit reaches the farm when a human runs `mfarm-deploy.sh`. It went
+unnoticed for ninety minutes once and the register claimed those fixes were live the whole time.
+`check-deployed.sh` reports the gap now — **reporting is not closing**. The options are a deploy
+step on the Release workflow, or an alert when the serving sha and `origin/main` diverge.
+
+### 3. The handset is out of the fleet and one command puts it back (D2)
+
+`SM-S918B` is quarantined behind a machine that last beat on 2026-08-29. Nothing is wrong with the
+code. `npx @mfarm/agent` on that machine re-registers it with its panel and its capabilities.
+**This is Rakesh's hardware and cannot be done from here.**
+
+### 4. Single-instance only, and the blocker is one module
+
+Rate limiting is in-memory (`apps/api/src/http/server.ts`), so a second API process silently
+multiplies every limit. Correct for one instance and named as such in the code. It is the one thing
+between here and running two.
+
+### 5. The execution timeline has no screen
+
+`AutomationExecutionPlan.md` §3. The events are recorded and served; nothing renders them. The only
+console screen the execution model still asks for.
+
+### 6. A device arriving still restarts the agent
+
+The heartbeat reconciles devices it knows and cannot create one, so a newly plugged phone becomes
+visible by re-registering (ADR-0027). Deliberate, bounded, and the last remaining restart — worth
+revisiting only if hot-plug becomes common.
+
+### Standing constraints, unchanged
+
+- **Video is unbuilt on purpose** until it can record only failures (§6).
+- **No worker-side metrics** — the agent reports incidents, not gauges.
+- **One device host.** A host outage is a farm outage; ADR-0027 and migration 038 reduce what one
+  costs, they do not remove it.
+
+### What is NOT a constraint any more
+
+Four claims that stood in this section and were false when checked: bounded reset escalation is
+built (032, ADR-0019); the CLI is published (`@mfarm/cli`, ADR-0023); host metrics exist
+(`mfarm_host_last_heartbeat_timestamp_seconds`); and the physical-device path is built and was
+hardware-verified rather than never run.
