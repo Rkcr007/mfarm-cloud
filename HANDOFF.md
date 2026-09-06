@@ -355,8 +355,9 @@ workers/agent/    worker agent, Appium supervisor,      345 tests
                   physical devices, tunnel
 deploy/           deploy scripts and their checks         41 tests
 apps/api/public/  the web console (served by the API at /)
-apps/console/     the React console at /app — NO TESTS, no `test` script at all
-apps/api/migrations/  033 of them; 033 is the newest
+apps/console/     the React console at /app — sign-in,    79 tests
+                  the gate, the device screen
+apps/api/migrations/  038 of them; 038 is the newest
 packages/protocol shared contract
 docs/adrs/        architecture decision records
 .github/, action.yml   CI and the customer-facing Action
