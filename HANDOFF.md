@@ -3787,3 +3787,56 @@ when the feature is broken. See issues 37 and 38.
     now says **"Queue a reset"**, which is exactly what it authorises.
 
     Farm left at 4 available, lab stopped.
+
+73. **THE PROTOCOL CHANGE HAD ALREADY SHIPPED — THE FIX WAS DELETING WHAT IT REPLACED.** 2026-09-06.
+
+    Asked to make the protocol change that would let the agent withdraw a capability without
+    restarting. **It was made on 2026-09-01.** `POST /workers/heartbeat` reconciles the per-device
+    automation map the agent had always been sending — endpoint gone, `webdriver` stripped; endpoint
+    back, `webdriver` restored; host-scoped; never touching `state` — and `http.test.ts` has covered
+    every branch of it since.
+
+    What nobody removed was the mechanism it replaced. `index.ts` still read: *"capabilities are
+    written at registration only, so one device's `webdriver` cannot be withdrawn without
+    re-registering the host… That needs the heartbeat to carry capabilities."* It carried them
+    already. **The comment outlived the constraint by five days and cost a thirteen-minute farm
+    outage** — and I quoted that comment back to Rakesh as the reason a protocol change was needed,
+    which is [[mfarm-comments-as-rumour]] doing it to me twice in one week.
+
+    So the fix was deletion: the withdraw timer, the grace window, the drain-and-exit, and a warning
+    telling people to restart the agent to pick up a recovery that is now automatic. ADR-0027
+    records it and marks ADR-0003's implementation note superseded. **What still drains, and must: a
+    device ARRIVING** — the heartbeat reconciles devices it knows and cannot create one.
+
+    `agent.test.ts` gains the assertion the deletion rests on, end to end against a real control
+    plane: withdraw an endpoint at runtime, and the next beat strips `webdriver` from that device
+    only, leaves the sibling advertised, leaves the device READY, and restores it later.
+
+    **D18/D19 — "is this farm running main?" now has an answer.** `deploy/check-deployed.sh` reports
+    the serving image, the control plane's checkout and the device host's, and `verify-live.sh` —
+    the script already run after every `instances start` — asks it too. The assertion that matters
+    is that **`unknown` never scores as up to date**: every gatherer is an ssh that can fail, and a
+    check going green on a farm it never reached is worse than no check.
+
+    **D20 — the boot unit is in the repo**, without the `CF_INSTANCES` it had no business declaring.
+
+    **D2 — the console stops reporting a stale row as a fact about the device.** The list carries
+    `hostLastSeenAt` now, so a blank geometry reads "last heard from this device 9d ago" where the
+    host is silent and a bare "not reported" where it is beating. Those call for opposite actions.
+
+    **TWO THINGS THE EXISTING TESTS CAUGHT THAT REVIEW DID NOT.**
+
+    `definer-acl.test.ts` failed because migration 038's `DROP` + `CREATE` reset the function's owner
+    to a superuser and re-granted EXECUTE to PUBLIC — see entry 71 and architecture rule 5.
+
+    And `device-health-fields.test.ts` returned **500** because I joined `hosts` inside `withTenant`.
+    Migration 002 revokes `hosts` from `mfarm_app` entirely; the correct shape is the one
+    `/devices/:id` already uses — the tenant read is the authorisation, and only the ids that
+    survived RLS are carried into a system-pool read. The code comment explaining that was four rows
+    from where I was typing.
+
+    Also: TS1005 on a line of prose, because a SQL comment inside a template literal contained
+    backticks. [[mfarm-sql-comment-backticks]], exactly as written down.
+
+    **The open register is empty for the first time** — twenty-five recorded, twenty-five closed.
+    Which says the last pass found everything it found, and nothing more.

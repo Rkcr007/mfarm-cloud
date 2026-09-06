@@ -1,0 +1,43 @@
+# Bring the farm up when the machine boots — the unit, IN THE REPO (D20).
+#
+# WHY IT IS HERE NOW. This unit existed only on the VM. Nothing version-controlled it, nothing
+# reviewed it, and it drifted: it declared `Environment=CF_INSTANCES=2` on a host running four
+# devices, and since the device-host guard landed in `farm-up.sh` that value is not read at all on
+# the lab — inert AND contradicted by the running system, which is the worst combination a
+# declaration can have. `deploy/mfarm-worker.service` has always been in the repo; this is the other
+# half of the same pair.
+#
+# INSTALL WITH `deploy/install-farm-service.sh`, which is what fills in the user and the paths.
+#
+# NO `CF_INSTANCES` HERE. How many devices a host runs is the WORKER's business and lives in
+# `deploy/.state/worker.env`, written by `install-worker-service.sh` — one place, read by the process
+# that acts on it. `farm-up.sh` still honours `CF_INSTANCES` from the environment for a single-host
+# farm, where it comes from `deploy/.env` alongside everything else that shapes that farm.
+
+[Unit]
+Description=MFARM farm bring-up (control plane, devices, worker, Appium)
+Documentation=file:///opt/mfarm/deploy/README.md
+# Docker must be up before compose is called, and DNS must resolve before the image pulls.
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+# A failed bring-up should not thrash the box on a boot loop.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Leaves the worker's tmux server alive when the oneshot exits.
+KillMode=process
+User=__USER__
+Group=__USER__
+WorkingDirectory=__REPO__
+Environment=HOME=__HOME__
+# Two devices cold booting plus a 4 GB snapshot each is minutes, not seconds.
+TimeoutStartSec=1800
+ExecStart=__REPO__/deploy/farm-up.sh
+StandardOutput=append:__HOME__/farmup-boot.log
+StandardError=append:__HOME__/farmup-boot.log
+
+[Install]
+WantedBy=multi-user.target

@@ -856,6 +856,68 @@ describe('per-device automation endpoints', () => {
     assert.equal(rows[1].automation_endpoint, null);
   });
 
+  /**
+   * WITHDRAWAL IN PLACE — and this is the test the agent's Appium drain was DELETED against.
+   *
+   * `index.ts` used to react to an unhealthy Appium by draining and exiting the whole agent, on the
+   * reasoning that "capabilities are written at registration only". That reasoning expired on
+   * 2026-09-01, when the heartbeat began reconciling the per-device automation map it had always
+   * been sent — but the comment did not, and on 2026-09-05 it cost a thirteen-minute farm outage:
+   * one device's Appium exited, the whole host cold-booted, and a device that was never offered a
+   * reset got escalated out of the pool for it.
+   *
+   * The drain is gone. What replaces it is `setAutomationEndpoint(localId, undefined)` and the next
+   * beat — so this asserts exactly that, end to end against a real control plane, and it is the
+   * thing that must fail if that link is ever broken again.
+   */
+  test('an endpoint withdrawn at runtime strips `webdriver` on the next beat — from that device only', async () => {
+    const a = fakeBackend('cf-1');
+    const b = fakeBackend('cf-2');
+    const agent = makeAgent([a, b], `b2-withdraw-${randomUUID().slice(0, 8)}`, {
+      automationEndpoints: {
+        'cf-1': 'https://worker.example:8443/automation/cf-1',
+        'cf-2': 'https://worker.example:8443/automation/cf-2',
+      },
+    });
+    await agent.start();
+
+    const read = async () => withSystem(async (c) => {
+      const { rows } = await c.query(
+        `SELECT local_id, capabilities, automation_endpoint, state::text AS state
+           FROM devices WHERE host_id = $1 ORDER BY local_id`, [agent.hostId]);
+      return rows as Array<{ local_id: string; capabilities: string[]; automation_endpoint: string | null; state: string }>;
+    });
+
+    const before = await read();
+    assert.ok(before.every((r) => r.capabilities.includes('webdriver')), 'both start advertised');
+
+    // Appium for cf-1 dies. This is the ONLY thing `onHealth` does about it now.
+    agent.setAutomationEndpoint('cf-1', undefined);
+    await agent.heartbeat();
+
+    const after = await read();
+    assert.ok(!after[0].capabilities.includes('webdriver'),
+      'cf-1 must stop advertising a capability it cannot serve — the whole point of ADR-0003');
+    assert.equal(after[0].automation_endpoint, null);
+    assert.ok(after[1].capabilities.includes('webdriver'),
+      'cf-2 is untouched: one device losing Appium must not cost the host its other devices');
+    assert.equal(after[1].automation_endpoint, 'https://worker.example:8443/automation/cf-2');
+
+    /**
+     * AND THE DEVICE IS STILL IN THE FLEET. Everything that does not need Appium — install, launch,
+     * logcat, screenshot, the live view — still works on it, which is why taking the host down for
+     * this was the larger outage.
+     */
+    assert.equal(after[0].state, 'READY');
+
+    // And it comes back on its own, with nothing restarted.
+    agent.setAutomationEndpoint('cf-1', 'https://worker.example:8443/automation/cf-1');
+    await agent.heartbeat();
+    const back = await read();
+    assert.ok(back[0].capabilities.includes('webdriver'), 'recovery needs no registration either');
+    assert.equal(back[0].automation_endpoint, 'https://worker.example:8443/automation/cf-1');
+  });
+
   test('registration returns a control-plane uuid for every device', async () => {
     // The gateway authorizes `claims.did` (a uuid) against a path segment (a local id). Without this
     // mapping it cannot make that comparison and must refuse every request.

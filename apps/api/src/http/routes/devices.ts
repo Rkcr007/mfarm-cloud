@@ -49,6 +49,33 @@ export async function deviceRoutes(app: FastifyInstance) {
         return rows;
       });
 
+      /**
+       * THE HOSTS' BEATS, ON THE SYSTEM POOL AND KEYED TO WHAT RLS ALREADY ALLOWED — D2.
+       *
+       * NOT A JOIN. Migration 002 revokes `hosts` from `mfarm_app` entirely, so a join inside
+       * `withTenant` is a 500 — which is exactly what the first version of this was, and what
+       * `device-health-fields.test.ts` reported before anybody looked at a farm.
+       *
+       * The order IS the authorisation, the same shape `/devices/:id` uses for this same field: the
+       * tenant read above decides which devices this caller may see, and only those ids are carried
+       * into a system-pool read. Nothing here widens what is visible; it annotates it.
+       *
+       * Skipped entirely for an empty fleet, so the ordinary "no devices yet" answer costs one query
+       * rather than two.
+       */
+      const heartbeats = new Map<string, string>();
+      if (rows.length) {
+        await withSystem(async (c) => {
+          const { rows: beats } = await c.query(
+            `SELECT d.id, h.last_heartbeat_at
+               FROM devices d JOIN hosts h ON h.id = d.host_id
+              WHERE d.id = ANY($1::uuid[]) AND h.last_heartbeat_at IS NOT NULL`,
+            [rows.map((r) => r.id)],
+          );
+          for (const b of beats) heartbeats.set(b.id as string, b.last_heartbeat_at as string);
+        });
+      }
+
       return {
         devices: rows.map((r) => ({
           id: r.id, region: r.region, platform: r.platform, tier: r.tier,
@@ -79,6 +106,27 @@ export async function deviceRoutes(app: FastifyInstance) {
            * from the list for no reason beyond nobody needing it there yet.
            */
           ...(r.last_reset_at ? { lastResetAt: r.last_reset_at } : {}),
+          /**
+           * WHEN THE FARM LAST HEARD FROM THIS DEVICE'S HOST — D2, and it is the difference between
+           * two readings of the same blank field.
+           *
+           * `Screen: not reported` on a handset was recorded as a worker defect. It is not: the
+           * agent has read a panel with `wm size` / `wm density` since 2026-08-24 and cannot send a
+           * device without one. The farm's handset shows nothing because its row has not been
+           * written since its host last beat on 2026-08-29 — the data is nine days old, and the
+           * console said "not reported" as though the device had been asked this morning.
+           *
+           * A silent host and a device that genuinely reports no geometry are indistinguishable
+           * without this timestamp, and they call for opposite actions: plug the machine back in,
+           * or go and look at the device. Detail has carried it since ADR-0026; the list did not,
+           * so the Fleet — where somebody actually notices a blank column — could not tell them
+           * apart.
+           *
+           * A TIMESTAMP, NEVER THE HOSTNAME (ADR-0026). It sharpens a fact the tenant already reads
+           * off the device's own state; a hostname would group their devices beside somebody else's
+           * permanently and cannot be acted on.
+           */
+          ...(heartbeats.has(r.id) ? { hostLastSeenAt: heartbeats.get(r.id) } : {}),
           /**
            * THE ESCALATED CONDITION (migration 032), and it is a CONDITION rather than a state:
            * the device still reads `CLEANING`, because that is what "not allocatable" means here

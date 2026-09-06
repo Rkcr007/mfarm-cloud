@@ -58,6 +58,30 @@ VERSION="$(curl -s --max-time 5 -H "Authorization: Bearer $KEY" "$API/v1/version
 SHA="$(printf '%s' "$VERSION" | sed -n 's/.*"short":"\([^"]*\)".*/\1/p')"
 [ -n "$SHA" ] && ok "running commit $SHA" || warn "could not read /v1/version (is deploy/.state/api_key present?)"
 
+# ---------------------------------------------------------------- is that commit `main`? (D18/D19)
+#
+# THE BUILD BADGE SAYS WHAT IS SERVING AND NOTHING SAID WHAT SHOULD BE. On 2026-09-05 the farm ran
+# `886cb47` while main was two merges further on — released at 11:34, served at 13:08 — and
+# `docs/DEFECTS.md` claimed those fixes were live for ninety minutes. It was found by reading
+# `docker ps` for an unrelated reason.
+#
+# Asked HERE because this is the script somebody already runs after `instances start`, and the
+# question "which commit was the farm running" is what every later claim depends on. The checkout is
+# reported alongside, because `deploy/*.sh` and the migrations run from it and it drifts separately
+# — mfarm-cp was found on a detached HEAD the same hour.
+. "$REPO_ROOT/deploy/lib/deployed-state.sh"
+git -C "$REPO_ROOT" fetch origin main --quiet 2>/dev/null || true
+WANT="$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || echo unknown)"
+HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [ "$WANT" = unknown ]; then
+  warn "could not read origin/main — cannot say whether this farm is up to date"
+else
+  [ "$(mfarm_deploy_verdict_quiet "$WANT" "$SHA")" = ok ] \
+    || { warn "the API is not running origin/main (${WANT:0:7}) — deploy/mfarm-deploy.sh $WANT"; }
+  [ "$(mfarm_deploy_verdict_quiet "$WANT" "$HEAD_SHA")" = ok ] \
+    || warn "this checkout is not on origin/main (${HEAD_SHA:0:7} vs ${WANT:0:7}) — git merge --ff-only origin/main"
+fi
+
 # The image tag, separately from the commit, because `:latest` is how this deployment lies. A bare
 # `docker compose up -d api` used to fall back to it and serve older code while reporting success.
 RUNNING_IMAGE="$(docker inspect mfarm-api-1 --format '{{.Config.Image}}' 2>/dev/null || true)"

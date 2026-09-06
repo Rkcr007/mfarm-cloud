@@ -1970,7 +1970,10 @@ function fleetCapacity() {
                 d.screen.density ? `${d.screen.density}dpi` : null,
                 widthDp(d).replace(' dp', 'dp'),
               ].filter(Boolean).join(' \u00b7 ') }))
-          : h('span', { class: 'caption', text: 'not reported' })),
+          // D2 — a blank geometry says WHY it is blank when the answer is "nobody has asked lately".
+          : h('span', { class: 'stack none' },
+              h('span', { class: 'caption', text: 'not reported' }),
+              heardFrom(d) ? h('span', { class: 'caption warn-text', text: heardFrom(d) }) : null)),
 
         h('td', null, h('span', { class: 'stack none' },
           pill(st.label, st.tone, { live: d.state === 'READY' }),
@@ -2699,6 +2702,31 @@ function resetStory(d) {
   return found.join(' + ');
 }
 
+/**
+ * HOW OLD IS WHAT THIS ROW IS TELLING YOU — D2.
+ *
+ * "Screen: not reported" was filed as a worker defect. It is not: the agent has read a handset's
+ * panel with `wm size` / `wm density` since 2026-08-24 and cannot register one without a geometry.
+ * The farm's SM-S918B shows nothing because its row has not been written since its host last beat
+ * on 2026-08-29 — nine days of the console saying "not reported" about a question nobody had asked
+ * the device in over a week.
+ *
+ * A SILENT HOST AND A DEVICE THAT REPORTS NOTHING ARE OPPOSITE PROBLEMS: one is fixed by plugging a
+ * machine back in, the other by looking at the device. A blank field cannot tell them apart, so
+ * this says which one it is wherever a field is blank.
+ *
+ * The threshold is the FARM'S OWN definition of a host that is not beating (90s, `HOST_SILENCE`),
+ * not a number invented here — the same fact the reaper acts on, so the console cannot disagree
+ * with the scheduler about whether a host is present.
+ */
+const HOST_SILENT_MS = 90_000;
+function heardFrom(d) {
+  if (!d?.hostLastSeenAt) return null;
+  const age = Date.now() - new Date(d.hostLastSeenAt).getTime();
+  if (!Number.isFinite(age) || age < HOST_SILENT_MS) return null;
+  return `last heard from this device ${ago(d.hostLastSeenAt)}`;
+}
+
 /** `1440 x 3088`, from the device's own report and never from the profile table (ADR-0016). */
 function screenSize(d) {
   const sc = d.screen;
@@ -2864,7 +2892,15 @@ function screenDevice(id) {
         card('Metadata', {},
           kv([
             ['Platform', `${d.platform} ${d.osVersion}`],
-            ['Screen', screenSize(d), true],
+            /**
+             * D2 — and here the staleness is one row away from "Host last seen" below, which is
+             * exactly why it was so easy to read "not reported" as a fact about the device. Said in
+             * place, because a reader looking at a blank geometry should not have to notice a
+             * timestamp four rows down and do the subtraction themselves.
+             */
+            ['Screen', heardFrom(d) && screenSize(d) === 'not reported'
+              ? `not reported — ${heardFrom(d)}`
+              : screenSize(d), true],
             ['Reset story', resetStory(d), true],
             ['Tier', d.tier],
             ['Region', d.region],
