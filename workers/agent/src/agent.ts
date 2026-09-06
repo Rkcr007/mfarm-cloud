@@ -1074,7 +1074,7 @@ export class Agent {
    */
   private async uploadArtifact(
     sessionId: string, deviceId: string, kind: 'logcat' | 'screenshot',
-    bytes: Buffer, filename: string,
+    bytes: Buffer, filename: string, context?: Record<string, unknown>,
   ): Promise<void> {
     // An unregistered agent has no token to present. Refusing here keeps the failure inside
     // `captureArtifacts`'s swallow, rather than sending `Bearer undefined` and getting a 401 that
@@ -1083,6 +1083,15 @@ export class Agent {
     if (!token) throw new Error('not registered — no worker token to upload with');
 
     const q = new URLSearchParams({ kind, device: deviceId, filename });
+    /**
+     * Why this was captured, handed straight back to the control plane that asked for it.
+     *
+     * READ, NEVER INTERPRETED. The agent does not know what a `testResultId` is and does not need
+     * to — which is what lets a new capture source ship without an agent release. Absent on a
+     * release-time capture and on any action requested before migration 040, and the control plane
+     * defaults it to `{}` either way.
+     */
+    if (context && Object.keys(context).length) q.set('context', JSON.stringify(context));
     const res = await fetch(
       `${this.opts.controlPlaneUrl}/v1/sessions/${sessionId}/artifacts?${q}`,
       {
@@ -1393,7 +1402,33 @@ export class Agent {
       // launcher rather than the failure. This one is taken while the suite still holds the device
       // and the screen still shows whatever went wrong.
       const shot = await control.screenshot();
-      await this.uploadArtifact(r.sessionId, r.deviceId, 'screenshot', shot.bytes, `${r.actionId}.png`);
+      await this.uploadArtifact(r.sessionId, r.deviceId, 'screenshot', shot.bytes,
+        `${r.actionId}.png`, r.context);
+      return;
+    }
+    if (r.kind === 'logcat') {
+      if (!control.dumpLogcat) {
+        throw new Error(`${control.info.localId} cannot dump logcat: this device tier has no log path.`);
+      }
+      /**
+       * THE SAME ARGUMENT AS `screenshot`, for the other half of the evidence (migration 040).
+       *
+       * A release-time logcat is the whole session with no marker for when the failure happened —
+       * 2.55 MB of haystack. One taken when a test reports failure is bounded by the same beat that
+       * carried the request, and `context` says which failure it belongs to.
+       *
+       * AN EMPTY DUMP IS NOT AN ERROR, and is not uploaded either. `captureArtifacts` makes the
+       * same choice and for the same reason: a device that has said nothing produces a zero-byte
+       * artifact, and `artifacts.size_bytes` has a `> 0` CHECK — uploading one would turn a quiet
+       * device into a FAILED action that reads as a broken farm.
+       */
+      const log = await control.dumpLogcat();
+      if (!log.trim()) {
+        console.log(`[agent] logcat for session ${r.sessionId} was empty — nothing to upload`);
+        return;
+      }
+      await this.uploadArtifact(r.sessionId, r.deviceId, 'logcat', Buffer.from(log, 'utf8'),
+        `${r.actionId}.log`, r.context);
       return;
     }
     // A verb from a newer control plane. Reported as a failure rather than ignored: the row would

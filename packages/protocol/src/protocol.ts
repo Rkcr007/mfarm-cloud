@@ -287,7 +287,17 @@ export interface WorkerHeartbeatResponse {
  * exists because the release-time screenshot is taken after Appium has force-stopped the app, so
  * the artifact a person opens to see why a test failed shows the launcher instead.
  */
-export type AppActionKind = 'install' | 'launch' | 'uninstall' | 'screenshot';
+export type AppActionKind = 'install' | 'launch' | 'uninstall' | 'screenshot' | 'logcat';
+
+/**
+ * The two verbs that produce EVIDENCE rather than acting on an app.
+ *
+ * Named as a set because three places have to agree on it — the control plane's `request_capture`,
+ * the migration's CHECK, and the agent's handler — and because "the kinds that name no app" is a
+ * rule, not a coincidence of two strings.
+ */
+export const CAPTURE_KINDS = ['screenshot', 'logcat'] as const;
+export type CaptureKind = (typeof CAPTURE_KINDS)[number];
 
 /**
  * One app action for one device, as offered to the worker.
@@ -310,7 +320,10 @@ export interface AppActionRequest {
    * changed hands mid-beat.
    */
   sessionId: string;
-  /** Absent for `screenshot`, which is a picture of the screen rather than an act on an app. */
+  /**
+   * Absent for the capture verbs, which name no app: a `screenshot` is a picture of the screen and
+   * a `logcat` is a dump of what the device has been saying.
+   */
   appId?: string;
   /**
    * Present for every APP kind, and the ONLY thing `launch` and `uninstall` need — neither moves
@@ -328,6 +341,19 @@ export interface AppActionRequest {
    * beat it received before a reallocation it has not heard about yet.
    */
   fence: number;
+  /**
+   * WHY this action was requested, copied verbatim onto the artifact it produces.
+   *
+   * A session that fails six tests produces six captures, and without this they are six unlabelled
+   * files with adjacent timestamps. A failure capture carries
+   * `{"source": "test-failure", "testResultId": ..., "test": ...}`; one a person asked for from the
+   * console carries `{"source": "console"}`.
+   *
+   * OPAQUE TO THE WORKER. It is read, never interpreted — the agent's only job is to hand it back
+   * with the bytes, so a new `source` needs no agent release. Absent on an action requested before
+   * migration 040, which uploads with an empty context exactly as it did.
+   */
+  context?: Record<string, unknown>;
 }
 
 /** What the worker reports back. `ok: false` carries adb's own words in `error`. */

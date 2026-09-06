@@ -367,3 +367,208 @@ describe('retention', () => {
     assert.equal(out.blobsDeleted, 1, 'one file removed');
   });
 });
+
+// ------------------------------------------------------------------ evidence at failure time
+
+/**
+ * Migration 040: a failed test asks for its own evidence.
+ *
+ * THE PROBLEM THIS SOLVES is stated in 022 and was only half solved there. The release-time
+ * screenshot is taken after Appium force-stops the app, so it reliably shows the launcher; 022 gave
+ * a suite a verb to take its own, which works and which every customer would have to reinvent. This
+ * is the control plane doing it on their behalf, off the one signal it already had and ignored —
+ * the result POST.
+ *
+ * Most of what follows is about the BOUNDS, because the ways this feature could make things worse
+ * are more interesting than the way it makes them better: fifty failing tests must not queue fifty
+ * screenshots, a device that cannot capture must not collect actions that fail, and a result must
+ * be recorded whether or not any of this works.
+ */
+describe('a failed test asks for its own evidence', () => {
+  /** Everything this session has been asked to capture, newest last. */
+  const captures = (sessionId: string) => withSystem(async (c) => (await c.query<{
+    kind: string; state: string; context: Record<string, unknown>;
+  }>(`SELECT kind, state::text AS state, context FROM app_actions
+       WHERE session_id = $1 AND kind IN ('screenshot','logcat')
+       ORDER BY requested_at`, [sessionId])).rows);
+
+  const report = (key: string, sessionId: string, body: Record<string, unknown>) => app.inject({
+    method: 'POST', url: `/v1/sessions/${sessionId}/result`, headers: auth(key), payload: body,
+  });
+
+  /** `deviceA` declares logcat but NOT screenshot; this gives it both for one test. */
+  const withScreenshotCap = (deviceId: string) => withSystem((c) => c.query(
+    `UPDATE devices SET capabilities = capabilities || '["screenshot"]'::jsonb WHERE id = $1`,
+    [deviceId]));
+  const withoutScreenshotCap = (deviceId: string) => withSystem((c) => c.query(
+    `UPDATE devices SET capabilities = capabilities - 'screenshot' WHERE id = $1`, [deviceId]));
+
+  test('a failed result queues a screenshot and a logcat, each naming the test', async () => {
+    await clearFleet();
+    await withScreenshotCap(deviceA);
+    try {
+      const sessionId = await liveSession(keyA, deviceA);
+      const res = await report(keyA, sessionId, {
+        status: 'failed', name: 'checkout applies the discount',
+        failure: 'expected 90 but got 100', failureReason: 'assertion-failure',
+      });
+      assert.equal(res.statusCode, 201, res.body);
+      const resultId = res.json().result.id;
+
+      const rows = await captures(sessionId);
+      assert.deepEqual(rows.map((r) => r.kind).sort(), ['logcat', 'screenshot'],
+        'both halves of the evidence — the screen, and what the app was saying on the way there');
+
+      for (const r of rows) {
+        assert.equal(r.state, 'PENDING', 'the beat has not carried it down yet');
+        assert.equal(r.context.source, 'test-failure');
+        assert.equal(r.context.testResultId, resultId,
+          'the artifact has to name WHICH failure it was taken for, or it is a mystery file');
+        assert.equal(r.context.test, 'checkout applies the discount');
+      }
+    } finally {
+      await withoutScreenshotCap(deviceA);
+    }
+  });
+
+  test('a passing test asks for nothing', async () => {
+    await clearFleet();
+    await withScreenshotCap(deviceA);
+    try {
+      const sessionId = await liveSession(keyA, deviceA);
+      const res = await report(keyA, sessionId, { status: 'passed', name: 'the happy path' });
+      assert.equal(res.statusCode, 201, res.body);
+      assert.deepEqual(await captures(sessionId), [],
+        'capturing evidence for a green test is how a farm fills its own disk');
+    } finally {
+      await withoutScreenshotCap(deviceA);
+    }
+  });
+
+  test('thirty failures queue one capture of each kind, not sixty', async () => {
+    await clearFleet();
+    await withScreenshotCap(deviceA);
+    try {
+      const sessionId = await liveSession(keyA, deviceA);
+      for (let i = 0; i < 30; i++) {
+        const res = await report(keyA, sessionId, { status: 'failed', name: `spec ${i}` });
+        assert.equal(res.statusCode, 201, res.body);
+      }
+
+      const rows = await captures(sessionId);
+      /**
+       * THE BOUND THAT MAKES THIS SHIPPABLE. A suite that fails thirty tests in a burst is ordinary,
+       * and on a ten-second beat the first capture has not even been delivered by the thirtieth
+       * failure — so the twenty-nine after it would be near-identical pictures of the same screen,
+       * paid for in device time, disk and upload.
+       *
+       * `request_capture` coalesces on one PENDING per kind per session. The next failure after
+       * this one is DELIVERED gets a fresh capture, which is the behaviour worth having.
+       */
+      assert.equal(rows.length, 2, `expected one screenshot and one logcat, got ${rows.length}`);
+      assert.deepEqual(rows.map((r) => r.kind).sort(), ['logcat', 'screenshot']);
+      assert.equal(rows[0].context.test, 'spec 0', 'the capture names the failure that triggered it');
+
+      /**
+       * ONE PENDING, NOT ONE EVER — and the assertion above cannot tell those two apart, which is
+       * why this half exists. A session that captured once and then went quiet forever would pass
+       * every line above and be a worse product than the one this replaces.
+       *
+       * Deliver the pending pair the way a beat would, then fail again.
+       */
+      await withSystem((c) => c.query(
+        `UPDATE app_actions SET state = 'DONE', finished_at = now() WHERE session_id = $1`,
+        [sessionId]));
+      assert.equal((await report(keyA, sessionId, { status: 'failed', name: 'a later spec' }))
+        .statusCode, 201);
+
+      const after = await captures(sessionId);
+      assert.equal(after.length, 4, 'a failure after the last capture landed gets its own');
+      assert.equal(after[3].context.test, 'a later spec',
+        'and it names the failure that triggered IT, not the first one of the run');
+    } finally {
+      await withoutScreenshotCap(deviceA);
+    }
+  });
+
+  test('a device that cannot screenshot collects no screenshot action', async () => {
+    await clearFleet();
+    // deviceA's seeded capabilities include `logcat` and not `screenshot`, which is the case this
+    // pins: an action a device can never perform sits PENDING, is re-offered on every beat, and is
+    // finally swept into a FAILED row that reads as a broken farm. It is not broken — the tier has
+    // no capture path — so the right answer is silence.
+    const sessionId = await liveSession(keyA, deviceA);
+    assert.equal((await report(keyA, sessionId, { status: 'failed', name: 'no camera here' }))
+      .statusCode, 201);
+
+    assert.deepEqual((await captures(sessionId)).map((r) => r.kind), ['logcat'],
+      'the half the device can serve, and only that half');
+  });
+
+  test('a result on an ended session is still recorded, and captures nothing', async () => {
+    await clearFleet();
+    await withScreenshotCap(deviceA);
+    try {
+      const sessionId = await liveSession(keyA, deviceA);
+      await app.inject({ method: 'DELETE', url: `/v1/sessions/${sessionId}`, headers: auth(keyA) });
+
+      /**
+       * THE RULE THIS PINS: evidence is a bonus and the report is the point. A reporting hook that
+       * flushes after the suite has released the device must still get its result written — turning
+       * that into a 500 would make the hook retry, and a retried result is a double-counted failure.
+       */
+      const res = await report(keyA, sessionId, { status: 'failed', name: 'reported after quit' });
+      assert.equal(res.statusCode, 201, res.body);
+      assert.deepEqual(await captures(sessionId), [],
+        'the device has been handed back; aiming a capture at it would photograph the next tenant');
+    } finally {
+      await withoutScreenshotCap(deviceA);
+    }
+  });
+
+  test('the context reaches the artifact, and a release-time capture has none', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    const shot = Buffer.from(`png-${randomUUID()}`);
+    const log = `log-${randomUUID()}`;
+
+    const q = new URLSearchParams({
+      kind: 'screenshot', device: deviceA,
+      context: JSON.stringify({ source: 'test-failure', testResultId: 'abc', test: 'a spec' }),
+    });
+    const withCtx = await app.inject({
+      method: 'POST', url: `/v1/sessions/${sessionId}/artifacts?${q}`,
+      headers: { ...auth(workerA), 'content-type': 'application/octet-stream' }, payload: shot,
+    });
+    assert.equal(withCtx.statusCode, 201, withCtx.body);
+    assert.equal((await upload(workerA, sessionId, deviceA, 'logcat', log)).statusCode, 201);
+
+    const list = await app.inject({
+      method: 'GET', url: `/v1/sessions/${sessionId}/artifacts`, headers: auth(keyA) });
+    const byKind = Object.fromEntries(list.json().artifacts.map(
+      (a: { kind: string; context: Record<string, unknown> }) => [a.kind, a.context]));
+
+    assert.equal(byKind.screenshot.source, 'test-failure');
+    assert.equal(byKind.screenshot.test, 'a spec');
+    // Always present, never absent — a screen that has to tell "no context" from "the field is
+    // missing" is one that gets it wrong once.
+    assert.deepEqual(byKind.logcat, {}, 'a release-time capture carries an empty context, not null');
+  });
+
+  test('a context that is not a JSON object is refused before the bytes are stored', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    const body = Buffer.from(`never-stored-${randomUUID()}`);
+
+    for (const bad of ['not json', '"a string"', '[1,2,3]', 'null']) {
+      const q = new URLSearchParams({ kind: 'logcat', device: deviceA, context: bad });
+      const res = await app.inject({
+        method: 'POST', url: `/v1/sessions/${sessionId}/artifacts?${q}`,
+        headers: { ...auth(workerA), 'content-type': 'application/octet-stream' }, payload: body,
+      });
+      assert.equal(res.statusCode, 400, `${bad} should be refused: ${res.body}`);
+    }
+    // Refused BEFORE the store, so nothing is written that the failing insert would then orphan.
+    assert.equal(await onDisk(sha(body)), false, 'a rejected upload must leave no bytes behind');
+  });
+});
