@@ -51,14 +51,7 @@
  * resets `letter-spacing` to normal and cannot carry it — a display heading that quietly loses its
  * -3.5% is the single most common way this scale gets undone by a later edit.
  */
-.t-display-xl { font: var(--ty-display-xl); letter-spacing: var(--tr-display-xl); color: var(--t-primary, #F1F1F1); }
-.t-display-lg { font: var(--ty-display-lg); letter-spacing: var(--tr-display-lg); color: var(--t-primary, #F1F1F1); }
-.t-display-md { font: var(--ty-display-md); letter-spacing: var(--tr-display-md); color: var(--t-primary, #F1F1F1); }
-.t-stat       { font: var(--ty-stat); font-variant-numeric: tabular-nums; color: var(--t-primary, #F1F1F1); }
 .t-body       { font: var(--ty-body); }
-.t-strong     { font: var(--ty-strong); }
-.t-machine    { font: var(--ty-machine); }
-.t-log        { font: var(--ty-log); font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------------------- reset */
 
@@ -98,7 +91,7 @@ html, body { height: 100%; }
  * The console used to set `--mono` on `<body>`, so every sentence MFARM wrote to a human inherited
  * a monospace face. That inverts the register rule the whole system rests on: mono is how the
  * reader knows a string came out of the machine, and when the prose is mono too, the signal carries
- * nothing. Machine text now opts IN through `.mono`, `code`, `.t-machine` and `.t-log`.
+ * nothing. Machine text now opts IN through `.mono` and `code`.
  */
 body {
   margin: 0;
@@ -143,7 +136,7 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 ::selection { background: var(--mf-accent-soft, rgba(117,94,184,.16)); }
 
 /* Live counters must not reflow as digits change. */
-.tnum, .lease-time, .clock, .wait, .hb { font-variant-numeric: tabular-nums; }
+.tnum, .clock, .wait, .hb { font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------------------- motion */
 
@@ -727,7 +720,6 @@ kbd {
 .spacer { flex: 1 1 auto; }
 .stack { display: grid; gap: 10px; }
 .stack.tight { gap: 6px; }
-.stack.loose { gap: var(--mf-gap, 16px); }
 
 /* ---------------------------------------------------------------------------- sign in
  *
@@ -1012,7 +1004,6 @@ kbd {
 .vital { display: grid; gap: 5px; }
 .vital .row { justify-content: space-between; }
 
-.thumbstrip { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 4px; }
 .thumb { width: 56px; height: 56px; flex: 0 0 auto; background: var(--s-inset, #050506); border: 1px solid var(--b-inset, #1A1A1C); border-radius: 2px; }
 
 /* -------------------------------------------------------------------- overlays */
@@ -1068,7 +1059,6 @@ kbd {
 .cmd-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* The free count or the geometry, on the row you are about to press. */
 .cmd-note { color: var(--t-caption, #6A6A6A); font-size: 10.5px; flex: 0 0 auto; }
-.cmd .grp { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--t-navhead, #484848); }
 .cmd.is-sel { background: var(--mf-accent-soft, rgba(117,94,184,.16)); color: var(--t-primary); }
 .palette footer {
   padding: 8px 14px;
@@ -2244,20 +2234,6 @@ kbd {
 .mf-device[data-state="nosignal"] .mf-sheen,
 .mf-device[data-state="nosignal"] .mf-cutout { display: none; }
 
-.mf-nosignal {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-content: center;
-  align-content: center;
-  gap: 6px;
-  padding: 8%;
-  text-align: center;
-  color: #787878;   /* on the device's screen — see `.dev-overlay` */
-  font-size: 11.5px;
-  text-wrap: pretty;
-}
-.mf-nosignal strong { display: block; color: #C4C4C4; font-size: 12.5px; }
 
 /**
  * SMALL SIZES drop the depth entirely.

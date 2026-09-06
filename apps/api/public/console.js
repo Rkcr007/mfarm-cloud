@@ -3780,18 +3780,6 @@ async function loadSessionDetail(id) {
 
 /* ------------------------------------------------------------------ the device panel */
 
-/**
- * SVG, built through the DOM rather than from a string.
- *
- * The console's CSP has no `unsafe-inline` and `h()` refuses an `html` prop, so every icon here is
- * constructed element by element. That is not a workaround — it is what keeps rule 1 structural:
- * there is no path by which a string from anywhere becomes markup on this page.
- */
-function svgEl(tag, attrs) {
-  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, String(v));
-  return el;
-}
 
 /**
  * One icon, at a size.
