@@ -3840,3 +3840,49 @@ when the feature is broken. See issues 37 and 38.
 
     **The open register is empty for the first time** — twenty-five recorded, twenty-five closed.
     Which says the last pass found everything it found, and nothing more.
+
+74. **ALL FOUR WATCHED, AND THE INSTALLER GOT ONE WRONG IN A WAY ONLY RUNNING IT SHOWED.**
+    2026-09-06. Control plane `c588ee2`.
+
+    **ADR-0027, on hardware.** Killed Appium for `cf-4` on the lab and read the journal:
+
+    ```
+    10:41:28  no automation endpoint is serving cf-4; `webdriver` dropped for it
+    10:41:28  Appium for cf-4 is no longer ready — withdrawing `webdriver` for that device on the
+              next heartbeat. Every other device on this host, and every live session, is unaffected.
+    10:41:31  automation endpoint for cf-4 is http://…; `webdriver` advertised for it
+    10:41:31  Appium for cf-4 is ready — `webdriver` advertised again on the next beat
+    ```
+
+    **`MainPID` 9173 before and 9173 after.** Withdrawn and restored in THREE SECONDS, one device,
+    no restart, no cold boot, the other three untouched. The same sequence used to start a 60s timer
+    and then take the host down for thirteen minutes.
+
+    **D18/D19 earned their keep on the first run.** `check-deployed.sh` immediately reported the lab's
+    checkout at `6c1202e` against a `main` of `c588ee2` — the tree the worker and the boot unit both
+    `ExecStart` from, behind, and nothing else would have said so. Brought forward, and it now reads
+    "The farm is running main."
+
+    **D2 on the real handset**: `SM-S918B … not reported · last heard from this device 8d ago`, and
+    it is the ONLY row carrying that note — the four Cuttlefish devices, whose host is beating, keep
+    a bare "not reported". That is the whole distinction: one is fixed by plugging a machine in, the
+    other by looking at the device.
+
+    **AND THE INSTALLER WROTE THE WRONG USER INTO THE UNIT.** `RUN_USER="${SUDO_USER:-$USER}"` looks
+    obviously right and is wrong through a nested sudo: `gcloud compute ssh` as one account, then
+    `sudo -u rkcr070707`, and `SUDO_USER` is the OUTER login. The unit installed as
+    `User=rakeshkumarbarik` on a farm whose devices belong to `rkcr070707` — and cvd's instance
+    database is per-uid, so that unit would have found no devices and built a second set. Worse, as
+    the wrong user it could not read `deploy/.state/worker.env`, so `CONTROL_PLANE_URL` would be
+    empty, the device-host guard would not fire, and it would die on `BACKUP_BUCKET` — **D13, exactly,
+    re-created by the fix for D20.**
+
+    It now resolves `stat -c '%U' "$REPO_ROOT"`: the owner of the checkout is the account that owns
+    the cvd database, the snapshots and `deploy/.state`, and it is a fact about the machine rather
+    than about how somebody happened to invoke the script. Caught by installing it for real and
+    reading the file back — `bash -n` passes either way, and so would any test that did not install.
+
+    Also fixed: the unit's `Documentation=` carried a hardcoded `/opt/mfarm` that no substitution
+    touched.
+
+    Lab stopped, farm at 4 READY.

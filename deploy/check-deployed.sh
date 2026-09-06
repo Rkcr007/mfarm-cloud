@@ -29,20 +29,30 @@ ssh_on() {
 running() { gcloud compute instances describe "$1" --zone "$ZONE" --format='value(status)' 2>/dev/null; }
 
 bad=0
+# Printing lives here, not in the lib: a function that both prints and returns on stdout gets its
+# display eaten by the command substitution reading its verdict. That is exactly what the first
+# version of this did, and it took running it against the farm to see.
+report() {
+  local label="$1" got="$2" v
+  v="$(mfarm_sha_verdict "$WANT" "$got")"
+  case "$v" in
+    ok)     printf '  \033[32m✓\033[0m %-28s %s\n' "$label" "${got:0:7}" ;;
+    behind) printf '  \033[31m✗\033[0m %-28s %s — origin/main is %s\n' "$label" "${got:0:7}" "${WANT:0:7}"; bad=1 ;;
+    *)      printf '  \033[33m!\033[0m %-28s could not be read\n' "$label"; bad=1 ;;
+  esac
+}
+
 say "Control plane ($CP)"
-IMAGE="$(ssh_on "$CP" "sudo docker ps --filter name=mfarm-api --format '{{.Image}}' | sed 's/.*://'")"
-CPGIT="$(ssh_on "$CP" "sudo -u rkcr070707 git -C /home/rkcr070707/mfarm rev-parse HEAD")"
-[ "$(mfarm_deploy_line 'serving image' "$WANT" "$IMAGE")" = ok ] || bad=1
-[ "$(mfarm_deploy_line 'checkout' "$WANT" "$CPGIT")" = ok ] || bad=1
+report 'serving image' "$(ssh_on "$CP" "sudo docker ps --filter name=mfarm-api --format '{{.Image}}' | sed 's/.*://'")"
+report 'checkout' "$(ssh_on "$CP" "sudo -u rkcr070707 git -C /home/rkcr070707/mfarm rev-parse HEAD")"
 
 say "Device host ($LAB)"
 if [ "$(running "$LAB")" = "RUNNING" ]; then
-  LABGIT="$(ssh_on "$LAB" "sudo -u rkcr070707 git -C /home/rkcr070707/mfarm rev-parse HEAD")"
   # The one whose drift changes what the DEVICES do: the worker unit and the boot unit both
   # ExecStart out of this tree.
-  [ "$(mfarm_deploy_line 'checkout (worker runs this)' "$WANT" "$LABGIT")" = ok ] || bad=1
+  report 'checkout (worker runs this)' "$(ssh_on "$LAB" "sudo -u rkcr070707 git -C /home/rkcr070707/mfarm rev-parse HEAD")"
 else
-  printf '  \033[33m!\033[0m %-26s stopped — nothing to check, and nothing running\n' 'device host'
+  printf '  \033[33m!\033[0m %-28s stopped — nothing to check, and nothing running\n' 'device host'
 fi
 
 if [ "$bad" = 0 ]; then

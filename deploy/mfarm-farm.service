@@ -16,7 +16,7 @@
 
 [Unit]
 Description=MFARM farm bring-up (control plane, devices, worker, Appium)
-Documentation=file:///opt/mfarm/deploy/README.md
+Documentation=file://__REPO__/deploy/README.md
 # Docker must be up before compose is called, and DNS must resolve before the image pulls.
 After=docker.service network-online.target
 Wants=docker.service network-online.target
