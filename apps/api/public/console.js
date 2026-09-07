@@ -1089,7 +1089,9 @@ function capturedLogCard(sess) {
       }),
     ),
     shown.length
-      ? h('div', { class: 'logbody mono' }, shown.map((p) => h('div',
+      // `logbody tall` — the dock's 220px is right for a stream you glance at beside a live device
+      // and wrong for a log you are reading: it showed ten lines of nineteen hundred.
+      ? h('div', { class: 'logbody tall mono' }, shown.map((p) => h('div',
           // The dock's own four-column shape and level classes: time, level letter, tag, message.
           // Colour repeats the letter rather than replacing it, so it is never the only carrier.
           { class: `logline${p.level ? ` l${p.level}` : ''}` },
@@ -5520,9 +5522,16 @@ export function failureOffsetSeconds(video, failure) {
   return Math.max(0, (at - startedAt) / 1000 - FAILURE_LEAD_IN_SECONDS);
 }
 
-/** mm:ss, for a position inside a recording. */
+/**
+ * mm:ss, for a position inside a recording.
+ *
+ * FLOOR, NOT ROUND, so this agrees with the player sitting beside it. `<video>` renders its own
+ * clock by truncating, so a 23.6-second recording reads `0:23` in the controls — and rounding here
+ * put "0:24 of the session" directly above it. Two numbers describing the same recording, differing
+ * by one, on one card.
+ */
 function clockText(seconds) {
-  const s = Math.max(0, Math.round(seconds));
+  const s = Math.max(0, Math.floor(seconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 

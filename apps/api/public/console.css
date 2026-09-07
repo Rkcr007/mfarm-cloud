@@ -2468,3 +2468,11 @@ kbd {
      grey there reads as a broken image rather than as the edge of the video. */
   background: #000;
 }
+
+/* The captured log is READ, not glanced at.
+ *
+ * `.logbody`'s 220px is sized for the live dock beside a running device, where the useful line is
+ * the one that just arrived. A finished session's log is nineteen hundred lines somebody is
+ * scanning, and ten at a time turns that into scrolling rather than reading. Capped in `vh` so it
+ * never grows past the viewport on a tall screen. */
+.logbody.tall { height: min(60vh, 640px); }
