@@ -229,7 +229,23 @@ class, "no answer", the privacy note, and the empty state) and four API tests (t
 one-line headline, a passing test leaving no mark, the timestamp clamp against a 2020 and a 2099
 claim, and evidence landing as a link).
 
-## S5 — Video, recorded only for failures — **GATE MEASURED, design decided, not built**
+## S5 — Video, recorded only for failures — **BUILT, DEPLOYED AND VERIFIED (2026-09-07)**
+
+**The answer was that Cuttlefish already ships the recorder.** `record_cvd start|stop` drives
+`RecordingManager`, which tees the same host-side `VideoTrackSourceInterface` that feeds the live
+view into its own VP8 encoder and an mkvmuxer. Nothing runs in the guest and no viewer need be
+attached. Measured on the farm: **29.8 fps recording vs 29.9 not (-0.2%)**, against guest
+`screenrecord`'s -33%. `VIDEO_RECORDING=off|failures|all`; the farm runs `failures`.
+`deploy/verify-video.mjs` proves the chain on real hardware, 17/17. ADR-0032, migration 045.
+
+Two defects came with it and are closed: **D29** (the setting reached the container from nowhere)
+and **D30** (the recorder could outlive every path that stops it). Two things remain unverified and
+are listed in `STATUS.md` §4.5.
+
+The gate measurement that produced this decision is kept below, because it is what ruled out the
+cheap path.
+
+### The original section, as written before it was built
 
 **Why this is fifth and not first.** `EXECUTION_MODEL.md` §4.4 measured it: 37.5 MB for a five-minute
 recording against 3.1 MB for everything else combined, and two saturated devices fill the control

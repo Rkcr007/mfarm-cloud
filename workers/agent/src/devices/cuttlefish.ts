@@ -1136,6 +1136,62 @@ export class CuttlefishDevice implements DeviceControl {
     return { path: file.path, bytes: file.bytes, startedAt: state.startedAt, stoppedAt: Date.now(), partial };
   }
 
+  /**
+   * Stop an orphaned recorder and delete recordings nothing is coming for.
+   *
+   * TWO HALVES, AND THE ORDER MATTERS. The stop first, so a recorder that has been running since
+   * before this agent existed is no longer writing into the file the sweep is about to consider;
+   * the sweep second, so the file it just finalized is judged on a settled mtime.
+   *
+   * A LIVE RECORDING IS SACRED, and there are two independent guards for it. `this.recording` says
+   * THIS agent started one, so no stop is issued; and the age check is on mtime, which on a file
+   * being written moves continuously — so even a recorder this process knows nothing about is safe
+   * as long as it is actually recording. Belt and braces, because deleting the evidence of the
+   * session that is running right now is the one failure this must not have.
+   *
+   * The stop is issued blind rather than after asking whether anything is recording, because cvd
+   * offers no way to ask. A stop against an instance with no recorder is an error we swallow, which
+   * is cheaper than the alternative: a recorder from a previous agent life that runs until the host
+   * reboots.
+   */
+  async reconcileRecordings(
+    maxAgeMs: number, { stopOrphans = false }: { stopOrphans?: boolean } = {},
+  ): Promise<{ stopped: boolean; deleted: number }> {
+    let stopped = false;
+
+    if (stopOrphans && !this.recording) {
+      try {
+        await run(this.recordCvdPath(), ['stop', `--instance_num=${this.opts.instanceNum}`],
+          this.opts.imageDir, 30_000);
+        stopped = true;
+        console.warn(
+          `[cuttlefish] ${this.info.localId}: stopped a recorder this agent did not start — ` +
+          'something ended without its teardown running',
+        );
+      } catch {
+        // The ordinary case by a wide margin: nothing was recording. cvd has no "is it recording?"
+        // to ask, so this is how the question gets answered.
+      }
+    }
+
+    let deleted = 0;
+    const cutoff = Date.now() - maxAgeMs;
+    for (const dir of await this.recordingDirs()) {
+      for (const name of await readdir(dir).catch(() => [])) {
+        if (!name.endsWith('.webm')) continue;
+        const path = join(dir, name);
+        const st = await stat(path).catch(() => null);
+        if (!st || st.mtimeMs > cutoff) continue;
+        await rm(path, { force: true }).catch(() => {});
+        deleted++;
+      }
+    }
+    if (deleted) {
+      console.log(`[cuttlefish] ${this.info.localId}: swept ${deleted} stale recording(s)`);
+    }
+    return { stopped, deleted };
+  }
+
   /** `record_cvd` ships in the cvd host package, beside every other host tool. */
   private recordCvdPath(): string {
     return join(this.opts.imageDir, 'bin', 'record_cvd');

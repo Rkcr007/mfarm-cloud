@@ -263,6 +263,44 @@ export interface DeviceControl {
    */
   stopRecording?(opts: { keep: boolean }): Promise<Recording | null>;
 
+  /**
+   * Put the recorder back in a known state: stop anything this agent did not start, and delete
+   * recordings old enough that nothing is coming for them.
+   *
+   * WHY THIS EXISTS AT ALL. `stopRecording` is reached from exactly one place — the teardown that
+   * runs when a device is released — and there are three ways to miss it:
+   *
+   *   1. the agent restarts mid-session. The handle to the running recorder is in memory, so after
+   *      a restart nothing knows a recorder is running or which file is its. It records forever.
+   *   2. a quarantine recovery resets the device down a different branch, which has no session to
+   *      attach a recording to and used to skip the stop entirely.
+   *   3. the upload fails. The file is then referenced by nothing — no artifact row names it — so
+   *      it is invisible to every other cleanup in the system.
+   *
+   * ADR-0032 argues there is no `video-stop` verb *because* the teardown "runs on every path a
+   * session can end". That was written about the paths a SESSION takes and is false about the
+   * paths an AGENT takes. This is the reconciliation that makes the claim true — the same shape as
+   * the reset sweep: a loop that converges on the desired state rather than a promise that every
+   * caller remembers.
+   *
+   * MUST NOT TOUCH A LIVE RECORDING. A device recording right now has a file whose mtime is moving
+   * and an in-memory handle; both are how an implementation tells the two apart.
+   */
+  reconcileRecordings?(
+    maxAgeMs: number,
+    opts?: {
+      /**
+       * Also issue a blind stop, for a recorder this process cannot know about.
+       *
+       * TRUE AT STARTUP AND NOWHERE ELSE. At startup a running recorder cannot be ours, because we
+       * have started none — so stopping one is unambiguous. On any later call it could be a
+       * recording in progress on another device path, and a housekeeping pass that can stop a live
+       * recording is worse than the leak it is cleaning up.
+       */
+      stopOrphans?: boolean;
+    },
+  ): Promise<{ stopped: boolean; deleted: number }>;
+
   tap(x: number, y: number): Promise<void>;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
   key(name: KeyName): Promise<void>;

@@ -19,7 +19,7 @@
  */
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1068,5 +1068,103 @@ exit 0
     const withIt = device({ resetMode: 'powerwash' });
     await withIt.start();
     assert.equal(withIt.info.capabilities.includes('recording'), true);
+  });
+});
+
+/**
+ * A recorder must not outlive its stop path (ADR-0032, the P1 family found 2026-09-07).
+ *
+ * `stopRecording` has exactly one caller — the teardown that runs when a device is released — and
+ * there are three ways to miss it: the agent restarts mid-session, a quarantine recovery resets the
+ * device down another branch, or the upload fails and leaves a file nothing references. ADR-0032
+ * claims the teardown "runs on every path a session can end"; that is true of the paths a SESSION
+ * takes and false of the paths an AGENT takes, and this is the reconciliation that closes the gap.
+ */
+describe('reconciling recordings a teardown never reached', () => {
+  async function installRecordCvd(recordingDir: string): Promise<void> {
+    const binDir = join(imageDir, 'bin');
+    await mkdir(binDir, { recursive: true });
+    await mkdir(recordingDir, { recursive: true });
+    await writeFile(join(binDir, 'record_cvd'), `#!/bin/sh
+printf 'record_cvd %s\\n' "$*" >> "$FAKE_LOG"
+exit 0
+`);
+    await chmod(join(binDir, 'record_cvd'), 0o755);
+  }
+
+  async function fleetWithInstanceDir(instanceDir: string): Promise<void> {
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [{
+        group_name: 'cvd_1',
+        instances: [{ adb_serial: '0.0.0.0:6520', status: 'Running', instance_dir: instanceDir }],
+      }],
+    }));
+  }
+
+  /** Write a `.webm` and backdate it, so an age-based sweep can be tested in milliseconds. */
+  async function aged(dir: string, name: string, ageMs: number): Promise<string> {
+    const path = join(dir, name);
+    await writeFile(path, 'bytes');
+    const when = new Date(Date.now() - ageMs);
+    await utimes(path, when, when);
+    return path;
+  }
+
+  const exists = (p: string) => stat(p).then(() => true).catch(() => false);
+
+  test('an orphaned recorder is stopped, but only where one cannot be ours', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd(join(instanceDir, 'recording'));
+
+    const d = device();
+    const r = await d.reconcileRecordings(60_000, { stopOrphans: true });
+    assert.equal(r.stopped, true);
+    assert.match(await callTo('record_cvd', 'stop'), /--instance_num=1/);
+
+    // WITHOUT the flag there is no stop at all. This is the guard that keeps a housekeeping pass
+    // from killing a recording in progress: on a reset the recorder COULD be ours, and a sweep that
+    // can stop a live one is worse than the leak it is cleaning up.
+    const d2 = device();
+    const r2 = await d2.reconcileRecordings(60_000);
+    assert.equal(r2.stopped, false);
+  });
+
+  test('a recording this agent started is never stopped by reconciliation', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd(join(instanceDir, 'recording'));
+
+    const d = device();
+    await d.startRecording();
+    const r = await d.reconcileRecordings(60_000, { stopOrphans: true });
+    // THE ONE FAILURE THIS MUST NOT HAVE. Stopping the session that is running right now would
+    // destroy the evidence of the very run somebody is watching.
+    assert.equal(r.stopped, false, 'a live recording must survive reconciliation');
+  });
+
+  test('a stale recording is swept and a fresh one is left alone', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    const recordingDir = join(instanceDir, 'recording');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd(recordingDir);
+
+    // What a failed upload or a restarted agent leaves behind: a file nothing references, so no
+    // other cleanup in the system can see it.
+    const old = await aged(recordingDir, 'recording_cvd-1_display_0_111.webm', 10 * 60_000);
+    // And one that could still be being written. Age is measured on mtime, which on a file being
+    // written moves continuously, so a recording in progress can never be old enough to sweep.
+    const fresh = await aged(recordingDir, 'recording_cvd-1_display_0_222.webm', 5_000);
+    // Not a recording at all. A sweep that took this would delete cvd's own files.
+    const other = join(recordingDir, 'notes.txt');
+    await writeFile(other, 'not a recording');
+
+    const d = device();
+    const r = await d.reconcileRecordings(60_000);
+
+    assert.equal(r.deleted, 1);
+    assert.equal(await exists(old), false, 'the stale recording is swept');
+    assert.equal(await exists(fresh), true, 'a recording that could still be writing is left alone');
+    assert.equal(await exists(other), true, 'only .webm files are swept');
   });
 });
