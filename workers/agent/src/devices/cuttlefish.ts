@@ -1033,7 +1033,25 @@ export class CuttlefishDevice implements DeviceControl {
    * oldest lines is the right half to lose: a failure is at the end.
    */
   async dumpLogcat(): Promise<string> {
-    const out = await runBinary('adb', ['-s', this.adbSerial, 'logcat', '-d', '-v', 'threadtime'], 60_000);
+    const out = await runBinary('adb', [
+      '-s', this.adbSerial, 'logcat', '-d',
+      /**
+       * `-v year -v UTC` ON TOP OF threadtime, AND THIS IS NOT COSMETIC.
+       *
+       * Plain `threadtime` stamps a line `09-07 20:14:45.123` — no year, and in the DEVICE'S local
+       * zone with nothing saying which. A console that wants to show "the log around the moment the
+       * test failed" has a UTC instant from `test_results.reported_at` and, with that format, no
+       * sound way to line the two up: it would have to guess a year and a zone, and a wrong guess
+       * silently shows the wrong fifteen seconds, which is worse than showing none.
+       *
+       * With both modifiers a line reads `2026-09-07 14:44:45.123` in UTC and the comparison is
+       * arithmetic. The cost is eleven characters a line on an artifact that is already megabytes.
+       *
+       * Logs captured BEFORE this change keep the old format, so anything reading them must treat
+       * an unparseable stamp as "cannot locate" rather than as zero.
+       */
+      '-v', 'threadtime', '-v', 'year', '-v', 'UTC',
+    ], 60_000);
     const text = out.toString('utf8');
     const LIMIT = 8 * 1024 * 1024;
     if (text.length <= LIMIT) return text;

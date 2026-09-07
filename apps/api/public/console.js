@@ -195,6 +195,17 @@ export const state = {
    * wants delivered to a page that shows six of them.
    */
   artifacts: { sessionId: null, items: [], failures: [], loaded: false },
+  /** The `?watch=` intent already acted on, so a re-render does not re-seek — see `sessionFailureCard`. */
+  watchHonoured: null,
+  /**
+   * The CAPTURED log — the artifact a finished session left behind, read in the page.
+   *
+   * Separate from `state.log`, which is the LIVE dock's ring buffer. The two answer different
+   * questions and are never both useful: the dock is for a device somebody is watching, and this is
+   * for a session that is over, which is when a log is actually read.
+   */
+  capturedLog: { sessionId: null, text: null, partial: false, loading: false, error: null,
+                 level: 'ALL', query: '', windowed: true },
   // The WebDriver steps for whichever session the cockpit is showing (migration 041). Keyed by
   // session for the same reason `artifacts` is: navigating between two sessions must never show one
   // session's steps under the other's heading.
@@ -281,10 +292,24 @@ const SESSION_STATE = {
   FAILED:     { label: 'Failed',     tone: 'bad' },
 };
 
+/**
+ * AMBER, NOT RED, and this is the same rule the run screen already holds.
+ *
+ * These are the FARM's own errands — an install, a screenshot, a logcat, a recording — and a failed
+ * one is an incident, never a statement about the customer's test. Drawn in `bad` they sat on the
+ * session screen in exactly the red a failing test gets, two rows of it, saying "the session ended
+ * before this action reached the device" — which is the S2 capture losing a race with a
+ * ten-second beat, working as designed. Somebody scanning a red session for what broke read that
+ * first.
+ *
+ * `docs/EXECUTION_ROADMAP.md` S4 calls this out on the run screen — *"red is reserved for a test
+ * failing; an incident stays amber"* — and the session screen was the one place that had not
+ * learned it.
+ */
 const ACTION_STATE = {
   PENDING: { label: 'Queued',    tone: 'warn' },
   DONE:    { label: 'Succeeded', tone: 'ok' },
-  FAILED:  { label: 'Failed',    tone: 'bad' },
+  FAILED:  { label: 'Did not run', tone: 'warn' },
 };
 
 const KIND_LABEL = { install: 'Install', launch: 'Launch', uninstall: 'Uninstall' };
@@ -908,6 +933,183 @@ async function loadArtifacts(sessionId) {
   }
 }
 
+/**
+ * How much of a captured log to pull for the first look.
+ *
+ * A SUFFIX RANGE, NOT THE WHOLE FILE. A session's logcat runs to a couple of megabytes and the
+ * lines that explain a failure are almost always at the end, so the default read is the last chunk
+ * — one `Range: bytes=-N` request against the blob route, which is the same range support the video
+ * player needs. "Load everything" is one press away and says how big it is first.
+ */
+const LOG_TAIL_BYTES = 256 * 1024;
+
+/**
+ * A threadtime line with an absolute stamp: `2026-09-07 14:44:45.123  1234  5678 I Tag: message`.
+ *
+ * NAMED FOR THE CAPTURED LOG, not for logs in general. `parseLogLine` is already imported from
+ * `/live.js` for the live dock's ring buffer, and a local function of that name SHADOWS the import
+ * — silently, and only the live view breaks. The first draft here did exactly that.
+ */
+const CAPTURED_LOG_LINE =
+  /^(?:(\d{4})-)?(\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\s+\d+\s+\d+\s+([VDIWEF])\s+([^:]*?):\s?([\s\S]*)$/;
+
+/**
+ * Parse one line into an instant and a level, or nulls.
+ *
+ * THE STAMP IS UTC BY CONSTRUCTION — the agent dumps with `-v year -v UTC` for exactly this reason.
+ * Logs captured before that change carry `09-07 20:14:45.123`: no year, no zone, and no sound way
+ * to line them up against a failure's UTC instant. Those parse to `at: null`, which the card reads
+ * as "cannot locate" and never as zero. Guessing a year and a zone would silently show the wrong
+ * fifteen seconds, which is worse than showing none.
+ */
+export function parseCapturedLine(line) {
+  const m = CAPTURED_LOG_LINE.exec(line);
+  // Not a log line at all — a stack trace continuation, a `--------- beginning of main` banner.
+  // Kept and shown verbatim rather than dropped: a Java stack trace IS the answer surprisingly
+  // often, and it arrives as a dozen lines none of which match this shape.
+  if (!m) return { at: null, level: null, time: '', tag: '', message: line, raw: line };
+  const [, year, monthDay, time, level, tag, message] = m;
+  /**
+   * THE YEAR IS THE ONLY OPTIONAL PART, and everything else still works without it.
+   *
+   * The first draft required it, so a log captured before the agent started passing
+   * `-v year -v UTC` matched nothing at all — losing its LEVEL and its TAG as well as its instant,
+   * which meant an old log could not even be filtered to errors. Only the clock arithmetic depends
+   * on the year; the filters do not, and taking them away too would have made this card useless on
+   * exactly the logs somebody is most likely to be reading a fortnight from now.
+   */
+  return {
+    at: year ? Date.parse(`${year}-${monthDay}T${time}Z`) : null,
+    level, time, tag: tag.trim(), message, raw: line,
+  };
+}
+
+async function loadCapturedLog(sessionId, artifactId, { whole = false } = {}) {
+  state.capturedLog = { ...state.capturedLog, sessionId, loading: true, error: null };
+  scheduleRender();
+  try {
+    const res = await fetch(`/v1/artifacts/${encodeURIComponent(artifactId)}/blob`, {
+      headers: whole ? {} : { range: `bytes=-${LOG_TAIL_BYTES}` },
+      credentials: 'same-origin',
+    });
+    if (!res.ok && res.status !== 206) throw new Error(`the log could not be read (${res.status})`);
+    let text = await res.text();
+    // A suffix range almost always lands mid-line. Dropping the first one costs nothing and beats
+    // rendering a fragment that looks like a corrupt entry.
+    const partial = res.status === 206 && !whole;
+    if (partial) text = text.slice(text.indexOf('\n') + 1);
+    if (state.capturedLog.sessionId !== sessionId) return;
+    state.capturedLog = { ...state.capturedLog, text, partial, loading: false, error: null };
+  } catch (e) {
+    if (state.capturedLog.sessionId !== sessionId) return;
+    state.capturedLog = { ...state.capturedLog, loading: false, error: e.message || String(e) };
+  }
+  scheduleRender();
+}
+
+/**
+ * The captured log, in the page (replacing the dead dock on an ended session).
+ *
+ * WHAT THIS REPLACED, because the old behaviour is the reason it exists: an ended session rendered
+ * the LIVE dock — an empty pane reading `0 / 0 lines`, with level chips that filtered nothing and a
+ * note pointing at the Evidence card. Meanwhile the log itself was a 2.2 MB download-only artifact.
+ * There was no way to READ a log in this console for a session that had ended, which is the only
+ * time anybody wants to.
+ *
+ * THREE THINGS NARROW IT, in the order they help:
+ *
+ *   the failure window   +/- 15s around what the suite reported, when both ends are known;
+ *   the level            E and W are what a red run is usually explained by;
+ *   a substring          because the person often knows the tag or the exception class.
+ *
+ * The window is DEFAULT-ON and always escapable, and it disappears entirely rather than lying when
+ * the log has no absolute timestamps — see `parseCapturedLine`.
+ */
+const LOG_WINDOW_MS = 15_000;
+
+function capturedLogCard(sess) {
+  const logArtifact = (state.artifacts.sessionId === sess.id ? state.artifacts.items : [])
+    .find((a) => a.kind === 'logcat');
+  if (!logArtifact) {
+    return card('Log', {}, h('p', { class: 'caption', text:
+      'No log was captured for this session — either the device could not be reached when it was '
+      + 'released, or the capture has passed its retention window.' }));
+  }
+
+  const st = state.capturedLog;
+  const mine = st.sessionId === sess.id;
+  const failures = (state.artifacts.sessionId === sess.id && state.artifacts.failures) || [];
+  const failureAt = failures.map((f) => Date.parse(f.reportedAt)).filter(Number.isFinite).sort()[0];
+
+  if (!mine && !st.loading) {
+    return card('Log', { aside: h('span', { class: 'caption', text: bytes(logArtifact.sizeBytes) }) },
+      h('p', { class: 'caption mb-sm', text:
+        'Captured when the device was released. The last part is loaded first, because what explains '
+        + 'a failure is almost always at the end.' }),
+      btn('Read the log', 'tiny', () => void loadCapturedLog(sess.id, logArtifact.id)),
+    );
+  }
+  if (st.loading) return card('Log', {}, h('p', { class: 'caption', text: 'Reading…' }));
+  if (st.error) {
+    return card('Log', {}, h('p', { class: 'caption bad-text', text: st.error }),
+      btn('Try again', 'tiny ghost', () => void loadCapturedLog(sess.id, logArtifact.id)));
+  }
+
+  const all = (st.text || '').split('\n').filter((l) => l.length);
+  const parsed = all.map((line) => ({ line, ...parseCapturedLine(line) }));
+  const locatable = Number.isFinite(failureAt) && parsed.some((p) => p.at !== null);
+  const windowed = locatable && st.windowed;
+
+  const shown = parsed.filter((p) => {
+    if (windowed && p.at !== null && Math.abs(p.at - failureAt) > LOG_WINDOW_MS) return false;
+    if (st.level !== 'ALL' && p.level !== st.level) return false;
+    if (st.query && !p.raw.toLowerCase().includes(st.query.toLowerCase())) return false;
+    return true;
+  });
+
+  // `levelchip`, the same control the live dock uses. A second visual language for the same job on
+  // the same screen is how a console stops feeling like one product.
+  const chip = (label, active, onclick) =>
+    h('button', { class: `levelchip${active ? ' on' : ''}`, type: 'button', onclick }, label);
+
+  return card('Log', {
+    aside: h('span', { class: 'caption', text: `${shown.length} of ${all.length} lines` }),
+  },
+    h('div', { class: 'row tight wrap mb-sm' },
+      locatable
+        ? chip(windowed ? 'around the failure' : 'everything',
+            windowed,
+            () => { state.capturedLog = { ...st, windowed: !st.windowed }; scheduleRender(); })
+        : null,
+      ...['ALL', 'E', 'W', 'I', 'D'].map((lv) => chip(lv, st.level === lv,
+        () => { state.capturedLog = { ...st, level: lv }; scheduleRender(); })),
+      h('input', {
+        class: 'field mono', type: 'search', placeholder: 'contains…', value: st.query,
+        oninput: (e) => { state.capturedLog = { ...st, query: e.target.value }; scheduleRender(); },
+      }),
+    ),
+    shown.length
+      ? h('div', { class: 'logbody mono' }, shown.map((p) => h('div',
+          // The dock's own four-column shape and level classes: time, level letter, tag, message.
+          // Colour repeats the letter rather than replacing it, so it is never the only carrier.
+          { class: `logline${p.level ? ` l${p.level}` : ''}` },
+          h('span', { class: 'log-t', text: p.time }),
+          h('span', { class: 'log-l', text: p.level || '' }),
+          h('span', { class: 'log-g', text: p.tag }),
+          h('span', { class: 'log-m', text: p.message }),
+        )))
+      : h('p', { class: 'caption', text: 'No lines match. Widen the level, clear the filter, or turn off the window.' }),
+    h('p', { class: 'caption mt-sm', text: [
+      st.partial ? `Showing the last ${bytes(LOG_TAIL_BYTES)} of ${bytes(logArtifact.sizeBytes)}.` : 'The whole log is loaded.',
+      locatable ? null : 'This log has no absolute timestamps, so it cannot be lined up with the failure — it was captured before the agent started stamping the year and the zone.',
+    ].filter(Boolean).join(' ') }),
+    st.partial
+      ? btn('Load the whole log', 'tiny ghost',
+          () => void loadCapturedLog(sess.id, logArtifact.id, { whole: true }))
+      : null,
+  );
+}
+
 async function refreshOrg() {
   const [members, keys] = await Promise.all([
     api('/v1/account/members'),
@@ -1079,10 +1281,21 @@ const LENS_FOR_ROUTE = { devices: 'capacity', sessions: 'live', queue: 'waiting'
  * bookmark, and a promise nothing can test is a promise somebody tidies away.
  */
 export function parseHash(hash = location.hash) {
-  const raw = String(hash || '').replace(/^#\/?/, '');
+  /**
+   * A QUERY ON A HASH ROUTE IS AN INTENT, NEVER PART OF THE ADDRESS.
+   *
+   * `#/sessions/<id>?watch=<resultId>` is the same page as `#/sessions/<id>` — it says what to do
+   * on arrival (seek the recording to that failure), not where to go. Stripped here so every
+   * existing comparison against `id` keeps working; a screen that does not read `intent` behaves
+   * exactly as it did, which is what makes an older tab safe after a deploy.
+   */
+  const full = String(hash || '').replace(/^#\/?/, '');
+  const q = full.indexOf('?');
+  const raw = q === -1 ? full : full.slice(0, q);
+  const intent = q === -1 ? {} : Object.fromEntries(new URLSearchParams(full.slice(q + 1)));
   const [name, id] = raw.split('/');
   if (name === 'devices' && id) return { name: 'device', id };
-  if (name === 'sessions' && id) return { name: 'cockpit', id };
+  if (name === 'sessions' && id) return { name: 'cockpit', id, intent };
   // `#/fleet/<lens>`; a bare `#/fleet` is capacity.
   if (name === 'fleet') return { name: 'fleet', id: null, lens: LENSES.some(([k]) => k === id) ? id : 'capacity' };
   // The three merged routes, each arriving on the lens it used to be.
@@ -5288,9 +5501,112 @@ function stepsCard(sess) {
  */
 const FAILURE_LEAD_IN_SECONDS = 5;
 
+/**
+ * Where in the recording a reported failure lands, in seconds — or null when it cannot be known.
+ *
+ * ONE PIECE OF ARITHMETIC, USED BY TWO CARDS. The failure card at the top of the page and the
+ * player at the bottom must never disagree about when something happened, and two copies of a
+ * subtraction is how they would come to.
+ *
+ * Both ends are approximate in the SAME direction — the anchor to about a frame interval, and
+ * `reportedAt` by however long the suite took to notice and post — so the result is deliberately
+ * pulled back by `FAILURE_LEAD_IN_SECONDS`. That is also what a person wants: the question is what
+ * happened immediately BEFORE the failure, not what the failure looked like.
+ */
+export function failureOffsetSeconds(video, failure) {
+  const startedAt = video?.context?.startedAt ? Date.parse(video.context.startedAt) : NaN;
+  const at = failure?.reportedAt ? Date.parse(failure.reportedAt) : NaN;
+  if (!Number.isFinite(startedAt) || !Number.isFinite(at)) return null;
+  return Math.max(0, (at - startedAt) / 1000 - FAILURE_LEAD_IN_SECONDS);
+}
+
+/** mm:ss, for a position inside a recording. */
+function clockText(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Send the player to a failure, from anywhere on the page.
+ *
+ * Found by id rather than held in a closure because the CALLER is a card rendered above the player
+ * and re-rendered independently of it. `scrollIntoView` first: seeking a video the person cannot
+ * see looks exactly like a button that does nothing.
+ */
+function watchFailureAt(seconds) {
+  const el = document.getElementById('evidence-video');
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (typeof el.fastSeek === 'function') el.fastSeek(seconds); else el.currentTime = seconds;
+  void el.play().catch(() => { /* autoplay policy; the scrubber has moved regardless */ });
+}
+
+/**
+ * WHAT FAILED, AT THE TOP OF THE PAGE THAT EXISTS TO EXPLAIN IT.
+ *
+ * The gap this closes was found by walking the journey: the run screen shows the failure and its
+ * message, you press the button beside it, and the session screen renders the message NOWHERE. The
+ * test's name survived only as the label on a jump button next to the video, four cards down. You
+ * navigate from a failure into the page for investigating it and the failure is gone.
+ *
+ * ENDED SESSIONS ONLY. On a live one the suite is still running and a half-reported list would be
+ * read as a verdict; the run screen is where a finished picture lives.
+ */
+function sessionFailureCard(sess, live) {
+  if (live) return null;
+  const mine = state.artifacts.sessionId === sess.id && state.artifacts.loaded;
+  const failures = (mine && state.artifacts.failures) || [];
+  if (!failures.length) return null;
+  const video = (state.artifacts.items || []).find((a) => a.kind === 'video');
+
+  /**
+   * Honour `?watch=<resultId>` from the run screen, ONCE.
+   *
+   * Here rather than at route time because the seek needs two things that arrive later than the
+   * route does: the artifacts fetch (for the anchor) and the `<video>` element itself. This card is
+   * rendered from the same state, so by the time it can draw a Watch button the player can take a
+   * seek. Guarded by `honoured` so a re-render — of which there are many on this screen — does not
+   * yank a person back to the failure every few seconds after they have scrubbed somewhere else.
+   */
+  const wanted = state.route?.intent?.watch;
+  if (wanted && state.watchHonoured !== wanted) {
+    const target = failures.find((f) => f.id === wanted) || failures[0];
+    const at = failureOffsetSeconds(video, target);
+    if (at !== null) {
+      state.watchHonoured = wanted;
+      setTimeout(() => watchFailureAt(at), 250);
+    }
+  }
+
+  return card(`Failed (${failures.length})`, { class: 'mb-gap' },
+    h('div', { class: 'stack' }, failures.map((f) => {
+      const at = failureOffsetSeconds(video, f);
+      return h('div', { class: 'stack tight' },
+        h('p', { class: 'row tight' },
+          pill('failed', 'bad'),
+          h('strong', { text: f.name || 'unnamed test' }),
+          // The suite's own classification, where it sent one. Absent is NOT "the product's fault".
+          f.failureClass ? failureTag(f.failureClass, f.failureReason) : null,
+        ),
+        f.failure
+          ? h('pre', { class: 'failtext', text: f.failure })
+          : h('p', { class: 'caption', text: 'No message was reported with this failure.' }),
+        at === null
+          ? null
+          : h('p', { class: 'row tight' },
+              btn(`Watch at ${clockText(at)}`, 'tiny', () => watchFailureAt(at),
+                { title: 'Jumps the recording to just before this failure' }),
+              h('span', { class: 'caption', text: `reported ${when(f.reportedAt)}` }),
+            ),
+      );
+    })),
+  );
+}
+
 function videoPlayer(video, failures) {
-  const startedAt = video.context && video.context.startedAt ? Date.parse(video.context.startedAt) : NaN;
   const el = h('video', {
+    // Addressed by id so a card ABOVE this one can seek it — see `watchFailureAt`.
+    id: 'evidence-video',
     class: 'evidence-video',
     src: `/v1/artifacts/${video.id}/blob`,
     controls: 'controls',
@@ -5299,12 +5615,28 @@ function videoPlayer(video, failures) {
   });
 
   /** Failures we can actually point at: we need both ends of the subtraction. */
-  const seekable = Number.isFinite(startedAt)
-    ? failures.filter((f) => f.reportedAt && Number.isFinite(Date.parse(f.reportedAt)))
-    : [];
+  const seekable = failures.filter((f) => failureOffsetSeconds(video, f) !== null);
+
+  /**
+   * WHAT THE RECORDING CONTAINS, not what it costs to keep.
+   *
+   * The artifact row below already carries bytes and an expiry date. Neither answers the question a
+   * person actually has — *is this long enough to hold the thing I am looking for?* — and the
+   * duration is not in the artifact row because nothing measures it server-side: the browser reads
+   * it off the container header, which is exactly what `preload="metadata"` and the blob route's
+   * range support are for.
+   */
+  const meta = h('span', { class: 'caption', text: 'reading the recording…' });
+  el.addEventListener('loadedmetadata', () => {
+    meta.textContent = Number.isFinite(el.duration)
+      ? `${clockText(el.duration)} of the session`
+      : 'duration unavailable — the recording may not have stopped cleanly';
+  });
+  el.addEventListener('error', () => { meta.textContent = 'this recording could not be played'; });
 
   return h('div', { class: 'stack tight mb-sm' },
     el,
+    meta,
     // SAID OUT LOUD when the recording did not finish cleanly. A partial file plays, has no
     // duration and no cues, and is often the most useful artifact a crashed session produced — but
     // it must never be presented as the complete record of an execution.
@@ -5315,13 +5647,10 @@ function videoPlayer(video, failures) {
       ? h('div', { class: 'row tight wrap' },
           h('span', { class: 'caption', text: seekable.length === 1 ? 'Jump to:' : 'Jump to a failure:' }),
           seekable.map((f) => {
-            const at = Math.max(0, (Date.parse(f.reportedAt) - startedAt) / 1000 - FAILURE_LEAD_IN_SECONDS);
-            return btn(f.name || 'failure', 'tiny', () => {
-              // `fastSeek` where it exists — it lands on the nearest keyframe, which on a recording
-              // with keyframes seconds apart is close enough and far quicker than an exact seek.
-              if (typeof el.fastSeek === 'function') el.fastSeek(at); else el.currentTime = at;
-              void el.play().catch(() => { /* autoplay policy; the scrubber has moved regardless */ });
-            }, { title: `${f.name || 'This test'} was reported at ${when(f.reportedAt)}` });
+            const at = failureOffsetSeconds(video, f);
+            return btn(`${f.name || 'failure'} · ${clockText(at)}`, 'tiny',
+              () => watchFailureAt(at),
+              { title: `${f.name || 'This test'} was reported at ${when(f.reportedAt)}` });
           }),
         )
       : failures.length
@@ -5470,7 +5799,20 @@ function screenCockpit(id) {
           const summary = endedSummary(sess, live);
           return summary ? h('div', { class: 'endedwrap' }, stage, summary) : stage;
         })(),
-        logcatDock(sess, live),
+        /**
+         * WHAT FAILED, FIRST. See `sessionFailureCard` — the run screen shows the message and the
+         * page you press through to did not show it at all.
+         */
+        sessionFailureCard(sess, live),
+        /**
+         * THE LIVE DOCK WHILE THE DEVICE IS LIVE, THE CAPTURED LOG AFTER.
+         *
+         * They are not the same thing shown twice: the dock is a stream for a device somebody is
+         * watching, and it is empty by definition once the session ends. Rendering it on an ended
+         * session produced a full card reading `0 / 0 lines`, with level chips that filtered
+         * nothing, pointing at an artifact that could only be downloaded.
+         */
+        live ? logcatDock(sess, live) : capturedLogCard(sess),
         card('Actions on this session', { aside: h('span', { class: 'caption', text: `${acts.length} total` }) },
           acts.length
             ? h('div', { class: 'tablewrap' }, h('table', { class: 'table narrow' },
@@ -5491,6 +5833,13 @@ function screenCockpit(id) {
                 })),
               ))
             : empty('Nothing has been sent to this device.', 'Install a build from the panel beside this one.'),
+          // Said out loud, because two amber rows on a red session still invite the wrong reading.
+          acts.some((a) => a.state === 'FAILED')
+            ? h('p', { class: 'caption mt-sm', text:
+                'These are the farm\u2019s own errands — a capture, an install, a recording. One that '
+                + 'did not run is never a statement about your test; the recording and the log below '
+                + 'are what the session actually left behind.' })
+            : null,
         ),
         /**
          * STEPS ABOVE EVIDENCE, deliberately.
@@ -6119,7 +6468,18 @@ function screenRun(id) {
               : h('p', { class: 'caption', text: 'No message was reported with this failure.' }),
             h('p', { class: 'row tight' },
               h('span', { class: 'caption', text: 'Evidence:' }),
-              btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
+              /**
+               * "WATCH" ONLY WHERE THERE IS SOMETHING TO WATCH (`hasVideo`, from the API).
+               *
+               * A button promising a recording that lands on an empty Evidence card is worse than
+               * the generic one it replaces. `#watch` is an INTENT, not a route: the session screen
+               * reads it, scrolls to the player and seeks to this failure. A screen that does not
+               * understand it simply opens normally, which is what an older tab does after a deploy.
+               */
+              f.hasVideo
+                ? btn('Watch the failure', 'tiny',
+                    () => go(`#/sessions/${f.sessionId}?watch=${encodeURIComponent(f.id)}`))
+                : btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
             ),
           ))))
       : null,
