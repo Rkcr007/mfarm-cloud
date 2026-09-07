@@ -2448,3 +2448,23 @@ kbd {
 /* A slow step that SUCCEEDED. Amber, never red: it did not fail, and painting it as though it had
    would put the reader's attention on the wrong row. */
 .table.steps .step-slow { color: var(--warn, #E8A30E); font-weight: 500; }
+
+/* ---------------------------------------------------------------- the session recording (S5)
+ *
+ * The player is the browser's `<video controls>`; this only gives it a sane box. A recording is
+ * portrait (a phone panel: 720x1280 or 1080x2340), so an unconstrained element is taller than the
+ * viewport and pushes the artifact list, the failure buttons and everything else below the fold —
+ * on the one screen whose whole job is answering a question quickly.
+ *
+ * `max-height` in `vh` rather than a fixed pixel box: the constraint is the person's screen, not a
+ * number, and `object-fit: contain` keeps the aspect ratio whatever the device's panel was.
+ */
+.evidence-video {
+  width: 100%;
+  max-height: 55vh;
+  object-fit: contain;
+  border-radius: var(--r-lg, 12px);
+  /* Black, not a themed surface: it is the letterbox around a portrait panel, and a light-theme
+     grey there reads as a broken image rather than as the edge of the video. */
+  background: #000;
+}

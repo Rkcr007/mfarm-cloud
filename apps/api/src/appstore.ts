@@ -151,7 +151,14 @@ export class AppStore {
     return s ? s.size : null;
   }
 
-  read(sha256: string): ReadStream {
+  /**
+   * `range` serves one byte span, for a `<video>` seeking (S5). Node's own semantics: `end` is
+   * INCLUSIVE, which is also what an HTTP Content-Range means, so the two need no translation — and
+   * a translation is exactly where an off-by-one here would go unnoticed, because a player asked
+   * for one byte too few simply stalls rather than erroring.
+   */
+  read(sha256: string, range?: { start: number; end: number }): ReadStream {
+    if (range) return createReadStream(this.pathFor(sha256), { start: range.start, end: range.end });
     return createReadStream(this.pathFor(sha256));
   }
 

@@ -363,11 +363,17 @@ measuring before the farm runs saturated with recording on.
 | **0** | ~~Lab probe~~ — **DONE 2026-09-07.** `record_cvd` present, `start`/`stop` verified against a live device with no viewer, output plays. | The whole plan. |
 | 1 | ~~`cuttlefish.ts`: `startRecording()` / `stopRecording({keep})`~~ — **DONE.** Invokes `${imageDir}/bin/record_cvd`, finds the `.webm` that was not there before, deletes it unless kept. Seven tests. | Step 1 of the brief, standalone. |
 | 2 | ~~`deploy/measure-video-cost.mjs`, arms A–D~~ — **DONE, PASSED.** | §7. **Gate: passed, so the steps below may ship.** |
-| 3 | Migration 045: `'video'` in `artifacts.kind`, `video` capability, `VIDEO_RETENTION_HOURS`, `keep_recording(session)` set from the result POST. | The retention model. |
-| 4 | Agent lifecycle: start on lease, stop in `captureArtifacts()`, upload-or-delete on the keep flag, `context.partial`. | §6. |
-| 5 | API: `video` in `KINDS`, `video/webm` content type, `durationMs`/`fps` in the artifact JSON, range requests on download so a browser can seek. | §5, §9. |
-| 6 | Console: a `<video>` on the session screen, in the artifacts card. Play/pause/seek/fullscreen are the browser's. | Brief §9. |
-| 7 | Seek-to-failure: the timeline's failing step links to `videoPositionMs`. | Brief §5, and the reason the anchor exists. |
+| 3 | ~~Migration 045~~ — **DONE.** `'video'` in `artifacts.kind`, `'video-start'` on the action pipeline mapped to the `recording` capability, `session_should_keep_video`, `VIDEO_RECORDING` and `VIDEO_RETENTION_HOURS`. | The retention model. |
+| 4 | ~~Agent lifecycle~~ — **DONE.** `video-start` on the beat; stop in `captureArtifacts()` before anything that can hang; upload-or-delete on the keep flag; `context.partial`. | §6. |
+| 5 | ~~API~~ — **DONE.** `video` in `KINDS`, `video/webm`, its own retention, and **range requests** on the blob route. | §5, §9. |
+| 6 | ~~Console~~ — **DONE.** A `<video controls preload="metadata">` in the Evidence card. Play/pause/seek/clock/fullscreen are the browser's. | Brief §9. |
+| 7 | ~~Seek-to-failure~~ — **DONE.** A button per reported failure, seeking `reportedAt − startedAt − 5s`. | Brief §5, and the reason the anchor exists. |
+
+**Everything above is built and unit-tested; `VIDEO_RECORDING` defaults to `off`, so it ships
+inert.** What has NOT happened yet is an end-to-end run on the farm: a real suite, recording on,
+producing a real artifact a person opens in the console. That is the next thing, and this project's
+own history says it is where the remaining defects are — six of them were found by the first real
+handset after 197 green tests.
 
 **Range requests (step 5) are not optional.** Without `Accept-Ranges`, Chrome downloads the whole
 file before it will play and cannot seek at all — which turns "what happened before the failure?"

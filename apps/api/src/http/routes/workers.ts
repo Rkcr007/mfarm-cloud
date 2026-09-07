@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { withSystem } from '../../db.ts';
+import { loadConfig } from '../../config.ts';
 import { generateWorkerToken, sha256, safeEqualHex } from '../../auth.ts';
 import { redeemEnrollment, markRedeemed } from '../../enrollment.ts';
 import { negotiate, deviceAutomationEndpoint, classifyReason, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
@@ -340,6 +341,10 @@ export async function workerRoutes(app: FastifyInstance) {
   /** Liveness, and the one regular chance the control plane has to hand a worker work to do. */
   app.post('/workers/heartbeat', async (req) => {
     const { hostId } = requireWorker(req);
+    // READ HERE, NOT AT MODULE SCOPE. `import` is hoisted, so an env var read while this module is
+    // evaluated cannot be overridden by a test that sets it — the trap `appRoutes` documents and
+    // the reason every route file in here calls `loadConfig()` from inside a handler.
+    const videoMode = loadConfig().videoRecording;
     const { row, resets, actions } = await withSystem(async (c) => {
       const { rows } = await c.query(
         `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1
@@ -524,12 +529,21 @@ export async function workerRoutes(app: FastifyInstance) {
       // is the same reset a released session needs, and a second way to prepare a device would be a
       // second thing to keep correct. The flag is what changes on the way back — a recovery is
       // confirmed with a health result, not with the bare "done" an ordinary reset reports.
+      //
+      // `keep_video` rides the same row (migration 045). The worker is stopping a recording either
+      // way — that happens on every teardown path, not on request — and this is the only thing it
+      // cannot decide for itself: whether the customer's suite reported a failure. Derived here
+      // rather than stored, because a stored flag needs a writer and every candidate writer is a
+      // place it could be forgotten.
       const { rows: cleaning } = await c.query(
-        `SELECT d.id, d.fence, d.state,
-                (SELECT s.id FROM sessions s
-                  WHERE s.device_id = d.id AND s.fence = d.fence
-                  ORDER BY s.created_at DESC LIMIT 1) AS session_id
+        `SELECT d.id, d.fence, d.state, sess.id AS session_id,
+                COALESCE(session_should_keep_video(sess.id), false) AS keep_video
            FROM devices d
+           LEFT JOIN LATERAL (
+                SELECT s.id FROM sessions s
+                 WHERE s.device_id = d.id AND s.fence = d.fence
+                 ORDER BY s.created_at DESC LIMIT 1
+           ) sess ON true
           WHERE d.host_id = $1 AND d.state IN ('CLEANING', 'PREPARING')
             -- ESCALATED DEVICES ARE NOT OFFERED (migration 032). The budget exists precisely so
             -- that this loop ends; leaving the offer in place while counting attempts against it
@@ -578,7 +592,7 @@ export async function workerRoutes(app: FastifyInstance) {
       return {
         row: { ...rows[0], state },
         resets: cleaning.map((d: { id: string; fence: string | number; state: string;
-                                   session_id: string | null }) => ({
+                                   session_id: string | null; keep_video: boolean }) => ({
           deviceId: d.id,
           fence: Number(d.fence),
           // Absent when no session matches the fence — a device reset by an operator, or one whose
@@ -589,6 +603,13 @@ export async function workerRoutes(app: FastifyInstance) {
           // Absent rather than `false` on the ordinary path, so an older agent's payload is byte
           // for byte what it was and a newer one reads a flag that only ever means one thing.
           ...(d.state === 'PREPARING' ? { recovery: true } : {}),
+          // Same rule, same reason. Absent means "delete it", which is the safe direction — the
+          // failure mode of keeping too much is a control plane that runs out of disk.
+          //
+          // `all` keeps regardless of what the suite reported. It is the setting for a farm that is
+          // being debugged rather than run, and it is deliberately NOT the default: at the measured
+          // bitrate a saturated farm on `all` writes ~2.2 GB a day.
+          ...(d.keep_video || videoMode === 'all' ? { keepVideo: true } : {}),
         })),
         actions: pending.map((i: Record<string, unknown>) => ({
           actionId: i.id as string,

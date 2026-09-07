@@ -31,12 +31,19 @@ import { badRequest, conflict, notFound } from '../errors.ts';
  */
 
 /** What a worker may declare. Anything else is refused rather than stored under a made-up kind. */
-const KINDS = new Set(['logcat', 'screenshot']);
+const KINDS = new Set(['logcat', 'screenshot', 'video']);
 
 const CONTENT_TYPE: Record<string, string> = {
   logcat: 'text/plain; charset=utf-8',
   screenshot: 'image/png',
+  // WebM/VP8, because that is what cvd's host-side recorder writes and re-containering it would
+  // mean a transcode on the device host — the CPU this whole design exists to protect.
+  // docs/VIDEO_EVIDENCE.md §4 has the tradeoff against MP4/H.264 written out.
+  video: 'video/webm',
 };
+
+/** File extension per kind, for the name a browser sees on a download. */
+const EXTENSION: Record<string, string> = { screenshot: '.png', video: '.webm', logcat: '.txt' };
 
 interface ArtifactRow {
   id: string;
@@ -186,7 +193,11 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
         const r = await c.query<{ id: string | null }>(
           `SELECT artifact_record($1,$2,$3,$4,$5,$6,$7,$8, make_interval(hours => $9), $10::jsonb) AS id`,
           [hostId, deviceId, req.params.id, kind, blob.sha256, blob.sizeBytes,
-           CONTENT_TYPE[kind], safeFilename(req.query.filename), cfg.artifactRetentionHours,
+           CONTENT_TYPE[kind], safeFilename(req.query.filename),
+           // A recording gets its OWN retention, and it is shorter. It is an order of magnitude
+           // larger than everything else a session leaves behind, so sharing one number with logcat
+           // means the disk conversation can only be had by shortening logcat too.
+           kind === 'video' ? cfg.videoRetentionHours : cfg.artifactRetentionHours,
            context],
         );
         return r.rows[0]?.id ?? null;
@@ -276,7 +287,43 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
       throw notFound(`Blob ${row.sha256} is missing from the artifact store`);
     }
 
-    const name = row.filename ?? `${row.kind}-${row.id.slice(0, 8)}${row.kind === 'screenshot' ? '.png' : '.txt'}`;
+    const name = row.filename ?? `${row.kind}-${row.id.slice(0, 8)}${EXTENSION[row.kind] ?? '.txt'}`;
+
+    /**
+     * RANGE REQUESTS, AND THEY ARE NOT OPTIONAL FOR VIDEO.
+     *
+     * Without `accept-ranges`, Chrome will not seek a `<video>` at all — the scrubber is dead and
+     * the whole file downloads before the first frame plays. For a 40 MB recording that turns "what
+     * happened just before it failed?" back into a download and a media player, which is precisely
+     * the question this feature exists to answer in one click.
+     *
+     * Served for every kind rather than only video: it is the same eight lines, and a browser that
+     * resumes an interrupted logcat download is not a problem to solve twice.
+     */
+    reply.header('accept-ranges', 'bytes');
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
+    if (range) {
+      // An open-ended suffix (`bytes=-500`) means the LAST n bytes, which is a different request
+      // from "from byte 0". Getting this backwards serves the head of the file for the tail and the
+      // player simply stalls, with no error anywhere.
+      const suffix = range[1] === '';
+      let start = suffix ? size - Number(range[2] || 0) : Number(range[1]);
+      let end = suffix || range[2] === '' ? size - 1 : Number(range[2]);
+      start = Math.max(0, start);
+      end = Math.min(size - 1, end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) {
+        return reply.code(416).header('content-range', `bytes */${size}`).send();
+      }
+      return reply
+        .code(206)
+        .header('content-type', row.content_type)
+        .header('content-range', `bytes ${start}-${end}/${size}`)
+        .header('content-length', String(end - start + 1))
+        .header('content-disposition', `inline; filename="${name}"`)
+        .header('x-mfarm-sha256', row.sha256)
+        .send(store.read(row.sha256, { start, end }));
+    }
+
     return reply
       .header('content-type', row.content_type)
       .header('content-length', String(size))
