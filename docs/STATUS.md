@@ -120,20 +120,26 @@ merely double the limits — roughly half of all tunnel-transport WebDriver sess
 Correct order is tunnel affinity first, rate-limit store second. Neither is worth building until
 something needs a second instance, and nothing does.
 
-### 5. Video — the gate is measured, and it is now a product decision
+### 5. ~~Video~~ — **CLOSED 2026-09-07, ADR-0032, migration 045**
 
-S5 of [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md), the only execution-engine step left, and no
-longer blocked on a measurement: it was taken on the farm on 2026-09-07 and it **ruled out the cheap
-path**. `screenrecord` costs the Flutter canvas 33% of its frame rate and doubles ordinary UI's
-dropped frames, and both `screenrecord` and scrcpy encode in the guest — so the encoder the live
-view already runs cannot be reused under a suite whose timing is being asserted.
+Both options this section offered turned out to be the wrong question. **Cuttlefish already ships a
+host-side recorder**: `record_cvd` drives `RecordingManager`, which tees the same
+`VideoTrackSourceInterface` that feeds the live view into its own VP8 encoder, on the host. Measured
+on the farm: **29.8 fps recording against 29.9 not**, where guest `screenrecord` costs 33%.
 
-Two honest options, and choosing between them is a product call:
+Record everything, keep only what a suite reported as failed (`VIDEO_RECORDING=off|failures|all`,
+the farm runs `failures`). Verified end to end by `deploy/verify-video.mjs`, 17/17 on real
+Cuttlefish. Measured output ~120 kbps — about 8x cheaper than the 1 Mbps `EXECUTION_MODEL.md` §4.4
+assumed, which moves a saturated farm from filling the disk in 1.3 days to 11.
 
-1. **Encode on the host**, reusing `cvd`'s WebRTC encoder at 49–53fps. Correct, and it does not
-   exist yet — this is real work.
-2. **Video for physical devices only**, where the encoder is dedicated silicon on the phone.
-   Available immediately; it is video for the part of the fleet that is currently not serving.
+**The execution engine is now complete**: every step of `EXECUTION_ROADMAP.md` is built or
+deliberately deferred with a reason.
+
+**Two things about it are still unverified**, and neither is a blocker: the console's player has
+never been opened by a person (the artifact, the API and range requests are verified; the `<video>`
+element is covered only by tests against seeded state, which is the D26 blind spot), and four
+*busy* recorded devices remain unmeasured — arm D drove one of four, and an idle device publishes
+almost no frames.
 
 ### 6. A device arriving still restarts the agent
 

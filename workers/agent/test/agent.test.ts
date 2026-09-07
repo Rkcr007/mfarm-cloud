@@ -1748,3 +1748,100 @@ describe('quarantine recovery', () => {
     await agent.shutdown();
   }));
 });
+
+/**
+ * A recorder must not outlive its stop path (ADR-0032; the P1 family, 2026-09-07).
+ *
+ * `stopRecording` is reached from exactly one place — `captureArtifacts`, on the ordinary release —
+ * and ADR-0032 leans on that: it argues there is no `video-stop` verb BECAUSE the teardown runs on
+ * every path a session can end. True of the paths a SESSION takes, false of the paths an AGENT
+ * takes, which is how a quarantine recovery came to leave a recorder encoding into a file nobody
+ * would ever be handed.
+ */
+describe('a recorder does not outlive the device that was recording', () => {
+  /**
+   * A device that records. Separate from `FakeDevice` for the reason `ViewableDevice` is separate:
+   * the honest default is a device that CANNOT, and giving every stub a recorder would hide the
+   * paths that check whether one exists at all.
+   */
+  class RecordingDevice extends FakeDevice {
+    recording = false;
+    reconciled: Array<{ maxAgeMs: number; stopOrphans: boolean }> = [];
+    async startRecording() { this.recording = true; this.calls.push('rec:start'); return { startedAt: Date.now() }; }
+    async stopRecording({ keep }: { keep: boolean }) {
+      this.recording = false;
+      this.calls.push(`rec:stop:${keep ? 'keep' : 'discard'}`);
+      return null;
+    }
+    async reconcileRecordings(maxAgeMs: number, opts: { stopOrphans?: boolean } = {}) {
+      this.reconciled.push({ maxAgeMs, stopOrphans: opts.stopOrphans === true });
+      this.calls.push('rec:reconcile');
+      return { stopped: false, deleted: 0 };
+    }
+  }
+
+  function recordingBackend(localId: string): DeviceBackend & { control: RecordingDevice } {
+    const control = new RecordingDevice(localId);
+    return { control, media: { async endpoint() { return null; } } };
+  }
+
+  async function settle(deviceId: string, want: string) {
+    let state = '';
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && state !== want) {
+      state = await withSystem(async (c) =>
+        (await c.query('SELECT state::text AS s FROM devices WHERE id = $1', [deviceId])).rows[0].s);
+      if (state !== want) await new Promise((r) => setTimeout(r, 25));
+    }
+    return state;
+  }
+
+  test('a quarantine recovery stops the recorder it would otherwise abandon', async () => {
+    process.env.RECOVERY_PROBE_ATTEMPTS = '1';
+    process.env.RECOVERY_PROBE_GAP_MS = '1';
+    try {
+      const b = recordingBackend(`rec-q-${randomUUID().slice(0, 8)}`);
+      const agent = makeAgent([b], `rec-q-${randomUUID().slice(0, 8)}`);
+      const registered = await agent.start();
+      const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+      // The device is recording when the operator quarantines and releases it — exactly the case
+      // that used to leak, because `release_device_quarantine` bumps the fence, so no session row
+      // matches and the branch that collects evidence is skipped entirely.
+      await b.control.startRecording();
+      await withSystem((c) => c.query(
+        `SELECT quarantine_device($1, 'adb kept dropping', 'health'),
+                release_device_quarantine($1, NULL)`, [deviceId]));
+
+      assert.equal((await agent.heartbeat()).ok, true);
+      assert.equal(await settle(deviceId, 'READY'), 'READY');
+
+      assert.equal(b.control.recording, false, 'the recorder must not survive the recovery');
+      // `discard`, not `keep`: the fence moved, so there is no session to file a recording against.
+      // An artifact with no run to attach it to is worse than no artifact.
+      assert.ok(b.control.calls.includes('rec:stop:discard'),
+        `expected a discarding stop, got ${b.control.calls.join(', ')}`);
+    } finally {
+      delete process.env.RECOVERY_PROBE_ATTEMPTS;
+      delete process.env.RECOVERY_PROBE_GAP_MS;
+    }
+  });
+
+  test('an ordinary reset sweeps stale recordings, without touching a live one', async () => {
+    const b = recordingBackend(`rec-s-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b], `rec-s-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    await agent.resetAndRelease(b, deviceId, 1);
+
+    assert.equal(b.control.reconciled.length, 1, 'every reset is a chance to sweep');
+    /**
+     * NOT `stopOrphans`. This is the guard that keeps housekeeping from killing a recording in
+     * progress: at startup a running recorder cannot be ours, but here it could be, and a sweep
+     * that can stop a live recording is worse than the leak it is cleaning up.
+     */
+    assert.equal(b.control.reconciled[0].stopOrphans, false);
+    assert.ok(b.control.reconciled[0].maxAgeMs > 0);
+  });
+});

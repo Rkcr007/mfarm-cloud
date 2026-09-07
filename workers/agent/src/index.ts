@@ -5,6 +5,20 @@ import { cpus, hostname as osHostname, totalmem } from 'node:os';
 import { join } from 'node:path';
 
 const { X_OK } = fsConstants;
+
+/**
+ * How old a `.webm` on the device host must be before it is swept (ADR-0032).
+ *
+ * SIX HOURS, and the number is chosen against the longest thing that could still be writing one
+ * rather than against a tidiness preference. A session's TTL is thirty minutes by default and a
+ * caller may ask for more; six hours is comfortably past any of it, so a file this old belongs to a
+ * session that ended without its teardown running — an agent that was restarted, a recovery, an
+ * upload that failed.
+ *
+ * The age is measured on mtime, which on a file being written moves continuously. A recording that
+ * is genuinely in progress can therefore never be old enough to sweep, whatever this number is.
+ */
+const RECORDING_MAX_AGE_MS = Number(process.env.RECORDING_MAX_AGE_MS ?? 6 * 60 * 60 * 1000);
 import { automationIsTunnelled, dataPlaneEndpoint, gatewayBase, tunnelEnabled } from './automation-endpoint.ts';
 import { Agent, persistedWorkerToken } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
@@ -508,6 +522,25 @@ async function main(): Promise<void> {
     const t0 = Date.now();
     await b.control.start();
     console.log(`[agent] ${b.control.info.localId} ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+    /**
+     * PUT THE RECORDER BACK IN A KNOWN STATE BEFORE SERVING ANYTHING (ADR-0032).
+     *
+     * The handle to a running recorder lives in memory, so an agent that restarted mid-session
+     * comes back with a recorder still encoding and no idea it exists — it would run until the host
+     * rebooted, into a file nobody will ever be handed. This is the only moment that can be
+     * noticed, because it is the only moment at which a recording that is running cannot be one of
+     * ours.
+     *
+     * Failure is logged and swallowed: a device that cannot tidy its recordings is still a device
+     * that can serve sessions, and refusing to start over housekeeping would turn a disk problem
+     * into a farm outage.
+     */
+    if (b.control.reconcileRecordings) {
+      await b.control.reconcileRecordings(RECORDING_MAX_AGE_MS, { stopOrphans: true })
+        .catch((e: unknown) => console.warn(
+          `[agent] could not reconcile recordings on ${b.control.info.localId}: ${(e as Error).message}`));
+    }
   }
 
   // Rebound once shutdown() exists below. Until then a give-up can only be reported, because there

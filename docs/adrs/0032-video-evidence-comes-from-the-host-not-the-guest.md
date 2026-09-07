@@ -85,6 +85,25 @@ a hook that runs on all of them (`captureArtifacts` on the CLEANING transition).
 be a second mechanism that works in the common case and fails in precisely the cases video exists to
 explain. The keep decision rides the reset offer beside it.
 
+**CORRECTED 2026-09-07, hours after this was written.** The paragraph above said the teardown "runs
+on every path a session can end", and that sentence was doing load-bearing work it could not carry.
+It is true of the paths a SESSION takes and false of the paths an AGENT takes, and there were three
+of the latter: an agent restarted mid-session lost the in-memory handle and left a recorder encoding
+forever; a quarantine recovery resets down a branch that has no session and skipped the stop
+entirely; and an upload that failed left a file referenced by no artifact row, invisible to every
+other cleanup in the system.
+
+**So the design is a reconciliation, not a promise that every caller remembers.**
+`reconcileRecordings(maxAgeMs, { stopOrphans })` runs at agent startup — where a running recorder
+cannot be ours, so stopping one is unambiguous — and again on every reset, where it sweeps by mtime
+only and issues no stop, because there a recorder could be live. The recovery branch stops its own
+recorder explicitly and discards it, since the fence has moved and there is no session to file it
+against. That is the same shape as the reset sweep and for the same reason: a loop that converges on
+the desired state beats a rule that every future caller has to remember.
+
+The verb decision stands. What was wrong was not "no stop verb" — it was believing one code path
+covered every case without checking.
+
 ## Consequences
 
 **`recording` is a real capability again.** It sat in `CAPABILITIES` for months with nothing behind

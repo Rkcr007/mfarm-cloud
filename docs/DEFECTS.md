@@ -38,7 +38,68 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Nothing, as of 2026-09-07** — twenty-eight recorded, twenty-eight closed. D26 is below and is the
+**Nothing, as of 2026-09-07** — thirty recorded, thirty closed.
+
+**This section read "nothing, twenty-eight closed" for about four hours and was wrong the whole
+time.** S5 shipped that afternoon and brought two defects with it: D29, found five minutes after
+turning the feature on, and D30, found by reading the code that had just been merged and deployed.
+Neither came from the suite. The lesson is the one this file keeps re-learning from the other
+direction — **an empty register means the last pass found everything it found**, and shipping a
+feature is itself a pass nobody has run yet.
+
+### D30 — the recorder could outlive every path that stops it
+
+| | |
+|---|---|
+| **Severity** | **S2** — an encoder that runs forever, and unreferenced files filling the device host |
+| **Found** | reading the code four hours after it was merged and deployed, while listing open defects |
+| **Closed** | 2026-09-07 |
+
+`stopRecording` had exactly one caller, `captureArtifacts`, on the ordinary release path — and
+ADR-0032 *leaned on that*, arguing there is no `video-stop` verb **because** the teardown "runs on
+every path a session can end". That sentence is true of the paths a SESSION takes and false of the
+paths an AGENT takes. Three of the latter:
+
+* **an agent restarted mid-session.** The handle to the running recorder is an in-memory field, so
+  the new process knows neither that a recorder is running nor which file is its. It encodes until
+  the host reboots.
+* **a quarantine recovery.** `release_device_quarantine` bumps the fence, so no session row matches
+  and that branch skips `captureArtifacts` deliberately — there is nothing of a tenant's to collect.
+  It skipped the recorder with it, and a recorder is not evidence to collect: it is a process.
+* **an upload that failed.** The `unlink` was after the POST and only after it, so a control plane
+  restarting, a 409, or a recording over `ARTIFACT_MAX_UPLOAD_BYTES` left a file that no artifact row
+  names — invisible to every other cleanup in the system.
+
+**The fix is a reconciliation rather than three more callers.** `reconcileRecordings(maxAge,
+{stopOrphans})` runs at startup, where a running recorder cannot be ours, and again on every reset,
+where it sweeps by mtime and issues no stop because there a recorder could be live. Age is measured
+on mtime, which on a file being written moves continuously, so a recording in progress can never be
+old enough to sweep — belt and braces beside the in-memory guard. Verified by reverting each half
+and watching the matching test go red.
+
+Same family as D28: **the correct shape was already in the repo** — `sweep()` in `allocator.ts` is a
+reconciliation loop for exactly this reason — and the new code invented a promise instead.
+
+### D29 — VIDEO_RECORDING in `deploy/.env` reached nothing
+
+| | |
+|---|---|
+| **Severity** | **S2** — the farm was configured to record and recorded nothing, with no error anywhere |
+| **Found** | five minutes after turning recording on, checking the container rather than the file |
+| **Closed** | 2026-09-07 |
+
+`deploy/.env` is **compose's** env file, not the container's environment. Compose reads it for
+`${…}` interpolation and passes nothing to a service that does not name the variable under
+`environment:`. So `VIDEO_RECORDING=failures` was set, correct, and read by nothing.
+
+There is nothing to see in a log, because reading an unset variable and falling back to a documented
+default is exactly what the code should do. `single-origin.test.ts` pins the same shape from the
+other direction — *the configuration the deploy scripts actually produce was the one that could not
+work*. The test added with the fix checks the **deployment** rather than the code, over a curated
+list: most settings have production-correct defaults and are legitimately absent from compose, and
+these are the ones whose default is deliberately not what a farm wants.
+
+D26 is below and is the
 most interesting entry this file has: it is the first defect the SUITE could not have found *by
 construction*, and the reason is worth reading before writing another fixture. D28, directly under
 this, is the newest member of this file's oldest family and was found the same way all six of the

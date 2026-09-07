@@ -45,6 +45,13 @@ export interface AgentOptions {
   /** Public data-plane address the browser connects to. Without it the host cannot take sessions. */
   endpoint: string;
   /**
+   * How old a recording on the device host must be before a reset sweeps it (ADR-0032).
+   *
+   * A TEST SEAM more than a setting: six hours is the production value and `index.ts` owns it, but
+   * a test that had to wait six hours to prove the sweep works would prove nothing instead.
+   */
+  recordingMaxAgeMs?: number;
+  /**
    * Automation base url applied to EVERY device on this host — the v1 shape.
    *
    * Still meaningful for the escape hatch in `AUTOMATION_ENDPOINT`: one externally-managed Appium
@@ -1036,6 +1043,22 @@ export class Agent {
    * a device still carrying the previous tenant's accounts, keychain and caches to the pool.
    */
   async resetAndRelease(backend: DeviceBackend, deviceId: string, fence: number): Promise<void> {
+    /**
+     * Sweep stale recordings on the way past (ADR-0032).
+     *
+     * HERE BECAUSE IT IS THE ONE THING THAT HAPPENS AFTER EVERY SESSION. Startup reconciliation
+     * bounds what a restart leaves behind; this bounds what a LONG-RUNNING agent leaves behind — a
+     * kept recording whose upload failed is referenced by nothing, so no other cleanup in the
+     * system can see it.
+     *
+     * `stopOrphans` is deliberately NOT set. At startup a running recorder cannot be ours; here it
+     * could be, and a housekeeping pass that can stop a live recording is worse than the leak.
+     */
+    if (backend.control.reconcileRecordings) {
+      await backend.control.reconcileRecordings(this.opts.recordingMaxAgeMs ?? 6 * 60 * 60 * 1000)
+        .catch((e: unknown) => console.warn(
+          `[agent] could not sweep recordings on ${backend.control.info.localId}: ${(e as Error).message}`));
+    }
     await backend.control.resetToSnapshot();
     this.pendingResets.push({ deviceId, fence });
     await this.flush();
@@ -1093,9 +1116,23 @@ export class Agent {
      * the database with it, so a control plane that is silent, old, or unsure deletes.
      */
     if (control.stopRecording) {
+      let kept: string | null = null;
+      let uploaded = false;
       try {
         const rec = await control.stopRecording({ keep: keepVideo });
+        if (rec) kept = rec.path;
         if (rec) {
+          /**
+           * THE UNLINK USED TO BE AFTER THIS CALL AND ONLY AFTER IT, so an upload that threw — a
+           * control plane restarting, a 409, a recording over ARTIFACT_MAX_UPLOAD_BYTES — left the
+           * file on the device host with nothing referencing it and nothing ever coming for it.
+           *
+           * It is kept on failure DELIBERATELY, not deleted: the one time somebody wants a
+           * recording off the host by hand is exactly when uploads are failing, and the path is
+           * logged below so it can be found. What makes that safe rather than a leak is that
+           * `reconcileRecordings` bounds it — a file nothing collected is swept once it is old
+           * enough that nothing is coming for it.
+           */
           await this.uploadArtifact(sessionId, deviceId, 'video',
             await readFile(rec.path), `${name}.webm`, {
               source: 'session',
@@ -1109,9 +1146,17 @@ export class Agent {
           // Only after the upload succeeded. A recording deleted before the POST lands is evidence
           // destroyed by the thing that was supposed to preserve it.
           await unlink(rec.path).catch(() => {});
+          uploaded = true;
         }
       } catch (e) {
         console.warn(`[agent] recording for ${name} failed: ${(e as Error).message}`);
+      } finally {
+        if (kept && !uploaded) {
+          console.warn(
+            `[agent] ${name}: a kept recording was not uploaded and is still at ${kept} — ` +
+            'it will be swept once it is stale',
+          );
+        }
       }
     }
 
@@ -1201,6 +1246,24 @@ export class Agent {
         // artifacts: `release_device_quarantine` bumps the fence, so there is no session behind
         // this and nothing of a tenant's to collect.
         if (recovery) {
+          /**
+           * A RECOVERY REACHES NO TEARDOWN, so it has to stop the recorder itself.
+           *
+           * `release_device_quarantine` bumps the fence, so no session row matches and there is
+           * nothing of a tenant's to collect — which is why this branch skips `captureArtifacts`.
+           * It skipped the recorder with it, and a recorder is not evidence to collect: it is a
+           * process that keeps running. A device quarantined mid-session and then recovered would
+           * encode into a file nobody would ever be handed, until the host rebooted.
+           *
+           * `keep: false` because there is no session to file it against. The recording of whatever
+           * went wrong is lost, and that is the correct trade: the alternative is an artifact with
+           * no run to attach it to.
+           */
+          if (backend.control.stopRecording) {
+            await backend.control.stopRecording({ keep: false })
+              .catch((e: unknown) => console.warn(
+                `[agent] could not stop the recorder on ${backend.control.info.localId}: ${(e as Error).message}`));
+          }
           await this.recoverDevice(backend, deviceId, fence);
           continue;
         }
