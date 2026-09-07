@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { badRequest, conflict, forbidden, notFound } from '../errors.ts';
 import { requireTenant, requireUser } from '../server.ts';
 import { withSystem, withTenant } from '../../db.ts';
+import { loadConfig } from '../../config.ts';
 import { createApiKey, revokeApiKey } from '../../auth.ts';
 import { createEnrollment, listEnrollments, revokeEnrollment } from '../../enrollment.ts';
 import { hashPassword } from '../../users.ts';
@@ -152,6 +153,89 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       deviceReliability: devices,
     };
   });
+
+  // ------------------------------------------------------------------ evidence retention
+
+  /**
+   * GET /v1/account/retention — how long this org's evidence lives, and whether it is swept at all.
+   *
+   * WHY THIS IS A TENANT SETTING AND NOT AN OPERATOR ONE. It used to be `ARTIFACT_RETENTION_HOURS`
+   * on the box: one number for everybody, invisible from the console, and unchangeable by the
+   * people whose data it governs. A person could neither see when the recording of their checkout
+   * flow would go, nor take it off a shared disk sooner. Both of those are the tenant's call.
+   *
+   * `maxDays` is the operator's ceiling, reported so the form can say why it refuses 90 rather than
+   * simply refusing. The disk is shared; one org's preference must not fill it for everybody.
+   */
+  app.get('/account/retention', async (req) => {
+    const { orgId } = requireUser(req);
+    const cfg = loadConfig();
+    const row = await withTenant(orgId, async (c) => (await c.query<{
+      evidence_retention_days: number; evidence_auto_delete: boolean;
+    }>('SELECT evidence_retention_days, evidence_auto_delete FROM orgs WHERE id = $1', [orgId])).rows[0]);
+    return {
+      retentionDays: row?.evidence_retention_days ?? 3,
+      autoDelete: row?.evidence_auto_delete ?? true,
+      maxDays: Math.floor(cfg.artifactRetentionHours / 24),
+    };
+  });
+
+  /**
+   * PATCH /v1/account/retention — change it. ADMIN ONLY.
+   *
+   * Deleting everyone's evidence three days sooner is a data-loss decision on behalf of a whole
+   * team, which is the same bar `DELETE /account/members` holds.
+   *
+   * **The change applies to evidence captured AFTER it.** `artifact_record` stamps `expires_at` at
+   * INSERT, so lowering the number does not retroactively shorten what is already stored, and
+   * raising it does not resurrect what has gone. Said plainly in the response rather than left for
+   * somebody to discover: a setting that silently fails to do the thing its name implies is worse
+   * than one that is not offered.
+   */
+  app.patch<{ Body: { retentionDays?: unknown; autoDelete?: unknown } }>(
+    '/account/retention',
+    async (req) => {
+      const { orgId } = requireOrgAdmin(req);
+      const cfg = loadConfig();
+      const maxDays = Math.max(1, Math.floor(cfg.artifactRetentionHours / 24));
+
+      const days = req.body?.retentionDays;
+      const auto = req.body?.autoDelete;
+      if (days === undefined && auto === undefined) {
+        throw badRequest('Send `retentionDays`, `autoDelete`, or both.');
+      }
+      if (days !== undefined && (typeof days !== 'number' || !Number.isInteger(days) || days < 1)) {
+        throw badRequest('`retentionDays` must be a whole number of days, at least 1.');
+      }
+      if (typeof days === 'number' && days > maxDays) {
+        throw badRequest(
+          `This farm keeps evidence for at most ${maxDays} day${maxDays === 1 ? '' : 's'}. `
+          + 'The disk is shared, so the operator\'s ceiling bounds every org.');
+      }
+      if (auto !== undefined && typeof auto !== 'boolean') {
+        throw badRequest('`autoDelete` must be true or false.');
+      }
+
+      const row = await withTenant(orgId, async (c) => (await c.query<{
+        evidence_retention_days: number; evidence_auto_delete: boolean;
+      }>(
+        `UPDATE orgs
+            SET evidence_retention_days = COALESCE($2, evidence_retention_days),
+                evidence_auto_delete    = COALESCE($3, evidence_auto_delete)
+          WHERE id = $1
+      RETURNING evidence_retention_days, evidence_auto_delete`,
+        [orgId, days ?? null, auto ?? null],
+      )).rows[0]);
+
+      return {
+        retentionDays: row.evidence_retention_days,
+        autoDelete: row.evidence_auto_delete,
+        maxDays,
+        // The one thing about this setting that surprises people.
+        appliesTo: 'evidence captured from now on; what is already stored keeps the expiry it was given',
+      };
+    },
+  );
 
   // ------------------------------------------------------------------ team
 

@@ -653,3 +653,148 @@ describe('a failed test asks for its own evidence', () => {
     assert.equal(await onDisk(sha(body)), false, 'a rejected upload must leave no bytes behind');
   });
 });
+
+/**
+ * Deleting evidence, and choosing how long it lives (migration 046).
+ *
+ * Retention was an OPERATOR's environment variable applied to every org and invisible from the
+ * console: a person could neither see when a recording of their checkout flow would go, nor take it
+ * off a shared disk sooner. These pin both doors and, more importantly, the three things that make
+ * them safe — org scoping, the shared-blob rule, and what a delete must NOT take with it.
+ */
+describe('a tenant can delete its own evidence', () => {
+  test('deleting one artifact removes the row and the bytes', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    const body = `only-copy-${randomUUID()}`;
+    const up = await upload(workerA, sessionId, deviceA, 'logcat', body);
+    const id = up.json().artifact.id;
+
+    const del = await app.inject({ method: 'DELETE', url: `/v1/artifacts/${id}`, headers: auth(keyA) });
+    assert.equal(del.statusCode, 200);
+    assert.equal(del.json().blobsDeleted, 1);
+    assert.equal(await onDisk(sha(body)), false, 'the bytes go with the last row that referenced them');
+  });
+
+  test('a shared blob survives while another row still points at it', async () => {
+    /**
+     * THE RULE THE WHOLE FEATURE TURNS ON. The store is content-addressed, so two sessions that
+     * captured identical bytes reference ONE file. Deleting the file because one of them was
+     * removed breaks the other session's download — silently, and only for whoever opens it next.
+     */
+    await clearFleet();
+    const s1 = await liveSession(keyA, deviceA);
+    const shared = `shared-${randomUUID()}`;
+    const a1 = await upload(workerA, s1, deviceA, 'logcat', shared);
+    const a2 = await upload(workerA, s1, deviceA, 'screenshot', Buffer.from(shared));
+
+    const del = await app.inject({
+      method: 'DELETE', url: `/v1/artifacts/${a1.json().artifact.id}`, headers: auth(keyA),
+    });
+    assert.equal(del.statusCode, 200);
+    assert.equal(del.json().blobsDeleted, 0, 'nothing may be unlinked while a row still names it');
+    assert.equal(await onDisk(sha(shared)), true);
+
+    // And the survivor still downloads, which is the property the count above is a proxy for.
+    const blob = await app.inject({
+      method: 'GET', url: `/v1/artifacts/${a2.json().artifact.id}/blob`, headers: auth(keyA),
+    });
+    assert.equal(blob.statusCode, 200);
+    assert.equal(blob.body, shared);
+  });
+
+  test("another org's artifact is not found, never deleted", async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    const up = await upload(workerA, sessionId, deviceA, 'logcat', `mine-${randomUUID()}`);
+    const id = up.json().artifact.id;
+
+    const del = await app.inject({ method: 'DELETE', url: `/v1/artifacts/${id}`, headers: auth(keyB) });
+    // The same answer an id that never existed gets — the disclosure boundary every other route
+    // here holds. A 403 would confirm the artifact exists to somebody who cannot see it.
+    assert.equal(del.statusCode, 404);
+
+    const still = await app.inject({ method: 'GET', url: `/v1/artifacts/${id}/blob`, headers: auth(keyA) });
+    assert.equal(still.statusCode, 200, 'and it is still there for its owner');
+  });
+
+  test('deleting a session’s evidence leaves the session and its results alone', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    await upload(workerA, sessionId, deviceA, 'logcat', `log-${randomUUID()}`);
+    await upload(workerA, sessionId, deviceA, 'screenshot', Buffer.from(`png-${randomUUID()}`));
+
+    const del = await app.inject({
+      method: 'DELETE', url: `/v1/sessions/${sessionId}/artifacts`, headers: auth(keyA),
+    });
+    assert.equal(del.statusCode, 200);
+    assert.equal(del.json().deleted, 2);
+
+    const list = await app.inject({
+      method: 'GET', url: `/v1/sessions/${sessionId}/artifacts`, headers: auth(keyA),
+    });
+    assert.equal(list.json().artifacts.length, 0);
+
+    // THE HALF PEOPLE FEAR. Deleting a 40 MB recording must not delete the record that the test
+    // failed — the dialog promises exactly this, so it is asserted rather than assumed.
+    const alive = await withSystem(async (c) =>
+      (await c.query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])).rowCount);
+    assert.equal(alive, 1);
+  });
+
+  test('an empty session answers 200 with nothing deleted, not 404', async () => {
+    // "This session has no evidence" is a true and useful answer, and a session whose evidence
+    // already expired is the ordinary case rather than a mistake.
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    const del = await app.inject({
+      method: 'DELETE', url: `/v1/sessions/${sessionId}/artifacts`, headers: auth(keyA),
+    });
+    assert.equal(del.statusCode, 200);
+    assert.equal(del.json().deleted, 0);
+  });
+});
+
+describe('a session record can be purged, and billing survives it', () => {
+  test('a live session is refused, because deleting one strands its device', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    const del = await app.inject({
+      method: 'DELETE', url: `/v1/sessions/${sessionId}/record`, headers: auth(keyA),
+    });
+    assert.equal(del.statusCode, 409);
+    assert.equal(del.json().error.code, 'session_live');
+  });
+
+  test('an ended session goes, and its metering rows stay', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    await upload(workerA, sessionId, deviceA, 'logcat', `bye-${randomUUID()}`);
+
+    // A metering row for this session, written the way the worker's beat writes them.
+    await withSystem((c) => c.query(
+      `INSERT INTO metering_events (org_id, session_id, kind, quantity, occurred_at, event_id)
+       SELECT org_id, id, 'device_seconds', 42, now(), gen_random_uuid() FROM sessions WHERE id = $1`,
+      [sessionId]));
+    await withSystem((c) => c.query(`UPDATE sessions SET state = 'ENDED' WHERE id = $1`, [sessionId]));
+
+    const del = await app.inject({
+      method: 'DELETE', url: `/v1/sessions/${sessionId}/record`, headers: auth(keyA),
+    });
+    assert.equal(del.statusCode, 200, del.body);
+
+    const gone = await withSystem(async (c) =>
+      (await c.query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])).rowCount);
+    assert.equal(gone, 0);
+
+    /**
+     * ARCHITECTURE RULE 4, READ BACKWARDS. `metering_events.session_id` is `ON DELETE SET NULL`
+     * (001), so billing keeps its rows and merely forgets which session they came from. Had that
+     * been CASCADE, this endpoint would let a tenant delete its own invoice — and the endpoint
+     * could not have been written at all.
+     */
+    const billed = await withSystem(async (c) =>
+      (await c.query(`SELECT quantity FROM metering_events WHERE quantity = 42`)).rows);
+    assert.equal(billed.length, 1, 'the charge survives the session it was for');
+  });
+});

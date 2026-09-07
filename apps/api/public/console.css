@@ -750,8 +750,23 @@ kbd {
 
 /* ---------------------------------------------------------------------------- shell */
 
+/**
+ * THE NAV AND THE TOPBAR DO NOT SCROLL. ONLY THE CONTENT DOES.
+ *
+ * `min-height: 100%` made the whole DOCUMENT the scroll container, so the sidebar and the farm
+ * status bar scrolled away with it. Measured on the deployed console: the session screen is 2695px
+ * against an 813px viewport, so a person reading the log or the steps had scrolled 1900px and no
+ * longer had Fleet, Runs, Health or the "0 of 5 ready" line anywhere on screen — on the one screen
+ * where "is the farm even up?" is the next question they will ask.
+ *
+ * `height` rather than `min-height` fixes the shell to the viewport; `1fr` gives the remaining
+ * space to the two panes, and each scrolls itself. `100dvh` so mobile browser chrome appearing does
+ * not push the last row out of reach, with the `%` line before it for anything that does not know
+ * the unit — `html, body { height: 100% }` is already set above.
+ */
 .shell {
-  min-height: 100%;
+  height: 100%;
+  height: 100dvh;
   display: grid;
   grid-template-columns: var(--mf-navw, 198px) 1fr;
   grid-template-rows: auto 1fr;
@@ -824,6 +839,9 @@ kbd {
   background: var(--s-nav, #0A0A0C);
   border-right: 1px solid var(--b-chrome, #191919);
   min-width: 0;
+  /* Its own scroller, so a short viewport can still reach Settings and the collapse control rather
+     than clipping them — the nav is nine items and a footer, so this almost never engages. */
+  overflow-y: auto;
 }
 .navgroup {
   margin: 12px 0 4px;
@@ -898,6 +916,12 @@ kbd {
   min-width: 0;
   padding: 22px 26px 40px;
   overflow-x: hidden;
+  /* THE PAGE'S ONLY VERTICAL SCROLLER. Everything that used to move the document now moves this,
+     which is what keeps the nav and the status bar in place. */
+  overflow-y: auto;
+  /* Reserve the scrollbar's width whether or not it is showing, so navigating from a short screen
+     (Team) to a tall one (a session) does not shift the whole layout sideways by 15px. */
+  scrollbar-gutter: stable;
 }
 .crumb { font-size: 10px; text-transform: uppercase; letter-spacing: .12em; color: var(--t-micro, #5A5A5A); }
 .crumb button { color: inherit; }
