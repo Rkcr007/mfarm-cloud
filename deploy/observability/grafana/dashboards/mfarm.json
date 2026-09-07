@@ -426,6 +426,108 @@
         },
         "overrides": []
       }
+    },
+    { "type": "row", "title": "The machines", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 } },
+    {
+      "type": "timeseries",
+      "title": "Disk free",
+      "description": "Fraction of the agent volume still free \u2014 cvd images, 4 GB snapshots and an app cache nothing prunes all live there. Alerts fire at 10% and 5%. A host running an agent older than migration 044 reports NOTHING here rather than zero, deliberately: a zero disk gauge does not read as 'unmeasured', it reads as a full disk.",
+      "datasource": { "type": "prometheus", "uid": "mfarm-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mfarm_host_disk_free_bytes / mfarm_host_disk_total_bytes",
+          "legendFormat": "{{hostname}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.05 },
+              { "color": "green", "value": 0.10 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Load per core",
+      "description": "One-minute load average divided by the core count \u2014 PER CORE, because 20 is unremarkable on 32 cores and dire on 4, and this farm is one provisioning decision away from two machine sizes. On this farm the host CPU is the binding constraint on rendering (RENDER_BASELINE.md), and a saturated host reaches a tenant as slow frames and flaky timing assertions rather than as a failure anyone can see.",
+      "datasource": { "type": "prometheus", "uid": "mfarm-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mfarm_host_load1 / mfarm_host_cores",
+          "legendFormat": "{{hostname}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 4 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Behind main",
+      "description": "How long the farm has been running older code than origin/main, measured by the auto-deploy timer (ADR-0030) \u2014 D18 as a line. Zero is healthy. A spike per merge is normal while Release publishes an image. A plateau means waiting, blocked or paused: read ~/autodeploy.log on mfarm-cp.",
+      "datasource": { "type": "prometheus", "uid": "mfarm-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mfarm_autodeploy_pending_seconds",
+          "legendFormat": "behind main"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1800 }
+            ]
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }
