@@ -38,9 +38,31 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Nothing, as of 2026-09-07** — twenty-six recorded, twenty-six closed. D26 is below and is the
+**Nothing, as of 2026-09-07** — twenty-seven recorded, twenty-seven closed. D26 is below and is the
 most interesting entry this file has: it is the first defect the SUITE could not have found *by
 construction*, and the reason is worth reading before writing another fixture.
+
+### D27 — a refused upload could leave its temp file behind
+
+| | |
+|---|---|
+| **Severity** | **S2** — reachable by anyone with an API key, and it fills the control plane's disk |
+| **Found** | a full-suite run on a loaded machine, while verifying unrelated work |
+| **Closed** | 2026-09-07 |
+
+`AppStore.put` writes to a `.part` file and unlinks it when an upload is refused. `createWriteStream`
+opens the file **asynchronously**, and an oversized upload throws on the very first chunk — before
+the open completes. The cleanup `unlink` therefore found nothing to remove, and the open then landed
+and created the file that had just been "cleaned up". Nothing ever removed it.
+
+The existing test asserted exactly this and had passed for weeks: on a quiet machine the open wins
+the race. It went red once, under the load of a suite that had grown by 37 tests. **A race asserted
+once is asserted by luck** — the fix ships with a second test that runs a hundred refused uploads in
+parallel and loses the race reliably, verified by reverting the fix and watching it fail.
+
+Not hypothetical: the path is reachable by anyone with a key, so a loop of oversized uploads was a
+way to fill `mfarm-cp`'s disk from outside. The test's own comment had called it *"a disk-fill
+primitive"* since the day it was written.
 
 ### D26 — the run screen's Failures card had never rendered
 

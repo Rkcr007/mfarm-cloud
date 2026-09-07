@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, type ReadStream } from 'node:fs';
 import { mkdir, rename, stat, unlink } from 'node:fs/promises';
+import { once } from 'node:events';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createWriteStream } from 'node:fs';
@@ -82,6 +83,25 @@ export class AppStore {
     let sizeBytes = 0;
     let tooLarge = false;
 
+    /**
+     * HELD, RATHER THAN CONSTRUCTED INLINE IN THE `pipeline()` CALL, and the reason is a race that
+     * leaks disk (found 2026-09-07 by a full-suite run, invisible on a quiet machine).
+     *
+     * `createWriteStream` opens the file ASYNCHRONOUSLY. An oversized upload throws on the very
+     * first chunk — before the open has completed — so the `unlink` in the catch below finds
+     * nothing to remove, and the open then lands and creates the `.part` file that was just
+     * "cleaned up". Nothing ever removes it.
+     *
+     * That is not cosmetic. This path is reachable by anyone with an API key, and its own test
+     * calls the leak what it is: **a disk-fill primitive.** Send oversized uploads in a loop and
+     * every one leaves a file behind.
+     *
+     * The fix is to wait for the sink to actually close before unlinking. `pipeline` destroys it on
+     * error, so `close` is guaranteed to fire — and by then the open has either completed (the file
+     * exists and the unlink removes it) or failed (there is nothing to remove).
+     */
+    const sink = createWriteStream(tmp);
+
     try {
       await pipeline(
         source,
@@ -96,9 +116,12 @@ export class AppStore {
             yield chunk;
           }
         },
-        createWriteStream(tmp),
+        sink,
       );
     } catch (err) {
+      // Guarded: `once` on a stream that has already closed never resolves, which would turn a
+      // rejected upload into a hung request — a considerably worse bug than the one being fixed.
+      if (!sink.closed) await once(sink, 'close').catch(() => {});
       await unlink(tmp).catch(() => {});
       throw tooLarge ? new BlobTooLargeError(maxBytes) : err;
     }
