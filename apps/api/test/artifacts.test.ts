@@ -729,6 +729,19 @@ describe('a tenant can delete its own evidence', () => {
     });
     assert.equal(del.statusCode, 200);
     assert.equal(del.json().deleted, 2);
+    /**
+     * THE ASSERTION THAT WAS MISSING, AND THE BUG IT LET THROUGH (migration 047).
+     *
+     * The first version checked the ROW count and not the BLOB count, so it passed against a
+     * function that deleted the rows and freed nothing: 046 asked "does anything still reference
+     * this digest?" inside the same statement as the DELETE, and a data-modifying CTE's effects are
+     * invisible to the rest of its own query — the EXISTS saw the rows it was deleting. On the farm
+     * that read `{"deleted":3,"blobsDeleted":0}` for a 268 KB recording nothing else referenced.
+     *
+     * A fixture that agrees with the code instead of with the requirement is this repo's most
+     * expensive recurring defect, and this is one more of them.
+     */
+    assert.equal(del.json().blobsDeleted, 2, 'the bytes must be freed, not just the rows');
 
     const list = await app.inject({
       method: 'GET', url: `/v1/sessions/${sessionId}/artifacts`, headers: auth(keyA),
