@@ -922,7 +922,38 @@ kbd {
   /* Reserve the scrollbar's width whether or not it is showing, so navigating from a short screen
      (Team) to a tall one (a session) does not shift the whole layout sideways by 15px. */
   scrollbar-gutter: stable;
+  /* Reaching the end of this pane must not start scrolling something behind it. With the document
+     no longer scrolling there is nothing behind it to move, and this keeps that true if a future
+     screen ever adds one. */
+  overscroll-behavior: contain;
 }
+
+/**
+ * THE TOPBAR'S HAIRLINE STRENGTHENS ONCE CONTENT IS UNDER IT.
+ *
+ * Possible only now that `.main` is the scroller rather than the document: the chrome stays put, so
+ * it can respond to the content passing beneath it. Every native application marks this moment
+ * somehow, and until now there was nothing to mark — the bar scrolled away with the page.
+ *
+ * A SHADOW WOULD BE THE OBVIOUS WAY AND IS THE WRONG ONE HERE. `design-tokens.css` states it
+ * plainly: depth is a STATE, not styling, and "NOTHING ELSE IN THE CONSOLE GETS A SHADOW" — the
+ * device is the only object in the product that reads as physical, and `--e-0` is "a hairline is
+ * the whole treatment". So this is a hairline that gets firmer, in the system's own language,
+ * rather than an elevation borrowed from somebody else's.
+ */
+.topbar {
+  position: relative;
+  z-index: 2;
+  transition: border-color 120ms ease;
+}
+.topbar.scrolled { border-bottom-color: var(--b-hover, #2B2B2E); }
+@media (prefers-reduced-motion: reduce) {
+  .topbar { transition: none; }
+}
+
+/* Scroll chaining again, for the pane most likely to be scrolled hard: reaching the end of a
+   nineteen-hundred-line log should stop, not start moving the page under it. */
+.logbody { overscroll-behavior: contain; }
 .crumb { font-size: 10px; text-transform: uppercase; letter-spacing: .12em; color: var(--t-micro, #5A5A5A); }
 .crumb button { color: inherit; }
 .crumb button:hover { color: var(--t-secondary, #C4C4C4); }

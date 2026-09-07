@@ -1344,6 +1344,30 @@ async function refreshAll() {
   state.lastGoodAt = Date.now();
 }
 
+/**
+ * Tell the chrome when content has scrolled under it.
+ *
+ * BOUND ONCE, TO THE PANE, not re-bound on every render — `render()` replaces the contents of
+ * `.main` and not the element itself, so a listener added per render would accumulate one per
+ * navigation and run hundreds of times per scroll by the end of a session.
+ *
+ * `passive` because this only reads: a scroll listener that the browser must wait for before
+ * painting is how a smooth pane becomes a stuttering one.
+ */
+let syncScrollShadow = () => {};
+
+function watchScrollShadow() {
+  const main = document.querySelector('.main');
+  const bar = document.querySelector('.topbar');
+  if (!main || !bar) return;
+  const sync = () => bar.classList.toggle('scrolled', main.scrollTop > 2);
+  main.addEventListener('scroll', sync, { passive: true });
+  syncScrollShadow = sync;
+  // Navigation resets the pane to the top, and the class has to follow it there — otherwise the
+  // hairline outlives the content that justified it.
+  sync();
+}
+
 /* ---------------------------------------------------------------------------- router */
 
 const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'team', 'settings']);
@@ -1416,6 +1440,21 @@ function go(hash) {
 }
 
 /**
+ * A NEW SCREEN STARTS AT THE TOP.
+ *
+ * With the document scrolling, the browser did this for free on every hash change. Now that
+ * `.main` is the scroller, arriving at a screen from halfway down a long one left the new screen
+ * scrolled — so opening a session from the bottom of Runs showed its middle. `scrollTop = 0`
+ * rather than `scrollTo({behavior:'smooth'})`: this is a navigation, not a movement within a page,
+ * and animating it makes the new screen appear to slide out from under the old one.
+ */
+function resetScroll() {
+  const main = document.querySelector('.main');
+  if (main) main.scrollTop = 0;
+  syncScrollShadow();
+}
+
+/**
  * THE FETCHES A ROUTE NEEDS BEFORE IT CAN DRAW ITSELF.
  *
  * ONE FUNCTION, because there are two callers — `boot()` on a cold load and the `hashchange`
@@ -1459,6 +1498,9 @@ window.addEventListener('hashchange', () => {
     closeLive();
   }
   render();
+  // A new screen starts at the top — see `resetScroll`. After `render()`, because it is the render
+  // that replaces the content whose height the scroll position was relative to.
+  resetScroll();
   loadForRoute().then(render);
   if (state.route.name === 'launching') watchBringup(state.route.id);
 });
@@ -8348,6 +8390,9 @@ async function boot() {
 
   $('signin').hidden = true;
   $('console').hidden = false;
+  // After the console is shown, because `.main` has no layout until then and a listener bound to a
+  // hidden element measures nothing.
+  watchScrollShadow();
   $('who-email').textContent = me.user.email;
   $('who-avatar').textContent = (me.user.email || '?').slice(0, 1).toUpperCase();
   $('who-avatar').title = `${me.user.email} · ${me.org.name} · ${me.role}`;
