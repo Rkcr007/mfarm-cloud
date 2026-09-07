@@ -396,7 +396,7 @@ says so in a comment: limits are per API instance, and a second process silently
 one of them. There is no HA and no rolling deploy. Moving the store to Redis is the known fix and it
 is only worth doing behind a second instance, which nothing yet needs.
 
-### S7.4 — Worker-side metrics — **the roadmap was wrong about this**
+### S7.4 — Worker-side metrics — **BUILT (2026-09-07), and the row describing it was wrong**
 
 This step previously read *"the agent reports incidents, not gauges, so queue depth and capacity are
 unobservable from Grafana"*. Checked against the code, the second half is false:
@@ -416,6 +416,37 @@ This is the third time a section of a spec in this repo has described as absent 
 built (`docs/DEFECTS.md`, and both MASTER PROMPT documents). Grep the verb before scheduling the
 work.
 
+**Schema — migration 044.** Five nullable columns on `hosts` plus `stats_at`, which is deliberately
+not `last_heartbeat_at`: an agent too old to send stats still beats, so reading freshness from the
+heartbeat column would present a week-old disk reading as current.
+
+**Code.** `workers/agent/src/hoststats.ts` reads `statfs` (`bavail`, not `bfree` — the root reserve
+is not usable by an agent that does not run as root), `loadavg`, and Linux `MemAvailable` out of
+`/proc/meminfo`. Not `os.freemem()`, which is `MemFree` and sits near zero on any healthy
+long-running box. The numbers ride the beat — ADR-0003's argument for capabilities, unchanged — and
+are measured *outside* the heartbeat's `try`, because a stats read caught by that `try` would return
+a failed beat and migration 038 quarantines a host that stops beating. Liveness outranks
+observability, and the ordering is what enforces it.
+
+`collectFleet()` exports six gauges plus `mfarm_host_stats_age_seconds`, and `alerts.yml` gains
+disk-low, disk-critical, stats-stale and per-core saturation.
+
+**The one design decision worth arguing about (ADR-0031).** A `NULL` emits **no series**, which
+inverts the rule the rest of `metrics.ts` follows. `DEVICE_STATES` is zero-filled precisely so an
+alert on an empty fleet still fires. Here a zero disk gauge does not read as "unmeasured" — **it
+reads as a full disk** — so zero-filling would have paged for every host running an agent older than
+044 on the first scrape after deploy.
+
+**Test.** `workers/agent/test/hoststats.test.ts` (5), `apps/api/test/host-stats.test.ts` (7, through
+the real registration and the real beat rather than seeded rows), six alert cases asserting both
+directions. Four bugs were put back and all four were caught: zero-filling the gauges, setting
+`stats_at` from every beat, trusting the worker's numbers uncoerced, and dropping the reset so a
+deleted host keeps reporting a disk.
+
+**Still not measured:** `cvd` and `adb` health. Both are known to the agent and both are a different
+kind of measurement — a probe with a timeout, not a read of a counter. Disk, CPU and memory are the
+three that end a farm without anybody noticing.
+
 ## The order, and why
 
 1. ~~**S1 fairness**~~ — **done**, migration 039 / ADR-0028.
@@ -427,10 +458,12 @@ work.
    host-side encode is measured against the `RENDER_BASELINE.md` workload and `mfarm-lab` is
    stopped. S5 is now the only remaining execution-engine step.
 6. ~~**S6 queue visibility**~~ — **done**, migration 043.
-7. **S7 ceilings** — deploy, then a second host, then the rate limiter. **S7.1 is done**
-   (ADR-0030): the box now pulls `main` on a five-minute timer, health-gates what it deploys, rolls
-   back what fails and refuses to retry it. S7.4 turned out to be mostly already built and the row
-   describing it was wrong; what remains there is host-level metrics, not fleet ones.
+7. **S7 ceilings** — **S7.1 done** (ADR-0030): the box pulls `main` on a five-minute timer,
+   health-gates what it deploys, rolls back what fails and refuses to retry it. **S7.4 done**
+   (ADR-0031, migration 044): the host now reports its own disk, load and memory, and the row that
+   said queue depth was the missing thing was wrong. **S7.2 and S7.3 remain**, and neither is
+   blocked on code — S7.2 is a provisioning decision, and S7.3 should not be built until something
+   needs a second API instance.
 
 Each step ships as its own PR with its own migration, and each is verified on a running farm before
 the next starts — not when CI is green. `DEFECTS.md` states the reason: twice this month a fix was

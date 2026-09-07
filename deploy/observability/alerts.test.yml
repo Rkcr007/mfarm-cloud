@@ -414,3 +414,160 @@ tests:
               summary: The farm has been behind main for half an hour
               description: >-
                 origin/main has been ahead of what this farm is running for 45m 0s. Every "verified on the farm" claim made in that window was made against older code. Check ~/autodeploy.log for the verdict — `waiting` means Release never published an image, `paused` means the kill switch is still set.
+
+  # -------------------------------------------------------------------------------------------
+  # THE MACHINE. A host with plenty of disk and an unremarkable load pages nobody — the case that,
+  # left out, would let every threshold below be an order of magnitude wrong and still pass.
+  #
+  # Pinned to the shape of `mfarm-lab`: 8 cores, a 100 GB volume.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a healthy machine pages nobody
+    input_series:
+      - series: 'mfarm_host_disk_free_bytes{hostname="mfarm-lab",region="asia-south1"}'
+        values: '64424509440x120'
+      - series: 'mfarm_host_disk_total_bytes{hostname="mfarm-lab",region="asia-south1"}'
+        values: '107374182400x120'
+      - series: 'mfarm_host_load1{hostname="mfarm-lab",region="asia-south1"}'
+        values: '3.2x120'
+      - series: 'mfarm_host_cores{hostname="mfarm-lab",region="asia-south1"}'
+        values: '8x120'
+      - series: 'mfarm_host_stats_age_seconds{hostname="mfarm-lab",region="asia-south1"}'
+        values: '10x120'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: MfarmHostDiskLow
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: MfarmHostDiskCritical
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: MfarmHostSaturated
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: MfarmHostStatsStale
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # A DISK FILLING UP. 8% free — under the 10% warning, over the 5% critical. Both directions
+  # asserted, because a warning that also fires the critical is a rule that cannot express urgency.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a filling disk warns without paging
+    input_series:
+      - series: 'mfarm_host_disk_free_bytes{hostname="mfarm-lab",region="asia-south1"}'
+        values: '8589934592x120'
+      - series: 'mfarm_host_disk_total_bytes{hostname="mfarm-lab",region="asia-south1"}'
+        values: '107374182400x120'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MfarmHostDiskLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              hostname: mfarm-lab
+              region: asia-south1
+            exp_annotations:
+              summary: 'mfarm-lab is running out of disk'
+              description: >-
+                Under 10% free on the volume holding the agent's working files — cvd images, snapshots and the app cache. A snapshot restore that runs out of space leaves its device in CLEANING, which surfaces as a device fault rather than as a full disk.
+      - eval_time: 20m
+        alertname: MfarmHostDiskCritical
+        exp_alerts: []
+
+  - interval: 1m
+    name: a nearly full disk pages
+    input_series:
+      - series: 'mfarm_host_disk_free_bytes{hostname="mfarm-lab",region="asia-south1"}'
+        values: '3221225472x120'
+      - series: 'mfarm_host_disk_total_bytes{hostname="mfarm-lab",region="asia-south1"}'
+        values: '107374182400x120'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MfarmHostDiskCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              hostname: mfarm-lab
+              region: asia-south1
+            exp_annotations:
+              summary: 'mfarm-lab has almost no disk left'
+              description: >-
+                Under 5% free. Resets will start failing shortly if they have not already. Prune the app cache and old artifacts before this becomes a fleet-wide CLEANING backlog.
+
+  # -------------------------------------------------------------------------------------------
+  # A HOST THAT NEVER REPORTED. `collectFleet` emits NO series for a NULL — deliberately, because a
+  # zero disk gauge reads as a full disk rather than as an unmeasured one, and zero-filling would
+  # have paged for every host running an agent older than migration 044 on the first scrape.
+  #
+  # This is that decision, asserted from the alerting side: with no series, nothing fires.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a host that never reported its machine fires nothing
+    input_series:
+      - series: 'mfarm_host_last_heartbeat_timestamp_seconds{hostname="old-agent",region="asia-south1"}'
+        values: '0+60x120'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: MfarmHostDiskLow
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: MfarmHostDiskCritical
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: MfarmHostStatsStale
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # STATS THAT STOPPED. The host still beats, so nothing else notices — and the disk rules have gone
+  # SILENT rather than passing, which is the failure mode that makes a metric worse than none.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a host that stopped reporting its machine says so
+    input_series:
+      - series: 'mfarm_host_stats_age_seconds{hostname="mfarm-lab",region="asia-south1"}'
+        values: '0+60x120'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MfarmHostStatsStale
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: MfarmHostStatsStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              hostname: mfarm-lab
+              region: asia-south1
+            exp_annotations:
+              summary: 'mfarm-lab has stopped reporting machine stats'
+              description: >-
+                Last machine reading was 40m 0s ago, while the host is still beating. The disk and load alerts for this host are now silent — not passing.
+
+  # -------------------------------------------------------------------------------------------
+  # LOAD IS PER CORE. A load of 20 is fine on 32 cores and dire on 4, so the rule divides — and this
+  # asserts both, because a threshold on the raw load average would be right for exactly one
+  # machine size and this farm is about to have two.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: load is judged per core, not absolutely
+    input_series:
+      - series: 'mfarm_host_load1{hostname="big",region="asia-south1"}'
+        values: '20x120'
+      - series: 'mfarm_host_cores{hostname="big",region="asia-south1"}'
+        values: '32x120'
+      - series: 'mfarm_host_load1{hostname="small",region="asia-south1"}'
+        values: '20x120'
+      - series: 'mfarm_host_cores{hostname="small",region="asia-south1"}'
+        values: '4x120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MfarmHostSaturated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              hostname: small
+              region: asia-south1
+            exp_annotations:
+              summary: 'small is CPU saturated'
+              description: >-
+                Load average is more than four times the core count, sustained. On this farm the host's CPU is the binding constraint on rendering — a saturated host reaches a tenant as slow frames and flaky timing assertions, not as a failure anyone can see.

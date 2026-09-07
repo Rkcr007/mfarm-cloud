@@ -214,6 +214,37 @@ export interface RegistrationResponse {
 }
 
 /**
+ * What the host machine itself is doing, carried on the beat — S7.4, migration 044.
+ *
+ * WHY THE BEAT AND NOT A ROUTE. It happens every ten seconds, it already carries the worker
+ * credential, and a missed one costs nothing because the next is ten seconds away. That is the same
+ * argument `resets` and the capability payload were built on, and it is why this needs no new
+ * endpoint, no new auth and no new failure mode.
+ *
+ * EVERY FIELD IS OPTIONAL AND NULLABLE, AND THOSE MEAN DIFFERENT THINGS. Absent means an agent that
+ * predates this and never measured; explicit `null` means an agent that tried and could not — no
+ * `/proc/meminfo`, a `statfs` that failed, a working directory that does not exist yet. Both are
+ * stored as NULL and both report as unmeasured, because the alternative is publishing a zero that
+ * reads as a full disk or a large number that reads as an empty one.
+ */
+export interface WorkerHostStats {
+  /** Bytes available to an ORDINARY user — `bavail`, not `bfree`. The root reserve is not usable. */
+  diskFreeBytes?: number | null;
+  diskTotalBytes?: number | null;
+  /** One-minute load average. Normalise against `cores`, not against a guess. */
+  load1?: number | null;
+  cores?: number | null;
+  /**
+   * Linux `MemAvailable` in MiB, never `os.freemem()`.
+   *
+   * `freemem()` is `MemFree`, which excludes the page cache and therefore sits near zero on any
+   * healthy long-running Linux box. A metric like that pages constantly and then gets turned off.
+   */
+  memAvailableMb?: number | null;
+  memTotalMb?: number | null;
+}
+
+/**
  * What a heartbeat answers with.
  *
  * `resets` is the missing half of the reset story, added 2026-08-18 after B8. A released device is
