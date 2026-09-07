@@ -80,6 +80,15 @@ and watching the matching test go red.
 Same family as D28: **the correct shape was already in the repo** — `sweep()` in `allocator.ts` is a
 reconciliation loop for exactly this reason — and the new code invented a promise instead.
 
+**The fix's first draft shipped a false alarm, caught on the farm the same hour.** It reported "an
+orphaned recorder was stopped" from `record_cvd stop`'s exit code — and `record_cvd stop` prints
+*"stop was successful"* and exits 0 against an instance with no recorder, on a host with **no
+devices booted at all**. So a clean boot of a healthy farm would have logged an abandoned-recorder
+warning for every device, every morning. The stop is still issued blind, because it is a cheap
+safety net; what changed is that the CLAIM now needs evidence — a `.webm` whose mtime moved in the
+last two minutes, which at startup cannot be ours. A control that cries wolf every morning is not a
+control.
+
 ### D29 — VIDEO_RECORDING in `deploy/.env` reached nothing
 
 | | |

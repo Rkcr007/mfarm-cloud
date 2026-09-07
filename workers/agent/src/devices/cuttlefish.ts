@@ -30,6 +30,19 @@ import type { DeviceProfile } from './profiles.ts';
  * somewhere else entirely.
  */
 
+/**
+ * How recently a recording must have been written for it to count as a LIVE encoder (ADR-0032).
+ *
+ * Two minutes, against a file that is written continuously while recording. Generous enough that an
+ * encoder on an idle device — which publishes very few frames — is still recognised, and far short
+ * of anything a finished session would leave behind.
+ *
+ * This exists because `record_cvd stop` cannot answer the question. Measured on the farm
+ * 2026-09-07: it prints "stop was successful" and exits 0 against an instance with no recorder, on
+ * a host with no devices booted at all.
+ */
+const ORPHAN_EVIDENCE_MS = 2 * 60 * 1000;
+
 export interface CuttlefishOptions {
   localId: string;
   instanceNum: number;
@@ -1149,10 +1162,16 @@ export class CuttlefishDevice implements DeviceControl {
    * as long as it is actually recording. Belt and braces, because deleting the evidence of the
    * session that is running right now is the one failure this must not have.
    *
-   * The stop is issued blind rather than after asking whether anything is recording, because cvd
-   * offers no way to ask. A stop against an instance with no recorder is an error we swallow, which
-   * is cheaper than the alternative: a recorder from a previous agent life that runs until the host
-   * reboots.
+   * THE STOP IS ISSUED BLIND, AND ITS RESULT MEANS NOTHING. cvd offers no way to ask whether
+   * anything is recording, and — measured on the farm 2026-09-07 — `record_cvd stop` prints
+   * "stop was successful" and exits 0 against an instance with no recorder, on a host with no
+   * devices booted at all. So the exit code cannot distinguish "stopped an orphan" from "did
+   * nothing", and a first draft that reported one from the other would have logged a warning about
+   * an abandoned recorder on every clean boot of every device. A control that cries wolf every
+   * morning is not a control.
+   *
+   * What IS evidence is a `.webm` whose mtime is seconds old at the moment an agent starts: nothing
+   * of ours can be writing one, because we have started nothing. That is what `stopped` reports.
    */
   async reconcileRecordings(
     maxAgeMs: number, { stopOrphans = false }: { stopOrphans?: boolean } = {},
@@ -1160,17 +1179,22 @@ export class CuttlefishDevice implements DeviceControl {
     let stopped = false;
 
     if (stopOrphans && !this.recording) {
+      // Evidence FIRST, and before the stop finalizes anything: a recording being written has an
+      // mtime that moves continuously, so one that moved seconds ago is a live encoder — and at
+      // startup it cannot be ours.
+      const orphan = await this.recordingWrittenSince(Date.now() - ORPHAN_EVIDENCE_MS);
       try {
         await run(this.recordCvdPath(), ['stop', `--instance_num=${this.opts.instanceNum}`],
           this.opts.imageDir, 30_000);
+      } catch {
+        // Swallowed. The call is a safety net and its outcome is not information either way.
+      }
+      if (orphan) {
         stopped = true;
         console.warn(
-          `[cuttlefish] ${this.info.localId}: stopped a recorder this agent did not start — ` +
-          'something ended without its teardown running',
+          `[cuttlefish] ${this.info.localId}: stopped a recorder this agent did not start ` +
+          `(${orphan}) — something ended without its teardown running`,
         );
-      } catch {
-        // The ordinary case by a wide margin: nothing was recording. cvd has no "is it recording?"
-        // to ask, so this is how the question gets answered.
       }
     }
 
@@ -1224,6 +1248,19 @@ export class CuttlefishDevice implements DeviceControl {
     const exists: string[] = [];
     for (const d of dirs) if (await stat(d).then(() => true).catch(() => false)) exists.push(d);
     return exists;
+  }
+
+  /** The newest `.webm` written since `since`, or null. Evidence of a live encoder. */
+  private async recordingWrittenSince(since: number): Promise<string | null> {
+    for (const dir of await this.recordingDirs()) {
+      for (const name of await readdir(dir).catch(() => [])) {
+        if (!name.endsWith('.webm')) continue;
+        const path = join(dir, name);
+        const st = await stat(path).catch(() => null);
+        if (st && st.mtimeMs >= since) return path;
+      }
+    }
+    return null;
   }
 
   /** The newest `.webm` that was not there when recording started. */
