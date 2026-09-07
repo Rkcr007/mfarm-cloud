@@ -135,11 +135,15 @@ assumed, which moves a saturated farm from filling the disk in 1.3 days to 11.
 **The execution engine is now complete**: every step of `EXECUTION_ROADMAP.md` is built or
 deliberately deferred with a reason.
 
-**Two things about it are still unverified**, and neither is a blocker: the console's player has
-never been opened by a person (the artifact, the API and range requests are verified; the `<video>`
-element is covered only by tests against seeded state, which is the D26 blind spot), and four
-*busy* recorded devices remain unmeasured — arm D drove one of four, and an idle device publishes
-almost no frames.
+**The player is verified by eye on the deployed console (2026-09-07).** Signed in as a real user at
+`https://farm.mfarm.dev`, a failed session's Evidence card renders the recording with the browser's
+own controls reading **0:00 / 0:23** — a duration it can only know by fetching the header over a
+range request — and a **Jump to: verify-video** button under it. That closes the D26-shaped gap:
+until then the `<video>` was covered only by tests against seeded state.
+
+**One thing about it is still unverified**, and it is not a blocker: four *busy* recorded devices.
+Arm D of the perturbation measurement drove one of four, and an idle device publishes almost no
+frames, so it showed that three idle recorders are free rather than that four working ones are.
 
 ### 6. A device arriving still restarts the agent
 
