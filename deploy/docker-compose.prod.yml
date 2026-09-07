@@ -225,6 +225,19 @@ services:
       ARTIFACT_MAX_UPLOAD_BYTES: ${ARTIFACT_MAX_UPLOAD_BYTES:-67108864}
       # Two weeks. Long enough that a flake noticed on Monday is still investigable the next Friday.
       ARTIFACT_RETENTION_HOURS: ${ARTIFACT_RETENTION_HOURS:-336}
+      # ---------------------------------------------------------------- video evidence (ADR-0032)
+      #
+      # DECLARED HERE OR THE API NEVER SEES IT. `deploy/.env` is compose's env file, not the
+      # container's environment: a variable that is not named in this block is read by compose for
+      # interpolation and passed to nothing. Setting VIDEO_RECORDING in .env without this line
+      # produces a farm that is configured to record, reports no error, and records nothing —
+      # which is exactly how it was found on 2026-09-07, five minutes after being turned on.
+      #
+      # `off` by default, so a box that has not opted in behaves as it did before this shipped.
+      VIDEO_RECORDING: ${VIDEO_RECORDING:-off}
+      # Three days, against the fortnight logcat gets: a recording is an order of magnitude larger
+      # than everything else a session leaves behind.
+      VIDEO_RETENTION_HOURS: ${VIDEO_RETENTION_HOURS:-72}
       # ---------------------------------------------------------------- live view (ADR-0007)
       # Where a BROWSER opens the data-plane socket. Distinct from the worker's own registered
       # endpoint, which is a VPC address no browser can reach: this names the console's public TLS
