@@ -59,7 +59,7 @@ half-finished one.
 
 | Area | State | The honest caveat |
 |---|---|---|
-| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1418-test suite**. All are closed. |
+| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1419-test suite**. All are closed. |
 | **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 39 migrations. | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host. A host outage is a farm outage; ADR-0027 and migration 038 reduce what one costs, they do not remove it. |
@@ -122,11 +122,11 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1418**, green, across three workspaces plus `deploy` |
+| Tests | **1419**, green, across three workspaces plus `deploy` |
 | Migrations | **43 in the repo, 38 applied on the farm** — 039–043 land with the next deploy |
 | Decisions | 28 ADRs (there is no 0013) |
 | Merged PRs | 126 |
-| Defects | 26 recorded, **26 closed** |
+| Defects | 27 recorded, **27 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |
 | Live view | 49–53 fps, ~39ms round trip, direct path |

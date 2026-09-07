@@ -307,6 +307,35 @@ describe('blob store', () => {
     const { readdir } = await import('node:fs/promises');
     assert.deepEqual(await readdir(join(tmpFiles, 'store-limit', 'tmp')), []);
   });
+
+  test('a hundred oversized uploads leave a hundred nothing behind', async () => {
+    /**
+     * THE SAME ASSERTION, MADE DETERMINISTIC — and it is a different test rather than a bigger one
+     * because the bug it catches is a RACE, and a race asserted once is asserted by luck.
+     *
+     * `createWriteStream` opens the file asynchronously. An oversized upload throws on the first
+     * chunk, BEFORE the open completes, so the cleanup `unlink` found nothing and the open then
+     * created the `.part` file that had just been "cleaned up". Nothing ever removed it.
+     *
+     * The single-upload test above passed for weeks and only went red under full-suite load, on a
+     * machine slow enough for the open to lose. A hundred in parallel loses reliably.
+     *
+     * Not a hypothetical leak: this path is reachable by anyone with an API key, and a loop of
+     * oversized uploads is then a way to fill the control plane's disk from outside.
+     */
+    const store = new AppStore(join(tmpFiles, 'store-limit-many'));
+    const { Readable } = await import('node:stream');
+
+    const attempts = await Promise.allSettled(Array.from({ length: 100 }, () =>
+      store.put(Readable.from(Buffer.alloc(5_000)), 1_000)));
+    assert.equal(attempts.filter((a) => a.status === 'rejected').length, 100,
+      'every one of them must be refused');
+
+    const { readdir } = await import('node:fs/promises');
+    const left = await readdir(join(tmpFiles, 'store-limit-many', 'tmp'));
+    assert.deepEqual(left, [],
+      `${left.length} .part file(s) survived a refused upload — that is a disk-fill primitive`);
+  });
 });
 
 // ---------------------------------------------------------------- upload
