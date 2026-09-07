@@ -195,6 +195,22 @@ Short shas, branch names and `HEAD` all work — the script resolves them throug
 the registry. It migrates, restarts **only** the API, and then asks the running process what commit
 it is; a deploy that cannot confirm its own sha fails rather than reporting success.
 
+**WAIT FOR THE RELEASE WORKFLOW, NOT JUST FOR THE MERGE.** `Release` runs on `workflow_run` after CI
+succeeds, so for two or three minutes after a merge there is no image for that commit — and
+`mfarm-deploy.sh` falls back to building one on the box. That fallback says so loudly, and on
+`mfarm-cp` it does not even succeed: the build context includes `deploy/secrets/metrics_token`,
+which the deploying user cannot read, so it dies with `checking context: no permission to read`.
+
+That failure is safe — the running API is left exactly as it was, which is the same property that
+makes a failed migration safe — but it wastes a deploy and reads alarmingly. Check first:
+
+```bash
+gh run list --branch main --workflow Release --limit 1
+```
+
+Same trap on the checkouts: `git merge --ff-only origin/main` on either box needs a `git fetch`
+first, or it silently merges a stale `origin/main` and reports success having moved nothing.
+
 **Confirm it landed without asking anyone**: reload the console. The header shows the running commit,
 and hovering gives the full sha, CI's build time, process start and schema version.
 
