@@ -31,8 +31,19 @@ function farm({ released = true, ready = true, deployOk = true, running = 'old' 
   }
   chmodSync(join(root, 'deploy', 'auto-deploy.sh'), 0o755);
 
+  // THE BARE REPO'S HEAD IS SET EXPLICITLY, and this is not tidiness.
+  //
+  // `git init --bare` points HEAD at whatever `init.defaultBranch` says. On this laptop that is
+  // `main` and every test passed; on the CI runner it is `master`, so the clone in
+  // `newCommitUpstream` checked out nothing ("remote HEAD refers to nonexistent ref"), committed
+  // onto a fresh `master`, and `push origin main` died with "src refspec main does not match any".
+  // Nine of twelve tests failed on CI having passed locally.
+  //
+  // Reproduced before fixing, with GIT_CONFIG_GLOBAL pointing at an `init.defaultBranch = master`
+  // config — the harness now names the branch it wants at every step instead of inheriting one.
   sh(`set -e
     git init -q --bare "${root}/upstream"
+    git -C "${root}/upstream" symbolic-ref HEAD refs/heads/main
     git init -q "${root}"
     git -C "${root}" config user.email t@t && git -C "${root}" config user.name t
     git -C "${root}" add -A && git -C "${root}" commit -qm base
@@ -87,11 +98,11 @@ function farm({ released = true, ready = true, deployOk = true, running = 'old' 
 function newCommitUpstream(root, file = 'f.txt') {
   const clone = mkdtempSync(join(tmpdir(), 'mfarm-up-'));
   sh(`set -e
-    git clone -q "${root}/upstream" "${clone}"
+    git clone -q --branch main "${root}/upstream" "${clone}"
     git -C "${clone}" config user.email t@t && git -C "${clone}" config user.name t
     echo hi > "${clone}/${file}"
     git -C "${clone}" add -A && git -C "${clone}" commit -qm next
-    git -C "${clone}" push -q origin main`);
+    git -C "${clone}" push -q origin HEAD:refs/heads/main`);
   return sh(`git -C "${clone}" rev-parse HEAD`).trim();
 }
 
@@ -280,7 +291,8 @@ describe('the guards', () => {
     newCommitUpstream(root);
     sh(`set -e
       echo local > "${root}/local.txt"
-      git -C "${root}" add -A && git -C "${root}" commit -qm "a human was here"`);
+      git -C "${root}" add -A
+      git -C "${root}" -c user.email=t@t -c user.name=t commit -qm "a human was here"`);
     const r = run(root);
     assert.equal(r.code, 1);
     assert.match(r.out, /will not fast-forward/);
