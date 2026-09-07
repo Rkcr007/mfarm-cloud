@@ -144,6 +144,67 @@ groups:
             devices are still in whatever state they were last reported in, which means the control
             plane's view of them is now fiction.
 
+  # ------------------------------------------------------------------ deploying
+  #
+  # D18 was ninety minutes of a released commit sitting undeployed while `docs/DEFECTS.md` claimed
+  # the fixes were live. `deploy/auto-deploy.sh` (ADR-0030) closes that gap with a timer, and these
+  # three rules exist because a timer that has silently stopped looks EXACTLY like a farm with
+  # nothing to deploy. An automatic mechanism nobody measures is how "released" and "deployed" came
+  # apart in the first place.
+  - name: mfarm-deploy
+    rules:
+      # THE ONE THAT PAGES. Every other state here is the deployer working: `waiting` is a farm a
+      # few minutes from a Release, `paused` is an operator holding it deliberately. `blocked` is
+      # the farm running older code than `main` with nothing left that will fix it — the deployer
+      # has correctly refused to redeploy a build that failed its health gate, and refusing is only
+      # safe if somebody is told.
+      #
+      # `== 1` and not `> 0`: -1 means the deploy state could not be read at all, which is the next
+      # rule's business and not a blocked deploy.
+      - alert: MfarmDeployBlocked
+        expr: mfarm_autodeploy_blocked == 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: A commit failed its health gate and the farm will not self-deploy
+          description: >-
+            The auto-deployer put a commit into service, it did not stay ready, and the image was
+            rolled back. It will not be retried — that refusal is what stops one bad merge becoming
+            a restart loop, and it also means NOTHING will bring this farm forward until a human
+            looks. Read ~/autodeploy.log, then either fix main or clear
+            deploy/.state/autodeploy/failed-sha. NOTE: the image rolled back, the SCHEMA did not.
+
+      # A deployer that has stopped ticking. -1 is included deliberately: an unreadable state
+      # directory and a dead timer are the same incident from the API's point of view — in both
+      # cases nothing is bringing this farm forward and nobody would otherwise find out.
+      - alert: MfarmDeployerNotRunning
+        expr: mfarm_autodeploy_check_age_seconds > 1800 or mfarm_autodeploy_check_age_seconds == -1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: The auto-deploy timer has not run
+          description: >-
+            No completed auto-deploy tick for over half an hour (it runs every five minutes), or its
+            state cannot be read at all. Check `systemctl status mfarm-autodeploy.timer` and that
+            deploy/.state/autodeploy is writable by the checkout's owner — docker creates a missing
+            bind-mount source as root, which produces a timer that ticks and records nothing.
+
+      # D18 ITSELF, as a rule. The farm knows it is behind `main` and has not caught up. On a
+      # healthy farm this sits at zero and rises for one or two ticks after each merge; half an hour
+      # means a Release that never published, a fast-forward that will not apply, or a pause
+      # somebody has forgotten they took.
+      - alert: MfarmFarmBehindMain
+        expr: mfarm_autodeploy_pending_seconds > 1800
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: The farm has been behind main for half an hour
+          description: >-
+            origin/main has been ahead of what this farm is running for
+            {{ $value | humanizeDuration }}. Every "verified on the farm" claim made in that window
+            was made against older code. Check ~/autodeploy.log for the verdict — `waiting` means
+            Release never published an image, `paused` means the kill switch is still set.
+
   # ------------------------------------------------------------------ contention
   - name: mfarm-queue
     rules:

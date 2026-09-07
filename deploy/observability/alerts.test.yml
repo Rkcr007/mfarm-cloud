@@ -261,3 +261,156 @@ tests:
       - eval_time: 20m
         alertname: MfarmDeviceRecoveryStuck
         exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # THE AUTO-DEPLOYER, HEALTHY. A tick every five minutes, the farm up to date, nothing blocked.
+  #
+  # This is the case that matters most and the one easiest to omit: without it, every threshold
+  # below could be an order of magnitude wrong and the tests would still pass — they would simply be
+  # asserting that the rules fire on a farm that is fine, which is how an alert gets silenced.
+  #
+  # `check_age` is a SAWTOOTH, not a ramp. The timer fires every 5m and rewrites `last-check`, so on
+  # a healthy farm this climbs to ~300s and drops back; modelling it as a ramp would cross the
+  # 1800s threshold after half an hour and fail a deployer that is working perfectly.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a working deployer pages nobody
+    input_series:
+      - series: 'mfarm_autodeploy_check_age_seconds'
+        values: '0+60x4 0+60x4 0+60x4 0+60x4 0+60x4 0+60x4 0+60x4 0+60x4 0+60x4 0+60x4 0+60x4 0+60x4'
+      - series: 'mfarm_autodeploy_pending_seconds'
+        values: '0x120'
+      - series: 'mfarm_autodeploy_blocked'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: MfarmDeployBlocked
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: MfarmDeployerNotRunning
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: MfarmFarmBehindMain
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # A COMMIT FAILED ITS HEALTH GATE. The farm is running older code than main and the deployer has
+  # correctly stopped — which is safe only because this pages.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a blocked commit pages
+    input_series:
+      - series: 'mfarm_autodeploy_blocked'
+        values: '0x10 1x50'
+      - series: 'mfarm_autodeploy_check_age_seconds'
+        values: '60x60'
+    alert_rule_test:
+      # Not at the moment it happens — `for: 5m`, so a single scrape cannot page.
+      - eval_time: 12m
+        alertname: MfarmDeployBlocked
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: MfarmDeployBlocked
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: A commit failed its health gate and the farm will not self-deploy
+              description: >-
+                The auto-deployer put a commit into service, it did not stay ready, and the image was rolled back. It will not be retried — that refusal is what stops one bad merge becoming a restart loop, and it also means NOTHING will bring this farm forward until a human looks. Read ~/autodeploy.log, then either fix main or clear deploy/.state/autodeploy/failed-sha. NOTE: the image rolled back, the SCHEMA did not.
+      # THE OTHER DIRECTION, and the reason this is a test rather than a hope: a healthy deployer
+      # reports 0 and an unreadable one reports -1, and NEITHER is a blocked deploy. `> 0` instead
+      # of `== 1` would be silent on the first and correct on the second, which is the wrong way
+      # round; a rule that pages when it cannot see is MfarmDeployerNotRunning's job.
+      - eval_time: 20m
+        alertname: MfarmDeployerNotRunning
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # THE TIMER IS DEAD, and separately, THE STATE CANNOT BE READ. Both mean nothing is bringing this
+  # farm forward, so both must page — and a -1 must NOT be mistaken for a blocked deploy.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a dead timer and an unreadable state both page, and neither reads as blocked
+    input_series:
+      - series: 'mfarm_autodeploy_check_age_seconds'
+        values: '0+60x120'
+      - series: 'mfarm_autodeploy_blocked'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MfarmDeployerNotRunning
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: MfarmDeployerNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The auto-deploy timer has not run
+              description: >-
+                No completed auto-deploy tick for over half an hour (it runs every five minutes), or its state cannot be read at all. Check `systemctl status mfarm-autodeploy.timer` and that deploy/.state/autodeploy is writable by the checkout's owner — docker creates a missing bind-mount source as root, which produces a timer that ticks and records nothing.
+
+  - interval: 1m
+    name: an unreadable deploy state pages as a dead timer, not as a blocked commit
+    input_series:
+      - series: 'mfarm_autodeploy_check_age_seconds'
+        values: '-1x120'
+      - series: 'mfarm_autodeploy_blocked'
+        values: '-1x120'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MfarmDeployerNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The auto-deploy timer has not run
+              description: >-
+                No completed auto-deploy tick for over half an hour (it runs every five minutes), or its state cannot be read at all. Check `systemctl status mfarm-autodeploy.timer` and that deploy/.state/autodeploy is writable by the checkout's owner — docker creates a missing bind-mount source as root, which produces a timer that ticks and records nothing.
+      # -1 IS NOT 1. This catches `!= 0`, which is the natural way to write "blocked is set" and
+      # would turn every unreadable state directory into a critical page about a commit that does
+      # not exist — verified by making that change and watching this case go red.
+      #
+      # It does NOT catch `> 0`, and the claim that it did was in this comment until it was checked.
+      # Given the collector's domain of -1/0/1 the two expressions are identical, so no test can
+      # separate them; `== 1` is written for the reader rather than for the rule engine.
+      - eval_time: 30m
+        alertname: MfarmDeployBlocked
+        exp_alerts: []
+
+  # -------------------------------------------------------------------------------------------
+  # D18, AS A RULE. The farm knows it is behind main and has not caught up.
+  #
+  # The healthy shape is a SPIKE: pending rises for the one or two ticks between a merge and its
+  # image, then returns to zero. A rule that fired on "pending > 0" would page on every merge, so
+  # the test asserts the spike is quiet and the sustained gap is not.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a merge does not page, but a farm left behind does
+    input_series:
+      - series: 'mfarm_autodeploy_pending_seconds'
+        values: '0x10 60+60x9 0x100'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MfarmFarmBehindMain
+        exp_alerts: []
+
+  - interval: 1m
+    name: half an hour behind main pages
+    input_series:
+      - series: 'mfarm_autodeploy_pending_seconds'
+        values: '0+60x120'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: MfarmFarmBehindMain
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: MfarmFarmBehindMain
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The farm has been behind main for half an hour
+              description: >-
+                origin/main has been ahead of what this farm is running for 45m 0s. Every "verified on the farm" claim made in that window was made against older code. Check ~/autodeploy.log for the verdict — `waiting` means Release never published an image, `paused` means the kill switch is still set.

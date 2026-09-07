@@ -1,0 +1,34 @@
+# One tick of the auto-deployer — S7's first ceiling, IN THE REPO, for D20's reason.
+#
+# `deploy/mfarm-farm.service` records what happens to a unit that lives only on the VM: it drifted
+# to declaring `CF_INSTANCES=2` on a host running four devices, inert and contradicted by the
+# running system at the same time. This one is installed from here by
+# `deploy/install-autodeploy-service.sh`, so the file on the box is the file somebody reviewed.
+#
+# ONESHOT, driven by `mfarm-autodeploy.timer`. A long-lived daemon with its own sleep loop would
+# have to reimplement backoff, restart-on-crash and "did it actually run", all of which systemd
+# already does — and a crashed daemon looks exactly like a farm with nothing to deploy.
+
+[Unit]
+Description=MFARM auto-deploy (put main into service)
+Documentation=file://__REPO__/docs/adrs/0030-the-box-pulls-main-on-a-timer.md
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+Group=__USER__
+WorkingDirectory=__REPO__
+Environment=HOME=__HOME__
+# A migration on a large table plus an image pull plus the health gate. Generous, and bounded:
+# a tick that hangs must not still be holding the lock when the next one fires.
+TimeoutStartSec=1800
+ExecStart=__REPO__/deploy/auto-deploy.sh
+# A tick that decides to do nothing exits 0; `waiting` and `blocked` are ordinary states of a
+# healthy farm and must not paint the unit red. The exit codes that DO matter are surfaced as
+# metrics and alerts instead (`mfarm_autodeploy_*`), because a failed systemd unit on a box nobody
+# is looking at is not a notification.
+SuccessExitStatus=0 1
+StandardOutput=append:__HOME__/autodeploy.log
+StandardError=append:__HOME__/autodeploy.log

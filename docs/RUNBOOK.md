@@ -184,7 +184,48 @@ git push origin main            # CI runs; on green, Release publishes ghcr.io/r
 gh run list --limit 3           # watch it
 ```
 
-Then, on the control plane:
+**Then wait.** Since ADR-0030 the control plane deploys itself: `mfarm-autodeploy.timer` asks every
+five minutes whether the farm is running `main`, fast-forwards the checkout, deploys the released
+image, and health-gates it. A merge normally reaches the farm within about ten minutes with nobody
+typing anything.
+
+```bash
+./deploy/check-deployed.sh      # from a laptop — is it there yet?
+```
+
+Watch it decide, or make it decide now:
+
+```bash
+CP="gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --command"
+
+$CP 'tail -20 ~/autodeploy.log'                        # what each tick concluded
+$CP 'cd ~/mfarm && ./deploy/auto-deploy.sh --dry-run'  # decide, change nothing
+$CP 'sudo systemctl start mfarm-autodeploy.service'    # tick now, not in five minutes
+$CP 'systemctl list-timers mfarm-autodeploy.timer'     # is it even scheduled
+```
+
+The verdicts are `current`, `waiting` (no image yet — Release runs after CI), `blocked` (a commit
+failed its health gate and will not be retried), `paused`, and `unknown` (`git fetch` failed).
+
+**Stop it deploying**, during an incident or a migration you want to watch by hand:
+
+```bash
+touch ~/mfarm/deploy/.state/autodeploy/paused     # …and rm it to resume
+```
+
+**When it refuses.** `blocked` means a commit deployed, failed its health gate, and the *image* was
+rolled back to the last build that passed one. The refusal to retry is deliberate — it is what stops
+one bad merge becoming a restart every five minutes. **The schema was not rolled back**, so if the
+problem is a migration, the rollback has not undone it. Read `~/autodeploy.log`, fix `main`, and the
+next tick picks it up; or clear the memory by hand with
+`rm ~/mfarm/deploy/.state/autodeploy/failed-sha`.
+
+`MfarmDeployBlocked`, `MfarmDeployerNotRunning` and `MfarmFarmBehindMain` page on all of this.
+
+### Deploying by hand
+
+Still correct, and what you want on the device host (the timer is control-plane only) or when the
+timer is paused:
 
 ```bash
 gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \

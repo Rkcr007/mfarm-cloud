@@ -495,6 +495,68 @@ const backupOffsiteAge = g(
   'Seconds since the newest backup was confirmed present in off-box storage. -1 when there is no such confirmation.',
 );
 
+/**
+ * The auto-deployer's evidence, read from disk — S7, ADR-0030.
+ *
+ * WHY THE API MEASURES THIS AT ALL. `deploy/auto-deploy.sh` is a systemd timer on the same box, and
+ * a timer that has silently stopped looks exactly like a farm with nothing to deploy. That is the
+ * shape of the defect it was built to fix (D18: a released commit sat undeployed for ninety minutes
+ * with nothing anywhere reporting the gap), so shipping the fix without a measurement would be
+ * replacing a human who forgets with a machine that forgets more quietly.
+ *
+ * Read from FILES the deployer writes, exactly as `collectBackups` reads the dump directory, and
+ * for the same reason: a mechanism reporting its own success cannot report having died. An mtime is
+ * evidence that something ran.
+ *
+ * The directory is mounted READ-ONLY. The API measures the deployer; it has no business being able
+ * to clear a `blocked` state or lift a pause.
+ *
+ * `-1` EVERYWHERE FOR "CANNOT SEE", never a large number and never a zero. "The deployer is fine"
+ * and "we cannot tell" are different alerts, and a gauge that guesses turns the second into the
+ * first.
+ */
+const autodeployCheckAge = g(
+  'mfarm_autodeploy_check_age_seconds',
+  'Seconds since the auto-deploy timer last ran. -1 when DEPLOY_STATE_DIR cannot be read. Rising ' +
+    'without bound means the timer is dead, which otherwise looks like a farm with nothing to deploy.',
+);
+
+/**
+ * How long the farm has been behind `main` — D18 as a number.
+ *
+ * 0 is the healthy state and is emitted explicitly rather than by absence, for DEVICE_STATES'
+ * reason: an alert on a series that disappears is silent exactly when it matters.
+ *
+ * This counts from the first tick that FOUND the farm behind, not from the merge, and the
+ * difference is worth stating: a commit merged while the box was off starts its clock when the box
+ * comes back. The question being answered is "how long has this farm knowingly been out of date",
+ * which is the one an operator can act on.
+ */
+const autodeployPending = g(
+  'mfarm_autodeploy_pending_seconds',
+  'Seconds the farm has been behind origin/main, as measured by the deployer. 0 when up to date, ' +
+    '-1 when it cannot be read.',
+);
+
+/**
+ * A commit that deployed, failed its health gate, was rolled back, and will not be retried.
+ *
+ * THIS IS THE ONE THAT PAGES. Every other state here is the deployer working: `waiting` is a farm
+ * three minutes from a Release, `paused` is an operator holding it. `blocked` is the farm running
+ * older code than `main` with no mechanism that will fix it — the deployer has correctly stopped,
+ * and stopping is only safe if somebody is told.
+ */
+const autodeployBlocked = g(
+  'mfarm_autodeploy_blocked',
+  '1 when a commit failed its health gate and the deployer has stopped retrying it. -1 unreadable.',
+);
+
+const autodeployPaused = g(
+  'mfarm_autodeploy_paused',
+  '1 when the auto-deploy kill switch is set. -1 unreadable. Not a fault — but a pause nobody ' +
+    'remembers taking is how a farm stays a fortnight behind.',
+);
+
 const droppedSeries = g(
   'mfarm_metric_series_dropped_total',
   `Series refused because a metric exceeded ${MAX_SERIES_PER_METRIC} label combinations. Any value ` +
@@ -572,6 +634,53 @@ export async function collectBackups(): Promise<void> {
     backupAge.set({}, -1);
     backupCount.set({}, 0);
     backupOffsiteAge.set({}, -1);
+  }
+}
+
+/**
+ * Read what the auto-deployer left behind on its last tick.
+ *
+ * Every failure lands on `-1`. An unset DEPLOY_STATE_DIR, an unmounted directory, a deployer that
+ * has never run — none of them mean the deployer is healthy and none of them mean it is broken.
+ * They mean the measurement is unavailable, and `alerts.yml` reads it that way.
+ *
+ * `blocked` is derived from the STATUS FILE rather than from the presence of `failed-sha`, and the
+ * distinction is load-bearing. `failed-sha` is the deployer's memory and it survives on purpose —
+ * it is what stops the timer redeploying a bad commit every five minutes. If this alerted on the
+ * file's existence, a farm that was fixed by hand and is now perfectly healthy would keep paging
+ * until somebody deleted a file nobody documented.
+ */
+export async function collectAutodeploy(): Promise<void> {
+  const unknown = () => {
+    autodeployCheckAge.set({}, -1);
+    autodeployPending.set({}, -1);
+    autodeployBlocked.set({}, -1);
+    autodeployPaused.set({}, -1);
+  };
+  const dir = process.env.DEPLOY_STATE_DIR?.trim();
+  if (!dir) return unknown();
+  try {
+    const { stat, readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const age = async (n: string) => {
+      const st = await stat(join(dir, n)).catch(() => null);
+      return st ? (Date.now() - st.mtimeMs) / 1000 : null;
+    };
+
+    const check = await age('last-check');
+    // A directory with no `last-check` in it is not a healthy deployer that happens to be quiet: it
+    // is one that has never completed a tick. -1, not 0.
+    if (check === null) return unknown();
+    autodeployCheckAge.set({}, check);
+
+    const pending = await age('pending-since');
+    autodeployPending.set({}, pending ?? 0);
+
+    const status = (await readFile(join(dir, 'status'), 'utf8').catch(() => '')).trim();
+    autodeployBlocked.set({}, status === 'blocked' ? 1 : 0);
+    autodeployPaused.set({}, status === 'paused' ? 1 : 0);
+  } catch {
+    unknown();
   }
 }
 
@@ -674,6 +783,7 @@ export async function scrape(): Promise<string> {
   collectRuntime();
   // Its own try: a directory that cannot be read must not cost the scrape its fleet numbers.
   try { await collectBackups(); } catch { scrapeErrors.inc(); }
+  try { await collectAutodeploy(); } catch { scrapeErrors.inc(); }
   scrapeDuration.observe({}, Number(process.hrtime.bigint() - t0) / 1e9);
   return registry.render();
 }

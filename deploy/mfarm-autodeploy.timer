@@ -1,0 +1,28 @@
+# When the box asks whether it is running main.
+#
+# FIVE MINUTES, and the number is chosen rather than defaulted. The gap this closes was ninety
+# minutes long (D18); a Release takes three to six minutes to publish an image, so anything shorter
+# spends most of its ticks answering `waiting`, and anything much longer starts to look like the
+# manual deploy it replaces. Five is roughly one tick of waiting per merge.
+#
+# PERSISTENT=false, deliberately. A box that was off for a day should not, the moment it boots,
+# immediately fast-forward and deploy while its devices are still coming up — `mfarm-farm.service`
+# is doing that at the same moment. The next ordinary tick is five minutes away and that is soon
+# enough for a farm nobody was using.
+
+[Unit]
+Description=Ask every few minutes whether the farm is running main
+Documentation=file://__REPO__/docs/adrs/0030-the-box-pulls-main-on-a-timer.md
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=5min
+# Spread the tick off the minute boundary, so a deploy never coincides exactly with the backup
+# sidecar or the metrics scrape.
+RandomizedDelaySec=60
+AccuracySec=30s
+Persistent=false
+Unit=mfarm-autodeploy.service
+
+[Install]
+WantedBy=timers.target

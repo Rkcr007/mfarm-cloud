@@ -333,20 +333,88 @@ schema has, `avd` is.
 ## S7 — The reliability ceilings
 
 Not execution-engine work, and named because "as reliable as the big farms" is false while any of
-them stands:
+them stands. Taken in the order S7 itself argued for: deploy, then a second host, then the limiter.
 
-| | what it costs |
-|---|---|
-| **Single API instance** — rate limiting is in-memory (`apps/api/src/http/server.ts`) | a second process silently multiplies every limit; there is no HA and no rolling deploy |
-| **One device host** | a host outage is a farm outage. ADR-0027 and 038 reduce the blast radius; they do not remove it |
-| **Deploy is manual** | a released commit reaches the farm when a human runs `mfarm-deploy.sh`. It went unnoticed for ninety minutes once |
-| **No worker-side metrics** | the agent reports incidents, not gauges, so queue depth and capacity are unobservable from Grafana |
+### S7.1 — Deploy is manual — **BUILT (2026-09-07)**
 
-S1 and S6 are what a second team hits first, so they come before all of these. But S7 is what a
-second *customer* hits, and the honest order after S6 is: deploy automation, then a second device
-host, then the rate limiter.
+**The defect.** A released commit reached the farm when a human ran `deploy/mfarm-deploy.sh`. On
+2026-09-05 that was ninety minutes, and `docs/DEFECTS.md` spent all ninety claiming fixes were live
+that were not (D18). Every "verified on the farm" claim made in such a window is worth exactly as
+much as the answer to "which commit was the farm running".
 
----
+**Schema.** None.
+
+**Code.** `deploy/auto-deploy.sh` on a five-minute systemd timer, pulling rather than being pushed
+to — ADR-0006's shape, and no standing SSH credential into production. The decision is a separate
+tested function (`deploy/lib/autodeploy-decision.sh`) returning `paused | unknown | current |
+blocked | waiting | deploy`; the doing is a fast-forward, a deploy, and a health gate of five
+*consecutive* `/ready` responses. A commit that fails the gate is rolled back to the last build that
+passed one and **never retried** — without that memory a timer turns one bad merge into a restart
+every five minutes forever, which is worse than the manual deploy it replaces.
+
+`apps/api/src/metrics.ts` reads the deployer's state from a read-only bind mount and exports
+`mfarm_autodeploy_{check_age_seconds,pending_seconds,blocked,paused}`; three rules in `alerts.yml`
+fire on a dead timer, a blocked commit, and a farm half an hour behind `main`. That last one is D18
+as a number somebody can be paged about.
+
+**Test.** `deploy/auto-deploy.test.mjs` executes the decision; `deploy/auto-deploy-run.test.mjs`
+runs the whole script against a **real git repository** with the registry, the API and
+`mfarm-deploy.sh` stubbed — the fast-forward, the fetch and `rev-parse origin/main` are the parts
+most likely to be subtly wrong and a stub would agree with whatever was written. Seven cases in
+`apps/api/test/metrics.test.ts`, and six in `alerts.test.yml` asserting both directions.
+
+**Verified.** Six bugs were put back one at a time and watched. Three were caught immediately.
+**Three were not**, and all three were defects in the tests rather than in the code:
+
+* the "it fast-forwards" injection never applied — a `grep -v` pattern that silently matched
+  nothing, so the run that "proved" the test discriminated had proved nothing;
+* the pinned-copy assertion compared `./deploy` against an absolute path, two strings that can never
+  be equal, so **deleting the self-pinning guard entirely left every test green**;
+* the health-gate test built farms that were unhealthy on *every* probe, so it could not tell
+  "ready three times" from "ready three times in a row" — the rule it exists for. It now drives a
+  **flapping** `/ready`.
+
+One further claim in a test comment — that an assertion caught `> 0` — turned out to be false and
+is now recorded as false in the file: given a gauge whose domain is -1/0/1 no test can separate
+`> 0` from `== 1`. `!= 0` *is* caught, and that is what the case is for.
+
+**Not done here:** the device host. D19's worse half was `mfarm-lab`'s checkout sixty-six commits
+behind, and bringing a worker's tree forward restarts the agent under running sessions — a different
+decision with a different blast radius. The installer refuses that box and says which case it is in.
+
+### S7.2 — One device host
+
+A host outage is a farm outage. ADR-0027 and migration 038 reduce the blast radius; they do not
+remove it. **This is a provisioning decision before it is an engineering one** — a second lab VM
+costs money whether or not it is serving — so what belongs here first is an audit of what in the
+control plane still assumes one host, not a second box.
+
+### S7.3 — Rate limiting is in-memory
+
+`apps/api/src/http/server.ts` registers `@fastify/rate-limit` with the default in-process store and
+says so in a comment: limits are per API instance, and a second process silently multiplies every
+one of them. There is no HA and no rolling deploy. Moving the store to Redis is the known fix and it
+is only worth doing behind a second instance, which nothing yet needs.
+
+### S7.4 — Worker-side metrics — **the roadmap was wrong about this**
+
+This step previously read *"the agent reports incidents, not gauges, so queue depth and capacity are
+unobservable from Grafana"*. Checked against the code, the second half is false:
+`collectFleet()` already exports `mfarm_sessions{state="QUEUED"}`, `mfarm_session_queue_oldest_seconds`,
+`mfarm_devices` by state and placement, and `mfarm_host_last_heartbeat_timestamp_seconds`; the
+dashboard has panels for them and `alerts.yml` has `MfarmQueueWaitLong`, `MfarmHostSilent` and
+`MfarmNoUsableDevice`. `metrics.test.ts` has a case called *"queue depth and queue age are
+reported"*. Queue depth and capacity have been observable for weeks.
+
+What is genuinely missing is narrower and worth stating precisely: **everything is sampled from
+Postgres by the control plane, so nothing observes the host itself.** Disk free, CPU, `cvd` and
+`adb` health, agent version — all known to the agent, none of them numbers. That gap matters more
+than it did last week, because the encode measurement in S5 showed the host's CPU is the binding
+constraint on this farm, and a full disk on the lab is the classic way a device farm dies.
+
+This is the third time a section of a spec in this repo has described as absent something already
+built (`docs/DEFECTS.md`, and both MASTER PROMPT documents). Grep the verb before scheduling the
+work.
 
 ## The order, and why
 
@@ -359,7 +427,10 @@ host, then the rate limiter.
    host-side encode is measured against the `RENDER_BASELINE.md` workload and `mfarm-lab` is
    stopped. S5 is now the only remaining execution-engine step.
 6. ~~**S6 queue visibility**~~ — **done**, migration 043.
-7. **S7 ceilings** — deploy, then a second host, then the rate limiter.
+7. **S7 ceilings** — deploy, then a second host, then the rate limiter. **S7.1 is done**
+   (ADR-0030): the box now pulls `main` on a five-minute timer, health-gates what it deploys, rolls
+   back what fails and refuses to retry it. S7.4 turned out to be mostly already built and the row
+   describing it was wrong; what remains there is host-level metrics, not fleet ones.
 
 Each step ships as its own PR with its own migration, and each is verified on a running farm before
 the next starts — not when CI is green. `DEFECTS.md` states the reason: twice this month a fix was
