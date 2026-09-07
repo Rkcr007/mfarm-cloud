@@ -38,9 +38,46 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Nothing, as of 2026-09-07** — twenty-seven recorded, twenty-seven closed. D26 is below and is the
+**Nothing, as of 2026-09-07** — twenty-eight recorded, twenty-eight closed. D26 is below and is the
 most interesting entry this file has: it is the first defect the SUITE could not have found *by
-construction*, and the reason is worth reading before writing another fixture.
+construction*, and the reason is worth reading before writing another fixture. D28, directly under
+this, is the newest member of this file's oldest family and was found the same way all six of the
+others were: by running the thing on the farm.
+
+### D28 — the auto-deploy installer's device-host guard could never fire
+
+| | |
+|---|---|
+| **Severity** | **S2** — it installs a timer that fast-forwards the worker's tree under running sessions |
+| **Found** | running `install-autodeploy-service.sh` on `mfarm-lab` to verify it would refuse |
+| **Status** | fixed and verified on the lab, 2026-09-07 |
+
+`deploy/install-autodeploy-service.sh` exists partly to refuse the device host. The auto-deployer
+fast-forwards the checkout it runs from, and on `mfarm-lab` the worker and the boot unit both
+`ExecStart` out of that tree — so a tick there would move the agent's code under whatever sessions
+are running. Bringing a device host forward is a decision with a different blast radius, and the
+installer's whole job in that case is to say no.
+
+**The guard tested for `deploy/.state/api_key`,** on the premise that only a control plane has
+deploy state. **`mfarm-lab` has had that file since 2026-08-18.** Run on the lab it passed, and the
+installer wrote both units onto the device host. It exited 0 and printed a success line.
+
+Two details make this worse than an ordinary mistake, and both are the point:
+
+* **The correct answer was already in the repo, sourced, and never called.** `deploy/lib/host-role.sh`
+  defines `mfarm_is_device_host` — `/dev/kvm` present *and* a `CONTROL_PLANE_URL` pointing somewhere
+  other than this machine. The installer had `. host-role.sh` at the top, with `|| true` after it,
+  and then invented its own weaker test three lines further down.
+* **It shipped with no test at all**, and no test on the machines it runs on could have caught it:
+  `mfarm_is_device_host` needs `/dev/kvm`, which exists on neither a developer's machine nor a CI
+  runner, so the branch that matters was unreachable. The fix adds `MFARM_KVM_PATH` purely as a
+  seam so a test can drive it, and a fixture that deliberately includes `api_key` — because the real
+  lab has one, and a fixture without it would have agreed with the bug.
+
+The refusal also now runs **before** `stat -c '%U'`, which is GNU-only: with that line first, the
+guard could not be reached on any non-Linux machine, so the test could not run at all.
+
+Verified by putting the shipped guard back and watching two of seven cases go red.
 
 ### D27 — a refused upload could leave its temp file behind
 
