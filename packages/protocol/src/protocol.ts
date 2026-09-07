@@ -290,6 +290,19 @@ export interface WorkerHeartbeatResponse {
      * `routes/workers.ts`. It never promotes an unverified device.
      */
     recovery?: boolean;
+    /**
+     * Keep this session's recording rather than deleting it (migration 045).
+     *
+     * RECORD EVERYTHING, KEEP ALMOST NOTHING. A recording cannot be made retroactively, so every
+     * session is recorded and the choice is which recordings survive — made here, from
+     * `session_should_keep_video`, at the moment the reset is offered. The farm may not claim a test
+     * failed (ADR-0018), so the rule is exactly "the suite reported at least one failure".
+     *
+     * Absent rather than `false` so an older control plane's payload is byte for byte what it was.
+     * The worker reads absent as "do not keep", which is the safe direction: the failure mode of
+     * keeping too much is a full disk that takes the database with it.
+     */
+    keepVideo?: boolean;
   }>;
   /**
    * App actions requested for THIS host's devices and not yet performed.
@@ -317,17 +330,29 @@ export interface WorkerHeartbeatResponse {
  * `screenshot` is the odd one and the reason the pipeline was generalised: it names no app. It
  * exists because the release-time screenshot is taken after Appium has force-stopped the app, so
  * the artifact a person opens to see why a test failed shows the launcher instead.
+ *
+ * `video-start` is the only verb here with NO MATCHING STOP, and that asymmetry is deliberate
+ * (migration 045). Starting a recording is a request that may reasonably be dropped — a device with
+ * no recorder, a session that ended first. Stopping one is not: it has to happen on every path a
+ * session can end, including a timeout, a crashed test process and a reaper sweep, and the worker
+ * already has a hook that runs on all of them. A stop verb would be a second mechanism that works
+ * in the common case and fails in precisely the cases video exists to explain.
  */
-export type AppActionKind = 'install' | 'launch' | 'uninstall' | 'screenshot' | 'logcat';
+export type AppActionKind =
+  'install' | 'launch' | 'uninstall' | 'screenshot' | 'logcat' | 'video-start';
 
 /**
- * The two verbs that produce EVIDENCE rather than acting on an app.
+ * The verbs that produce EVIDENCE rather than acting on an app.
  *
  * Named as a set because three places have to agree on it — the control plane's `request_capture`,
  * the migration's CHECK, and the agent's handler — and because "the kinds that name no app" is a
  * rule, not a coincidence of two strings.
+ *
+ * `video-start` is a member because it names no app and is requested the same way. It is NOT a
+ * member of the set that uploads an artifact on completion: it starts something whose artifact
+ * arrives at the end of the session, down the release path, hours of test time later.
  */
-export const CAPTURE_KINDS = ['screenshot', 'logcat'] as const;
+export const CAPTURE_KINDS = ['screenshot', 'logcat', 'video-start'] as const;
 export type CaptureKind = (typeof CAPTURE_KINDS)[number];
 
 /**

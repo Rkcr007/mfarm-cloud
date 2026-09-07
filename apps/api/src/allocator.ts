@@ -62,6 +62,32 @@ export async function allocate(req: AllocationRequest): Promise<Allocation> {
       ],
     );
     const r = rows[0];
+
+    /**
+     * Start recording, if this farm records (S5, migration 045).
+     *
+     * HERE RATHER THAN AT ACTIVATION, and the difference is about ten seconds of test. The action
+     * rides the heartbeat, so it is performed up to one beat (10s) after it is queued; a session
+     * takes 12-15s to open a WebDriver connection including the app install (measured). Queuing at
+     * allocation therefore usually has the recorder running before the suite sends its first
+     * command, while queuing at activation would reliably miss the opening of every test.
+     *
+     * SWALLOWED, LIKE AN EXECUTION EVENT AND FOR THE SAME REASON. Video is diagnostic; the session
+     * is the product. Failing a customer's allocation because a recording could not be requested is
+     * the wrong trade in a way that is only obvious at three in the morning.
+     *
+     * Nothing is queued when the device queued instead of allocating: `request_capture` requires a
+     * session that holds a device at its fence, so it would decline anyway, and asking it to decline
+     * is a round trip that buys nothing.
+     */
+    if (r.device_id && loadConfig().videoRecording !== 'off') {
+      await c.query('SELECT request_capture($1, $2, $3, $4::jsonb) AS id',
+        [req.orgId, r.session_id, 'video-start', JSON.stringify({ source: 'session-start' })])
+        .catch((e: unknown) => {
+          console.warn(`[allocator] could not request a recording for ${r.session_id}: ${(e as Error).message}`);
+        });
+    }
+
     return {
       sessionId: r.session_id,
       deviceId: r.device_id,

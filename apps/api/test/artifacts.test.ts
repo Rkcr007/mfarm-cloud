@@ -200,12 +200,93 @@ describe('worker upload', () => {
     assert.equal(await onDisk(sha(body)), false, 'a refused upload must not leave an orphan blob');
   });
 
+  /**
+   * Video evidence (S5, migration 045).
+   *
+   * WHAT THESE COVER is the API's half: the kind is accepted, it gets the right content type, it
+   * gets its OWN retention, and a browser can seek it. That last one is not a nicety — without
+   * range support Chrome will not seek a `<video>` at all and downloads the whole file before it
+   * plays, which turns "what happened just before it failed?" back into a download.
+   */
+  test('a video is accepted, typed, and kept on its own clock', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    // Not real WebM. This route stores bytes and never parses them, and a test that needed a valid
+    // container would be asserting ffmpeg rather than this handler.
+    const res = await upload(workerA, sessionId, deviceA, 'video', Buffer.from('WEBM-BYTES'), 'cf-1.webm');
+    assert.equal(res.statusCode, 201);
+
+    const list = await app.inject({ method: 'GET', url: `/v1/sessions/${sessionId}/artifacts`, headers: auth(keyA) });
+    const video = list.json().artifacts.find((a: { kind: string }) => a.kind === 'video');
+    assert.ok(video, 'the video is listed');
+    assert.equal(video.contentType, 'video/webm');
+
+    /**
+     * ITS OWN RETENTION, and the assertion is a COMPARISON rather than a fixed date.
+     *
+     * A recording is an order of magnitude larger than everything else a session leaves behind, so
+     * it expires sooner (3 days against 14). Asserting "expires before the logcat does" states the
+     * rule; asserting a timestamp would agree with whatever the defaults happen to be today and
+     * would pass just as happily if the two were accidentally made equal.
+     */
+    await upload(workerA, sessionId, deviceA, 'logcat', 'a log');
+    const both = (await app.inject({
+      method: 'GET', url: `/v1/sessions/${sessionId}/artifacts`, headers: auth(keyA),
+    })).json().artifacts as Array<{ kind: string; expiresAt: string }>;
+    const vid = both.find((a) => a.kind === 'video')!;
+    const log = both.find((a) => a.kind === 'logcat')!;
+    assert.ok(new Date(vid.expiresAt) < new Date(log.expiresAt),
+      `a recording must expire before a logcat does (video ${vid.expiresAt}, logcat ${log.expiresAt})`);
+  });
+
+  test('a video blob can be seeked, which is what makes it watchable', async () => {
+    await clearFleet();
+    const sessionId = await liveSession(keyA, deviceA);
+    const body = 'ABCDEFGHIJ';
+    const up = await upload(workerA, sessionId, deviceA, 'video', Buffer.from(body), 'cf-1.webm');
+    const id = up.json().artifact.id;
+
+    const whole = await app.inject({ method: 'GET', url: `/v1/artifacts/${id}/blob`, headers: auth(keyA) });
+    assert.equal(whole.statusCode, 200);
+    assert.equal(whole.headers['accept-ranges'], 'bytes');
+
+    const part = await app.inject({
+      method: 'GET', url: `/v1/artifacts/${id}/blob`,
+      headers: { ...auth(keyA), range: 'bytes=2-5' },
+    });
+    assert.equal(part.statusCode, 206);
+    assert.equal(part.headers['content-range'], `bytes 2-5/${body.length}`);
+    assert.equal(part.headers['content-length'], '4');
+    // INCLUSIVE END, both in HTTP and in Node's createReadStream. A player handed one byte too few
+    // does not error — it stalls — so this is asserted on the bytes rather than on the header.
+    assert.equal(part.body, 'CDEF');
+
+    // `bytes=-3` is the LAST three bytes, not "from zero to three". Getting this backwards serves
+    // the head of the file for the tail and the player simply hangs.
+    const tail = await app.inject({
+      method: 'GET', url: `/v1/artifacts/${id}/blob`,
+      headers: { ...auth(keyA), range: 'bytes=-3' },
+    });
+    assert.equal(tail.statusCode, 206);
+    assert.equal(tail.body, 'HIJ');
+
+    const silly = await app.inject({
+      method: 'GET', url: `/v1/artifacts/${id}/blob`,
+      headers: { ...auth(keyA), range: 'bytes=99-200' },
+    });
+    assert.equal(silly.statusCode, 416, 'a range past the end is 416, not a truncated 206');
+  });
+
   test('an unknown kind is refused rather than stored under a made-up one', async () => {
     await clearFleet();
     const sessionId = await liveSession(keyA, deviceA);
-    // `video` is deliberately NOT a kind: nothing produces one, and a storage enum that accepts it
-    // is the same claim-with-nothing-behind-it that got `recording` removed from the capability list.
-    for (const kind of ['video', 'heapdump', '']) {
+    // `video` USED TO BE IN THIS LIST, with the note "nothing produces one, and a storage enum that
+    // accepts it is the same claim-with-nothing-behind-it that got `recording` removed from the
+    // capability list". That was true when it was written and stopped being true on 2026-09-07:
+    // cvd's host-side recorder produces one, measured free for the guest, and `recording` is a
+    // declared capability again (migration 045, docs/VIDEO_EVIDENCE.md). The reason expired; the
+    // assertion had to move with it rather than outlive it.
+    for (const kind of ['heapdump', 'coredump', '']) {
       const res = await upload(workerA, sessionId, deviceA, kind, 'x');
       assert.equal(res.statusCode, 400, `kind=${kind} should be refused`);
     }

@@ -643,6 +643,77 @@ describe('outcome reporting', () => {
    * poisoning another tenant's failure reports, which is worse than most things a worker could
    * forge precisely because nobody would ever look for it.
    */
+  /**
+   * Which recordings survive (S5, migration 045).
+   *
+   * THIS IS THE ONLY DECISION THE WORKER CANNOT MAKE FOR ITSELF. It stops the recorder on every
+   * teardown path whatever happens; what it cannot know is whether the customer's suite reported a
+   * failure, and that is the whole of the keep rule. The flag rides the reset offer.
+   *
+   * Asserted through the BEAT rather than by calling `session_should_keep_video` directly. A test
+   * that called the function would prove the SQL and prove nothing about whether the flag reaches
+   * the worker — which is the half that has been silently missing before in this repo (four of
+   * migration 030's nine event kinds were never emitted by anything).
+   */
+  describe('keeping a recording', () => {
+    /** Beat as the fixture worker and return the reset offers, minting a fresh token as ever. */
+    async function resetOffers(): Promise<Array<{ deviceId: string; keepVideo?: boolean }>> {
+      const wt = generateWorkerToken();
+      await withSystem((c) => c.query(
+        'UPDATE hosts SET token_prefix = $2, token_hash = $3 WHERE id = $1',
+        [hostId, wt.prefix, wt.hash]));
+      const beat = await app.inject({
+        method: 'POST', url: '/v1/workers/heartbeat', headers: auth(wt.plaintext),
+      });
+      assert.equal(beat.statusCode, 200, beat.body);
+      return (beat.json().resets ?? []) as Array<{ deviceId: string; keepVideo?: boolean }>;
+    }
+
+    test('a session that reported a failure keeps its recording', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'keep-video-red' });
+      await report(s, { status: 'failed', name: 'checkout', failure: 'expected 3 got 2' });
+      await quit(keyA, s);
+
+      const offers = await resetOffers();
+      assert.equal(offers.length, 1, `expected one device in CLEANING, got ${JSON.stringify(offers)}`);
+      assert.equal(offers[0].keepVideo, true);
+    });
+
+    test('a session that passed does not', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'keep-video-green' });
+      await report(s, { status: 'passed', name: 'checkout' });
+      await quit(keyA, s);
+
+      const offers = await resetOffers();
+      assert.equal(offers.length, 1);
+      // ABSENT, not `false`. An older agent's payload has to be byte for byte what it was, and the
+      // worker reads absent as "delete it" — the safe direction, because the failure mode of
+      // keeping too much is a control plane that runs out of disk.
+      assert.equal(offers[0].keepVideo, undefined);
+    });
+
+    test('a session that reported nothing does not, because the farm may not infer a pass', async () => {
+      await clearFleet();
+      await seedDevices(1);
+      const s = await openSession(keyA, { 'mfarm:runId': 'keep-video-silent' });
+      await quit(keyA, s);
+
+      const offers = await resetOffers();
+      assert.equal(offers.length, 1);
+      /**
+       * ADR-0018's rule, applied to disk rather than to a dashboard. A run that reports nothing
+       * reads "Not reported" and never as a pass — but it is equally not a failure, and keeping
+       * every unreported session's video would quietly make "keep failures" mean "keep everything"
+       * for exactly the suites that have not been wired up yet.
+       */
+      assert.equal(offers[0].keepVideo, undefined);
+    });
+  });
+
   describe('incidents', () => {
     const sendIncidents = async (incidents: unknown[]) => {
       const wt = generateWorkerToken();

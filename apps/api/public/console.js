@@ -194,7 +194,7 @@ export const state = {
    * that session, and a farm that has been running for a fortnight has more artifacts than anyone
    * wants delivered to a page that shows six of them.
    */
-  artifacts: { sessionId: null, items: [], loaded: false },
+  artifacts: { sessionId: null, items: [], failures: [], loaded: false },
   // The WebDriver steps for whichever session the cockpit is showing (migration 041). Keyed by
   // session for the same reason `artifacts` is: navigating between two sessions must never show one
   // session's steps under the other's heading.
@@ -877,15 +877,34 @@ async function refreshSessions() {
  */
 async function loadArtifacts(sessionId) {
   if (state.artifacts.sessionId === sessionId && state.artifacts.loaded) return;
-  state.artifacts = { sessionId, items: [], loaded: false };
+  state.artifacts = { sessionId, items: [], failures: [], loaded: false };
   try {
-    const out = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`);
+    /**
+     * The results ride along with the artifacts, because the video needs them.
+     *
+     * "Jump to failure" is the whole reason a recording beats a screenshot, and it needs two things
+     * this screen did not have together: the recording's start instant (on the artifact's context)
+     * and when the suite reported the failure (on the result). One extra round trip on a screen
+     * that already makes several.
+     *
+     * A results request that fails must NOT cost the page its artifacts — a video with a dead
+     * scrub button is worth far more than no video.
+     */
+    const [out, results] = await Promise.all([
+      api(`/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`),
+      api(`/v1/sessions/${encodeURIComponent(sessionId)}/results`).catch(() => ({ results: [] })),
+    ]);
     // Guard against a slower request for a session the person has already navigated away from
     // landing on top of a newer one.
     if (state.artifacts.sessionId !== sessionId) return;
-    state.artifacts = { sessionId, items: out.artifacts || [], loaded: true };
+    state.artifacts = {
+      sessionId,
+      items: out.artifacts || [],
+      failures: (results.results || []).filter((r) => r.status === 'failed'),
+      loaded: true,
+    };
   } catch {
-    state.artifacts = { sessionId, items: [], loaded: true };
+    state.artifacts = { sessionId, items: [], failures: [], loaded: true };
   }
 }
 
@@ -5241,6 +5260,78 @@ function stepsCard(sess) {
  * saying that is different from saying there is nothing — an empty card during a running session
  * would read as a loss.
  */
+
+/**
+ * The recording, and the one control that makes it worth more than a screenshot.
+ *
+ * NOT A VIDEO PLAYER. `<video controls>` is the browser's, and it already has play, pause, a
+ * scrubber, a clock and fullscreen — all of them better than a reimplementation, all of them
+ * keyboard-accessible, none of them our code to keep working. What this file adds is the ONE thing
+ * the browser cannot know: where in these minutes the test went red.
+ *
+ * `preload="metadata"` rather than `auto`: a session screen must not pull forty megabytes because
+ * somebody opened it. The duration and the scrubber need the header, and the rest arrives when
+ * play is pressed — which is what the blob route's range support is for.
+ *
+ * THE SEEK MATH, AND ITS HONEST ERROR. A WebM stamps its first frame at zero, so a video position
+ * is `reportedAt - startedAt`, both wall clock, with `startedAt` carried on the artifact's context
+ * from the moment `record_cvd start` returned. Two things make that approximate and neither is
+ * hidden here:
+ *
+ *   - the anchor is accurate to about a frame interval, not a millisecond (docs/VIDEO_EVIDENCE.md);
+ *   - `reportedAt` is when the SUITE POSTED the failure, which is after the assertion actually
+ *     fired — by however long the suite took to notice and report.
+ *
+ * Both errors point the same way: the true moment is a little EARLIER than the number. So the seek
+ * lands `LEAD_IN` seconds before it, which is also what a person wants anyway — the question is
+ * "what happened immediately before this failed", not "what did the failure look like".
+ */
+const FAILURE_LEAD_IN_SECONDS = 5;
+
+function videoPlayer(video, failures) {
+  const startedAt = video.context && video.context.startedAt ? Date.parse(video.context.startedAt) : NaN;
+  const el = h('video', {
+    class: 'evidence-video',
+    src: `/v1/artifacts/${video.id}/blob`,
+    controls: 'controls',
+    preload: 'metadata',
+    playsinline: 'playsinline',
+  });
+
+  /** Failures we can actually point at: we need both ends of the subtraction. */
+  const seekable = Number.isFinite(startedAt)
+    ? failures.filter((f) => f.reportedAt && Number.isFinite(Date.parse(f.reportedAt)))
+    : [];
+
+  return h('div', { class: 'stack tight mb-sm' },
+    el,
+    // SAID OUT LOUD when the recording did not finish cleanly. A partial file plays, has no
+    // duration and no cues, and is often the most useful artifact a crashed session produced — but
+    // it must never be presented as the complete record of an execution.
+    video.context && video.context.partial
+      ? h('p', { class: 'caption warn', text: 'This recording did not stop cleanly — it is what was on disk when the device or the worker went away, so it may end early.' })
+      : null,
+    seekable.length
+      ? h('div', { class: 'row tight wrap' },
+          h('span', { class: 'caption', text: seekable.length === 1 ? 'Jump to:' : 'Jump to a failure:' }),
+          seekable.map((f) => {
+            const at = Math.max(0, (Date.parse(f.reportedAt) - startedAt) / 1000 - FAILURE_LEAD_IN_SECONDS);
+            return btn(f.name || 'failure', 'tiny', () => {
+              // `fastSeek` where it exists — it lands on the nearest keyframe, which on a recording
+              // with keyframes seconds apart is close enough and far quicker than an exact seek.
+              if (typeof el.fastSeek === 'function') el.fastSeek(at); else el.currentTime = at;
+              void el.play().catch(() => { /* autoplay policy; the scrubber has moved regardless */ });
+            }, { title: `${f.name || 'This test'} was reported at ${when(f.reportedAt)}` });
+          }),
+        )
+      : failures.length
+        // A recording with no anchor is still watchable; it just cannot be pointed at. Saying which
+        // of the two is missing beats a button that silently does nothing.
+        ? h('p', { class: 'caption', text: 'This recording carries no start time, so failures cannot be located in it.' })
+        : null,
+  );
+}
+
 function evidenceCard(sess, live) {
   const id = sess.id;
   if (state.artifacts.sessionId !== id || !state.artifacts.loaded) {
@@ -5250,16 +5341,22 @@ function evidenceCard(sess, live) {
   const loaded = mine && state.artifacts.loaded;
   const arts = mine ? state.artifacts.items : [];
 
+  const video = arts.find((a) => a.kind === 'video');
+
   return card('Evidence', {
     aside: h('span', { class: 'caption', text: loaded ? `${arts.length} item${arts.length === 1 ? '' : 's'}` : 'loading…' }),
   },
+    // `|| []` because the screen smoke test seeds `state.artifacts` directly and predates this
+    // field. A missing list must render a player with no jump buttons, never throw and take the
+    // whole session screen with it.
+    video ? videoPlayer(video, (mine && state.artifacts.failures) || []) : null,
     !loaded
       ? h('p', { class: 'caption', text: 'Loading…' })
       : arts.length
         ? h('div', { class: 'stack tight' }, arts.map((a) => h('div', { class: 'row between' },
             h('div', { class: 'stack tight' },
               h('span', { class: 'row tight' },
-                pill(a.kind, a.kind === 'screenshot' ? 'accent' : 'warn plain', { dot: false }),
+                pill(a.kind, a.kind === 'screenshot' || a.kind === 'video' ? 'accent' : 'warn plain', { dot: false }),
                 h('span', { class: 'caption', text: bytes(a.sizeBytes) })),
               h('p', { class: 'caption', text: `kept until ${when(a.expiresAt)}` }),
             ),

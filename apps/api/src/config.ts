@@ -83,6 +83,27 @@ export interface Config {
   artifactMaxUploadBytes: number;
   /** How long an artifact is kept before the reaper deletes the row and, if unreferenced, the blob. */
   artifactRetentionHours: number;
+  /**
+   * Whether sessions are recorded, and which recordings are kept (S5, migration 045).
+   *
+   *   off        no session is recorded. The default, so this ships inert.
+   *   failures   every session is recorded; only sessions whose suite reported a failure are kept.
+   *   all        every session is recorded and every recording is kept.
+   *
+   * RECORDING AND KEEPING ARE ONE SETTING BECAUSE THEY ARE NOT INDEPENDENT. You cannot record a
+   * session retroactively, so "record only failures" is not expressible — the honest choices are
+   * these three. `failures` is what makes video affordable: a saturated farm keeping everything
+   * writes ~2.2 GB/day at the measured bitrate, and keeping only what explains a red run is a
+   * rounding error against that.
+   */
+  videoRecording: 'off' | 'failures' | 'all';
+  /**
+   * How long a kept recording lives. SHORTER THAN ARTIFACTS BY DEFAULT — three days against
+   * fourteen — for the same reason the command trace is: a video is an order of magnitude larger
+   * than everything else a session leaves behind, and sharing one retention number with logcat
+   * means the disk conversation can only be had by shortening logcat too.
+   */
+  videoRetentionHours: number;
 
   /**
    * How long a session's command trace is kept (migration 041).
@@ -565,6 +586,25 @@ export function parseConfig(env: Env): Config {
   const artifactRetentionHours = intVar(
     env.ARTIFACT_RETENTION_HOURS, 'ARTIFACT_RETENTION_HOURS', 14 * 24, 1, 365 * 24, problems,
   );
+  /**
+   * OFF BY DEFAULT, so this migration and this code ship inert on a farm nobody has configured.
+   *
+   * An unrecognised value is a startup problem rather than a silent fallback: "VIDEO_RECORDING=true"
+   * quietly meaning `off` is exactly the kind of configuration that is discovered weeks later by
+   * somebody looking for a recording that was never made.
+   */
+  const videoRaw = (env.VIDEO_RECORDING ?? 'off').trim().toLowerCase();
+  if (!['off', 'failures', 'all'].includes(videoRaw)) {
+    problems.push(`VIDEO_RECORDING must be one of off | failures | all, not ${JSON.stringify(videoRaw)}`);
+  }
+  const videoRecording = (['off', 'failures', 'all'].includes(videoRaw) ? videoRaw : 'off') as
+    'off' | 'failures' | 'all';
+
+  // Three days. See the field comment: a recording is ~10x everything else a session leaves behind.
+  const videoRetentionHours = intVar(
+    env.VIDEO_RETENTION_HOURS, 'VIDEO_RETENTION_HOURS', 3 * 24, 1, 365 * 24, problems,
+  );
+
   const commandRetentionHours = intVar(
     env.COMMAND_RETENTION_HOURS, 'COMMAND_RETENTION_HOURS', 3 * 24, 1, 365 * 24, problems,
   );
@@ -646,6 +686,8 @@ export function parseConfig(env: Env): Config {
     artifactDir,
     artifactMaxUploadBytes,
     artifactRetentionHours,
+    videoRecording,
+    videoRetentionHours,
     commandRetentionHours,
     dataPlanePublicBase,
     turnUrls,
@@ -705,6 +747,8 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     artifactDir: c.artifactDir,
     artifactMaxUploadBytes: c.artifactMaxUploadBytes,
     artifactRetentionHours: c.artifactRetentionHours,
+    videoRecording: c.videoRecording,
+    videoRetentionHours: c.videoRetentionHours,
     commandRetentionHours: c.commandRetentionHours,
     // "unset (no live view route)" was true and is not any more: unset now means the live-view
     // socket is same-origin on this console's own ingress, which is the recommended shape.

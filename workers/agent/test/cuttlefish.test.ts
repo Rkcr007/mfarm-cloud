@@ -925,3 +925,148 @@ describe('rotate turns the device, or says who refused', () => {
     });
   });
 });
+
+/**
+ * Host-side recording (S5, docs/VIDEO_EVIDENCE.md).
+ *
+ * WHAT THESE CANNOT TELL YOU, stated here because the temptation to trust them is strongest on the
+ * one feature whose whole justification is a measurement: they do not show that recording is cheap,
+ * that the file plays, or that cvd agrees with the command line. Those were established on the farm
+ * on 2026-09-07 — `deploy/measure-video-cost.mjs`, 6/6 rounds at 29.9fps recorded against 29.9fps
+ * not, ~300 KB of real VP8 per round. These keep the plumbing from drifting away from that.
+ */
+describe('recording runs on the host, and the file is kept only when asked', () => {
+  /** `<imageDir>/bin/record_cvd`, which is where the cvd host package puts it. */
+  async function installRecordCvd(opts: { recordingDir: string; failStop?: boolean }): Promise<void> {
+    const binDir = join(imageDir, 'bin');
+    await mkdir(binDir, { recursive: true });
+    await mkdir(opts.recordingDir, { recursive: true });
+    // Writes the .webm on `stop`, the way mkvmuxer finalizes a segment there. `start` only logs.
+    await writeFile(join(binDir, 'record_cvd'), `#!/bin/sh
+printf 'record_cvd %s\\n' "$*" >> "$FAKE_LOG"
+if [ "$1" = stop ]; then
+  ${opts.failStop ? 'echo "streamer is not answering" >&2; exit 1' : ''}
+  printf 'fake-vp8-bytes' > "${opts.recordingDir}/recording_cvd-1_display_0_999.webm"
+fi
+exit 0
+`);
+    await chmod(join(binDir, 'record_cvd'), 0o755);
+  }
+
+  /** A running group whose instance dir is inside the temp tree, so `recordingDirs` can find it. */
+  async function fleetWithInstanceDir(instanceDir: string): Promise<void> {
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [{
+        group_name: 'cvd_1',
+        instances: [{ adb_serial: '0.0.0.0:6520', status: 'Running', instance_dir: instanceDir }],
+      }],
+    }));
+  }
+
+  test('start invokes record_cvd for THIS instance and anchors the clock', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd({ recordingDir: join(instanceDir, 'recording') });
+
+    const d = device({ instanceNum: 3 });
+    const before = Date.now();
+    const { startedAt } = await d.startRecording();
+
+    const call = await callTo('record_cvd', 'start');
+    assert.match(call, /--instance_num=3/, 'must name the instance, or it records another tenant');
+    // The anchor is taken AFTER the call returns — see startRecording. Asserting the ordering
+    // rather than a value, because a value would only assert that Date.now() works.
+    assert.ok(startedAt >= before, 'the anchor cannot predate the request');
+  });
+
+  test('refuses a second start rather than silently recording twice', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd({ recordingDir: join(instanceDir, 'recording') });
+
+    const d = device();
+    await d.startRecording();
+    await assert.rejects(() => d.startRecording(), /already recording/);
+  });
+
+  test('stop hands back the NEW file, never one that was already there', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    const recordingDir = join(instanceDir, 'recording');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd({ recordingDir });
+    // A previous session's recording, still on disk. Picking this one would attach the WRONG
+    // TENANT'S VIDEO to this session, which is the failure this test exists for.
+    await writeFile(join(recordingDir, 'recording_cvd-1_display_0_111.webm'), 'older session');
+
+    const d = device();
+    await d.startRecording();
+    const rec = await d.stopRecording({ keep: true });
+
+    assert.ok(rec, 'a recording was made and kept');
+    assert.match(rec.path, /_999\.webm$/, `picked ${rec.path}`);
+    assert.equal(rec.bytes, 'fake-vp8-bytes'.length);
+    assert.equal(rec.partial, false);
+    assert.ok(rec.stoppedAt >= rec.startedAt);
+    assert.match(await callTo('record_cvd', 'stop'), /--instance_num=1/);
+  });
+
+  test('keep:false deletes the file and returns nothing', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    const recordingDir = join(instanceDir, 'recording');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd({ recordingDir });
+
+    const d = device();
+    await d.startRecording();
+    assert.equal(await d.stopRecording({ keep: false }), null);
+
+    // THE POINT OF THE WHOLE keep FLAG. A farm that keeps every recording fills the control
+    // plane's disk in about a day; the deletion has to be the default path through the code.
+    const left = (await readFile(join(recordingDir, 'recording_cvd-1_display_0_999.webm'), 'utf8')
+      .then(() => 'still there').catch(() => 'gone'));
+    assert.equal(left, 'gone');
+  });
+
+  test('a stop that fails still yields the file, flagged partial', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    const recordingDir = join(instanceDir, 'recording');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd({ recordingDir, failStop: true });
+    // What a crashed device leaves behind: bytes on disk that no `stop` ever finalized.
+    await writeFile(join(recordingDir, 'recording_cvd-1_display_0_777.webm'), 'half a segment');
+
+    const d = device();
+    // The pre-existing file must not be mistaken for this session's, so start AFTER writing it and
+    // then write the "crash" file while recording.
+    await d.startRecording();
+    await writeFile(join(recordingDir, 'recording_cvd-1_display_0_888.webm'), 'crash residue');
+
+    const rec = await d.stopRecording({ keep: true });
+    assert.ok(rec, 'a partial recording is still evidence');
+    assert.match(rec.path, /_888\.webm$/);
+    assert.equal(rec.partial, true, 'a recording that did not stop cleanly must say so');
+  });
+
+  test('stopping when nothing was started is not an error', async () => {
+    const d = device();
+    assert.equal(await d.stopRecording({ keep: true }), null);
+  });
+
+  test('the recording capability is declared only when record_cvd is on disk', async () => {
+    await answer('cvd', 'fleet', JSON.stringify({
+      groups: [{ group_name: 'cvd_1', instances: [{ adb_serial: '0.0.0.0:6520', status: 'Running' }] }],
+    }));
+
+    // ADR-0003: a capability is observed state. A host package built before `RecordingManager`
+    // replaced the old --record_screen flag genuinely does not ship this tool, and this device may
+    // not claim a verb it cannot perform.
+    const without = device({ resetMode: 'powerwash' });
+    await without.start();
+    assert.equal(without.info.capabilities.includes('recording'), false);
+
+    await installRecordCvd({ recordingDir: join(dir, 'cvd-1', 'recording') });
+    const withIt = device({ resetMode: 'powerwash' });
+    await withIt.start();
+    assert.equal(withIt.info.capabilities.includes('recording'), true);
+  });
+});

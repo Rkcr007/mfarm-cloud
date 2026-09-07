@@ -1074,10 +1074,46 @@ export class Agent {
    * the screenshot showing why is already uploaded.
    */
   private async captureArtifacts(
-    backend: DeviceBackend, deviceId: string, sessionId: string,
+    backend: DeviceBackend, deviceId: string, sessionId: string, keepVideo = false,
   ): Promise<void> {
     const { control } = backend;
     const name = control.info.localId;
+
+    /**
+     * STOP THE RECORDING FIRST, before anything that can hang.
+     *
+     * This method is the only hook that runs on EVERY path a session can end — a pass, a failed
+     * assertion, a timeout, a killed test process, a device fault, a reaper sweep — which is why
+     * there is no `video-stop` verb (migration 045). A recorder left running holds a file open on
+     * the device host and keeps encoding into a recording nobody will ever be handed, so stopping
+     * it must not sit behind a logcat dump that can take its whole timeout on a wedged device.
+     *
+     * `keepVideo` comes from the control plane's reset offer and is FALSE unless it said otherwise.
+     * That direction matters: the failure mode of keeping too much is a disk that fills and takes
+     * the database with it, so a control plane that is silent, old, or unsure deletes.
+     */
+    if (control.stopRecording) {
+      try {
+        const rec = await control.stopRecording({ keep: keepVideo });
+        if (rec) {
+          await this.uploadArtifact(sessionId, deviceId, 'video',
+            await readFile(rec.path), `${name}.webm`, {
+              source: 'session',
+              startedAt: new Date(rec.startedAt).toISOString(),
+              durationMs: rec.stoppedAt - rec.startedAt,
+              // THE ANCHOR EVERY SEEK IS RELATIVE TO — see `device.ts`'s `startRecording`. A WebM
+              // stamps its first frame at zero, so without this the console can show the video and
+              // cannot point at the moment a test failed.
+              ...(rec.partial ? { partial: true } : {}),
+            });
+          // Only after the upload succeeded. A recording deleted before the POST lands is evidence
+          // destroyed by the thing that was supposed to preserve it.
+          await unlink(rec.path).catch(() => {});
+        }
+      } catch (e) {
+        console.warn(`[agent] recording for ${name} failed: ${(e as Error).message}`);
+      }
+    }
 
     if (control.screenshot) {
       try {
@@ -1105,7 +1141,7 @@ export class Agent {
    * control plane, so nothing here names an org and nothing here could if it wanted to.
    */
   private async uploadArtifact(
-    sessionId: string, deviceId: string, kind: 'logcat' | 'screenshot',
+    sessionId: string, deviceId: string, kind: 'logcat' | 'screenshot' | 'video',
     bytes: Buffer, filename: string, context?: Record<string, unknown>,
   ): Promise<void> {
     // An unregistered agent has no token to present. Refusing here keeps the failure inside
@@ -1145,9 +1181,11 @@ export class Agent {
   }
 
   private async runRequestedResets(
-    requests: Array<{ deviceId: string; fence: number; sessionId?: string; recovery?: boolean }>,
+    requests: Array<{
+      deviceId: string; fence: number; sessionId?: string; recovery?: boolean; keepVideo?: boolean;
+    }>,
   ): Promise<void> {
-    for (const { deviceId, fence, sessionId, recovery } of requests) {
+    for (const { deviceId, fence, sessionId, recovery, keepVideo } of requests) {
       if (this.resetsInFlight.has(deviceId)) continue;
       const backend = this.backendForDeviceId(deviceId);
       if (!backend) {
@@ -1168,7 +1206,7 @@ export class Agent {
         }
         // BEFORE the reset, because the reset destroys exactly what is being captured — and inside
         // the in-flight guard, so a capture that outlasts a beat cannot start a second one.
-        if (sessionId) await this.captureArtifacts(backend, deviceId, sessionId);
+        if (sessionId) await this.captureArtifacts(backend, deviceId, sessionId, keepVideo === true);
         console.log(`[agent] resetting ${backend.control.info.localId} (fence ${fence})`);
         await this.resetAndRelease(backend, deviceId, fence);
         console.log(`[agent] ${backend.control.info.localId} restored and released`);
@@ -1438,6 +1476,26 @@ export class Agent {
         `${r.actionId}.png`, r.context);
       return;
     }
+    if (r.kind === 'video-start') {
+      if (!control.startRecording) {
+        throw new Error(`${control.info.localId} cannot record: this device tier has no host-side recorder.`);
+      }
+      /**
+       * NOTHING IS UPLOADED HERE, and that is the difference between this verb and every other one
+       * on this pipeline. `screenshot` and `logcat` produce their artifact within the action;
+       * a recording produces its artifact at the END of the session, minutes or hours later, down
+       * the release path in `captureArtifacts`.
+       *
+       * So the action completes as soon as the recorder is running. If the session then ends
+       * without ever being stopped — a worker restart mid-session — the file is left on the device
+       * host and swept at the next bring-up rather than uploaded, because nothing can vouch for
+       * what it contains.
+       */
+      const { startedAt } = await control.startRecording();
+      console.log(`[agent] recording session ${r.sessionId} on ${control.info.localId} from ${new Date(startedAt).toISOString()}`);
+      return;
+    }
+
     if (r.kind === 'logcat') {
       if (!control.dumpLogcat) {
         throw new Error(`${control.info.localId} cannot dump logcat: this device tier has no log path.`);
