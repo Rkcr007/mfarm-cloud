@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { readdir, rm, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { Capability } from '@mfarm/protocol';
 import type {
   DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, LogcatHandle, MediaSource,
-  SignalChannel, SignalOptions,
+  Recording, SignalChannel, SignalOptions,
 } from '../device.ts';
 import { openSignalChannel } from './operator.ts';
 import type { DeviceProfile } from './profiles.ts';
@@ -240,6 +242,8 @@ export class CuttlefishDevice implements DeviceControl {
   private readonly adbSerial: string;
   /** Assigned by cvd at create time, parsed out of its output; needed as a selector afterwards. */
   private groupName?: string;
+  /** Non-null exactly while `record_cvd` is recording this instance — see `startRecording`. */
+  private recording?: { startedAt: number; before: Set<string> };
 
   constructor(opts: CuttlefishOptions) {
     this.opts = { webrtcPort: 8443, gpuMode: 'guest_swiftshader', ...opts };
@@ -268,8 +272,9 @@ export class CuttlefishDevice implements DeviceControl {
       // `recording` USED TO BE HERE AND WAS NEVER IMPLEMENTED. Nothing in the worker started a
       // screenrecord, so the console correctly offered no control for it and the declaration was
       // simply a lie — the one place this codebase broke ADR-0003's rule that a capability is
-      // observed state. It comes back when `startRecording` does. `logcat` and `screenshot` are
-      // here because the methods below now exist.
+      // observed state. `startRecording` exists now, so it comes BACK — but from
+      // `refreshRecordingCapability()` on start(), which stats the recorder on disk, and never from
+      // this list. A host package without `record_cvd` must not claim it.
       capabilities: [
         'screen-stream', 'input-datachannel',
         'app-install', 'logcat', 'screenshot', 'ui-hierarchy',
@@ -369,6 +374,7 @@ export class CuttlefishDevice implements DeviceControl {
 
     // Before the branch, because start() has two exits and both must publish it.
     await this.refreshAbis();
+    await this.refreshRecordingCapability();
 
     // In powerwash mode there is nothing to take and nothing to be stale: the reset is a first-boot
     // restore, so the whole snapshot apparatus below is skipped rather than kept warm for a path
@@ -1038,6 +1044,164 @@ export class CuttlefishDevice implements DeviceControl {
       throw new Error(`screencap did not return a PNG on ${this.info.localId}: ${bytes.subarray(0, 120).toString().trim()}`);
     }
     return { bytes, contentType: 'image/png' };
+  }
+
+  /**
+   * Start cvd's OWN recorder, on the host, for this instance's displays.
+   *
+   * WHY A cvd SUBCOMMAND RATHER THAN ANYTHING IN THIS PROCESS. Cuttlefish's WebRTC streamer already
+   * receives every display frame on the host — that is what makes the live view cost the guest
+   * nothing — and `RecordingManager` tees that same `VideoTrackSourceInterface` into a VP8 encoder
+   * and an mkvmuxer, both on the host. `record_cvd start` is the supported way to reach it
+   * (`StartRecordingDisplayRequest` over the streamer's command channel). The agent starts a
+   * process and later reads a file; it never sees a frame, which is `device.ts`'s standing invariant
+   * and the reason a transcode here would be a design error rather than an optimisation.
+   *
+   * NO VIEWER IS REQUIRED. Sources are registered when the streamer publishes a display, not when a
+   * browser attaches — verified on the farm 2026-09-07 with nothing connected to the operator. That
+   * is the property CI depends on and it is not obvious from the interface.
+   *
+   * WHAT IS RECORDED IS THE DISPLAY, NOT THE SESSION. A device with no snapshot-restored display
+   * publishes no frames at all (ADR-0007: a snapshot-restored Cuttlefish never publishes one), and
+   * an idle device publishes very few — measured, an untouched device records a 110-byte empty
+   * container. Neither is an error here and neither is worth failing a session over.
+   */
+  async startRecording(): Promise<{ startedAt: number }> {
+    if (this.recording) throw new Error(`${this.info.localId} is already recording`);
+
+    /**
+     * The files already there, so `stopRecording` can tell ITS recording from an older one.
+     *
+     * Not "the newest file", and not the timestamp in the name. `RecordingManager` names files with
+     * `rtc::TimeMillis()`, which on Linux is a MONOTONIC clock since the streamer started — a
+     * number that looks like an epoch millisecond, sorts like one, and is not one. Comparing it to
+     * `Date.now()` would silently pick the wrong file forever.
+     */
+    const before = new Set<string>();
+    for (const dir of await this.recordingDirs()) {
+      for (const n of await readdir(dir).catch(() => [])) before.add(join(dir, n));
+    }
+
+    await run(this.recordCvdPath(), ['start', `--instance_num=${this.opts.instanceNum}`],
+      this.opts.imageDir, 60_000);
+
+    // AFTER the call, not before it. The anchor has to be as close to the first frame as this side
+    // can observe, and `record_cvd` returning is the closest observable moment there is.
+    const startedAt = Date.now();
+    this.recording = { startedAt, before };
+    return { startedAt };
+  }
+
+  /**
+   * Stop recording, and either hand over the file or destroy it.
+   *
+   * `keep` IS THE DEFAULT PATH TO DELETION and that is deliberate — see `device.ts`. At §4.4's
+   * arithmetic a saturated two-device farm fills the control plane's disk in about a day and a
+   * third, so the overwhelming majority of recordings must never leave this host.
+   *
+   * A FAILED STOP STILL LOOKS FOR THE FILE. If `record_cvd` cannot reach the streamer — the device
+   * crashed, cvd died, the host is thrashing — whatever mkvmuxer had already written is still on
+   * disk, and a recording of the crash is often the most useful artifact the session produced. It
+   * comes back flagged `partial`, never silently as a complete recording.
+   */
+  async stopRecording({ keep }: { keep: boolean }): Promise<Recording | null> {
+    const state = this.recording;
+    this.recording = undefined;
+    if (!state) return null;
+
+    let partial = false;
+    try {
+      await run(this.recordCvdPath(), ['stop', `--instance_num=${this.opts.instanceNum}`],
+        this.opts.imageDir, 60_000);
+    } catch (e) {
+      partial = true;
+      console.warn(`[cuttlefish] ${this.info.localId}: record_cvd stop failed: ${(e as Error).message}`);
+    }
+
+    /**
+     * mkvmuxer finalizes the segment on stop and the file is still being flushed when the command
+     * returns. Reading the size immediately reported **110 bytes for a recording that was 300 KB**
+     * — a number that reads exactly like a recorder which never captured anything, which is the
+     * most expensive way for this to be wrong.
+     */
+    await sleep(1500);
+
+    const file = await this.newestRecordingSince(state.before);
+    if (!file) return null;
+
+    if (!keep) {
+      await rm(file.path, { force: true }).catch(() => {});
+      return null;
+    }
+    return { path: file.path, bytes: file.bytes, startedAt: state.startedAt, stoppedAt: Date.now(), partial };
+  }
+
+  /** `record_cvd` ships in the cvd host package, beside every other host tool. */
+  private recordCvdPath(): string {
+    return join(this.opts.imageDir, 'bin', 'record_cvd');
+  }
+
+  /**
+   * Every directory cvd might be writing this instance's recordings into.
+   *
+   * `PerInstancePath("recording/")` hangs off cvd's OWN per-group HOME
+   * (`/var/tmp/cvd/<uid>/<group>/home/...`), not the user's, and cvd mints a fresh group id every
+   * time a group is created — so this cannot be computed once and cached across a reset.
+   *
+   * Two sources, in order. `cvd fleet` reports `instance_dir` and is authoritative; it also
+   * "frequently dies in its own gflags XML parser" on 1.55.1 (HANDOFF), so a scan of the cvd root is
+   * the fallback rather than the primary. Returning EVERY match rather than the first is the fix for
+   * a bug that cost a measurement: the first match belonged to another instance's group and the
+   * lookup reported no recordings while six sat on disk.
+   */
+  private async recordingDirs(): Promise<string[]> {
+    const dirs: string[] = [];
+    const fromFleet = (await this.findExisting().catch(() => undefined))?.instanceDir;
+    if (fromFleet) dirs.push(join(fromFleet, 'recording'));
+
+    const root = `/var/tmp/cvd/${process.getuid?.() ?? ''}`;
+    for (const group of await readdir(root).catch(() => [])) {
+      const dir = join(root, group, 'home', 'cuttlefish', 'instances', `cvd-${this.opts.instanceNum}`, 'recording');
+      if (!dirs.includes(dir)) dirs.push(dir);
+    }
+
+    const exists: string[] = [];
+    for (const d of dirs) if (await stat(d).then(() => true).catch(() => false)) exists.push(d);
+    return exists;
+  }
+
+  /** The newest `.webm` that was not there when recording started. */
+  private async newestRecordingSince(before: Set<string>):
+  Promise<{ path: string; bytes: number } | null> {
+    let best: { path: string; bytes: number; mtimeMs: number } | null = null;
+    for (const dir of await this.recordingDirs()) {
+      for (const name of await readdir(dir).catch(() => [])) {
+        if (!name.endsWith('.webm')) continue;
+        const path = join(dir, name);
+        if (before.has(path)) continue;
+        const st = await stat(path).catch(() => null);
+        if (st && (!best || st.mtimeMs > best.mtimeMs)) {
+          best = { path, bytes: st.size, mtimeMs: st.mtimeMs };
+        }
+      }
+    }
+    return best ? { path: best.path, bytes: best.bytes } : null;
+  }
+
+  /**
+   * Declare `recording` only where the recorder is actually on disk.
+   *
+   * THE RULE THIS FILE ONCE BROKE. `recording` sat in this device's capability list for months with
+   * nothing behind it — no worker code started anything — which is ADR-0003's rule inverted: a
+   * capability is observed state, not configuration. It is back now, and it is back conditionally,
+   * because a host package built before `RecordingManager` replaced the old `--record_screen` flag
+   * genuinely does not have this tool.
+   */
+  private async refreshRecordingCapability(): Promise<void> {
+    const has = await stat(this.recordCvdPath()).then(() => true).catch(() => false);
+    const listed = this.info.capabilities.includes('recording');
+    if (has && !listed) this.info.capabilities = [...this.info.capabilities, 'recording'];
+    if (!has && listed) this.info.capabilities = this.info.capabilities.filter((c) => c !== 'recording');
   }
 
   /**

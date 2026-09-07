@@ -49,9 +49,20 @@
 //   ALTERNATE=1 node deploy/measure-encode-cost.mjs      # A,B,A,B… rather than AAA,BBB
 //
 // RUNS ON THE DEVICE HOST, where adb can see the devices.
+//
+// ---------------------------------------------------------------- reused by measure-video-cost.mjs
+//
+// S5 needed the same experiment against a THIRD arm — cvd's host-side recorder — and the parts
+// worth sharing are the gesture, the panel geometry and the round structure, not just the parsers.
+// So `round` takes an injected recorder rather than knowing about `screenrecord`, and the pieces
+// below are exported. Run directly, this file behaves exactly as it did when it produced the
+// numbers in `docs/EXECUTION_MODEL.md` §4.4 — the default recorder IS `screenrecord`, and that is
+// what keeps those numbers reproducible rather than merely recorded.
 
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import { layerCandidates, parseLatency, frameStats } from './verify-render.mjs';
 
 const exec = promisify(execFile);
@@ -70,11 +81,11 @@ const note = (m) => console.log(`  \x1b[33m·\x1b[0m ${m}`);
 const ok   = (m) => console.log(`  \x1b[32m✓\x1b[0m ${m}`);
 const bad  = (m) => console.log(`  \x1b[31m✗\x1b[0m ${m}`);
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const adb = (serial, args, opts = {}) =>
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export const adb = (serial, args, opts = {}) =>
   exec('adb', ['-s', serial, ...args], { maxBuffer: 32 * 1024 * 1024, ...opts });
 
-async function firstDevice() {
+export async function firstDevice() {
   const { stdout } = await exec('adb', ['devices']);
   const serial = stdout.split('\n').slice(1)
     .map((l) => l.trim()).filter((l) => l.endsWith('\tdevice'))
@@ -84,7 +95,7 @@ async function firstDevice() {
 }
 
 /** The canvas layer SurfaceFlinger is presenting for this app. */
-async function canvasLayer(serial) {
+export async function canvasLayer(serial) {
   const { stdout } = await adb(serial, ['shell', 'dumpsys', 'SurfaceFlinger', '--list']);
   const candidates = layerCandidates(stdout, PKG);
   if (!candidates.length) throw new Error(`no SurfaceFlinger layer for ${PKG} — is it foreground?`);
@@ -98,25 +109,20 @@ async function canvasLayer(serial) {
  * the gesture would sample a moving window and make the two arms differ by when they were read
  * rather than by what they did.
  */
-async function round(serial, layer, geometry, { recording }) {
-  let rec = null;
-  if (recording) {
-    /**
-     * The same invocation `capture.ts` uses for the live view, streamed to /dev/null.
-     *
-     * TO STDOUT AND DISCARDED, not to a file on the device. Writing to the guest's own storage
-     * would add I/O the real path does not have — `capture.ts` streams `exec-out` — and would
-     * measure the emulated disk rather than the encoder.
-     */
-    rec = spawn('adb', ['-s', serial, 'exec-out', 'screenrecord', '--output-format=h264', '-'],
-      { stdio: ['ignore', 'ignore', 'ignore'] });
-    // The encoder takes a moment to start; measuring the ramp-up would flatter the recording arm.
-    await sleep(2500);
-    if (rec.exitCode !== null) throw new Error('screenrecord exited immediately');
-  }
+export async function round(serial, layer, geometry, { recorder = null } = {}) {
+  if (recorder) await recorder.start();
 
   try {
+    /**
+     * Host CPU is sampled across THE GESTURE ONLY, not across the whole round.
+     *
+     * The first version bracketed the entire round, recorder start and stop included — and those
+     * add about four seconds of deliberate idle waiting that the no-recording arm does not have.
+     * The busy fraction came out LOWER while recording than while not, which reads as "recording
+     * makes the host cheaper" and is really "these two windows are not the same window".
+     */
     await adb(serial, ['shell', 'dumpsys', 'SurfaceFlinger', '--latency-clear']);
+    const cpuBefore = await cpuSnapshot();
 
     /**
      * TWO GESTURES, because the answer differs by workload and the difference is the whole design.
@@ -146,35 +152,97 @@ async function round(serial, layer, geometry, { recording }) {
       }
     }
 
+    const hostCpuPct = cpuBusyPct(cpuBefore, await cpuSnapshot());
     const { stdout } = await adb(serial, ['shell', 'dumpsys', 'SurfaceFlinger', '--latency', `'${layer}'`]);
     const { refreshNs, presents } = parseLatency(stdout);
-    return frameStats(refreshNs, presents);
+    return { ...frameStats(refreshNs, presents), hostCpuPct };
   } finally {
-    if (rec) { rec.kill('SIGINT'); await sleep(500); rec.kill('SIGKILL'); }
+    if (recorder) await recorder.stop().catch(() => {});
   }
 }
 
-const median = (xs) => {
+/**
+ * Host CPU busy fraction between two `/proc/stat` reads.
+ *
+ * THE WHOLE HOST, not the encoder process. What can hurt a guest is the machine running out of
+ * cores; attributing that to one PID would answer a narrower question, and would miss encoder
+ * threads that live inside the long-running `cvd_internal_webrtc` process rather than in a child of
+ * ours. Null off Linux, where this file's experiments do not run anyway.
+ */
+export async function cpuSnapshot() {
+  const line = await readFile('/proc/stat', 'utf8').then((t) => t.split('\n')[0]).catch(() => null);
+  if (!line) return null;
+  const v = line.trim().split(/\s+/).slice(1).map(Number);
+  return { idle: v[3] + (v[4] ?? 0), total: v.reduce((a, b) => a + b, 0) };
+}
+export const cpuBusyPct = (a, b) => {
+  if (!a || !b) return null;
+  const dt = b.total - a.total, di = b.idle - a.idle;
+  return dt > 0 ? ((dt - di) / dt) * 100 : null;
+};
+
+/**
+ * The guest-side arm: `screenrecord`, exactly as `capture.ts` runs it for the live view.
+ *
+ * TO STDOUT AND DISCARDED, not to a file on the device. Writing to the guest's own storage would
+ * add I/O the real path does not have — `capture.ts` streams `exec-out` — and would measure the
+ * emulated disk rather than the encoder.
+ */
+export function screenrecordRecorder(serial) {
+  let rec = null;
+  return {
+    async start() {
+      rec = spawn('adb', ['-s', serial, 'exec-out', 'screenrecord', '--output-format=h264', '-'],
+        { stdio: ['ignore', 'ignore', 'ignore'] });
+      // The encoder takes a moment to start; measuring the ramp-up would flatter the recording arm.
+      await sleep(2500);
+      if (rec.exitCode !== null) throw new Error('screenrecord exited immediately');
+    },
+    /**
+     * KILLING THE adb CLIENT DOES NOT RELIABLY KILL `screenrecord` IN THE GUEST, and the orphan
+     * keeps encoding until the platform's 180-second cap.
+     *
+     * Found 2026-09-07 by `measure-video-cost.mjs`: a four-arm run reported the HOST-side recorder
+     * costing 31% of the frame rate, which an A/C-only run then reproduced as 0.1% across twelve
+     * rounds. The difference was this arm's leftovers running through later rounds. A measurement
+     * that contaminates the arms after it is worse than no measurement, because the number it
+     * produces is confident.
+     */
+    async stop() {
+      if (!rec) return;
+      rec.kill('SIGINT'); await sleep(500); rec.kill('SIGKILL'); rec = null;
+      await exec('adb', ['-s', serial, 'shell', 'pkill', '-f', 'screenrecord']).catch(() => {});
+      await sleep(500);
+    },
+  };
+}
+
+export const median = (xs) => {
   const s = [...xs].filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
   return s.length ? s[Math.floor(s.length / 2)] : null;
 };
 
-function summariseArm(rounds) {
+export function summariseArm(rounds) {
   return {
     fps: median(rounds.map((r) => r.fps)),
     jankPct: median(rounds.map((r) => r.jankPct)),
+    hostCpuPct: median(rounds.map((r) => r.hostCpuPct)),
     droppedFrames: median(rounds.map((r) => r.droppedFrames)),
     worstMs: median(rounds.map((r) => r.worstMs)),
     frames: median(rounds.map((r) => r.frames)),
   };
 }
 
-const fmt = (v, digits = 1) => (v === null || v === undefined ? '—' : v.toFixed(digits));
+export const fmt = (v, digits = 1) => (v === null || v === undefined ? '—' : v.toFixed(digits));
 
-async function main() {
-  const serial = await firstDevice();
-  say(`Device ${serial}`);
-
+/**
+ * Get the device to the state a round expects: the workload installed, foreground, and settled,
+ * with the panel geometry and the layer to measure resolved from the device rather than assumed.
+ *
+ * Extracted from `main` so the video arms drive the identical workload. If these two scripts ever
+ * launch the app differently, their numbers stop being comparable and nothing says so.
+ */
+export async function prepareWorkload(serial) {
   const installed = await adb(serial, ['shell', 'pm', 'list', 'packages', PKG])
     .then(({ stdout }) => stdout.includes(PKG)).catch(() => false);
   // A system package (AOSP Settings, for the ordinary-UI arm) is present and has no APK to install.
@@ -208,6 +276,13 @@ async function main() {
 
   const layer = await canvasLayer(serial);
   ok(`measuring layer ${layer}`);
+  return { geometry, layer };
+}
+
+async function main() {
+  const serial = await firstDevice();
+  say(`Device ${serial}`);
+  const { geometry, layer } = await prepareWorkload(serial);
   note(`${ROUNDS} round(s) per arm, ${SWIPES} ${GESTURE} gesture(s) each${ALTERNATE ? ', alternating' : ''}`);
 
   const arms = { plain: [], recording: [] };
@@ -222,7 +297,8 @@ async function main() {
   for (const [i, arm] of order.entries()) {
     process.stdout.write(`  round ${i + 1}/${order.length} (${arm})… `);
     try {
-      const stats = await round(serial, layer, geometry, { recording: arm === 'recording' });
+      const stats = await round(serial, layer, geometry,
+        { recorder: arm === 'recording' ? screenrecordRecorder(serial) : null });
       arms[arm].push(stats);
       console.log(`${fmt(stats.fps)}fps, ${fmt(stats.jankPct)}% jank, worst ${fmt(stats.worstMs, 0)}ms`);
     } catch (e) {
@@ -277,4 +353,10 @@ async function main() {
   }
 }
 
-main().catch((e) => { bad(e.stack ?? e.message); process.exit(1); });
+/**
+ * Only when run directly. `measure-video-cost.mjs` imports `round` and the helpers above, and an
+ * import that also ran a twenty-minute experiment would be a booby trap.
+ */
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => { bad(e.stack ?? e.message); process.exit(1); });
+}

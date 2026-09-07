@@ -90,6 +90,29 @@ export type DeviceHealth =
   | { status: 'degraded'; reason: string; reasonCode?: FailureReason; inputLatencyMs?: number }
   | { status: 'offline'; reason: string; reasonCode?: FailureReason };
 
+/**
+ * A finished screen recording, as a file on the device host.
+ *
+ * A PATH, NEVER BYTES, for `installApp`'s reason inverted: the agent uploads this by streaming it,
+ * and a `Buffer` here would put a whole recording through the agent's heap on the way to an HTTP
+ * request that only wanted a file.
+ */
+export interface Recording {
+  path: string;
+  bytes: number;
+  /** Host wall clock when recording began — see `startRecording`. */
+  startedAt: number;
+  stoppedAt: number;
+  /**
+   * The recorder did not stop cleanly, so the container may have no duration and no cues.
+   *
+   * Carried rather than thrown, because a partial recording of a device that crashed is often the
+   * most valuable artifact a session produces. It must never be presented as the complete record of
+   * an execution, which is what this flag exists to prevent.
+   */
+  partial: boolean;
+}
+
 export interface DeviceControl {
   readonly info: DeviceInfo;
 
@@ -203,6 +226,42 @@ export interface DeviceControl {
    * the two that survives the session ending.
    */
   screenshot?(): Promise<{ bytes: Buffer; contentType: string }>;
+
+  /**
+   * Begin recording this device's screen, and answer with the instant recording began.
+   *
+   * OPTIONAL, and on Cuttlefish it is emphatically NOT `screenrecord`. `deploy/measure-encode-cost.mjs`
+   * measured guest-side encode costing the Flutter canvas a third of its frame rate and doubling
+   * dropped frames on ordinary UI, so a recorder that runs inside the guest changes what the test
+   * observes — which is the one thing evidence must never do (ADR-0027, docs/VIDEO_EVIDENCE.md).
+   * The Cuttlefish implementation drives cvd's own host-side recorder and the guest is not involved.
+   *
+   * A backend that implements this pair declares `recording`. That capability spent months in
+   * `CAPABILITIES` with nothing behind it — the one place this codebase broke ADR-0003's rule that a
+   * capability is observed state — so it is declared only where the recorder is actually present on
+   * disk, never from configuration.
+   *
+   * `startedAt` IS THE WHOLE TIMESTAMP MODEL. A WebM stamps its first frame at zero, so the only
+   * thing relating a video position to a test event is this anchor: `position = eventAt − startedAt`.
+   * It is host wall clock, taken as close to the first frame as this side can observe, and it is
+   * accurate to about a frame interval — not to a millisecond. Anything presented as more precise
+   * than that is presenting a guess.
+   */
+  startRecording?(): Promise<{ startedAt: number }>;
+
+  /**
+   * Stop recording and either keep the file or destroy it.
+   *
+   * `keep` IS A PARAMETER RATHER THAN A SEPARATE `discard()` FOR ONE REASON: video is only
+   * affordable if the overwhelming majority of recordings are deleted (a saturated two-device farm
+   * fills the control plane's disk in ~1.3 days at §4.4's arithmetic). A caller that has to remember
+   * a second call to delete will eventually forget, and the failure mode of forgetting is a full
+   * disk that takes the database with it. Here the deletion is the default path through the code.
+   *
+   * Returns null when there is nothing to hand over — nothing was recording, no file appeared, or
+   * `keep` was false and the file has been deleted. Never returns a path that no longer exists.
+   */
+  stopRecording?(opts: { keep: boolean }): Promise<Recording | null>;
 
   tap(x: number, y: number): Promise<void>;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
