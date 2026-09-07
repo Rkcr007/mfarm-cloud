@@ -1,7 +1,7 @@
 # MFARM — status
 
 **Open this first.** What the product is, what works, what is left, and what it costs to run.
-Re-derived 2026-09-07 at `9788568` / migration 043 / ADR-0029 — every number below was read from the
+Re-derived 2026-09-07 at `5089232` / migration 043 / ADR-0029 — **and deployed**: the farm is running this — every number below was read from the
 code, the farm or `git` on that day, not carried forward from the last version of this page. Two
 numbers on the last version had decayed and are corrected here; see §5.
 
@@ -51,7 +51,8 @@ while the expensive half is off.
 Stopped VMs still bill for disks. Only deleting the disks stops that, and that throws away the farm.
 
 **Current state: `mfarm-lab` STOPPED, `mfarm-cp` RUNNING.** That is the resting state, not a
-half-finished one.
+half-finished one. It was up on 2026-09-07 to verify the execution work on real devices and to take
+the encode measurement, and returned to rest afterwards.
 
 ---
 
@@ -67,7 +68,7 @@ half-finished one.
 | **Agent** | **Working.** One binary, loopback window, no admin rights (ADR-0009). | A device ARRIVING still re-registers the agent — the heartbeat reconciles devices it knows and cannot create one. Deliberate (ADR-0027). |
 | **Deploy / ops** | **Working, gaps instrumented.** `check-deployed.sh` answers "is this farm running `main`?" for the serving image and both checkouts; `verify-live.sh` asks it too. | **Deploy is manual.** A released commit reaches the farm when somebody runs `mfarm-deploy.sh`. Reported now, not closed. |
 | **Observability** | **Working** — Prometheus, Grafana, alert rules, host heartbeat and tunnel metrics. | No worker-side metrics: the agent reports incidents, not gauges. |
-| **Video / recording** | **Not built, deliberately.** Costed, and unbuilt until it can record only failures. | — |
+| **Video / recording** | **Not built. The gate is now measured (2026-09-07) and it decided the design.** `screenrecord` costs the Flutter canvas a third of its frame rate and doubles ordinary UI's dropped frames, so guest-side encode — which is both `screenrecord` and scrcpy — is not available here. | S5 must encode on the HOST, reusing `cvd`'s WebRTC encoder; that path does not exist yet. The immediate alternative is video for physical devices only. `RENDER_BASELINE.md`. |
 | **Execution timeline UI** | **Built (2026-09-07).** A *What happened* card on the run screen, and a *Steps* card on the session screen with the failing WebDriver commands in red (ADR-0029). | Red is reserved for a test failing; an incident is amber. The distinction the run screen already kept, kept here too. |
 | **Failure evidence** | **Built (2026-09-07).** A failed result requests its own screenshot and logcat, each naming the test (migration 040). | Up to one beat — ten seconds — after the assertion. The step trace is what makes a late screenshot readable. |
 | **Queue** | **Working, fair (ADR-0028), and it says where you stand (migration 043).** FIFO within an org, round-robin across them, per-org caps, device-class matching (ADR-0025). A queued caller gets a position and, where one can be proved, an estimate. | The estimate reads the lease, so it is the LATEST a device frees — usually pessimistic — and it is omitted rather than guessed where no lease is readable. |
@@ -101,16 +102,20 @@ from the repo.**
 Rate limiting is in-memory (`apps/api/src/http/server.ts`). Correct for one instance and named as
 such in the code. It is the one module between here and running two.
 
-### 5. Video — the last execution-engine step, and it needs the lab
+### 5. Video — the gate is measured, and it is now a product decision
 
-S5 of [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md), and the only one left. It records **only
-failures**, which S2 and S4 have just made expressible, and reuses the encoder the live view already
-runs rather than adding a second one inside the guest.
+S5 of [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md), the only execution-engine step left, and no
+longer blocked on a measurement: it was taken on the farm on 2026-09-07 and it **ruled out the cheap
+path**. `screenrecord` costs the Flutter canvas 33% of its frame rate and doubles ordinary UI's
+dropped frames, and both `screenrecord` and scrcpy encode in the guest — so the encoder the live
+view already runs cannot be reused under a suite whose timing is being asserted.
 
-**Gated on one measurement, and it cannot be taken from the repo:** what host-side encode costs
-against the `RENDER_BASELINE.md` Flutter-canvas workload, where there is least headroom. That is
-lab hours on `mfarm-lab`. If it perturbs the workload it measures, video ships for physical devices
-only, where the encoder is on the phone's own hardware and the farm's CPU is not in the loop.
+Two honest options, and choosing between them is a product call:
+
+1. **Encode on the host**, reusing `cvd`'s WebRTC encoder at 49–53fps. Correct, and it does not
+   exist yet — this is real work.
+2. **Video for physical devices only**, where the encoder is dedicated silicon on the phone.
+   Available immediately; it is video for the part of the fleet that is currently not serving.
 
 ### 6. A device arriving still restarts the agent
 
@@ -123,9 +128,9 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 | | |
 |---|---|
 | Tests | **1419**, green, across three workspaces plus `deploy` |
-| Migrations | **43 in the repo, 38 applied on the farm** — 039–043 land with the next deploy |
+| Migrations | 43, all applied on the farm |
 | Decisions | 28 ADRs (there is no 0013) |
-| Merged PRs | 126 |
+| Merged PRs | 128 |
 | Defects | 27 recorded, **27 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |

@@ -111,3 +111,68 @@ QHD+ as an opt-in — and the two Samsung profiles are now separated by density 
 Note these numbers are NOT comparable to the table above: different driver (adb `input swipe`
 rather than WebDriver flings), different app, fewer samples. The A/B between rows is the finding;
 the absolute values are not a re-baseline.
+
+---
+
+## What recording costs the thing it records (2026-09-07)
+
+**This is the measurement `EXECUTION_MODEL.md` §4.4 ended by asking for, and the gate on video.**
+§4.4 costed video and stopped with one thing unmeasured: *"what `screenrecord` actually costs on
+this hardware, run against the Flutter canvas workload where there is least headroom. That is a
+lab-hours experiment, not a design question."* `EXECUTION_ROADMAP.md` S5 then made video wait on it.
+
+`deploy/measure-encode-cost.mjs` produces it. It imports `verify-render.mjs`'s own parsers rather
+than reimplementing the arithmetic, drives the device with `adb shell input swipe`, and runs the two
+arms **interleaved** so neither can be measuring the device warming up.
+
+| Workload | arm | fps | jank | dropped | worst frame |
+|---|---|---|---|---|---|
+| Flutter canvas (Saber whiteboard) | nothing recording | **29.9** | 100% | 87 | 51ms |
+| Flutter canvas | `screenrecord` running | **19.9** | 100% | 145 | 68ms |
+| Native list (AOSP Settings) | nothing recording | 30.2 | 55.6% | 36 | 35ms |
+| Native list | `screenrecord` running | 29.5 | **96.8%** | 87 | 54ms |
+
+**The canvas loses a third of its frame rate: −33%.** Reproduced three times — sequentially,
+interleaved, and again after the gesture coordinates were corrected — with a run-to-run spread of
+0.2fps. It is not noise and it is not thermal drift.
+
+**Ordinary UI keeps its frame rate and loses its smoothness.** −2.5% fps looks survivable and is the
+wrong column to read: jank goes from 56% to 97% and **dropped frames multiply by 2.4**, with one
+round of six collapsing to 21fps. This page's own warning is what that means — *"the risk is not red
+suites, it is timing-sensitive assertions and screenshot comparisons silently reading a device three
+frames behind"*. Doubling dropped frames is precisely that risk, arriving quietly.
+
+**Jank saturates on the canvas and says nothing there.** At 30fps on a 60Hz panel every interval is
+longer than 1.5 refresh periods, so both canvas arms read 100% and the column is uninformative.
+fps, dropped frames and worst frame are the ones carrying the finding.
+
+### The conclusion, and what it changes
+
+**Guest-side H.264 encode is not available on Cuttlefish on this host.** Both `screenrecord` and
+scrcpy encode *on the device*, so both are this measurement — which means the encoder
+`workers/agent/src/devices/capture.ts` already runs for the live view is fine to point at a screen
+somebody is watching, and not fine to run under a suite whose timing is being asserted.
+
+That leaves S5 two honest paths, and the measurement chooses between them rather than leaving it
+open:
+
+1. **Record on the host** — §4.4's own first bullet, reusing the encode `cvd`'s WebRTC streamer
+   already performs at 49–53fps. The farm's CPU does the work either way, but *outside* the guest,
+   so it does not compete with the app under test for the same virtual cores. This does not exist
+   yet and is the real S5.
+2. **Ship video for physical devices only** — where the encoder is dedicated silicon on the phone
+   and this host's CPU is not in the loop at all. Available immediately, and honest, but it is video
+   for the part of the fleet that is currently not serving.
+
+### Two caveats on these numbers
+
+**The scroll rows are not comparable to the table at the top of this page.** That one measured 60fps
+for a native list scroll driven by WebDriver flings; these are `adb input swipe` at 120ms, which is
+a different gesture producing a different frame rate. **The A/B within each pair is the finding; the
+absolute values are not a re-baseline** — the same caveat the geometry section above carries.
+
+**The first run of this measured nothing at all** and said so. The gesture coordinates were written
+for a 1080-wide phone and this farm's unprofiled devices are 720×1280, so the scroll ran from
+y=1600 — entirely off-screen. The script reads `wm size` now. A harness that had silently reported
+zero difference instead of "not enough frames to compare" would have sent this decision the wrong
+way, which is the same class of false negative the `gfxinfo` note above describes.
