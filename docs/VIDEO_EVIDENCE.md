@@ -369,11 +369,29 @@ measuring before the farm runs saturated with recording on.
 | 6 | ~~Console~~ — **DONE.** A `<video controls preload="metadata">` in the Evidence card. Play/pause/seek/clock/fullscreen are the browser's. | Brief §9. |
 | 7 | ~~Seek-to-failure~~ — **DONE.** A button per reported failure, seeking `reportedAt − startedAt − 5s`. | Brief §5, and the reason the anchor exists. |
 
-**Everything above is built and unit-tested; `VIDEO_RECORDING` defaults to `off`, so it ships
-inert.** What has NOT happened yet is an end-to-end run on the farm: a real suite, recording on,
-producing a real artifact a person opens in the console. That is the next thing, and this project's
-own history says it is where the remaining defects are — six of them were found by the first real
-handset after 197 green tests.
+**All of it is built, deployed, and verified end to end on the farm — 2026-09-07, `5c6ac36`.**
+`deploy/verify-video.mjs` drives the whole chain against a real Cuttlefish through the real hub:
+
+```text
+17 passed, 0 failed
+  ✓ a video-start action was queued for this session
+  ✓ the worker started the recorder
+  ✓ video artifact f8223720…, 271 KB
+  ✓ it carries the start instant every seek is relative to
+  ✓ the failure locates inside the recording (21.6s in)
+  ✓ the bytes are a real Matroska/WebM container
+  ✓ a range request is served as a 206
+```
+
+The artifact itself, pulled off the farm and probed: **VP8, 720×1280, 21.9s, 156 frames, 277 KB**,
+and a frame extracted at 18s is the device's launcher — real evidence, not a black container.
+
+**One defect was found by doing this that no test could have.** `VIDEO_RECORDING=failures` was set
+in `deploy/.env` and the API never saw it: `.env` is *compose's* env file, and compose passes
+nothing to a service that does not name the variable under `environment:`. The farm was configured
+to record, recorded nothing, and reported no error — there is nothing to log, because falling back
+to a documented default is exactly what the code should do. Fixed in `docker-compose.prod.yml` with
+a test that checks the **deployment** rather than the code (PR #138).
 
 **Range requests (step 5) are not optional.** Without `Accept-Ranges`, Chrome downloads the whole
 file before it will play and cannot seek at all — which turns "what happened before the failure?"
