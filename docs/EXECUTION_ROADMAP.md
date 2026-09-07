@@ -274,30 +274,42 @@ the phone's dedicated hardware and the farm's CPU is not in the loop at all.
 
 ---
 
-## S6 — A queued caller is told nothing
+## S6 — A queued caller is told nothing — **BUILT (2026-09-07)**
 
-`POST /v1/sessions` answers a queued caller with `"No device is free right now. The session is queued
-and will start automatically."` (`sessions.ts:186`) — no position, no estimate. `mfarm run` then
-prints *"waiting up to 300s"* and either starts or exits 75. For fifteen minutes, in a CI log, that
-is indistinguishable from a hang.
+`POST /v1/sessions` answered a queued caller with *"No device is free right now"* and nothing else;
+`mfarm run` then printed *"waiting up to 300s"*. Over fifteen minutes of a CI log that is
+indistinguishable from a hung process, and a person who cannot tell the difference kills the job.
 
-**Schema.** None. Everything needed is already stored: `sessions.created_at` gives position,
-`sessions.expires_at` on the leases ahead of you gives the estimate, and the sessions list read
-already carries the lease for exactly this reason (`sessions.ts:331`).
+**Schema — migration 043.** `queue_standing(org, session)`, `SECURITY DEFINER` because a caller has
+to be told how many sessions are ahead of them *including other orgs'* — that is what makes the
+number true — and RLS correctly hides those rows. The disclosure is bounded by what comes back:
+**a count and a timestamp, never a row.**
 
-**Code.**
+**The position counts the way the queue drains.** ADR-0028 made promotion round-robin across orgs,
+so position is the number of sessions whose `(queue_rank, created_at)` sorts before this one — the
+same ordering `promote_queued` walks. A global `created_at` rank is the obvious implementation and
+would now disagree with the scheduler: it would tell the second org's first session it was 26th when
+it is next. **A queue position that does not match how the queue drains is worse than none, because
+a person plans around it.**
 
-- A `queuePosition(orgId, sessionId)` in `allocator.ts`: rank among `QUEUED` for the matching device
-  class, plus the earliest `expires_at` among the leases that could free a matching device.
-- `POST /v1/sessions` and `GET /v1/sessions/:id` return `{position, ahead, estimatedStartAt}` while
-  `QUEUED`. `estimatedStartAt` is **nullable and often null** — a lease that ends early makes it
-  pessimistic and a suite that renews makes it optimistic. A null is honest; a confident wrong number
-  is the thing that makes people stop trusting a queue.
-- `apps/cli/src/run.ts` — the progress line becomes `queued: 3rd of 7, a device frees up in ~4m`,
-  refreshed on the poll it already makes.
-- The console gains a queue depth line on the Runs screen.
+**The estimate is pessimistic, and often absent.** It reads the *lease* — the latest a session may
+run, not when it will end — so the real wait is usually shorter, and the wording says "at the
+latest". Where nothing can be proved it is **null and the field is omitted**, never guessed: a
+confident wrong number is what makes people stop trusting a queue. It is also matched on the device
+class asked for, so a lease on a device that could not serve this session is not counted.
 
----
+**Code.** Both `POST /v1/sessions` and `GET /v1/sessions/:id` return `session.queue` — the polling
+endpoint matters more, since the POST's answer is stale by the second poll and watching the position
+move is most of what makes a wait tolerable. Both calls are best-effort: a standing that cannot be
+computed must never turn a successful queue into a 500. `mfarm run` prints
+`queued: 3rd in line, 2 ahead — a device frees up in ~4m at the latest`, **only when the position
+changes**, so a loop backing off from 1s to 10s does not bury the signal in identical lines.
+
+**Verified.** Five tests: the position against the round-robin ordering (org B arrives *fourth* and
+is *second*), cross-tenant refusal, a promoted session having no standing without that being an
+error, null rather than a guess when no lease is readable, and the estimate ignoring a device of the
+wrong class. The last one failed first on `devices_tier_check` — `emulator` is not a tier this
+schema has, `avd` is.
 
 ## S7 — The reliability ceilings
 
@@ -324,9 +336,10 @@ host, then the rate limiter.
 3. ~~**S3 command trace**~~ — **done**, migration 041 / ADR-0029.
 4. ~~**S4 timeline + screen**~~ — **done**, migration 042.
 5. **S5 video** — affordable only after S2/S4 make "record only failures" expressible, and gated on
-   one measurement.
-6. **S6 queue visibility** — smaller than it sounds, and it is most of what "graceful queuing" means
-   to a person watching a CI log.
+   one measurement. **Taken out of order:** S6 was built before it, because S5 cannot start until
+   host-side encode is measured against the `RENDER_BASELINE.md` workload and `mfarm-lab` is
+   stopped. S5 is now the only remaining execution-engine step.
+6. ~~**S6 queue visibility**~~ — **done**, migration 043.
 7. **S7 ceilings** — deploy, then a second host, then the rate limiter.
 
 Each step ships as its own PR with its own migration, and each is verified on a running farm before

@@ -599,3 +599,66 @@ export async function quarantineLog(deviceId: string, limit = 50): Promise<Quara
     }));
   });
 }
+
+/** Where a queued session stands, and when it might start. */
+export interface QueueStanding {
+  /** 1-based, among the sessions that would be promoted before this one. */
+  position: number;
+  /** How many are ahead. `position - 1`, said plainly so a caller need not do the arithmetic. */
+  ahead: number;
+  /**
+   * When a device that could serve this session is next expected to free up, or null.
+   *
+   * NULL IS THE COMMON, HONEST ANSWER and is never a fallback for "we did not look". It means no
+   * lease that could free a matching device has an expiry we can read — which is the case when
+   * every matching device is held by a session with no TTL yet, and when nothing matching is held
+   * at all. **A confident wrong number is what makes people stop trusting a queue**, so this
+   * reports what it can prove and says nothing where it cannot.
+   */
+  estimatedStartAt: Date | null;
+}
+
+/**
+ * Where a queued session stands.
+ *
+ * WHY THIS EXISTS. `POST /v1/sessions` answers a queued caller with "No device is free right now"
+ * and nothing else, and `mfarm run` then prints "waiting up to 300s". Over fifteen minutes of CI
+ * log, that is indistinguishable from a hang — and the difference between a person waiting calmly
+ * and a person killing the job is entirely in whether the queue said anything.
+ *
+ * ---------------------------------------------------------------- position, and what it counts
+ *
+ * Counted the way `promote_queued` actually promotes (ADR-0028): **round-robin across orgs, FIFO
+ * within one**. So a caller's position is the number of sessions whose `(rank, created_at)` sorts
+ * before theirs, where rank is their org's own queue depth at that point.
+ *
+ * Deriving it any other way would be worse than not reporting it. A global `created_at` rank — the
+ * obvious implementation — was correct before ADR-0028 and is now a number that disagrees with the
+ * scheduler: it would tell the second org's first session it was 26th when it is next.
+ *
+ * NOT FILTERED BY DEVICE CLASS. Two sessions queued for different classes do not really contend,
+ * so a class-aware position would be smaller and more accurate — and it would also be a promise
+ * this scheduler does not keep, because `promote_queued` walks its window in rank order regardless
+ * of class and stops at `p_limit`. The honest number is the one that matches how the queue drains.
+ */
+export async function queueStanding(orgId: string, sessionId: string): Promise<QueueStanding | null> {
+  return withTenant(orgId, async (c: PoolClient) => {
+    /**
+     * `withSystem` would be wrong and `withTenant` is not quite enough on its own, so the position
+     * is computed by a definer function: a caller has to be told how many sessions are ahead of
+     * them INCLUDING other orgs', and RLS correctly hides those rows. The function returns a COUNT
+     * and never a row, which is the whole disclosure: "26 ahead of you" says nothing about who.
+     */
+    const { rows } = await c.query<{ queue_position: number | null; free_at: Date | null }>(
+      // `queue_position`, because `position` is SQL-standard syntax and cannot be a column name.
+      'SELECT queue_position, free_at FROM queue_standing($1, $2)', [orgId, sessionId],
+    );
+    const r = rows[0];
+    if (!r || r.queue_position === null) return null;
+    return {
+      position: Number(r.queue_position),
+      ahead: Number(r.queue_position) - 1,
+      estimatedStartAt: r.free_at,
+    };
+  });
+}

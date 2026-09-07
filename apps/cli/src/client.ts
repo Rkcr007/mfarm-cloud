@@ -28,6 +28,16 @@ export interface SessionSummary {
   expiresAt?: string | null;
   endedAt?: string | null;
   endReason?: string | null;
+  /**
+   * Where a QUEUED session stands (migration 043). Absent on every other state, and absent from an
+   * older control plane — so this is read defensively and its absence changes nothing.
+   *
+   * `estimatedStartAt` is itself optional inside it, and often missing. It reads the LEASE of the
+   * session ahead, which is the latest that one may run rather than when it will end, so the real
+   * wait is usually shorter. Where nothing can be proved it is simply not sent, because a confident
+   * wrong number is what makes people stop trusting a queue.
+   */
+  queue?: { position: number; ahead: number; estimatedStartAt?: string | null };
 }
 
 export interface DataPlaneCoordinates {
