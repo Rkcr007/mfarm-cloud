@@ -274,8 +274,14 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
      */
     const failures = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
+        // `has_video` so the console can offer "Watch the failure" only where there is something
+        // to watch. A button that promises a recording and lands on an empty Evidence card is worse
+        // than the generic one it replaced — and the run screen cannot otherwise know, because
+        // artifacts are fetched per session, one screen later.
         `SELECT tr.id, tr.session_id, tr.name, tr.failure, tr.duration_ms, tr.reported_at,
-                tr.failure_class, tr.failure_reason
+                tr.failure_class, tr.failure_reason,
+                EXISTS (SELECT 1 FROM artifacts a
+                         WHERE a.session_id = tr.session_id AND a.kind = 'video') AS has_video
            FROM test_results tr
            JOIN sessions s ON s.id = tr.session_id
           WHERE s.run_id = $1 AND tr.status = 'failed'
@@ -342,6 +348,8 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         failureReason: f.failure_reason ?? null,
         durationMs: f.duration_ms,
         reportedAt: f.reported_at,
+        /** Whether this failure's session left a recording — see the query's comment. */
+        hasVideo: f.has_video === true,
       })),
       incidents: incidents.map((i: Record<string, unknown>) => ({
         id: i.id,

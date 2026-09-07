@@ -3466,3 +3466,131 @@ describe('a blank geometry says whether anybody has asked lately', () => {
     });
   });
 });
+
+/**
+ * Tracing a failure: what the session screen owes somebody who arrived from a red run.
+ *
+ * FOUND BY WALKING THE JOURNEY on the deployed console, not by reading code. The run screen shows
+ * the failure and its message; you press the button beside it; and the session screen rendered the
+ * message NOWHERE — the test's name survived only as the label on a jump button four cards down,
+ * beside the video. You navigate from a failure into the page that exists to explain it and the
+ * failure is gone.
+ */
+describe('a session screen explains the failure that led to it', () => {
+  const VIDEO_STARTED = '2026-09-07T14:44:20.000Z';
+  const FAILED_AT = '2026-09-07T14:44:45.000Z';
+
+  function seedFailedSession() {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    /**
+     * ENDED, and that is the card's own rule rather than a fixture convenience: while a suite is
+     * still running, a half-reported failure list reads as a verdict, and the recording it would
+     * offer to seek does not exist until the device is released.
+     */
+    mod.state.detail = { ...mod.state.detail, state: 'ENDED', endedAt: FAILED_AT };
+    mod.state.sessions = (mod.state.sessions || []).map((x: { id: string }) =>
+      x.id === 'sess-1' ? { ...x, state: 'ENDED', endedAt: FAILED_AT } : x);
+    mod.state.artifacts = {
+      sessionId: 'sess-1',
+      loaded: true,
+      items: [
+        { id: 'art-v', kind: 'video', sizeBytes: 523_000, contentType: 'video/webm',
+          expiresAt: FAILED_AT, context: { startedAt: VIDEO_STARTED } },
+        { id: 'art-l', kind: 'logcat', sizeBytes: 2_200_000, contentType: 'text/plain',
+          expiresAt: FAILED_AT, context: {} },
+      ],
+      failures: [{
+        id: 'tr-9', name: 'checkout applies a promo',
+        failure: 'AssertionError: expected 8 got 10',
+        failureClass: 'test', failureReason: 'assertion-failure',
+        reportedAt: FAILED_AT,
+      }],
+    };
+  }
+
+  test('the failure message is on the page, not only on the run screen', () => {
+    seedFailedSession();
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /checkout applies a promo/, 'the test name');
+    // THE ASSERTION THAT WOULD HAVE CAUGHT THE ORIGINAL GAP. The name appeared as a button label
+    // even before this card existed; the MESSAGE appeared nowhere at all.
+    assert.match(text, /expected 8 got 10/, 'the message the suite reported');
+  });
+
+  test('it offers to watch the recording at the moment it failed', () => {
+    seedFailedSession();
+    // 25s into the recording, less the 5s lead-in — the question is what happened BEFORE.
+    assert.match(textOf(mod.SCREENS.cockpit()), /Watch at 0:20/);
+  });
+
+  test('a session with no reported failure grows no card', () => {
+    seedFailedSession();
+    mod.state.artifacts = { ...mod.state.artifacts, failures: [] };
+    assert.doesNotMatch(textOf(mod.SCREENS.cockpit()), /Watch at/);
+  });
+
+  /**
+   * A FARM ERRAND THAT DID NOT RUN IS NOT A TEST FAILURE.
+   *
+   * On the deployed console two rows read "Failed" in the same red a failing test gets, saying
+   * "the session ended before this action reached the device" — the S2 capture losing a race with a
+   * ten-second beat, working as designed. Somebody scanning a red session read that first.
+   * `EXECUTION_ROADMAP.md` S4 already states the rule for the run screen: red is reserved for a
+   * test failing, an incident stays amber.
+   */
+  test('a farm action that did not run is amber and does not say "failed"', () => {
+    seedFailedSession();
+    mod.state.actions = [{
+      id: 'act-1', kind: 'logcat', sessionId: 'sess-1', deviceId: 'dev-1', appId: null,
+      state: 'FAILED', error: 'The session ended before this action reached the device.',
+      requestedAt: FAILED_AT, finishedAt: FAILED_AT,
+    }];
+    const tree = mod.SCREENS.cockpit();
+    assert.match(textOf(tree), /Did not run/);
+    assert.match(textOf(tree), /farm.s own errands/,
+      'and it says whose failure it is not');
+  });
+});
+
+/**
+ * Reading the captured log in the page.
+ *
+ * The clock arithmetic is the part worth pinning: a wrong answer here silently shows the wrong
+ * fifteen seconds, which is worse than showing none.
+ */
+describe('the captured log can be lined up with the failure', () => {
+  test('a stamped UTC line yields an instant, a level, a tag and a message', () => {
+    const p = mod.parseCapturedLine('2026-09-07 14:44:45.123  1234  5678 E OkHttp: <-- 500 https://api.acme.io');
+    assert.equal(p.at, Date.parse('2026-09-07T14:44:45.123Z'));
+    assert.equal(p.level, 'E');
+    assert.equal(p.tag, 'OkHttp');
+    assert.match(p.message, /500 https:\/\/api\.acme\.io/);
+  });
+
+  test('a line with no year cannot be placed on the clock, and says so with null', () => {
+    // The format every log captured before the agent started passing `-v year -v UTC`. Guessing a
+    // year AND a zone would put the window in the wrong place while looking perfectly confident.
+    const p = mod.parseCapturedLine('09-07 20:14:45.123  1234  5678 W ActivityManager: slow operation');
+    assert.equal(p.at, null, 'unlocatable, never zero');
+    assert.equal(p.level, 'W', 'but the level still filters');
+    assert.equal(p.tag, 'ActivityManager');
+  });
+
+  test('a stack-trace continuation is kept verbatim rather than dropped', () => {
+    // A Java stack trace IS the answer surprisingly often, and it arrives as a dozen lines none of
+    // which match the threadtime shape.
+    const p = mod.parseCapturedLine('\tat com.acme.app.Checkout.apply(Checkout.java:88)');
+    assert.equal(p.at, null);
+    assert.match(p.message, /Checkout\.java:88/);
+  });
+
+  test('the offset into the recording is the failure, less the lead-in, never negative', () => {
+    const video = { context: { startedAt: '2026-09-07T14:44:20.000Z' } };
+    assert.equal(mod.failureOffsetSeconds(video, { reportedAt: '2026-09-07T14:44:45.000Z' }), 20);
+    // A failure reported before the recorder started — a clock skew, or a result posted late from
+    // an earlier attempt — clamps rather than seeking to a negative time.
+    assert.equal(mod.failureOffsetSeconds(video, { reportedAt: '2026-09-07T14:44:00.000Z' }), 0);
+    assert.equal(mod.failureOffsetSeconds({ context: {} }, { reportedAt: '2026-09-07T14:44:45.000Z' }), null,
+      'no anchor, no claim');
+  });
+});
