@@ -1112,22 +1112,45 @@ exit 0
 
   const exists = (p: string) => stat(p).then(() => true).catch(() => false);
 
-  test('an orphaned recorder is stopped, but only where one cannot be ours', async () => {
+  test('a stop is issued at startup, and only reported when there is evidence', async () => {
     const instanceDir = join(dir, 'cvd-1');
     await fleetWithInstanceDir(instanceDir);
     await installRecordCvd(join(instanceDir, 'recording'));
 
+    /**
+     * THE STOP IS ISSUED EVEN WITH NOTHING TO STOP — it is a safety net, and it is cheap.
+     *
+     * But `stopped` stays FALSE, and that is the whole point of this case. Measured on the farm:
+     * `record_cvd stop` prints "stop was successful" and exits 0 against an instance with no
+     * recorder, on a host with no devices booted at all. A first draft reported an abandoned
+     * recorder from that exit code, which would have logged a warning on every clean boot of every
+     * device. A control that cries wolf every morning is not a control.
+     */
     const d = device();
-    const r = await d.reconcileRecordings(60_000, { stopOrphans: true });
-    assert.equal(r.stopped, true);
+    const quiet = await d.reconcileRecordings(60_000, { stopOrphans: true });
     assert.match(await callTo('record_cvd', 'stop'), /--instance_num=1/);
+    assert.equal(quiet.stopped, false, 'an exit code that is always 0 is not evidence');
 
-    // WITHOUT the flag there is no stop at all. This is the guard that keeps a housekeeping pass
-    // from killing a recording in progress: on a reset the recorder COULD be ours, and a sweep that
-    // can stop a live one is worse than the leak it is cleaning up.
+    // A recording written seconds ago, at a moment when this agent has started none, IS evidence.
+    await writeFile(join(instanceDir, 'recording', 'recording_cvd-1_display_0_999.webm'), 'live');
     const d2 = device();
-    const r2 = await d2.reconcileRecordings(60_000);
-    assert.equal(r2.stopped, false);
+    const found = await d2.reconcileRecordings(60_000, { stopOrphans: true });
+    assert.equal(found.stopped, true, 'a file written seconds ago is a live encoder');
+  });
+
+  test('no stop is issued without the flag, whatever is on disk', async () => {
+    const instanceDir = join(dir, 'cvd-1');
+    await fleetWithInstanceDir(instanceDir);
+    await installRecordCvd(join(instanceDir, 'recording'));
+    await writeFile(join(instanceDir, 'recording', 'recording_cvd-1_display_0_888.webm'), 'live');
+
+    // The guard that keeps housekeeping from killing a recording in progress: on a reset the
+    // recorder COULD be ours, and a sweep that can stop a live one is worse than the leak.
+    const d = device();
+    const r = await d.reconcileRecordings(60_000);
+    assert.equal(r.stopped, false);
+    assert.equal((await calls()).some((c) => c.startsWith('record_cvd ')), false,
+      'a reset-time sweep must never issue a stop');
   });
 
   test('a recording this agent started is never stopped by reconciliation', async () => {
