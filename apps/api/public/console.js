@@ -197,6 +197,8 @@ export const state = {
   artifacts: { sessionId: null, items: [], failures: [], loaded: false },
   /** The `?watch=` intent already acted on, so a re-render does not re-seek — see `sessionFailureCard`. */
   watchHonoured: null,
+  /** This org's evidence retention (migration 046). Loaded by the Settings screen. */
+  retention: { loaded: false, saving: false, retentionDays: null, autoDelete: null, maxDays: null },
   /**
    * The CAPTURED log — the artifact a finished session left behind, read in the page.
    *
@@ -1112,6 +1114,89 @@ function capturedLogCard(sess) {
   );
 }
 
+async function loadRetention() {
+  if (state.retention.loaded || state.retention.saving) return;
+  try {
+    const r = await api('/v1/account/retention');
+    state.retention = { ...state.retention, ...r, loaded: true };
+  } catch {
+    // A farm that predates migration 046 answers 404. The card says it is unavailable rather than
+    // showing a control that cannot save — which is the failure mode this codebase calls a
+    // capability claimed on a false premise.
+    state.retention = { ...state.retention, loaded: true, retentionDays: null };
+  }
+  scheduleRender();
+}
+
+async function saveRetention(patch) {
+  state.retention = { ...state.retention, saving: true };
+  scheduleRender();
+  try {
+    const r = await api('/v1/account/retention', { method: 'PATCH', body: patch });
+    state.retention = { ...state.retention, ...r, loaded: true, saving: false };
+    toast('Saved', r.autoDelete
+      ? `Evidence is deleted after ${r.retentionDays} day${r.retentionDays === 1 ? '' : 's'}.`
+      : 'Evidence is kept until you delete it.', 'ok');
+  } catch (e) {
+    state.retention = { ...state.retention, saving: false };
+    toast('Could not save', e.message, 'bad');
+  }
+  scheduleRender();
+}
+
+/**
+ * How long this org's evidence lives.
+ *
+ * IT USED TO BE AN ENVIRONMENT VARIABLE ON THE BOX — one number for every org, invisible from the
+ * console, changeable only by whoever had SSH. A person could see "kept until 21/09/2026" on an
+ * artifact and had no way to find out who decided that or to shorten it.
+ *
+ * ADMIN ONLY TO CHANGE, readable by anyone: shortening retention deletes other people's evidence on
+ * their behalf, which is the bar `Team` already holds for removing a member.
+ *
+ * THE ONE THING THAT SURPRISES PEOPLE is stated on the card rather than in a tooltip: the expiry is
+ * stamped when evidence is captured, so a change moves what comes next and not what is already
+ * stored. A setting that silently fails to do what its name implies is worse than no setting.
+ */
+function retentionCard(admin) {
+  if (!state.retention.loaded) { void loadRetention(); }
+  const r = state.retention;
+  if (r.loaded && r.retentionDays === null) {
+    return card('Evidence retention', {}, h('p', { class: 'caption', text:
+      'This farm does not report a retention setting — it is running a build from before evidence '
+      + 'retention became an org setting.' }));
+  }
+  if (!r.loaded) return card('Evidence retention', {}, h('p', { class: 'caption', text: 'Loading…' }));
+
+  const choices = [1, 3, 7, 14, 30].filter((d) => !r.maxDays || d <= r.maxDays);
+  return card('Evidence retention', {
+    aside: h('span', { class: 'caption', text: r.autoDelete ? `${r.retentionDays} days` : 'kept until deleted' }),
+  },
+    h('p', { class: 'caption mb-sm', text:
+      'Logs, screenshots and recordings are deleted automatically after this long. Sessions, runs '
+      + 'and their results are not touched — only the files.' }),
+    h('div', { class: 'row tight wrap' },
+      ...choices.map((d) => h('button', {
+        class: `levelchip${r.autoDelete && r.retentionDays === d ? ' on' : ''}`,
+        type: 'button', disabled: !admin || r.saving,
+        onclick: () => saveRetention({ retentionDays: d, autoDelete: true }),
+      }, `${d} day${d === 1 ? '' : 's'}`)),
+      h('button', {
+        class: `levelchip${r.autoDelete ? '' : ' on'}`,
+        type: 'button', disabled: !admin || r.saving,
+        onclick: () => saveRetention({ autoDelete: false }),
+      }, 'keep until deleted'),
+    ),
+    h('p', { class: 'caption mt-sm', text:
+      'The expiry is stamped when evidence is captured, so this applies to what comes next — it '
+      + 'does not shorten what is already stored, and it cannot bring back what has gone.' }),
+    r.maxDays
+      ? h('p', { class: 'caption', text: `This farm keeps evidence for at most ${r.maxDays} days.` })
+      : null,
+    admin ? null : h('p', { class: 'caption mt-sm', text: 'Only an owner or admin can change this.' }),
+  );
+}
+
 async function refreshOrg() {
   const [members, keys] = await Promise.all([
     api('/v1/account/members'),
@@ -1715,10 +1800,14 @@ function askRelease(sess) {
       'session state, and anything typed or cached',
       'the WebDriver session, if a suite is attached',
     ],
-    // The design's reassurance names screenshots, video and logcat. None of those are captured
-    // anywhere in this system, so promising they survive would be a comforting lie. The action log
-    // is what genuinely outlives the session, so that is what this says.
-    keeps: 'The action log for this session stays available.',
+    /**
+     * CORRECTED 2026-09-08. This used to read "None of those are captured anywhere in this system,
+     * so promising they survive would be a comforting lie" — true when written, and false since the
+     * artifact store (019), the on-demand captures (022, 040) and video (045). The evidence a
+     * release produces is now the main reason to press this button, and the dialog was still
+     * apologising for not having it.
+     */
+    keeps: 'The logcat, a final screenshot and the recording are captured as the device is released.',
     confirm: 'Release & reset',
     onConfirm: () => releaseSession(sess.id),
   });
@@ -5258,7 +5347,19 @@ function toolsCard(sess, live) {
     sess.state === 'QUEUED'
       ? h('p', { class: 'help', text: 'No device has been allocated yet, so there is nothing to send to. These become available the moment the farm hands one over.' })
       : !live
-        ? h('p', { class: 'help', text: 'This session has ended. Nothing can be sent to the device.' })
+        ? h('div', { class: 'stack tight' },
+            h('p', { class: 'help', text: 'This session has ended. Nothing can be sent to the device.' }),
+            /**
+             * The only destructive control on this screen, and it is here rather than beside the
+             * evidence for a reason: deleting the RECORD is a different act from deleting the
+             * files, and putting them side by side invites the heavier one to be pressed by
+             * accident. Admin only, for the same reason shortening retention is.
+             */
+            isOrgAdmin()
+              ? btn('Delete this session', 'tiny ghost', () => askPurgeSession(sess),
+                  { title: 'Removes the session and its evidence from the record. Usage is kept.' })
+              : null,
+          )
         : !state.apps.length
           ? empty('No builds yet.', 'Upload an APK on the Apps screen first.')
           : !canInstall
@@ -5670,6 +5771,80 @@ function videoPlayer(video, failures) {
   );
 }
 
+/**
+ * Deleting evidence, and saying exactly what goes.
+ *
+ * `confirmDialog`'s `removes`/`keeps` pair is the right shape for this and already carries the
+ * house style: name what disappears, then name what survives. The second half matters more here
+ * than anywhere else in the console — somebody deleting a 40 MB recording wants to know they are
+ * not also deleting the record that the test failed.
+ */
+function askDeleteArtifact(sess, artifact) {
+  confirmDialog({
+    title: `Delete this ${artifact.kind}?`,
+    lead: `${bytes(artifact.sizeBytes)}, captured for this session.`,
+    removes: [`the ${artifact.kind} itself, from the farm's disk`],
+    keeps: 'The session, its steps and any reported failures stay exactly as they are.',
+    confirm: 'Delete',
+    onConfirm: async () => {
+      try {
+        await api(`/v1/artifacts/${encodeURIComponent(artifact.id)}`, { method: 'DELETE' });
+        toast('Deleted', `The ${artifact.kind} is gone.`, 'ok');
+        // Forces the card to re-fetch rather than patching the array by hand: the server is the one
+        // that knows what survived, and a list edited locally drifts from it the first time a
+        // delete half-succeeds.
+        state.artifacts = { sessionId: null, items: [], failures: [], loaded: false };
+        scheduleRender();
+      } catch (e) { toast('Could not delete', e.message, 'bad'); }
+    },
+  });
+}
+
+function askDeleteEvidence(sess, count) {
+  confirmDialog({
+    title: 'Delete all evidence for this session?',
+    lead: `${count} item${count === 1 ? '' : 's'} — the log, any screenshots and the recording.`,
+    removes: ['every captured file for this session'],
+    keeps: 'The session, its steps and any reported failures stay. Only the files go.',
+    confirm: 'Delete evidence',
+    onConfirm: async () => {
+      try {
+        const r = await api(`/v1/sessions/${encodeURIComponent(sess.id)}/artifacts`, { method: 'DELETE' });
+        toast('Deleted', `${r.deleted} file${r.deleted === 1 ? '' : 's'} removed.`, 'ok');
+        state.artifacts = { sessionId: null, items: [], failures: [], loaded: false };
+        scheduleRender();
+      } catch (e) { toast('Could not delete', e.message, 'bad'); }
+    },
+  });
+}
+
+/**
+ * Deleting the session RECORD — heavier, and deliberately worded to say so.
+ *
+ * The word "release" is already taken on this screen and means the opposite thing (hand the device
+ * back, keep the record), so this dialog never uses it. What actually goes is listed rather than
+ * summarised, because "delete the session" is read by most people as "tidy up a row".
+ */
+function askPurgeSession(sess) {
+  confirmDialog({
+    title: 'Delete this session from the record?',
+    lead: 'It disappears from Runs and from this org\u2019s history. This cannot be undone.',
+    removes: [
+      'the session row, and its place in the run it belonged to',
+      'its steps, its reported results and its evidence',
+    ],
+    keeps: 'Usage and billing for this session are kept — they are what you were charged for.',
+    confirm: 'Delete the session',
+    onConfirm: async () => {
+      try {
+        await api(`/v1/sessions/${encodeURIComponent(sess.id)}/record`, { method: 'DELETE' });
+        toast('Deleted', 'The session is gone from the record.', 'ok');
+        go('#/runs');
+      } catch (e) { toast('Could not delete', e.message, 'bad'); }
+    },
+  });
+}
+
 function evidenceCard(sess, live) {
   const id = sess.id;
   if (state.artifacts.sessionId !== id || !state.artifacts.loaded) {
@@ -5682,7 +5857,14 @@ function evidenceCard(sess, live) {
   const video = arts.find((a) => a.kind === 'video');
 
   return card('Evidence', {
-    aside: h('span', { class: 'caption', text: loaded ? `${arts.length} item${arts.length === 1 ? '' : 's'}` : 'loading…' }),
+    aside: h('span', { class: 'row tight' },
+      h('span', { class: 'caption', text: loaded ? `${arts.length} item${arts.length === 1 ? '' : 's'}` : 'loading…' }),
+      // Only where there is something to delete, and never while the device is still working: a
+      // session that is running is still producing the thing this would remove.
+      loaded && arts.length && !live
+        ? btn('Delete all', 'tiny ghost', () => askDeleteEvidence(sess, arts.length))
+        : null,
+    ),
   },
     // `|| []` because the screen smoke test seeds `state.artifacts` directly and predates this
     // field. A missing list must render a player with no jump buttons, never throw and take the
@@ -5698,17 +5880,34 @@ function evidenceCard(sess, live) {
                 h('span', { class: 'caption', text: bytes(a.sizeBytes) })),
               h('p', { class: 'caption', text: `kept until ${when(a.expiresAt)}` }),
             ),
-            // A plain link rather than a fetch: the blob route streams and sets its own
-            // content-disposition, so the browser renders a PNG and a log correctly without this
-            // file learning the difference between them.
-            h('a', {
-              class: 'btn tiny', href: `/v1/artifacts/${a.id}/blob`,
-              target: '_blank', rel: 'noopener', text: 'Open',
-            }),
+            h('span', { class: 'row tight' },
+              // A plain link rather than a fetch: the blob route streams and sets its own
+              // content-disposition, so the browser renders a PNG and a log correctly without this
+              // file learning the difference between them.
+              h('a', {
+                class: 'btn tiny', href: `/v1/artifacts/${a.id}/blob`,
+                target: '_blank', rel: 'noopener', text: 'Open',
+              }),
+              btn('Delete', 'tiny ghost', () => askDeleteArtifact(sess, a),
+                { title: 'Removes this file from the farm' }),
+            ),
           )))
         : h('p', { class: 'caption' }, live
             ? 'The log and a final screenshot are collected when this device is released and reset.'
             : 'Nothing was captured — either the worker could not reach the device, or these have passed their retention window.'),
+    /**
+     * WHERE THE EXPIRY DATES COME FROM, said next to them.
+     *
+     * Every row already shows "kept until <date>" and nothing said who decided it. A person seeing
+     * a recording expire in three days had no way to know that was their org's setting rather than
+     * a property of the product — so the one sentence that turns a mystery into a control.
+     */
+    loaded && arts.length && !live
+      ? h('p', { class: 'caption mt-sm row tight' },
+          h('span', { text: 'Expiry dates come from this org\u2019s evidence retention.' }),
+          btn('Change it', 'tiny ghost', () => go('#/settings')),
+        )
+      : null,
   );
 }
 
@@ -7554,6 +7753,8 @@ function screenSettings() {
             btn('Done', 'tiny ghost', () => { state.org.newKey = null; render(); }),
           ),
         ) : null,
+
+        retentionCard(admin),
 
         card('API keys', {},
           pending || (state.org.keys.length

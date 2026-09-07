@@ -272,6 +272,93 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
    * either. That is the property content addressing gives away for free and is easy to lose by
    * adding a "download by sha" convenience route. Do not add one.
    */
+  /**
+   * Delete evidence — one artifact, or everything a session left behind (migration 046).
+   *
+   * THE TENANT'S DATA, THE TENANT'S DELETE. Retention used to be an operator's environment variable
+   * applied to everybody and invisible from the console: a person could neither see when a
+   * recording of their checkout flow would go, nor take it off a shared disk sooner. Both doors are
+   * here, and both are scoped to the caller's org inside the SQL rather than by anything in the
+   * request — architecture rule 4, the same rule that keeps a worker from naming its own org.
+   *
+   * ROWS FIRST, FILES SECOND, which is `expire_artifacts`' order and for its reason: crash between
+   * the two and the store holds a file nothing references, which costs disk and breaks nothing. The
+   * other order leaves a row pointing at bytes that are gone, which a person discovers as a 404
+   * while chasing a failure.
+   *
+   * The blob is CONTENT-ADDRESSED and shared, so only `blob_orphaned` may authorise an unlink — two
+   * sessions that captured identical bytes reference one file, and deleting it because one of them
+   * was removed breaks the other's download.
+   */
+  async function removeBlobs(rows: Array<{ sha256: string; blob_orphaned: boolean }>): Promise<number> {
+    let removed = 0;
+    for (const sha of new Set(rows.filter((r) => r.blob_orphaned).map((r) => r.sha256))) {
+      await store.remove(sha);
+      removed++;
+    }
+    return removed;
+  }
+
+  app.delete<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {
+    const { orgId } = requireTenant(req);
+    const rows = await withTenant(orgId, async (c) => (await c.query<{
+      sha256: string; blob_orphaned: boolean;
+    }>('SELECT sha256, blob_orphaned FROM delete_artifact($1, $2)', [orgId, req.params.id])).rows);
+
+    // NOT FOUND rather than "deleted nothing". An id belonging to another org answers exactly like
+    // one that never existed, which is the disclosure boundary every other route here holds.
+    if (!rows.length) throw notFound('Artifact');
+    const blobsDeleted = await removeBlobs(rows);
+    return reply.code(200).send({ deleted: 1, blobsDeleted });
+  });
+
+  app.delete<{ Params: { id: string } }>('/sessions/:id/artifacts', async (req, reply) => {
+    const { orgId } = requireTenant(req);
+    const rows = await withTenant(orgId, async (c) => (await c.query<{
+      sha256: string; blob_orphaned: boolean;
+    }>('SELECT sha256, blob_orphaned FROM delete_session_evidence($1, $2)', [orgId, req.params.id])).rows);
+    const blobsDeleted = await removeBlobs(rows);
+    // 200 with a zero count, not a 404: "this session has no evidence" is a true and useful answer,
+    // and a session whose evidence already expired is the ordinary case rather than a mistake.
+    return reply.code(200).send({ deleted: rows.length, blobsDeleted });
+  });
+
+  /**
+   * Delete the session record itself, and everything that hangs off it.
+   *
+   * SEPARATE FROM THE EVIDENCE DELETE, and much heavier: this removes the WebDriver session, the
+   * commands, the reported results and the attempt ledger by cascade. **Metering survives** —
+   * `metering_events.session_id` is `ON DELETE SET NULL` (001), so billing keeps its rows and merely
+   * forgets which session they came from. Had that been CASCADE this endpoint could not exist: a
+   * tenant would be able to delete its own invoice, which is architecture rule 4 read backwards.
+   *
+   * A LIVE SESSION IS REFUSED by `purge_session`, because deleting one strands its device at a
+   * fence nothing can match and the reaper never releases it.
+   *
+   * `/record` RATHER THAN `DELETE /sessions/:id`, WHICH IS ALREADY TAKEN and means something almost
+   * opposite: `sessions.ts` uses that verb to RELEASE a device — end the lease, restore the
+   * snapshot, hand it back to the pool. Two routes on one method and path is a registration error
+   * in Fastify and would have been a confusing endpoint even if it were not: "delete the session"
+   * has meant "stop using the device" in this API since 001, and the destructive one has to be the
+   * one that says so in its path.
+   */
+  app.delete<{ Params: { id: string } }>('/sessions/:id/record', async (req, reply) => {
+    const { orgId } = requireTenant(req);
+    try {
+      const rows = await withTenant(orgId, async (c) => (await c.query<{
+        sha256: string; blob_orphaned: boolean;
+      }>('SELECT sha256, blob_orphaned FROM purge_session($1, $2)', [orgId, req.params.id])).rows);
+      const blobsDeleted = await removeBlobs(rows);
+      return reply.code(200).send({ deleted: true, blobsDeleted });
+    } catch (e) {
+      // The state guard raises rather than returning, so the message names the state a person can
+      // act on ("release it before deleting it") instead of a generic 500.
+      const msg = (e as { message?: string }).message ?? '';
+      if (/still (QUEUED|ALLOCATING|ACTIVE|ENDING)/.test(msg)) throw conflict('session_live', msg);
+      throw e;
+    }
+  });
+
   app.get<{ Params: { id: string } }>('/artifacts/:id/blob', async (req, reply) => {
     const { orgId } = requireTenant(req);
     const row = await withTenant(orgId, async (c) => {

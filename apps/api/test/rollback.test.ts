@@ -43,6 +43,18 @@ const BASELINE = '022_screenshot_action.sql';
  */
 const ACCEPTED_NEW_CHECKS: string[] = [
   /**
+   * Migration 046, evidence retention. Same shape as the two families below and safe for the same
+   * reason: it constrains ONLY `evidence_retention_days`, a column 046 itself adds to `orgs`,
+   * NOT NULL DEFAULT 3.
+   *
+   * Roll the CODE back and it writes `orgs` exactly as it always did — creating an org names
+   * `slug`, `name` and `max_concurrent` and nothing else — so the column takes its default of 3,
+   * which satisfies `BETWEEN 1 AND 365`. There is no write the old release makes that this rejects,
+   * which is the precise question this guard asks.
+   */
+  'orgs.orgs_evidence_retention_days_check',
+
+  /**
    * Migration 024, failure classification (spec §18). All four constrain ONLY columns that did not
    * exist at the baseline — `failure_class` and `failure_reason`, both nullable and both added by
    * the same migration.
