@@ -204,6 +204,104 @@ const seedDevice = (state: string, age = '0 seconds') =>
     return rows[0].id as string;
   });
 
+describe('the auto-deployer, measured', () => {
+  /**
+   * The gap this closes is the same one `deploy/auto-deploy.sh` exists for, one level up: a timer
+   * that has silently stopped looks exactly like a farm with nothing to deploy. D18 was ninety
+   * minutes of a released commit sitting undeployed with nothing anywhere reporting the gap, and
+   * replacing the forgetful human with a mechanism nobody measures would not have fixed it.
+   *
+   * Every assertion here is about telling "fine" apart from "cannot see", because the whole family
+   * of failures this metric family covers is one of them being reported as the other.
+   */
+  let dir: string;
+
+  const collect = async () => {
+    const { collectAutodeploy, scrape } = await import('../src/metrics.ts');
+    await collectAutodeploy();
+    return scrape();
+  };
+  const touch = async (name: string, agoMs = 0) => {
+    const f = join(dir, name);
+    await writeFile(f, '');
+    if (agoMs) { const t = new Date(Date.now() - agoMs); await utimes(f, t, t); }
+  };
+
+  before(async () => { dir = await mkdtemp(join(tmpdir(), 'mfarm-autodeploy-')); });
+  after(async () => { await rm(dir, { recursive: true, force: true }); delete process.env.DEPLOY_STATE_DIR; });
+
+  test('an unset DEPLOY_STATE_DIR is -1 everywhere, never a healthy zero', async () => {
+    // Zero would read as "the timer ran this instant" and "the farm is up to date" — the two most
+    // reassuring things this metric can say — about a box where the deployer is not installed.
+    delete process.env.DEPLOY_STATE_DIR;
+    const body = await collect();
+    for (const m of ['mfarm_autodeploy_check_age_seconds', 'mfarm_autodeploy_pending_seconds',
+                     'mfarm_autodeploy_blocked', 'mfarm_autodeploy_paused']) {
+      assert.equal(sample(body, m), -1, m);
+    }
+  });
+
+  test('a directory with no completed tick is -1, not a deployer that is merely quiet', async () => {
+    process.env.DEPLOY_STATE_DIR = dir;
+    assert.equal(sample(await collect(), 'mfarm_autodeploy_check_age_seconds'), -1);
+  });
+
+  test('a recent tick reports a small age and a farm that is not pending', async () => {
+    process.env.DEPLOY_STATE_DIR = dir;
+    await touch('last-check');
+    await writeFile(join(dir, 'status'), 'current\n');
+    const body = await collect();
+    const age = sample(body, 'mfarm_autodeploy_check_age_seconds')!;
+    assert.ok(age >= 0 && age < 60, `age was ${age}`);
+    // 0 EXPLICITLY, not absent: an alert on a series that disappears is silent exactly when it
+    // matters, which is the same rule DEVICE_STATES follows.
+    assert.equal(sample(body, 'mfarm_autodeploy_pending_seconds'), 0);
+    assert.equal(sample(body, 'mfarm_autodeploy_blocked'), 0);
+  });
+
+  test('a timer that stopped an hour ago reports an hour, which is what the alert fires on', async () => {
+    process.env.DEPLOY_STATE_DIR = dir;
+    await touch('last-check', 3_600_000);
+    const age = sample(await collect(), 'mfarm_autodeploy_check_age_seconds')!;
+    assert.ok(age > 3500 && age < 3700, `age was ${age}`);
+  });
+
+  test('a farm behind main reports how long it has been behind — D18, as a number', async () => {
+    process.env.DEPLOY_STATE_DIR = dir;
+    await touch('last-check');
+    await touch('pending-since', 1_800_000);
+    const pending = sample(await collect(), 'mfarm_autodeploy_pending_seconds')!;
+    assert.ok(pending > 1700 && pending < 1900, `pending was ${pending}`);
+  });
+
+  test('a blocked commit is the one that pages; waiting and paused are not', async () => {
+    process.env.DEPLOY_STATE_DIR = dir;
+    await touch('last-check');
+    for (const [status, blocked, paused] of [
+      ['blocked', 1, 0], ['paused', 0, 1], ['waiting', 0, 0], ['current', 0, 0],
+    ] as const) {
+      await writeFile(join(dir, 'status'), `${status}\n`);
+      const body = await collect();
+      assert.equal(sample(body, 'mfarm_autodeploy_blocked'), blocked, `blocked for ${status}`);
+      assert.equal(sample(body, 'mfarm_autodeploy_paused'), paused, `paused for ${status}`);
+    }
+  });
+
+  /**
+   * `failed-sha` is the deployer's MEMORY and outlives the incident on purpose — it is what stops
+   * the timer redeploying a bad commit every five minutes. Alerting on the file's existence would
+   * page forever after a farm was fixed by hand, until somebody deleted a file nobody documented,
+   * so the gauge reads the status the last tick actually reached.
+   */
+  test('a leftover failed-sha does not page a farm that has since recovered', async () => {
+    process.env.DEPLOY_STATE_DIR = dir;
+    await touch('last-check');
+    await writeFile(join(dir, 'failed-sha'), 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n');
+    await writeFile(join(dir, 'status'), 'current\n');
+    assert.equal(sample(await collect(), 'mfarm_autodeploy_blocked'), 0);
+  });
+});
+
 describe('backup freshness', () => {
   // The gap these close: the sidecar logged failures and nothing scraped it, so backups could stop
   // for six weeks and every dashboard would look identical.
