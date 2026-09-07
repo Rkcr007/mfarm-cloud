@@ -38,7 +38,104 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Nothing, as of 2026-09-07** — thirty recorded, thirty closed.
+**Four, as of 2026-09-08** — thirty-four recorded, thirty closed. The four below are named at the
+bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
+here rather than being quietly absent.
+
+An exploratory pass over the whole console on 2026-09-08 — every screen, every control, the layout
+measured rather than eyeballed — produced D31 to D34. **Two things it did NOT find are worth
+recording too**, because both look like defects and are not: the sign-in screen's controls remain in
+the DOM after login (all `display:none`, verified genuinely inert by calling `focus()` and checking
+`document.activeElement`, so they are out of the tab order), and the Apps screen's disabled
+**Install** buttons are correct when no `app-install` device is free. A predicate that reports either
+as a defect is a bad predicate — the first draft of the audit had one.
+
+### D34 — a new screen kept the previous screen's scroll position
+
+| | |
+|---|---|
+| **Severity** | S3 — the screen is right and shows the wrong part of itself |
+| **Found** | reasoning about D31's fix before shipping it, then confirmed in the browser |
+| **Closed** | 2026-09-08, in the same series as D31 |
+
+Introduced BY D31's fix and caught with it. While the document scrolled, the browser reset the
+position on every hash change for free. Once `.main` became the scroller that stopped happening, so
+opening a session from the bottom of a long Runs list showed the session's middle. `scrollTop = 0`
+on navigation, not a smooth scroll: this is a navigation rather than a movement within a page, and
+animating it makes the new screen appear to slide out from under the old one.
+
+### D33 — the release dialog apologised for evidence it now captures
+
+| | |
+|---|---|
+| **Severity** | S3 — the console is right and says it badly |
+| **Found** | reading the dialog while adding the delete controls |
+| **Closed** | 2026-09-08 |
+
+`askRelease` promised *"The action log for this session stays available"* under a comment reading
+*"The design's reassurance names screenshots, video and logcat. None of those are captured anywhere
+in this system, so promising they survive would be a comforting lie."*
+
+True the day it was written. False since the artifact store (019), the on-demand captures (022, 040)
+and video (045). The dialog was apologising for not having the evidence that is now the main reason
+to press the button. Another entry for *"Comments as rumour"* — the fourth.
+
+### D32 — deleting a session's evidence freed the rows and not the bytes
+
+| | |
+|---|---|
+| **Severity** | **S2** — silent, unbounded disk growth with nothing to collect it |
+| **Found** | on the farm, minutes after deploying it: `{"deleted":3,"blobsDeleted":0}` |
+| **Closed** | 2026-09-08, migration 047 |
+
+A PROPERTY OF POSTGRES RATHER THAN A TYPO. Migration 046 wrote the function as one statement —
+`WITH gone AS (DELETE ... RETURNING sha256) SELECT ..., NOT EXISTS (SELECT 1 FROM artifacts ...)` —
+and **a data-modifying CTE's effects are not visible to other parts of the same query**. Every
+sub-statement reads the snapshot taken before it ran, so the `EXISTS` found the very rows the CTE
+was deleting and reported every blob as still referenced. Rows went; a 268 KB recording nothing else
+referenced stayed; nothing would ever have come back for it.
+
+`delete_artifact` was never affected — it deletes as its own statement and asks afterwards, which is
+the shape 047 adopts.
+
+**The test agreed with the bug.** It asserted the row count and not the blob count. That is this
+register's most expensive recurring shape, and it is why the fix ships with `blobsDeleted` asserted
+and verified by restoring the 046 form and watching it go red. Three blobs stranded on the farm by
+the live bug were identified by diffing digests on disk against the table (261 rows, 264 files) and
+removed; no row was left without a file, so nothing was broken by it.
+
+### D31 — the nav and the top bar scrolled away
+
+| | |
+|---|---|
+| **Severity** | **S2** — a capability that is unreachable, with no workaround on the page |
+| **Found** | measuring the deployed console rather than looking at it |
+| **Closed** | 2026-09-08 |
+
+`.shell` was `min-height: 100%`, so the DOCUMENT was the scroll container and the sidebar and farm
+status bar scrolled off with the content. Measured: the session screen is **2695px against an 813px
+viewport**, and five of nine screens scrolled the document. A person reading the log or the steps
+had scrolled 1900px and no longer had Fleet, Runs, Health or the "0 of 5 ready" line anywhere on
+screen — on the one screen where *"is the farm even up?"* is the next question they will ask.
+
+`height: 100dvh` on the shell and `overflow-y: auto` on `.main`, so the content pane is the only
+vertical scroller and the chrome stays put. Verified after deploying: `docScrolls=false` on every
+screen, and the sidebar's bottom edge sits exactly at the viewport height while the pane scrolls
+1629px beneath it.
+
+**It also made a piece of polish possible that was not before**: the top bar's hairline strengthens
+once content passes under it, which is the cue every native application uses. Deliberately a
+hairline and not a shadow — `design-tokens.css` reserves depth for the device and says so.
+
+### Known and not fixed
+
+| what | why it is still here |
+|---|---|
+| `Unrecognized Content-Security-Policy directive 'webrtc'` on every page load | Chrome does not implement CSP3's `webrtc` directive. ADR-0007 sets it deliberately; it changes nothing and costs one console warning. Removing it would lose the statement of intent, keeping it costs noise in the place a developer looks for problems. |
+| `mfarm-deploy.sh` reported failure on a deploy that succeeded | A stale container name — `Conflict. The container name "/…_mfarm-api-1" is already in use` — left by an out-of-band `docker compose up -d api`. The new image was running and the migration applied; the script errored and skipped its own verification step, which is the part that matters. |
+| No app network traffic anywhere | `network-capture` is a capability NAME in `protocol.ts` with no implementation. The Steps table is the WebDriver command trace, not what the app under test requested. A per-session proxy is real work and needs its own privacy decision (ADR-0029 stores no bodies). |
+| The Steps table does not collapse repeated successful commands | Nine identical `GET screenshot 200` rows on a short session; hundreds on a real suite, with the interesting one buried. |
+
 
 **This section read "nothing, twenty-eight closed" for about four hours and was wrong the whole
 time.** S5 shipped that afternoon and brought two defects with it: D29, found five minutes after
