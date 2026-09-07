@@ -1,6 +1,45 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
-import { allocate, release } from '../../allocator.ts';
+import { allocate, release, queueStanding, type QueueStanding } from '../../allocator.ts';
+
+/**
+ * The queue standing, as JSON.
+ *
+ * `estimatedStartAt` is nullable and often null, and that is deliberate rather than a gap — see
+ * `queue_standing` in migration 043. A confident wrong number is what makes people stop trusting a
+ * queue, so this reports what can be proved and omits the field where it cannot.
+ */
+const queueJson = (q: QueueStanding) => ({
+  position: q.position,
+  ahead: q.ahead,
+  ...(q.estimatedStartAt ? { estimatedStartAt: q.estimatedStartAt.toISOString() } : {}),
+});
+
+/**
+ * The same thing in a sentence, because the caller most likely to read it is a person watching a
+ * CI log rather than a program.
+ *
+ * "about" and "at the latest" carry the honest shape of the estimate: it reads the LEASE, which is
+ * the latest a session may run rather than when it will actually end, so the real wait is usually
+ * shorter. A queue that is early is a queue people trust.
+ */
+function queueSentence(q: QueueStanding): string {
+  const place = q.ahead === 0
+    ? 'You are next in the queue'
+    : `You are ${q.position}${nth(q.position)} in the queue, behind ${q.ahead} session${q.ahead === 1 ? '' : 's'}`;
+  if (!q.estimatedStartAt) {
+    return `No device is free right now. ${place}; the session will start automatically.`;
+  }
+  const mins = Math.max(1, Math.round((q.estimatedStartAt.getTime() - Date.now()) / 60_000));
+  return `No device is free right now. ${place}. A device frees up in about ${mins} minute`
+    + `${mins === 1 ? '' : 's'} at the latest; the session will start automatically.`;
+}
+
+/** 1st, 2nd, 3rd, 4th. The 11-13 exception is why this is not `['st','nd','rd'][n-1]`. */
+function nth(n: number): string {
+  if (n % 100 >= 11 && n % 100 <= 13) return 'th';
+  return { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] ?? 'th';
+}
 import { openUserAttempt } from '../../attempts.ts';
 import { mintSessionToken, DEFAULT_TTL_SECONDS } from '../../tokens.ts';
 import { mintIce, type IceBlock } from '../../turn.ts';
@@ -182,9 +221,37 @@ export async function sessionRoutes(app: FastifyInstance) {
       // Queued is a success, not a failure: the client holds a real session id and can poll or wait
       // for the webhook. Returning 409 here is what forces clients to build their own retry loops.
       status = 202;
+
+      /**
+       * WHERE THEY STAND, not merely that they are queued (migration 043).
+       *
+       * "No device is free right now" over fifteen minutes of a CI log is indistinguishable from a
+       * hang, and the difference between a person waiting calmly and a person killing the job is
+       * entirely in whether the queue said anything.
+       *
+       * Best-effort: a standing that cannot be computed must not turn a successful queue into a
+       * 500. The session is real and pollable either way, and this is a courtesy on top of it.
+       */
+      const standing = await queueStanding(orgId, alloc.sessionId).catch((e: Error) => {
+        // `console`, not the request logger: this arm runs inside a helper whose `req` is narrowed
+        // to its body, and reaching for the logger here would be a type error standing in for a
+        // real question — which is whether a failure to count a queue is worth a request-scoped
+        // log line at all. It is not; nothing is broken for the caller.
+        console.warn(`[sessions] could not compute queue standing for ${alloc.sessionId}: ${e.message}`);
+        return null;
+      });
+
       payload = {
-        session: { id: alloc.sessionId, state: 'QUEUED', deviceId: null },
-        message: 'No device is free right now. The session is queued and will start automatically.',
+        // `queue` INSIDE the session, matching `GET /v1/sessions/:id`. A field that lives beside
+        // the session on one endpoint and inside it on the other is a client bug waiting to be
+        // written, and the CLI reads both.
+        session: {
+          id: alloc.sessionId, state: 'QUEUED', deviceId: null,
+          ...(standing ? { queue: queueJson(standing) } : {}),
+        },
+        message: standing
+          ? queueSentence(standing)
+          : 'No device is free right now. The session is queued and will start automatically.',
       };
     } else {
       const host = await hostForDevice(alloc.deviceId!);
@@ -432,9 +499,24 @@ export async function sessionRoutes(app: FastifyInstance) {
       }
     }
 
+    /**
+     * A POLLING CALLER NEEDS THIS MORE THAN THE ONE WHO JUST QUEUED (migration 043).
+     *
+     * `mfarm run` polls this endpoint every few seconds while it waits, and the POST's answer is
+     * already stale by the second poll — the position moves as other sessions are promoted, and
+     * watching it move is most of what makes a wait tolerable.
+     *
+     * Only for a QUEUED session, and best-effort: this endpoint also mints a session token and
+     * serves the data plane, and none of that may fail over a courtesy.
+     */
+    const standing = row.state === 'QUEUED'
+      ? await queueStanding(orgId, req.params.id).catch(() => null)
+      : null;
+
     return {
       session: {
         id: row.id, state: row.state, deviceId: row.device_id,
+        ...(standing ? { queue: queueJson(standing) } : {}),
         fence: row.fence === null ? null : Number(row.fence),
         region: row.region, createdAt: row.created_at, startedAt: row.started_at,
         expiresAt: row.expires_at, endedAt: row.ended_at, endReason: row.end_reason,

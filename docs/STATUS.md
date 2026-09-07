@@ -1,7 +1,7 @@
 # MFARM — status
 
 **Open this first.** What the product is, what works, what is left, and what it costs to run.
-Re-derived 2026-09-07 at `bebc821` / migration 042 / ADR-0029 — every number below was read from the
+Re-derived 2026-09-07 at `9788568` / migration 043 / ADR-0029 — every number below was read from the
 code, the farm or `git` on that day, not carried forward from the last version of this page. Two
 numbers on the last version had decayed and are corrected here; see §5.
 
@@ -59,7 +59,7 @@ half-finished one.
 
 | Area | State | The honest caveat |
 |---|---|---|
-| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1413-test suite**. All are closed. |
+| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1418-test suite**. All are closed. |
 | **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 39 migrations. | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host. A host outage is a farm outage; ADR-0027 and migration 038 reduce what one costs, they do not remove it. |
@@ -70,7 +70,7 @@ half-finished one.
 | **Video / recording** | **Not built, deliberately.** Costed, and unbuilt until it can record only failures. | — |
 | **Execution timeline UI** | **Built (2026-09-07).** A *What happened* card on the run screen, and a *Steps* card on the session screen with the failing WebDriver commands in red (ADR-0029). | Red is reserved for a test failing; an incident is amber. The distinction the run screen already kept, kept here too. |
 | **Failure evidence** | **Built (2026-09-07).** A failed result requests its own screenshot and logcat, each naming the test (migration 040). | Up to one beat — ten seconds — after the assertion. The step trace is what makes a late screenshot readable. |
-| **Queue** | **Working, and fair as of ADR-0028.** FIFO within an org, round-robin across them, per-org concurrency caps, device-class matching (ADR-0025). | A queued caller is told it is queued and nothing else — no position, no estimate. `EXECUTION_ROADMAP.md` S6. |
+| **Queue** | **Working, fair (ADR-0028), and it says where you stand (migration 043).** FIFO within an org, round-robin across them, per-org caps, device-class matching (ADR-0025). A queued caller gets a position and, where one can be proved, an estimate. | The estimate reads the lease, so it is the LATEST a device frees — usually pessimistic — and it is omitted rather than guessed where no lease is readable. |
 
 ---
 
@@ -101,13 +101,16 @@ from the repo.**
 Rate limiting is in-memory (`apps/api/src/http/server.ts`). Correct for one instance and named as
 such in the code. It is the one module between here and running two.
 
-### 5. Video, and a queued caller who is told nothing
+### 5. Video — the last execution-engine step, and it needs the lab
 
-The two remaining steps of [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md). **S5 video** records only
-failures, reusing the encoder the live view already runs, and is gated on one measurement: what
-host-side encode costs against the `RENDER_BASELINE.md` Flutter-canvas workload. **S6** gives a
-queued caller a position and an estimate — `POST /v1/sessions` currently says only "no device is
-free right now", which over fifteen minutes of CI log is indistinguishable from a hang.
+S5 of [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md), and the only one left. It records **only
+failures**, which S2 and S4 have just made expressible, and reuses the encoder the live view already
+runs rather than adding a second one inside the guest.
+
+**Gated on one measurement, and it cannot be taken from the repo:** what host-side encode costs
+against the `RENDER_BASELINE.md` Flutter-canvas workload, where there is least headroom. That is
+lab hours on `mfarm-lab`. If it perturbs the workload it measures, video ships for physical devices
+only, where the encoder is on the phone's own hardware and the farm's CPU is not in the loop.
 
 ### 6. A device arriving still restarts the agent
 
@@ -119,10 +122,10 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1413**, green, across three workspaces plus `deploy` |
-| Migrations | **42 in the repo, 38 applied on the farm** — 039–042 land with the next deploy |
+| Tests | **1418**, green, across three workspaces plus `deploy` |
+| Migrations | **43 in the repo, 38 applied on the farm** — 039–043 land with the next deploy |
 | Decisions | 28 ADRs (there is no 0013) |
-| Merged PRs | 125 |
+| Merged PRs | 126 |
 | Defects | 26 recorded, **26 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |

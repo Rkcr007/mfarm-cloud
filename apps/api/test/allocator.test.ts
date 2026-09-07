@@ -9,8 +9,9 @@
  */
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { withTenant, withSystem, withAppUnscoped, closePools } from '../src/db.ts';
-import { allocate, activate, release, resetComplete, reap } from '../src/allocator.ts';
+import { allocate, activate, release, resetComplete, reap, queueStanding } from '../src/allocator.ts';
 import { ingest, usage } from '../src/metering.ts';
 import { negotiate, acceptFence, PROTOCOL_VERSION, type WorkerRegistration } from '@mfarm/protocol';
 
@@ -844,5 +845,141 @@ describe('allocating a device class', () => {
 
     assert.equal(row.state, 'ALLOCATING');
     assert.equal(row.device_id, pro, 'the old signature still hands over a device');
+  });
+});
+
+/**
+ * Migration 043: a queued caller is told where they stand.
+ *
+ * `POST /v1/sessions` used to answer "No device is free right now" and nothing else, and `mfarm
+ * run` then printed "waiting up to 300s". Over fifteen minutes of a CI log that is
+ * indistinguishable from a hang, and a person who cannot tell the difference kills the job.
+ *
+ * THE PROPERTY THAT MATTERS is not that a number is returned — it is that the number matches how
+ * the queue actually drains. ADR-0028 made promotion round-robin across orgs, so a position derived
+ * from a global `created_at` rank would be the obvious implementation and would now disagree with
+ * the scheduler. A queue position that does not match the queue is worse than none, because a
+ * person plans around it.
+ */
+describe('a queued caller is told where they stand', () => {
+  test('position counts the way the queue drains, not by arrival time', async () => {
+    await resetFleet();
+    await seedDevices(1);
+    await withSystem((c) => c.query('UPDATE orgs SET max_concurrent = 1 WHERE id = $1', [orgA]));
+
+    const held = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    assert.ok(held.deviceId);
+
+    // A queues three, sequentially so they have a defined order. B queues one, LAST.
+    const a1 = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    const a2 = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    const a3 = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    const b1 = await allocate({ orgId: orgB, userId: null, region: REGION, platform: 'android' });
+    for (const r of [a1, a2, a3, b1]) assert.equal(r.deviceId, null, 'all four should queue');
+
+    const posA1 = await queueStanding(orgA, a1.sessionId);
+    const posA2 = await queueStanding(orgA, a2.sessionId);
+    const posA3 = await queueStanding(orgA, a3.sessionId);
+    const posB1 = await queueStanding(orgB, b1.sessionId);
+
+    /**
+     * B ARRIVED FOURTH AND IS SECOND. That is the whole assertion.
+     *
+     * Under ADR-0028 the promotion order is (rank 1: A's first, B's first), then (rank 2: A's
+     * second), then (rank 3: A's third). A position by arrival time would say B is 4th — a number
+     * that would have been right before ADR-0028 and is now a lie the scheduler contradicts.
+     */
+    assert.equal(posA1?.position, 1, "A's oldest is next");
+    assert.equal(posB1?.position, 2, 'B arrived last and is second — its own first lap');
+    assert.equal(posA2?.position, 3);
+    assert.equal(posA3?.position, 4);
+
+    // `ahead` is `position - 1`, said plainly so a caller need not do the arithmetic.
+    assert.equal(posB1?.ahead, 1);
+
+    await withSystem((c) => c.query('UPDATE orgs SET max_concurrent = 100 WHERE id = $1', [orgA]));
+  });
+
+  test('a caller cannot ask about a session that is not theirs', async () => {
+    await resetFleet();
+    await seedDevices(1);
+    await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    const queued = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    assert.equal(queued.deviceId, null);
+
+    /**
+     * `queue_standing` is SECURITY DEFINER and `mfarm_definer` has BYPASSRLS, so RLS does not scope
+     * it — the function has to. Same rule migration 041 shipped a cross-tenant write by missing,
+     * checked here rather than assumed for the same reason.
+     */
+    assert.equal(await queueStanding(orgB, queued.sessionId), null,
+      "another org must not learn even that a session exists, let alone where it stands");
+    assert.ok(await queueStanding(orgA, queued.sessionId), 'the owner gets an answer');
+  });
+
+  test('a session that is no longer queued has no standing, and that is not an error', async () => {
+    await resetFleet();
+    await seedDevices(1);
+    const live = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    assert.ok(live.deviceId);
+
+    // A session promoted between a caller's poll and this call is the ORDINARY case, not a fault —
+    // it is what happens every time the wait ends successfully.
+    assert.equal(await queueStanding(orgA, live.sessionId), null);
+    assert.equal(await queueStanding(orgA, randomUUID()), null, 'and neither is a session that never was');
+  });
+
+  test('the estimate is null rather than guessed when no lease can be read', async () => {
+    await resetFleet();
+    await seedDevices(1);
+    const held = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    const queued = await allocate({ orgId: orgA, userId: null, region: REGION, platform: 'android' });
+    assert.equal(queued.deviceId, null);
+
+    // With a lease on the device ahead, an estimate can be proved.
+    const withLease = await queueStanding(orgA, queued.sessionId);
+    assert.ok(withLease?.estimatedStartAt instanceof Date, 'a readable lease gives an estimate');
+
+    // Without one, nothing can be. **A confident wrong number is what makes people stop trusting a
+    // queue**, so this reports null and the API omits the field entirely.
+    await withSystem((c) => c.query(
+      'UPDATE sessions SET expires_at = NULL WHERE id = $1', [held.sessionId]));
+    assert.equal((await queueStanding(orgA, queued.sessionId))?.estimatedStartAt, null,
+      'unknown is reported as unknown, never as a guess');
+  });
+
+  test('the estimate reads a device of the class asked for, not any device at all', async () => {
+    await resetFleet();
+    // Two classes — `avd` is a real tier in this schema and `emulator` is not, which the CHECK on
+    // `devices.tier` said plainly the first time this test was run. The tier the caller did NOT ask
+    // for is held under a lease expiring far sooner, so a class-blind estimate would quote it and
+    // be confidently early — the exact failure mode that makes people stop trusting a queue.
+    const [other] = await withSystem(async (c) => (await c.query(
+      `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities)
+       VALUES ($1,$2,'android','avd','sdk_gphone','15','READY','[]'::jsonb) RETURNING id`,
+      [host, REGION])).rows.map((r) => r.id));
+    await seedDevices(1);
+
+    const cuttlefish = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish' });
+    assert.ok(cuttlefish.deviceId, 'the cuttlefish is held');
+    const avd = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'avd' });
+    assert.equal(avd.deviceId, other, 'and so is the avd');
+
+    // The avd frees far sooner. A class-blind estimate would quote it.
+    await withSystem((c) => c.query(
+      "UPDATE sessions SET expires_at = now() + interval '1 minute' WHERE id = $1", [avd.sessionId]));
+    await withSystem((c) => c.query(
+      "UPDATE sessions SET expires_at = now() + interval '30 minutes' WHERE id = $1", [cuttlefish.sessionId]));
+
+    const queued = await allocate({
+      orgId: orgA, userId: null, region: REGION, platform: 'android', tier: 'cuttlefish' });
+    assert.equal(queued.deviceId, null);
+
+    const standing = await queueStanding(orgA, queued.sessionId);
+    const minutes = (standing!.estimatedStartAt!.getTime() - Date.now()) / 60_000;
+    assert.ok(minutes > 20,
+      `a device that could not serve this session is not a device whose lease counts (got ${minutes.toFixed(1)}m)`);
   });
 });

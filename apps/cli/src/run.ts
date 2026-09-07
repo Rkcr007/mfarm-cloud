@@ -182,10 +182,15 @@ export async function run(opts: RunOptions): Promise<number> {
 
   try {
     if (created.queued) {
-      progress(`no device is free — session ${sessionId} is queued (waiting up to ${opts.waitSeconds}s)`);
+      progress(created.session.queue
+        ? `${queueLine(created.session.queue)} (waiting up to ${opts.waitSeconds}s)`
+        : `no device is free — session ${sessionId} is queued (waiting up to ${opts.waitSeconds}s)`);
       const promoted = await waitForDevice(opts, sessionId, {
         interrupted: () => interrupted,
         sleep: interruptibleSleep,
+        // Passed in rather than reached for: `progress` is a closure over this function's stderr
+        // handling, and the wait loop is the one place that has something to say while it waits.
+        progress,
       });
       session = promoted.session;
       // The coordinates arrive here or nowhere. This assignment is the whole of the known-issue-9
@@ -304,11 +309,16 @@ function makeRelease(
 async function waitForDevice(
   opts: RunOptions,
   sessionId: string,
-  ctx: { interrupted: () => boolean; sleep: (ms: number) => Promise<void> },
+  ctx: {
+    interrupted: () => boolean;
+    sleep: (ms: number) => Promise<void>;
+    progress: (msg: string) => void;
+  },
 ): Promise<SessionResult> {
   const startedAt = Date.now();
   const deadline = startedAt + opts.waitSeconds * 1_000;
   let delay = POLL_MIN_MS;
+  let lastPosition: number | null = null;
 
   for (;;) {
     if (ctx.interrupted()) throw new InterruptedError();
@@ -321,6 +331,22 @@ async function waitForDevice(
 
     const result = await opts.client.getSession(sessionId);
     const session = result.session;
+
+    /**
+     * SAY WHERE WE STAND, EVERY TIME IT CHANGES (migration 043).
+     *
+     * The old line was printed once — "no device is free — session X is queued (waiting up to
+     * 300s)" — and then nothing for up to five minutes. In a CI log that is indistinguishable from
+     * a hung process, and a person who cannot tell the difference kills the job.
+     *
+     * ONLY ON CHANGE, not every poll. The loop backs off from 1s to 10s, so printing each time
+     * would produce dozens of identical lines and bury the one that matters. A position that has
+     * not moved is not news; a position that has is the whole signal.
+     */
+    if (session.queue && session.queue.position !== lastPosition) {
+      lastPosition = session.queue.position;
+      ctx.progress(queueLine(session.queue));
+    }
     // The coordinates travel back with the session, not separately: on this path they are the ONLY
     // ones the run will ever see. POST answered 202 with no device and therefore no endpoint and no
     // token (known issue 9).
@@ -423,4 +449,33 @@ function reportFailure(opts: RunOptions, warn: (m: string) => void, message: str
 
 function emitJson(payload: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+/**
+ * Where the queue stands, in one line a person can read while scrolling a CI log.
+ *
+ * WHY THIS IS A SENTENCE AND NOT A NUMBER. The reader is a human watching a build, and the thing
+ * they are deciding is whether to keep waiting or kill the job. "3rd in the queue" answers that;
+ * `{"position":3}` does not.
+ *
+ * THE ESTIMATE IS PESSIMISTIC BY CONSTRUCTION and the wording says so. It reads the LEASE of the
+ * sessions ahead — the latest they may run, not when they will actually end — so the real wait is
+ * usually shorter. "at the latest" is what keeps that from reading as a broken promise when the
+ * device arrives early, and a queue that is early is a queue people trust.
+ *
+ * Absent entirely where nothing can be proved, rather than guessed at.
+ */
+function queueLine(q: { position: number; ahead: number; estimatedStartAt?: string | null }): string {
+  const place = q.ahead === 0
+    ? 'queued: next in line'
+    : `queued: ${q.position}${ordinal(q.position)} in line, ${q.ahead} ahead`;
+  if (!q.estimatedStartAt) return `${place} — no device is free yet`;
+  const mins = Math.max(1, Math.round((Date.parse(q.estimatedStartAt) - Date.now()) / 60_000));
+  return `${place} — a device frees up in ~${mins}m at the latest`;
+}
+
+/** 1st, 2nd, 3rd, 4th. The 11–13 exception is why this is not an index into three strings. */
+function ordinal(n: number): string {
+  if (n % 100 >= 11 && n % 100 <= 13) return 'th';
+  return { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] ?? 'th';
 }
