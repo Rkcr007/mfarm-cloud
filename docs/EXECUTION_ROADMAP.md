@@ -382,21 +382,64 @@ is now recorded as false in the file: given a gauge whose domain is -1/0/1 no te
 behind, and bringing a worker's tree forward restarts the agent under running sessions — a different
 decision with a different blast radius. The installer refuses that box and says which case it is in.
 
-### S7.2 — One device host
+### S7.2 — One device host — **AUDITED (2026-09-07): nothing in the code blocks a second one**
 
 A host outage is a farm outage. ADR-0027 and migration 038 reduce the blast radius; they do not
-remove it. **This is a provisioning decision before it is an engineering one** — a second lab VM
-costs money whether or not it is serving — so what belongs here first is an audit of what in the
-control plane still assumes one host, not a second box.
+remove it. This is a **provisioning** decision before it is an engineering one — a second lab VM
+costs money whether or not it is serving — so the work that belongs here is finding out what in the
+control plane still assumes one host. That audit is done, and the answer is: **nothing does.**
 
-### S7.3 — Rate limiting is in-memory
+| checked | finding |
+|---|---|
+| `allocate_device` (037) and `promote_queued` (039) | no `host_id` anywhere in either. Devices are chosen by region, platform, tier, capabilities and org; the host they sit on is not a term in the query |
+| `hosts` / `devices` schema | `devices.host_id` is per row with its own index; `hosts.hostname` is UNIQUE; endpoint, capabilities, cores, worker token and quarantine state are all per host |
+| the reaper | `sweep()` selects hosts as a set; the 038 silence quarantine is per host |
+| the WebDriver hub | resolves `COALESCE(d.automation_endpoint, h.automation_endpoint)` per device and routes on `target.host_id`. Both ADR-0011 transports are per host |
+| metrics | every host gauge is labelled `hostname` / `region`, including the S7.4 machine gauges |
+| the console | no query or view picks "the host" |
 
-`apps/api/src/http/server.ts` registers `@fastify/rate-limit` with the default in-process store and
-says so in a comment: limits are per API instance, and a second process silently multiplies every
-one of them. There is no HA and no rolling deploy. Moving the store to Redis is the known fix and it
-is only worth doing behind a second instance, which nothing yet needs.
+**The one that could have blocked it, and does not.** `/dp/*` carries the live view and the path
+segment is a host id. `setup-ingress.sh` builds that route two ways and says so: pointed straight at
+a worker, *"only one host can be named here"*; pointed at the API, which relays down the tunnel each
+agent dialled out, *"the only one that works for more than one host"*. **The deployed farm is on the
+second path** — the live Caddyfile routes `/dp/*` to `127.0.0.1:3000` and `WORKER_DATA_PLANE` is
+unset — so live view for a second host needs no ingress change at all.
 
-### S7.4 — Worker-side metrics — **the roadmap was wrong about this**
+What a second host actually costs is a VM, a `farm-up.sh` run, the boot unit, and a registration
+token. All operational, none of it in this repo.
+
+**The dev tooling does assume one**, harmlessly: `check-deployed.sh`, `farm-online.sh`,
+`verify-failure.mjs` and friends default `MFARM_LAB=mfarm-lab`, all through env vars that already
+override. They would each need a second name, or a loop, before they described a two-host farm
+honestly — which is a real but small piece of work, and it is worth doing *when* there is a second
+host rather than in anticipation of one.
+
+### S7.3 — Rate limiting is in-memory — **AUDITED: it is not the first blocker, and the real one is bigger**
+
+The row is true as far as it goes. `apps/api/src/http/server.ts` registers `@fastify/rate-limit`
+with the default in-process store and says so in a comment: limits are per API instance, so a second
+process silently multiplies every one of them.
+
+**But swapping that store for Redis would not get a second instance working.** `TunnelRegistry` is
+decorated per Fastify instance and holds its hosts in a process-local `Map`
+(`apps/api/src/http/tunnel.ts`). `openControlChannel` returns `undefined` when the host is not in
+*this* process's map. `metrics.ts` already says the quiet part — *"a viewer can only be relayed by
+the replica holding that host's tunnel"* — and it understates the blast radius, because since
+ADR-0011 the same registry carries **automation**, not only the live view:
+`callOverTunnel(app.tunnels, route.hostId, …)` is how a WebDriver command reaches a host that is not
+directly dialable.
+
+So behind a naive round-robin load balancer, a second instance does not merely double the rate
+limits — **roughly half of all tunnel-transport WebDriver sessions fail**, in a farm whose whole
+point is that they do not. Fixing that is sticky routing by host id, or a relay bus between
+replicas, and either is a genuine piece of architecture rather than a store swap.
+
+**The honest recommendation is therefore not to build any of this yet.** Nothing needs a second API
+instance: one process serves a four-device farm with room to spare, and S7.1's health gate has taken
+the worst of the no-rolling-deploy sting out. When a second instance does become necessary, the
+order is tunnel affinity first, rate-limit store second — the reverse of what this row implied.
+
+### S7.4 — Worker-side metrics — **BUILT (2026-09-07), and the row describing it was wrong**
 
 This step previously read *"the agent reports incidents, not gauges, so queue depth and capacity are
 unobservable from Grafana"*. Checked against the code, the second half is false:
@@ -416,6 +459,37 @@ This is the third time a section of a spec in this repo has described as absent 
 built (`docs/DEFECTS.md`, and both MASTER PROMPT documents). Grep the verb before scheduling the
 work.
 
+**Schema — migration 044.** Five nullable columns on `hosts` plus `stats_at`, which is deliberately
+not `last_heartbeat_at`: an agent too old to send stats still beats, so reading freshness from the
+heartbeat column would present a week-old disk reading as current.
+
+**Code.** `workers/agent/src/hoststats.ts` reads `statfs` (`bavail`, not `bfree` — the root reserve
+is not usable by an agent that does not run as root), `loadavg`, and Linux `MemAvailable` out of
+`/proc/meminfo`. Not `os.freemem()`, which is `MemFree` and sits near zero on any healthy
+long-running box. The numbers ride the beat — ADR-0003's argument for capabilities, unchanged — and
+are measured *outside* the heartbeat's `try`, because a stats read caught by that `try` would return
+a failed beat and migration 038 quarantines a host that stops beating. Liveness outranks
+observability, and the ordering is what enforces it.
+
+`collectFleet()` exports six gauges plus `mfarm_host_stats_age_seconds`, and `alerts.yml` gains
+disk-low, disk-critical, stats-stale and per-core saturation.
+
+**The one design decision worth arguing about (ADR-0031).** A `NULL` emits **no series**, which
+inverts the rule the rest of `metrics.ts` follows. `DEVICE_STATES` is zero-filled precisely so an
+alert on an empty fleet still fires. Here a zero disk gauge does not read as "unmeasured" — **it
+reads as a full disk** — so zero-filling would have paged for every host running an agent older than
+044 on the first scrape after deploy.
+
+**Test.** `workers/agent/test/hoststats.test.ts` (5), `apps/api/test/host-stats.test.ts` (7, through
+the real registration and the real beat rather than seeded rows), six alert cases asserting both
+directions. Four bugs were put back and all four were caught: zero-filling the gauges, setting
+`stats_at` from every beat, trusting the worker's numbers uncoerced, and dropping the reset so a
+deleted host keeps reporting a disk.
+
+**Still not measured:** `cvd` and `adb` health. Both are known to the agent and both are a different
+kind of measurement — a probe with a timeout, not a read of a counter. Disk, CPU and memory are the
+three that end a farm without anybody noticing.
+
 ## The order, and why
 
 1. ~~**S1 fairness**~~ — **done**, migration 039 / ADR-0028.
@@ -427,10 +501,14 @@ work.
    host-side encode is measured against the `RENDER_BASELINE.md` workload and `mfarm-lab` is
    stopped. S5 is now the only remaining execution-engine step.
 6. ~~**S6 queue visibility**~~ — **done**, migration 043.
-7. **S7 ceilings** — deploy, then a second host, then the rate limiter. **S7.1 is done**
-   (ADR-0030): the box now pulls `main` on a five-minute timer, health-gates what it deploys, rolls
-   back what fails and refuses to retry it. S7.4 turned out to be mostly already built and the row
-   describing it was wrong; what remains there is host-level metrics, not fleet ones.
+7. **S7 ceilings** — **S7.1 done** (ADR-0030): the box pulls `main` on a five-minute timer,
+   health-gates what it deploys, rolls back what fails and refuses to retry it. **S7.4 done**
+   (ADR-0031, migration 044): the host now reports its own disk, load and memory, and the row that
+   said queue depth was the missing thing was wrong. **S7.2 audited** — nothing in the control plane
+   assumes one device host, including the ingress, so a second one is a VM and a `farm-up.sh` run.
+   **S7.3 audited and deliberately not built** — the rate limiter is not the first blocker to a
+   second API instance; the process-local `TunnelRegistry` is, and it now carries automation as well
+   as the live view.
 
 Each step ships as its own PR with its own migration, and each is verified on a running farm before
 the next starts — not when CI is green. `DEFECTS.md` states the reason: twice this month a fix was

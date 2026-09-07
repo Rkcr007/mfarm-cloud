@@ -12,9 +12,11 @@ import {
   type FailureReason,
   type RegistrationResponse,
   type WorkerHeartbeatResponse,
+  type WorkerHostStats,
   type WorkerRegistration,
 } from '@mfarm/protocol';
 import { derivePort } from './appium.ts';
+import { readHostStats } from './hoststats.ts';
 import type { DeviceBackend, DeviceHealth } from './device.ts';
 import { InstallBlockedError } from './devices/physical.ts';
 
@@ -663,17 +665,45 @@ export class Agent {
    * and already carries the worker credential, so attaching present state costs one field and
    * bounds the lie at one heartbeat interval.
    *
-   * IT DOES NOT WORK YET, AND THAT IS NOT SILENT. `POST /workers/heartbeat` in
-   * `apps/api/src/http/routes/workers.ts` touches `last_heartbeat_at` and reads nothing from the
-   * body, and `packages/protocol` has no type for it — so today this body is parsed and dropped.
-   * It is sent anyway because it is inert on the current control plane (the route has no body
-   * schema, so an unexpected body is accepted and ignored) and because the worker half then needs
-   * no change at all when the protocol catches up. Until it does, the real withdrawal path is the
-   * drain-and-exit in index.ts. See the report accompanying ADR-0003 for the exact protocol change.
+   * IT WORKS NOW, AND THIS COMMENT USED TO SAY IT DID NOT. Until 2026-09-01 the handler touched
+   * `last_heartbeat_at` and read nothing from the body, and this paragraph said so at length. The
+   * handler has reconciled `capabilities` and the per-device automation map on every beat ever
+   * since — `apps/api/src/http/routes/workers.ts` reads `req.body` and rewrites `devices.capabilities`
+   * from it — so the sentence outlived the constraint by six days and was found by going looking
+   * for somewhere to put `stats`. That is the third documented instance in this repo of a comment
+   * that was true when written and became a lie without changing; see `docs/DEFECTS.md`.
+   *
+   * The beat now also carries `stats`: what the HOST MACHINE is doing (S7.4, migration 044). Same
+   * argument as the capability payload — the beat already runs every ten seconds and already
+   * carries the credential, so this costs one field and no new failure mode.
    */
+  /**
+   * The machine's own numbers, or nothing at all.
+   *
+   * MEASURED BEFORE THE `try`, AND SWALLOWED SEPARATELY. A stats read that could throw inside the
+   * heartbeat's own `try` would be caught by it and returned as `{ ok: false }` — a failed BEAT.
+   * The control plane reaps a host that stops beating (migration 038 quarantines it), so a bug in a
+   * metric would take the whole machine out of service. Liveness outranks observability, and the
+   * ordering here is what enforces that rather than a comment asking for it.
+   *
+   * `readHostStats` is already written not to throw. This is the second belt: it is one `statfs`
+   * and one small file read away from a quarantine, and being wrong about that is expensive.
+   */
+  private async beatStats(): Promise<WorkerHostStats | undefined> {
+    // The agent's own working directory — on a device host, the same volume as the cvd images, the
+    // 4 GB snapshots and the app cache. One disk, the one that fills.
+    const path = this.opts.appCacheDir ?? this.opts.statePath ?? process.cwd();
+    try {
+      return await readHostStats(path);
+    } catch {
+      return undefined;
+    }
+  }
+
   async heartbeat(): Promise<{ ok: boolean; hostState?: string }> {
     const token = this.state?.workerToken ?? (await this.loadState())?.workerToken;
     if (!token) return { ok: false };
+    const stats = await this.beatStats();
     try {
       const res = await fetch(`${this.opts.controlPlaneUrl}/v1/workers/heartbeat`, {
         method: 'POST',
@@ -687,6 +717,8 @@ export class Agent {
           // Per-device since v2, for the same reason registration carries it: one string cannot
           // describe a host whose devices are served by different gateways.
           devices: Object.fromEntries(this.automation),
+          // Measured just above, OUTSIDE the try — see `beatStats()`.
+          stats,
         }),
       });
       if (!res.ok) return { ok: false };

@@ -306,6 +306,48 @@ const queueOldest = g(
 const hosts = g('mfarm_hosts', 'Worker hosts by state.', ['state']);
 
 /**
+ * The HOST MACHINE, as opposed to the fleet running on it — S7.4, migration 044.
+ *
+ * Every other gauge in this file is a fact about devices and sessions, and every one of them is
+ * green on a device host whose disk is 98% full — the state in which snapshot restores start
+ * failing and the farm degrades in a way that reads as a device fault for as long as it takes
+ * somebody to ssh in and run `df`.
+ *
+ * REPORTED ONLY WHEN THE HOST ACTUALLY SENT THEM. An agent that predates migration 044 stores NULL,
+ * and a NULL emits no series at all rather than a zero. That is the opposite of the rule
+ * DEVICE_STATES follows — and deliberately so. A zero disk gauge does not read as "unmeasured", it
+ * reads as A FULL DISK, so the explicit-zero trick that keeps `mfarm_devices` alertable would here
+ * manufacture a critical incident on every host too old to answer. The staleness of these series is
+ * covered instead by `mfarm_host_stats_age_seconds`, which is the honest way to say "these numbers
+ * may be old" without inventing a value for them.
+ */
+const hostDiskFree = g('mfarm_host_disk_free_bytes', 'Bytes available to the agent on the volume holding its working files.', ['hostname', 'region']);
+const hostDiskTotal = g('mfarm_host_disk_total_bytes', 'Size of that volume.', ['hostname', 'region']);
+const hostLoad1 = g('mfarm_host_load1', 'One-minute load average. Normalise against mfarm_host_cores.', ['hostname', 'region']);
+const hostCores = g('mfarm_host_cores', 'Cores as the host kernel reports them.', ['hostname', 'region']);
+const hostMemAvailable = g(
+  'mfarm_host_mem_available_mb',
+  'Linux MemAvailable in MiB — the kernel\'s estimate of what a new allocation could get. NOT ' +
+    'MemFree, which excludes the page cache and sits near zero on any healthy long-running box.',
+  ['hostname', 'region'],
+);
+const hostMemTotal = g('mfarm_host_mem_total_mb', 'MemTotal in MiB.', ['hostname', 'region']);
+
+/**
+ * How old the five gauges above are, per host.
+ *
+ * NOT derivable from `mfarm_host_last_heartbeat_timestamp_seconds`, which is the whole reason it
+ * exists: an agent too old to send stats beats perfectly happily, so a host can be seconds from its
+ * last heartbeat and days from its last disk reading. Alerting on the disk without this would mean
+ * alerting on a number nobody can date.
+ */
+const hostStatsAge = g(
+  'mfarm_host_stats_age_seconds',
+  'Seconds since this host last reported machine stats. Absent when it never has.',
+  ['hostname', 'region'],
+);
+
+/**
  * Agent tunnels currently connected (ADR-0008).
  *
  * NOT DERIVABLE FROM ANY OF THE GAUGES ABOVE, which is the reason it exists. A host beats over
@@ -686,7 +728,13 @@ export async function collectAutodeploy(): Promise<void> {
 
 interface DeviceRow { state: string; region: string; platform: string; tier: string; n: string }
 interface SessionRow { state: string; n: string }
-interface HostRow { hostname: string; region: string; state: string; beat: string | null }
+interface HostRow {
+  hostname: string; region: string; state: string; beat: string | null;
+  disk_free_bytes: string | null; disk_total_bytes: string | null;
+  load1: string | null; cores: string | null;
+  mem_available_mb: string | null; mem_total_mb: string | null;
+  stats_age: string | null;
+}
 interface AgeRow { cleaning_age: string; preparing_age: string; queue_age: string }
 
 /**
@@ -708,7 +756,10 @@ export async function collectFleet(): Promise<void> {
     );
     const h = await client.query<HostRow>(
       `SELECT hostname, region, state::text AS state,
-              EXTRACT(EPOCH FROM last_heartbeat_at)::text AS beat
+              EXTRACT(EPOCH FROM last_heartbeat_at)::text AS beat,
+              disk_free_bytes::text, disk_total_bytes::text, load1::text, cores::text,
+              mem_available_mb::text, mem_total_mb::text,
+              EXTRACT(EPOCH FROM (now() - stats_at))::text AS stats_age
          FROM hosts`,
     );
     const a = await client.query<AgeRow>(
@@ -732,6 +783,11 @@ export async function collectFleet(): Promise<void> {
   sessions.reset();
   hosts.reset();
   hostHeartbeat.reset();
+  // Reset with the rest, so a host that is DELETED stops reporting a disk. Without this its last
+  // reading would sit on the dashboard forever, indistinguishable from a machine that is still
+  // there and still full.
+  for (const m of [hostDiskFree, hostDiskTotal, hostLoad1, hostCores,
+                   hostMemAvailable, hostMemTotal, hostStatsAge]) m.reset();
 
   // Every placement gets all eight states, zeros included — see DEVICE_STATES.
   const placements = new Map<string, { region: string; platform: string; tier: string }>();
@@ -755,7 +811,20 @@ export async function collectFleet(): Promise<void> {
   const hostCounts = new Map<string, number>(HOST_STATES.map((s) => [s, 0]));
   for (const r of hostRows) {
     hostCounts.set(r.state, (hostCounts.get(r.state) ?? 0) + 1);
-    hostHeartbeat.set({ hostname: r.hostname, region: r.region }, r.beat === null ? 0 : Number(r.beat));
+    const at = { hostname: r.hostname, region: r.region };
+    hostHeartbeat.set(at, r.beat === null ? 0 : Number(r.beat));
+
+    // NULL EMITS NOTHING. See the comment on these gauges: a zero here does not read as
+    // "unmeasured", it reads as a full disk, so a host that has never reported must produce no
+    // series rather than a manufactured incident.
+    const set = (gauge: Gauge, v: string | null) => { if (v !== null) gauge.set(at, Number(v)); };
+    set(hostDiskFree, r.disk_free_bytes);
+    set(hostDiskTotal, r.disk_total_bytes);
+    set(hostLoad1, r.load1);
+    set(hostCores, r.cores);
+    set(hostMemAvailable, r.mem_available_mb);
+    set(hostMemTotal, r.mem_total_mb);
+    set(hostStatsAge, r.stats_age);
   }
   for (const [state, n] of hostCounts) hosts.set({ state }, n);
 

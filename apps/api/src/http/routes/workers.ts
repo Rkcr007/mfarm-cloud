@@ -408,7 +408,56 @@ export async function workerRoutes(app: FastifyInstance) {
        * names its devices by LOCAL id and they are resolved against `(host_id, local_id)`, so a
        * worker cannot describe another host's hardware however it spells the name.
        */
-      const beat = (req.body ?? {}) as { devices?: unknown };
+      const beat = (req.body ?? {}) as { devices?: unknown; stats?: unknown };
+
+      /**
+       * WHAT THE HOST MACHINE ITSELF IS DOING — S7.4, migration 044.
+       *
+       * Every other gauge on the dashboard is sampled from this database and describes the FLEET.
+       * All of them are green on a device host whose disk is 98% full, which is the state in which
+       * resets start failing and the farm degrades in a way that reads as a device fault.
+       *
+       * ---------------------------------------------------------------- why it is shaped this way
+       *
+       * ONE UPDATE, ONLY WHEN STATS ARRIVE. The beat runs six times a minute per host forever, so
+       * an unconditional second write would double the write rate of the busiest route on the farm
+       * to carry numbers an older agent does not send.
+       *
+       * `stats_at` IS SET HERE AND NOWHERE ELSE, and it is not `last_heartbeat_at`. An agent too
+       * old to send stats still beats, so reading freshness from the heartbeat column would report
+       * a week-old disk reading as current. This column means "the five numbers beside it came from
+       * a beat that actually carried them".
+       *
+       * EVERY FIELD IS COERCED TO null-OR-FINITE-NUMBER rather than trusted. A worker is
+       * authenticated but not trusted to be correct, and a string or a NaN here would either throw
+       * inside the beat — quarantining a live host over a metric — or store a value that makes the
+       * gauge lie. `Number.isFinite` rejects NaN and both infinities in one test.
+       *
+       * NOT VALIDATED FOR PLAUSIBILITY. A disk reporting more free than total is a bug worth SEEING
+       * in a graph, not one worth refusing a heartbeat over. Liveness outranks observability here,
+       * as it does on the agent side.
+       */
+      const st = beat.stats;
+      if (st && typeof st === 'object' && !Array.isArray(st)) {
+        const raw = st as Record<string, unknown>;
+        const num = (k: string): number | null => {
+          const v = raw[k];
+          return typeof v === 'number' && Number.isFinite(v) ? v : null;
+        };
+        await c.query(
+          `UPDATE hosts
+              SET disk_free_bytes = $2, disk_total_bytes = $3, load1 = $4,
+                  mem_available_mb = $5, mem_total_mb = $6, stats_at = now(),
+                  -- The kernel's core count, when the agent sends one. Registration also sets this
+                  -- and is authoritative when it does; COALESCE keeps a beat from nulling a value
+                  -- registration knew and this agent could not read.
+                  cores = COALESCE($7, hosts.cores)
+            WHERE id = $1`,
+          [hostId, num('diskFreeBytes'), num('diskTotalBytes'), num('load1'),
+           num('memAvailableMb'), num('memTotalMb'), num('cores')],
+        );
+      }
+
       if (beat.devices && typeof beat.devices === 'object' && !Array.isArray(beat.devices)) {
         const serving = beat.devices as Record<string, unknown>;
         // Only the devices whose advertised automation actually disagrees with what is stored, so

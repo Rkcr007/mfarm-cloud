@@ -205,6 +205,69 @@ groups:
             was made against older code. Check ~/autodeploy.log for the verdict — `waiting` means
             Release never published an image, `paused` means the kill switch is still set.
 
+  # ------------------------------------------------------------------ the machine, not the fleet
+  #
+  # Every other rule in this file watches devices and sessions. All of them are green on a device
+  # host whose disk is 98% full — the state in which snapshot restores start failing and the farm
+  # degrades in a way that reads as a DEVICE fault for as long as it takes somebody to ssh in and
+  # run `df`. S7.4, migration 044.
+  #
+  # None of these can fire for a host that has never reported: `collectFleet` emits no series at all
+  # for a NULL, deliberately, because a zero disk gauge reads as a full disk rather than as an
+  # unmeasured one. Staleness is MfarmHostStatsStale's job, not a manufactured zero's.
+  - name: mfarm-host
+    rules:
+      # The number that ends a farm. Four Cuttlefish instances, a 4 GB snapshot each, an app cache
+      # `fetchApk` never prunes, and every logcat dump — on one volume.
+      - alert: MfarmHostDiskLow
+        expr: mfarm_host_disk_free_bytes / mfarm_host_disk_total_bytes < 0.10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $labels.hostname }} is running out of disk'
+          description: >-
+            Under 10% free on the volume holding the agent's working files — cvd images, snapshots
+            and the app cache. A snapshot restore that runs out of space leaves its device in
+            CLEANING, which surfaces as a device fault rather than as a full disk.
+
+      - alert: MfarmHostDiskCritical
+        expr: mfarm_host_disk_free_bytes / mfarm_host_disk_total_bytes < 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: '{{ $labels.hostname }} has almost no disk left'
+          description: >-
+            Under 5% free. Resets will start failing shortly if they have not already. Prune the app
+            cache and old artifacts before this becomes a fleet-wide CLEANING backlog.
+
+      # A host that DID report and has stopped. Cannot fire for an agent too old to send stats —
+      # that host emits no series — so this means the agent was downgraded, or its stats read is
+      # failing while its beat still works. Either way the disk rules above have gone quiet without
+      # anything being fixed, which is the failure mode that makes a metric worse than none.
+      - alert: MfarmHostStatsStale
+        expr: mfarm_host_stats_age_seconds > 900
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $labels.hostname }} has stopped reporting machine stats'
+          description: >-
+            Last machine reading was {{ $value | humanizeDuration }} ago, while the host is still
+            beating. The disk and load alerts for this host are now silent — not passing.
+
+      # Load per core. `docs/RENDER_BASELINE.md` and the encode measurement that closed S5's gate
+      # both concluded the host's CPU is this farm's binding constraint, and a saturated host shows
+      # up to a tenant as slow frames and timing-sensitive assertions failing, never as an incident.
+      - alert: MfarmHostSaturated
+        expr: mfarm_host_load1 / mfarm_host_cores > 4
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: '{{ $labels.hostname }} is CPU saturated'
+          description: >-
+            Load average is more than four times the core count, sustained. On this farm the host's
+            CPU is the binding constraint on rendering — a saturated host reaches a tenant as slow
+            frames and flaky timing assertions, not as a failure anyone can see.
+
   # ------------------------------------------------------------------ contention
   - name: mfarm-queue
     rules:
