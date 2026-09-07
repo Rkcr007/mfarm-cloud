@@ -499,3 +499,47 @@ describe('db.ts resolves its connections through config.ts', () => {
     assert.ok(!Number.isNaN(appOpts.max), 'a pool must never be constructed with NaN');
   });
 });
+
+/**
+ * A SETTING THE API READS MUST BE DECLARED IN THE COMPOSE SERVICE, or the deployed farm never sees it.
+ *
+ * ---------------------------------------------------------------- the bug this pins
+ *
+ * `deploy/.env` is COMPOSE'S env file, not the container's environment. Compose reads it for `${…}`
+ * interpolation and passes nothing to a service that does not name the variable under
+ * `environment:`. So on 2026-09-07, five minutes after video recording was turned on:
+ *
+ *   deploy/.env         VIDEO_RECORDING=failures     ✓
+ *   the API container   VIDEO_RECORDING              absent
+ *   the farm            configured to record, recording nothing, reporting no error
+ *
+ * `single-origin.test.ts` pins the same shape from the other direction — the configuration the
+ * deploy scripts actually produce was the one that could not work. This is the cheapest possible
+ * check for that class, and it is a check on the DEPLOYMENT rather than on the code.
+ *
+ * The list is curated rather than derived from `config.ts`. Most settings have production-correct
+ * defaults and are legitimately absent from compose; the ones here are those where the default is
+ * deliberately NOT what a farm wants, so a farm that fails to override them is silently degraded.
+ */
+describe('the production compose file passes through what the API reads', () => {
+  test('every operator-facing setting is declared on the api service', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    const compose = await readFile(join(root, 'deploy', 'docker-compose.prod.yml'), 'utf8');
+
+    for (const name of [
+      'ARTIFACT_DIR',
+      'ARTIFACT_MAX_UPLOAD_BYTES',
+      'ARTIFACT_RETENTION_HOURS',
+      // ADR-0032. Default `off`, so a farm that sets this only in .env records nothing.
+      'VIDEO_RECORDING',
+      'VIDEO_RETENTION_HOURS',
+    ]) {
+      assert.match(compose, new RegExp(`^\\s+${name}:`, 'm'),
+        `${name} is read by the API but not declared on the api service in ` +
+        'deploy/docker-compose.prod.yml — setting it in deploy/.env would do nothing');
+    }
+  });
+});
