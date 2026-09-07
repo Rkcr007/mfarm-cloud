@@ -382,19 +382,62 @@ is now recorded as false in the file: given a gauge whose domain is -1/0/1 no te
 behind, and bringing a worker's tree forward restarts the agent under running sessions — a different
 decision with a different blast radius. The installer refuses that box and says which case it is in.
 
-### S7.2 — One device host
+### S7.2 — One device host — **AUDITED (2026-09-07): nothing in the code blocks a second one**
 
 A host outage is a farm outage. ADR-0027 and migration 038 reduce the blast radius; they do not
-remove it. **This is a provisioning decision before it is an engineering one** — a second lab VM
-costs money whether or not it is serving — so what belongs here first is an audit of what in the
-control plane still assumes one host, not a second box.
+remove it. This is a **provisioning** decision before it is an engineering one — a second lab VM
+costs money whether or not it is serving — so the work that belongs here is finding out what in the
+control plane still assumes one host. That audit is done, and the answer is: **nothing does.**
 
-### S7.3 — Rate limiting is in-memory
+| checked | finding |
+|---|---|
+| `allocate_device` (037) and `promote_queued` (039) | no `host_id` anywhere in either. Devices are chosen by region, platform, tier, capabilities and org; the host they sit on is not a term in the query |
+| `hosts` / `devices` schema | `devices.host_id` is per row with its own index; `hosts.hostname` is UNIQUE; endpoint, capabilities, cores, worker token and quarantine state are all per host |
+| the reaper | `sweep()` selects hosts as a set; the 038 silence quarantine is per host |
+| the WebDriver hub | resolves `COALESCE(d.automation_endpoint, h.automation_endpoint)` per device and routes on `target.host_id`. Both ADR-0011 transports are per host |
+| metrics | every host gauge is labelled `hostname` / `region`, including the S7.4 machine gauges |
+| the console | no query or view picks "the host" |
 
-`apps/api/src/http/server.ts` registers `@fastify/rate-limit` with the default in-process store and
-says so in a comment: limits are per API instance, and a second process silently multiplies every
-one of them. There is no HA and no rolling deploy. Moving the store to Redis is the known fix and it
-is only worth doing behind a second instance, which nothing yet needs.
+**The one that could have blocked it, and does not.** `/dp/*` carries the live view and the path
+segment is a host id. `setup-ingress.sh` builds that route two ways and says so: pointed straight at
+a worker, *"only one host can be named here"*; pointed at the API, which relays down the tunnel each
+agent dialled out, *"the only one that works for more than one host"*. **The deployed farm is on the
+second path** — the live Caddyfile routes `/dp/*` to `127.0.0.1:3000` and `WORKER_DATA_PLANE` is
+unset — so live view for a second host needs no ingress change at all.
+
+What a second host actually costs is a VM, a `farm-up.sh` run, the boot unit, and a registration
+token. All operational, none of it in this repo.
+
+**The dev tooling does assume one**, harmlessly: `check-deployed.sh`, `farm-online.sh`,
+`verify-failure.mjs` and friends default `MFARM_LAB=mfarm-lab`, all through env vars that already
+override. They would each need a second name, or a loop, before they described a two-host farm
+honestly — which is a real but small piece of work, and it is worth doing *when* there is a second
+host rather than in anticipation of one.
+
+### S7.3 — Rate limiting is in-memory — **AUDITED: it is not the first blocker, and the real one is bigger**
+
+The row is true as far as it goes. `apps/api/src/http/server.ts` registers `@fastify/rate-limit`
+with the default in-process store and says so in a comment: limits are per API instance, so a second
+process silently multiplies every one of them.
+
+**But swapping that store for Redis would not get a second instance working.** `TunnelRegistry` is
+decorated per Fastify instance and holds its hosts in a process-local `Map`
+(`apps/api/src/http/tunnel.ts`). `openControlChannel` returns `undefined` when the host is not in
+*this* process's map. `metrics.ts` already says the quiet part — *"a viewer can only be relayed by
+the replica holding that host's tunnel"* — and it understates the blast radius, because since
+ADR-0011 the same registry carries **automation**, not only the live view:
+`callOverTunnel(app.tunnels, route.hostId, …)` is how a WebDriver command reaches a host that is not
+directly dialable.
+
+So behind a naive round-robin load balancer, a second instance does not merely double the rate
+limits — **roughly half of all tunnel-transport WebDriver sessions fail**, in a farm whose whole
+point is that they do not. Fixing that is sticky routing by host id, or a relay bus between
+replicas, and either is a genuine piece of architecture rather than a store swap.
+
+**The honest recommendation is therefore not to build any of this yet.** Nothing needs a second API
+instance: one process serves a four-device farm with room to spare, and S7.1's health gate has taken
+the worst of the no-rolling-deploy sting out. When a second instance does become necessary, the
+order is tunnel affinity first, rate-limit store second — the reverse of what this row implied.
 
 ### S7.4 — Worker-side metrics — **BUILT (2026-09-07), and the row describing it was wrong**
 
@@ -461,9 +504,11 @@ three that end a farm without anybody noticing.
 7. **S7 ceilings** — **S7.1 done** (ADR-0030): the box pulls `main` on a five-minute timer,
    health-gates what it deploys, rolls back what fails and refuses to retry it. **S7.4 done**
    (ADR-0031, migration 044): the host now reports its own disk, load and memory, and the row that
-   said queue depth was the missing thing was wrong. **S7.2 and S7.3 remain**, and neither is
-   blocked on code — S7.2 is a provisioning decision, and S7.3 should not be built until something
-   needs a second API instance.
+   said queue depth was the missing thing was wrong. **S7.2 audited** — nothing in the control plane
+   assumes one device host, including the ingress, so a second one is a VM and a `farm-up.sh` run.
+   **S7.3 audited and deliberately not built** — the rate limiter is not the first blocker to a
+   second API instance; the process-local `TunnelRegistry` is, and it now carries automation as well
+   as the live view.
 
 Each step ships as its own PR with its own migration, and each is verified on a running farm before
 the next starts — not when CI is green. `DEFECTS.md` states the reason: twice this month a fix was
