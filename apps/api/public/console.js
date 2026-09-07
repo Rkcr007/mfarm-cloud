@@ -195,6 +195,10 @@ export const state = {
    * wants delivered to a page that shows six of them.
    */
   artifacts: { sessionId: null, items: [], loaded: false },
+  // The WebDriver steps for whichever session the cockpit is showing (migration 041). Keyed by
+  // session for the same reason `artifacts` is: navigating between two sessions must never show one
+  // session's steps under the other's heading.
+  commands: { sessionId: null, items: [], truncated: false, loaded: false },
   /**
    * The element inspector. `nodes` is the last dump, `picked` the node under the last click.
    *
@@ -958,15 +962,47 @@ async function loadDevice(id) {
   }
 }
 
-async function loadRunDetail(id) {
-  if (state.runDetail?.id !== id) state.runDetail = { id, run: null, sessions: [], loaded: false };
+/**
+ * A run, its sessions, its failures, what the farm saw, and what happened when.
+ *
+ * `failures` AND `incidents` WERE BEING DROPPED HERE, and the screen has rendered neither since
+ * they were built. `GET /v1/runs/:id` has always returned both; this function spread `run` and
+ * `sessions` and nothing else, so `d.failures?.length` was `undefined?.length` on every run ever
+ * opened. The optional chaining is what made it invisible — the cards did not error, they simply
+ * never appeared, and the screen looked finished.
+ *
+ * The Failures card's own comment calls itself "the whole payoff of runs plus outcomes". It was
+ * dead code. This is the same shape as the console defect register's recurring lesson: a thing that
+ * is shipped, correct, and never reached looks exactly like a thing that works.
+ *
+ * The timeline is fetched ALONGSIDE rather than inside: it is a separate endpoint for a reason —
+ * a run page is opened for every run and a timeline can be hundreds of rows — but both land in one
+ * state write so the screen cannot render half of itself.
+ */
+export async function loadRunDetail(id) {
+  if (state.runDetail?.id !== id) {
+    state.runDetail = { id, run: null, sessions: [], failures: [], incidents: [], events: [], loaded: false };
+  }
   try {
-    const out = await api(`/v1/runs/${encodeURIComponent(id)}`);
+    const [out, tl] = await Promise.all([
+      api(`/v1/runs/${encodeURIComponent(id)}`),
+      // A timeline that fails must not cost the page its failures. Caught here rather than in the
+      // outer catch, which would blank everything over a secondary fetch.
+      api(`/v1/runs/${encodeURIComponent(id)}/timeline?limit=300`).catch(() => ({ events: [] })),
+    ]);
     if (state.runDetail?.id !== id) return;
-    state.runDetail = { id, run: out.run, sessions: out.sessions || [], loaded: true };
+    state.runDetail = {
+      id,
+      run: out.run,
+      sessions: out.sessions || [],
+      failures: out.failures || [],
+      incidents: out.incidents || [],
+      events: tl.events || [],
+      loaded: true,
+    };
   } catch {
     if (state.runDetail?.id !== id) return;
-    state.runDetail = { id, run: null, sessions: [], loaded: true };
+    state.runDetail = { id, run: null, sessions: [], failures: [], incidents: [], events: [], loaded: true };
   }
 }
 
@@ -5096,6 +5132,104 @@ function connectCard(sess) {
 }
 
 /**
+ * The steps this session ran (migration 041).
+ *
+ * Paged at 500 rather than fetched whole. A long suite produces thousands of commands and a screen
+ * that asks for all of them is a screen that times out on the run most worth reading — which would
+ * be the exact opposite of what this card is for.
+ */
+async function loadCommands(sessionId) {
+  if (state.commands.sessionId === sessionId && state.commands.loaded) return;
+  state.commands = { sessionId, items: [], truncated: false, loaded: false };
+  try {
+    const out = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/commands?limit=500`);
+    if (state.commands.sessionId !== sessionId) return;
+    state.commands = {
+      sessionId, items: out.commands || [], truncated: Boolean(out.nextAfter), loaded: true,
+    };
+  } catch {
+    if (state.commands.sessionId !== sessionId) return;
+    state.commands = { sessionId, items: [], truncated: false, loaded: true };
+  }
+}
+
+/**
+ * THE STEPS, WITH THE FAILING ONES IN RED (migration 041).
+ *
+ * The thing every commercial farm puts at the centre of this screen, and the thing MFARM could not
+ * show until the hub started writing down what it forwards. A red run's question is "which step",
+ * and until now the only answer was a message the suite happened to include.
+ *
+ * ---------------------------------------------------------------- what is shown, and what is not
+ *
+ * Method, path, status and duration. **No selectors, no test data, no request bodies** — the hub
+ * does not store them (ADR-0029) and so this cannot show them. That is a deliberate limit worth
+ * knowing while reading the card: `POST element` tells you a lookup failed, not what it looked for.
+ *
+ * FAILURES FIRST IS **NOT** WHAT THIS DOES, unlike the run screen's Failures card. A step list read
+ * out of order is not a step list — the value is in what came immediately before the red one — so
+ * the order is the order they ran, and the summary line above carries the count.
+ */
+function stepsCard(sess) {
+  const id = sess.id;
+  if (state.commands.sessionId !== id || !state.commands.loaded) {
+    void loadCommands(id).then(scheduleRender);
+  }
+  const mine = state.commands.sessionId === id;
+  const loaded = mine && state.commands.loaded;
+  const steps = mine ? state.commands.items : [];
+  const failed = steps.filter((c) => c.failed);
+
+  /**
+   * A SLOW STEP IS WORTH SEEING even when it succeeded — a click that took nine seconds is usually
+   * the thing before the failure, not a curiosity. Threshold, not a percentile: a percentile on a
+   * suite of mostly-fast commands would flag noise on a healthy run.
+   */
+  const SLOW_MS = 3000;
+
+  return card('Steps', {
+    aside: h('span', { class: 'caption', text: !loaded
+      ? 'loading…'
+      : `${steps.length}${state.commands.truncated ? '+' : ''} step${steps.length === 1 ? '' : 's'}`
+        + (failed.length ? `, ${failed.length} failed` : '') }),
+  },
+    !loaded
+      ? h('p', { class: 'caption', text: 'Loading…' })
+      : steps.length
+        ? h('div', {},
+            h('div', { class: 'tablewrap' }, h('table', { class: 'table wide steps' },
+              h('thead', null, h('tr', null,
+                ['#', 'Command', 'Status', 'Took', 'At'].map((t) => h('th', { text: t })))),
+              h('tbody', null, steps.map((c) => h('tr', { class: c.failed ? 'step-bad' : '' },
+                h('td', { class: 'tnum caption', text: String(c.seq) }),
+                h('td', null, h('code', { text: `${c.method} ${c.path || '/'}` })),
+                h('td', null, c.failed
+                  // The W3C code where there is one; the bare status otherwise. A step that never
+                  // got an answer has neither, and "no answer" is the most important thing this
+                  // table can say — it means the device stopped talking, not that the test failed.
+                  ? pill(c.error || (c.status === null ? 'no answer' : String(c.status)), 'bad')
+                  : h('span', { class: 'caption tnum', text: String(c.status) })),
+                h('td', { class: `tnum ${c.durationMs >= SLOW_MS ? 'step-slow' : 'caption'}`,
+                          text: c.durationMs == null ? '—' : `${c.durationMs}ms` }),
+                h('td', { class: 'caption', text: new Date(c.startedAt).toLocaleTimeString() }),
+              ))),
+            )),
+            state.commands.truncated
+              ? h('p', { class: 'caption mt-md', text:
+                  'Only the first 500 steps are shown. The rest are on '
+                  + `GET /v1/sessions/${id}/commands.` })
+              : null,
+            h('p', { class: 'caption mt-md', text:
+              'MFARM records what each command WAS, never what it carried \u2014 selectors, test '
+              + 'data and passwords live in the request body and are not stored.' }),
+          )
+        : h('p', { class: 'caption', text:
+            'No WebDriver commands were recorded. A session driven from this console, or one whose '
+            + 'steps have passed their retention window, has none.' }),
+  );
+}
+
+/**
  * What the finished run left behind (migration 019).
  *
  * IN THE COCKPIT, not on a screen of its own, because `#/sessions/<id>` already routes here — the
@@ -5261,6 +5395,15 @@ function screenCockpit(id) {
               ))
             : empty('Nothing has been sent to this device.', 'Install a build from the panel beside this one.'),
         ),
+        /**
+         * STEPS ABOVE EVIDENCE, deliberately.
+         *
+         * A person opening a red session asks "which step" before "show me the picture" — and the
+         * picture is only readable once you know what the device was being asked to do when it was
+         * taken. The screenshot 040 captures can be up to a beat late, so the step list is also
+         * what tells you what happened in between.
+         */
+        stepsCard(sess),
         evidenceCard(sess, live),
       ),
       h('div', { class: 'rail' },
@@ -5707,6 +5850,62 @@ function runOutcome(run) {
  * counts describe part of the run. Silence about that would make a partial pass look like a whole
  * one.
  */
+/**
+ * One timeline entry, as a tone, a title and a note.
+ *
+ * A TABLE OF KINDS RATHER THAN A CHAIN OF IFS, so that a kind added to `execution_events` and not
+ * added here renders as itself instead of vanishing. That is the failure mode worth designing
+ * against: a timeline is read as complete, so an entry silently dropped is worse than an ugly one.
+ */
+const RUN_EVENT = {
+  'run-created':            { tone: 'info',   title: 'Run created' },
+  'session-queued':         { tone: 'warn',   title: 'Waiting for a device' },
+  'device-allocated':       { tone: 'accent', title: 'Device allocated' },
+  'session-active':         { tone: 'ok',     title: 'Session started' },
+  'build-install-started':  { tone: 'info',   title: 'Installing the build' },
+  'build-install-finished': { tone: 'ok',     title: 'Build installed' },
+  'test-failed':            { tone: 'bad',    title: 'Test failed' },
+  'artifact-created':       { tone: 'info',   title: 'Evidence captured' },
+  'session-ended':          { tone: '',       title: 'Session ended' },
+  'device-released':        { tone: '',       title: 'Device released' },
+  // AMBER, NOT RED. The farm having a problem is not the test failing, and this screen keeps those
+  // apart everywhere else.
+  incident:                 { tone: 'warn',   title: 'The farm had a problem' },
+  'run-completed':          { tone: 'ok',     title: 'Run completed' },
+};
+
+function runEventLine(e) {
+  const meta = RUN_EVENT[e.kind] || { tone: '', title: e.kind };
+  const d = e.detail || {};
+
+  /**
+   * The note is per-kind because a shared one would be useless for all of them. A queue wait's
+   * interesting number is how long it waited; a failure's is which test and why.
+   */
+  let note = '';
+  if (e.kind === 'test-failed') {
+    note = [d.test, d.message].filter(Boolean).join(' — ');
+  } else if (e.kind === 'session-queued' && d.queuedMs != null) {
+    note = `waited ${Math.round(d.queuedMs / 1000)}s`;
+  } else if (e.kind === 'artifact-created') {
+    // Says WHAT it is evidence of. A screenshot taken for a failure and one somebody took from the
+    // console are the same row otherwise, and they mean completely different things.
+    note = d.context?.source === 'test-failure'
+      ? `${d.kind} for ${d.context.test ?? 'a failed test'}`
+      : `${d.kind}`;
+  } else if (e.kind === 'incident') {
+    note = d.detail || d.reason || '';
+  } else if (e.kind === 'build-install-finished' && d.packageName) {
+    note = d.packageName;
+  } else if (e.kind === 'session-ended' && d.reason) {
+    note = String(d.reason).replace(/_/g, ' ');
+  }
+
+  // The clock first, because the question a timeline answers is "in what order, and how far apart".
+  const when = e.occurredAt ? new Date(e.occurredAt).toLocaleTimeString() : '';
+  return { tone: meta.tone, title: meta.title, note: [when, note].filter(Boolean).join(' · ') };
+}
+
 function runPartialNote(run) {
   const t = run.tests || {};
   const reporting = t.sessionsReporting ?? 0;
@@ -5853,6 +6052,26 @@ function screenRun(id) {
             h('span', { class: 'caption', text: i.detail || FAILURE_REASON_LABEL[i.reason] || i.reason }),
             h('span', { class: 'caption', text: ago(i.occurredAt) }),
           ))))
+      : null,
+
+    /**
+     * WHAT HAPPENED, AND WHEN (migration 030, and 042 for the test lines).
+     *
+     * The events have been recorded and served since 2026-09-01 and no screen has ever rendered
+     * them — `AutomationExecutionPlan.md` §18 asks for exactly this, and `STATUS.md` has carried it
+     * as the one console screen the execution model still wanted.
+     *
+     * RED IS RESERVED, and the reservation is the point. `test-failed` is `bad`; an `incident` is
+     * `warn`. The run screen already refuses to conflate a test failing with the farm having a
+     * problem — the two cards above are side by side for that reason — and a timeline that painted
+     * both red would undo that distinction in the one place a reader scans fastest.
+     */
+    d.events?.length
+      ? card('What happened', { class: 'mb-gap' },
+          h('p', { class: 'help' },
+            'Every state change this run went through, in order. Red is a test the suite reported '
+            + 'as failed; amber is a problem the farm had.'),
+          h('div', { class: 'mt-md' }, timeline(d.events.map(runEventLine))))
       : null,
 
     card('Sessions', { class: 'flush' },

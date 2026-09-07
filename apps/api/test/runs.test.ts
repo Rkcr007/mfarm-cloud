@@ -1477,3 +1477,129 @@ describe('execution event stream, over a real socket', () => {
     await res.body?.cancel().catch(() => {});
   });
 });
+
+/**
+ * Migration 042: the timeline learns that tests exist.
+ *
+ * Nine event kinds described what the FARM did and none described what the TEST did, so a timeline
+ * could say the device was allocated at 10:30:04 and not that the test failed at 10:31:43 — which
+ * is the line somebody opens the page for.
+ */
+describe('a failed test reaches the timeline', () => {
+  const events = async (run: string) => {
+    const r = await app.inject({
+      method: 'GET', url: `/v1/runs/${run}/timeline`, headers: auth(keyA) });
+    assert.equal(r.statusCode, 200, r.body);
+    return r.json().events as Array<{ kind: string; detail: Record<string, unknown>; occurredAt: string }>;
+  };
+
+  test('a failed result becomes a test-failed event carrying the test and a headline', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openSession(keyA, { 'mfarm:runId': 'tf-1' });
+
+    await app.inject({
+      method: 'POST', url: `/v1/sessions/${sid}/result`, headers: auth(keyA),
+      payload: {
+        status: 'failed', name: 'checkout applies a promo',
+        failure: 'AssertionError: expected 8 got 10\n    at Object.<anonymous> (spec.js:12:5)',
+        failureReason: 'assertion-failure',
+      },
+    });
+
+    const failed = (await events('tf-1')).filter((e) => e.kind === 'test-failed');
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].detail.test, 'checkout applies a promo');
+    assert.equal(failed[0].detail.failureReason, 'assertion-failure');
+
+    /**
+     * THE HEADLINE, NOT THE STACK. A timeline entry is a one-line summary and the full stack is one
+     * click away on the result itself — and every SSE frame of a live run would otherwise carry a
+     * 10k string.
+     */
+    assert.equal(failed[0].detail.message, 'AssertionError: expected 8 got 10');
+    assert.ok(!JSON.stringify(failed[0]).includes('spec.js'), 'only the first line');
+  });
+
+  test('a passing test leaves no mark', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openSession(keyA, { 'mfarm:runId': 'tf-2' });
+    await app.inject({
+      method: 'POST', url: `/v1/sessions/${sid}/result`, headers: auth(keyA),
+      payload: { status: 'passed', name: 'the happy path' },
+    });
+    assert.equal((await events('tf-2')).filter((e) => e.kind === 'test-failed').length, 0,
+      'a timeline of every green test is a timeline nobody reads');
+  });
+
+  test('a suite\'s own timestamp is used, and clamped to what could have happened', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openSession(keyA, { 'mfarm:runId': 'tf-3' });
+
+    const report = (occurredAt: string, name: string) => app.inject({
+      method: 'POST', url: `/v1/sessions/${sid}/result`, headers: auth(keyA),
+      payload: { status: 'failed', name, occurredAt },
+    });
+
+    /**
+     * A TIMESTAMP FROM A CALLER IS A CLAIM. A reporter with a skewed clock — or somebody who would
+     * like their failure to appear before the run started — must not be able to write a timeline
+     * that could not have happened.
+     */
+    const past = await report('2020-01-01T00:00:00.000Z', 'from the past');
+    const future = await report('2099-01-01T00:00:00.000Z', 'from the future');
+    const junk = await report('not a date at all', 'unparseable');
+
+    for (const r of [past, future, junk]) assert.equal(r.statusCode, 201, r.body);
+
+    const results = (await app.inject({
+      method: 'GET', url: `/v1/sessions/${sid}/results`, headers: auth(keyA) })).json().results;
+    const at = (name: string) =>
+      new Date(results.find((x: { name: string }) => x.name === name).occurredAt).getTime();
+
+    const now = Date.now();
+    assert.ok(at('from the past') > now - 60_000,
+      'clamped up to the session start, not written as 2020');
+    assert.ok(at('from the future') <= now + 1000, 'clamped down to now, not written as 2099');
+    // Unparseable is treated as absent rather than as a 400: the result is what the endpoint is
+    // for, and losing it over a malformed optional field is the mistake `boundFailure` refuses.
+    assert.ok(at('unparseable') > now - 60_000, 'falls back to when we heard');
+  });
+
+  test('evidence landing is on the timeline as a link, not a note that a picture exists', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openSession(keyA, { 'mfarm:runId': 'tf-4' });
+
+    /**
+     * Minted here rather than reused, for the reason `beatAndAck` gives at length: the plaintext is
+     * discarded at registration, and a token held across describes is dead by the time this runs.
+     */
+    const wt = generateWorkerToken();
+    await withSystem((c) => c.query(
+      'UPDATE hosts SET token_prefix = $2, token_hash = $3 WHERE id = $1',
+      [hostId, wt.prefix, wt.hash]));
+
+    // Uploaded as the worker would, with the context migration 040 attaches to a failure capture.
+    const q = new URLSearchParams({
+      kind: 'logcat', device: (await withSystem(async (c) => (await c.query(
+        'SELECT device_id FROM sessions WHERE id = $1', [sid])).rows[0].device_id)) as string,
+      context: JSON.stringify({ source: 'test-failure', test: 'checkout applies a promo' }),
+    });
+    const up = await app.inject({
+      method: 'POST', url: `/v1/sessions/${sid}/artifacts?${q}`,
+      headers: { ...auth(wt.plaintext), 'content-type': 'application/octet-stream' },
+      payload: 'E/AndroidRuntime: FATAL EXCEPTION\n',
+    });
+    assert.equal(up.statusCode, 201, up.body);
+
+    const made = (await events('tf-4')).filter((e) => e.kind === 'artifact-created');
+    assert.equal(made.length, 1);
+    assert.equal(made[0].detail.artifactId, up.json().artifact.id,
+      'the id is what makes the entry a link rather than a note');
+    assert.equal((made[0].detail.context as Record<string, unknown>).source, 'test-failure',
+      'a capture taken for a failure and one somebody took by hand mean different things');
+  });
+});

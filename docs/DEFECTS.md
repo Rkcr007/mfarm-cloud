@@ -38,7 +38,35 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Nothing, as of 2026-09-06** — twenty-five recorded, twenty-five closed.
+**Nothing, as of 2026-09-07** — twenty-six recorded, twenty-six closed. D26 is below and is the
+most interesting entry this file has: it is the first defect the SUITE could not have found *by
+construction*, and the reason is worth reading before writing another fixture.
+
+### D26 — the run screen's Failures card had never rendered
+
+| | |
+|---|---|
+| **Severity** | **S2** — a capability that is missing, with no workaround on the page |
+| **Found** | reading `loadRunDetail` while building the execution timeline |
+| **Closed** | 2026-09-07, PR for `EXECUTION_ROADMAP.md` S4 |
+
+`GET /v1/runs/:id` has returned `failures` and `incidents` since they were built.
+`loadRunDetail` spread `run` and `sessions` and dropped both, so `d.failures?.length` was
+`undefined?.length` on every run anybody has ever opened. The **Failures** card — whose own comment
+in `console.js` calls it *"the whole payoff of runs plus outcomes"* — and the **"What the farm saw"**
+card have never appeared. The optional chaining is what made it silent: the cards did not throw,
+they simply were not there, and the screen looked finished.
+
+**Why 229 console-screen tests were green through all of it.** `console-screens.test.ts` seeds
+`failures` *directly into `state.runDetail`*. A fixture that supplies what the loader is supposed to
+supply cannot see the loader failing to supply it. Every assertion about that card was true, and
+true about a code path no user ever reached.
+
+That is the sixth defect of this shape in the register (see *"Controls on a false premise"*), and
+the first where the blind spot is structural rather than incidental. **The lesson to carry: a test
+that seeds state tests the renderer, never the loader.** The fix ships with a test that drives
+`loadRunDetail` against a stubbed `fetch` and asserts on what lands in state — verified by
+reverting the loader and watching it go red.
 
 That is a statement about this list, not about the console. Every entry here was found by USING the
 thing: clicking every control, reading every sentence on a real farm, watching a real device arrive.
