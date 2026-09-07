@@ -229,7 +229,7 @@ class, "no answer", the privacy note, and the empty state) and four API tests (t
 one-line headline, a passing test leaving no mark, the timestamp clamp against a 2020 and a 2099
 claim, and evidence landing as a link).
 
-## S5 — Video, recorded only for failures
+## S5 — Video, recorded only for failures — **GATE MEASURED, design decided, not built**
 
 **Why this is fifth and not first.** `EXECUTION_MODEL.md` §4.4 measured it: 37.5 MB for a five-minute
 recording against 3.1 MB for everything else combined, and two saturated devices fill the control
@@ -266,11 +266,30 @@ timestamp. Video gets its own retention — days, not the fortnight logcat gets 
 - Everything else — content addressing, retention, the RLS'd blob endpoint — already exists and is
   reused unchanged.
 
-**The measurement that gates this step.** §4.4 ends with the one thing still unknown: what host-side
-encode costs against the `RENDER_BASELINE.md` Flutter-canvas workload, where there is least headroom.
-That is lab hours, not a design question, and **S5 does not start until that number exists.** If it
-perturbs the workload it is measuring, video ships for physical devices only, where the encoder is on
-the phone's dedicated hardware and the farm's CPU is not in the loop at all.
+**The measurement that gated this step — TAKEN 2026-09-07, and it decides the design.**
+
+`deploy/measure-encode-cost.mjs`, on the farm, interleaved, reproduced three times with a
+run-to-run spread of 0.2fps:
+
+| Workload | nothing recording | `screenrecord` running | |
+|---|---|---|---|
+| Flutter canvas | **29.9 fps**, 87 dropped | **19.9 fps**, 145 dropped | **−33% fps** |
+| Native list | 30.2 fps, 55.6% jank, 36 dropped | 29.5 fps, **96.8% jank**, 87 dropped | fps holds, **dropped ×2.4** |
+
+**Guest-side encode is not available on Cuttlefish on this host**, and both `screenrecord` and
+scrcpy encode on the device — so the encoder `capture.ts` already runs is fine for a live view
+somebody is watching and not fine under a suite whose timing is being asserted. Ordinary UI is the
+more dangerous of the two results, because its fps *holds* while its dropped frames double:
+`RENDER_BASELINE.md`'s warning is that the risk was never red suites, it is timing-sensitive
+assertions silently reading a device three frames behind.
+
+**So bullet 1 is no longer a preference, it is the requirement.** S5 records on the host, reusing
+`cvd`'s WebRTC encode, and that path does not exist yet — it is the real remaining work. The
+alternative, available immediately and honest, is shipping video for **physical devices only**,
+where the encoder is dedicated silicon on the phone and this host's CPU is not in the loop.
+
+That is a product decision rather than an engineering one, and it is the open question this step now
+rests on. Full numbers and both caveats: `docs/RENDER_BASELINE.md`.
 
 ---
 

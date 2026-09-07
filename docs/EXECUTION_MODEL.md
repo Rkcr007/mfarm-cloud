@@ -279,9 +279,23 @@ order:
 3. 10–15 fps at ~500 kbps — UI testing does not need 60 fps, and this roughly quarters both costs;
 4. retention in days, not the fortnight logcat gets.
 
-One thing still needs measuring before any of it: what `screenrecord` actually costs on this
-hardware, run against the Flutter canvas workload where there is least headroom. That is a
-lab-hours experiment, not a design question.
+**MEASURED 2026-09-07, and it settles bullet 1 rather than confirming it as a preference.**
+`deploy/measure-encode-cost.mjs`, on the farm, interleaved, reproduced three times:
+
+| Workload | nothing recording | `screenrecord` running |
+|---|---|---|
+| Flutter canvas | **29.9 fps**, 87 dropped | **19.9 fps**, 145 dropped |
+| Native list | 30.2 fps, 55.6% jank, 36 dropped | 29.5 fps, **96.8% jank**, 87 dropped |
+
+The canvas loses **a third of its frame rate**. Ordinary UI keeps its fps and doubles its dropped
+frames, which is the quieter and more dangerous half — `RENDER_BASELINE.md`'s warning is that the
+risk was never red suites, it is timing-sensitive assertions silently reading a device three frames
+behind.
+
+So **guest-side encode is not available here**, and both `screenrecord` and scrcpy are guest-side.
+Bullet 1 above is no longer the preferred option; it is the only one on virtual devices. The
+alternative is shipping video for physical devices only, where the encoder is dedicated silicon on
+the phone. Full numbers and both caveats: `docs/RENDER_BASELINE.md`.
 
 ### 4.5 On-demand screenshots — DONE (2026-08-24)
 
