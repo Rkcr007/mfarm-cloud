@@ -378,6 +378,26 @@ One further claim in a test comment — that an assertion caught `> 0` — turne
 is now recorded as false in the file: given a gauge whose domain is -1/0/1 no test can separate
 `> 0` from `== 1`. `!= 0` *is* caught, and that is what the case is for.
 
+**Verified on the farm, 2026-09-07 — including the case that matters most.** The timer was enabled
+on `mfarm-cp` at 10:10 and then **deployed a commit by itself**, with nobody typing a deploy command:
+
+```
+10:32:44  want=820c987 running=90eda52 released=no  verdict=waiting
+10:32:44  no image for 820c987 yet — Release runs after CI; will retry
+10:38:34  Deployed 820c9871e24fbed99539691f729f58bcb5c7ea32
+10:38:35  health gate: 5 consecutive /ready, 6s apart
+10:39:00  deployed and healthy: 820c987
+```
+
+**That `waiting` tick is the whole point.** The merge had landed and Release had not published, which
+is exactly the window this session walked into by hand four minutes after merging #128 — and the
+deployer waited rather than falling back to building on the box.
+
+Also verified on the box: `pinned-from` reads `/tmp/tmp.sq0yYzZDI9`, so a tick really does execute
+from outside the tree it fast-forwards; the kill switch pauses and resumes, with
+`mfarm_autodeploy_paused` following it; and `check-deployed.sh` reports image, control-plane
+checkout and device-host checkout all on `main`.
+
 **Not done here:** the device host. D19's worse half was `mfarm-lab`'s checkout sixty-six commits
 behind, and bringing a worker's tree forward restarts the agent under running sessions — a different
 decision with a different blast radius. The installer refuses that box and says which case it is in.

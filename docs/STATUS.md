@@ -60,7 +60,7 @@ the encode measurement, and returned to rest afterwards.
 
 | Area | State | The honest caveat |
 |---|---|---|
-| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1419-test suite**. All are closed. |
+| **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the 1474-test suite**. All are closed. |
 | **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 39 migrations. | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host. A host outage is a farm outage; ADR-0027 and migration 038 reduce what one costs, they do not remove it. |
@@ -84,12 +84,23 @@ console has been used hard and its register is empty, and the farm has run real 
 never happened is somebody who did not build it trying to use it for a day. Everything below is
 smaller than this.
 
-### 2. Deploy is manual — the largest operational gap
+### 2. ~~Deploy is manual~~ — **CLOSED 2026-09-07, ADR-0030**
 
-A merged, CI-green, released commit reaches the farm when a human runs `mfarm-deploy.sh`. It went
-unnoticed for ninety minutes once, while the defect register claimed those fixes were live.
-`check-deployed.sh` reports the gap; **reporting is not closing.** Either a deploy step on the
-Release workflow, or an alert when the serving sha and `origin/main` diverge.
+A merged, CI-green, released commit used to reach the farm when a human ran `mfarm-deploy.sh`. It
+went unnoticed for ninety minutes once, while the defect register claimed those fixes were live.
+
+`mfarm-autodeploy.timer` now asks every five minutes whether the farm is running `main`, and the box
+PULLS rather than CI pushing — a deploy job in Actions would need a standing SSH credential into
+production, and pulling is ADR-0006's shape. It health-gates what it deploys on five *consecutive*
+`/ready` answers, rolls back the image on failure, and **refuses to retry a commit that failed** —
+without that memory a timer turns one bad merge into a restart every five minutes forever.
+
+Both halves of the old suggestion shipped: the deploy is automatic AND the divergence is alerted.
+`mfarm_autodeploy_pending_seconds` is the gap as a number, and `MfarmFarmBehindMain` pages on it.
+
+**The device host is deliberately excluded.** Fast-forwarding the worker's tree restarts the agent
+under running sessions; the installer refuses that box and names the by-hand path. That guard was
+itself wrong on its first attempt and is now D28.
 
 ### 3. The handset is out of the fleet, and one command puts it back
 
@@ -97,10 +108,17 @@ Release workflow, or an alert when the serving sha and `origin/main` diverge.
 machine re-registers it with its panel and its capabilities. **Physical hardware — cannot be done
 from the repo.**
 
-### 4. Single-instance only
+### 4. Single-instance only — and the blocker is NOT the rate limiter
 
-Rate limiting is in-memory (`apps/api/src/http/server.ts`). Correct for one instance and named as
-such in the code. It is the one module between here and running two.
+Rate limiting is in-memory (`apps/api/src/http/server.ts`), correct for one instance and named as
+such in the code. It was described here as "the one module between here and running two". **That is
+wrong**, and the audit in `EXECUTION_ROADMAP.md` S7.3 says why: `TunnelRegistry` is decorated per
+Fastify instance and holds its hosts in a process-local `Map`, and since ADR-0011 it carries
+**automation**, not only the live view. Behind a naive round-robin a second instance would not
+merely double the limits — roughly half of all tunnel-transport WebDriver sessions would fail.
+
+Correct order is tunnel affinity first, rate-limit store second. Neither is worth building until
+something needs a second instance, and nothing does.
 
 ### 5. Video — the gate is measured, and it is now a product decision
 
@@ -127,7 +145,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1419**, green, across three workspaces plus `deploy` |
+| Tests | **1474**, green, across three workspaces plus `deploy` |
 | Migrations | 43, all applied on the farm |
 | Decisions | 28 ADRs (there is no 0013) |
 | Merged PRs | 128 |
