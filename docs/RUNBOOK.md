@@ -207,6 +207,18 @@ $CP 'systemctl list-timers mfarm-autodeploy.timer'     # is it even scheduled
 The verdicts are `current`, `waiting` (no image yet — Release runs after CI), `blocked` (a commit
 failed its health gate and will not be retried), `paused`, and `unknown` (`git fetch` failed).
 
+**Installing it** (once, on `mfarm-cp`):
+
+```bash
+$CP 'cd ~/mfarm && sudo -v && ./deploy/install-autodeploy-service.sh --enable'
+```
+
+The installer **chowns** `deploy/.state/autodeploy`, and that is not cosmetic. Docker creates a
+missing bind-mount source as root, and the compose file mounts that directory into the API — so on
+any box where a deploy happened before the installer ran, the directory already exists owned by
+root and the deployer can see it and not write to it. A tick in that state exits fatal and says so
+rather than running forever and recording nothing.
+
 **Stop it deploying**, during an incident or a migration you want to watch by hand:
 
 ```bash
