@@ -49,12 +49,22 @@ MSG
   exit 1
 fi
 
-# CREATED HERE, BEFORE THE TIMER EVER RUNS, and owned by the account that will write to it.
+# CREATED AND CHOWNED HERE, BEFORE THE TIMER EVER RUNS.
+#
 # `docker-compose.prod.yml` bind-mounts this directory into the API read-only so the deploy state
-# can be scraped, and docker creates a missing bind-mount source AS ROOT. A box where compose came
-# up first would leave the deployer with a directory it can see and cannot write — a timer that
-# ticks forever and records nothing.
-sudo -u "$RUN_USER" mkdir -p "$REPO_ROOT/deploy/.state/autodeploy"
+# can be scraped, and DOCKER CREATES A MISSING BIND-MOUNT SOURCE AS ROOT. On this farm that is not
+# a hypothetical ordering: the compose change ships in the same commit as the deployer, so the
+# first deploy after it lands creates `deploy/.state/autodeploy` owned by root — BEFORE anybody
+# runs this installer.
+#
+# `mkdir -p` alone is not enough for exactly that reason: it succeeds silently on a directory that
+# already exists and leaves the ownership wrong, which is the failure `auto-deploy.sh` then has to
+# report as fatal on every tick. The chown is the line that actually fixes it, and it is
+# unconditional rather than guarded on a stat, because getting it wrong is a timer that runs
+# forever and records nothing.
+AD_STATE="$REPO_ROOT/deploy/.state/autodeploy"
+sudo mkdir -p "$AD_STATE"
+sudo chown -R "$RUN_USER" "$AD_STATE"
 
 for unit in mfarm-autodeploy.service mfarm-autodeploy.timer; do
   src="$REPO_ROOT/deploy/$unit"
