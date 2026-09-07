@@ -386,6 +386,14 @@ measuring before the farm runs saturated with recording on.
 The artifact itself, pulled off the farm and probed: **VP8, 720×1280, 21.9s, 156 frames, 277 KB**,
 and a frame extracted at 18s is the device's launcher — real evidence, not a black container.
 
+**And the player is verified by eye**, signed in as a real user on the deployed console: the
+Evidence card renders the recording with the browser's controls reading `0:00 / 0:23` — a duration
+it can only know by fetching the header over a range request — and a **Jump to** button naming the
+failed test. One trap for whoever looks next: `document.querySelector('video')` on the session
+screen finds the **live-view** element, not this one. The cockpit's device panel is first in the DOM
+and carries no `src` (it uses `srcObject`), so a probe written that way reports the player as broken
+when it is fine.
+
 **One defect was found by doing this that no test could have.** `VIDEO_RECORDING=failures` was set
 in `deploy/.env` and the API never saw it: `.env` is *compose's* env file, and compose passes
 nothing to a service that does not name the variable under `environment:`. The farm was configured
