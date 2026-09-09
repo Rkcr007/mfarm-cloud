@@ -4074,3 +4074,32 @@ when the feature is broken. See issues 37 and 38.
     host read endpoint for disk/CPU/agent version (migration 044 feeds Prometheus only), no usage
     view over the metering that exists, no share link, and no customer-facing tunnel. Deployment of
     this branch has not happened; nothing here has been seen on hardware.
+
+78. **DEPLOYED, AND THE TIMER GOT THERE FIRST.** 2026-09-09, `7faf06c`.
+
+    PR #149 merged, 14/14 checks. I then ran `deploy/mfarm-deploy.sh` **on my laptop**, which its own
+    header says not to do — "Runs ON THE BOX". It built a local image and stopped at migrations
+    because the local `deploy/.env` has no `POSTGRES_USER`. Nothing remote was touched and nothing
+    local was left behind except an image tag I deleted. Worth recording because the script is
+    otherwise well-signposted and I read past it.
+
+    **The auto-deploy timer (ADR-0030) had already done it properly** — `7faf06c` in service at
+    14:52 UTC, migration 048 applied at 14:52:43, health gate five consecutive `/ready`. That is the
+    timer doing exactly what it was built for, and it is the first time it has beaten a human to a
+    deploy in this log.
+
+    **Verified four ways, and the last one is the only one that proves the CODE changed:**
+
+    - `check-deployed.sh` — serving image and checkout both `7faf06c`.
+    - `verify-console.sh` — 64/64 including the build badge.
+    - `/v1/version` on the box — `"migration":"048_a_session_says_which_test_it_is.sql"`.
+    - **A capability probe against the running hub.** `mfarm:nope` comes back naming all ten known
+      capabilities including `runName`, `name` and `deviceClass`; `mfarm:runName` without
+      `mfarm:runId` comes back with the rule. An image tag and a migration row say a deploy
+      happened; only this says the parser somebody edited is the parser answering.
+
+    **NOT verified, and it is the important half.** `mfarm-lab` is stopped, so no session has carried
+    a name to a real device, no `mfarm-status` hook has been sent through a live driver, and the
+    capacity fix has not been seen with a quarantined fleet in front of it — which is the exact state
+    it was written for. Every defect in `docs/DEFECTS.md` was found by using the farm and none by the
+    suite; this branch has only the suite behind it so far.
