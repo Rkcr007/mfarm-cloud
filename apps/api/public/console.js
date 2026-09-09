@@ -2072,7 +2072,9 @@ function queueCard() {
            */
           h('p', { class: 'caption', text: 'A queued session starts automatically when a device frees up. There is no estimate here because the soonest lease to expire is only an upper bound — a holder can release early, and anyone ahead of you takes the device first.' }),
         )
-      : empty('All devices are available.', 'Nobody is waiting.'),
+      // The TITLE is a session fact and stays one; the BODY was a capacity claim read off the
+      // session table, and is now read off the devices. See `capacityState`.
+      : empty('Nobody is waiting.', capacityState().sentence),
     q.length ? h('div', { class: 'mt-md' }, btn('Open queue', 'ghost wide', () => go('#/queue'))) : null,
   );
 }
@@ -2168,17 +2170,81 @@ function nextGuaranteedFree() {
   };
 }
 
+/**
+ * WHETHER A SESSION CAN START, DERIVED ONCE, FROM THE DEVICES.
+ *
+ * Four surfaces answered this question and three of them answered it from `state.sessions`: the
+ * queue card, both empty states on the Waiting lens, and the capacity half of `fleetHeadline`. That
+ * is a false premise. The session table knows who is HOLDING a device; it knows nothing about
+ * whether one could be handed out — so on 2026-09-09, with all five devices quarantined, the
+ * console said "Every device is on its clean snapshot", "All devices are available" and "Every
+ * device is in use" on three panels while its own header, reading the same API, said 0 of 5 ready.
+ * Each of those sentences was true about sessions and false about capacity, which is the shape this
+ * console keeps shipping: copy asserting a fact it never checked.
+ *
+ * THE THREE-WAY SPLIT IS THE WHOLE POINT, and it is the same distinction `BUSY_STATES` was written
+ * for one screen over. A busy device comes back on its own and "wait" is right advice. A
+ * quarantined or offline one needs a person, and telling somebody to wait for it is precisely the
+ * failure being fixed here — they wait for a handover that cannot happen.
+ */
+function capacityState() {
+  const total = state.devices.length;
+  const ready = state.devices.filter((d) => d.state === 'READY').length;
+  const busy = state.devices.filter((d) => BUSY_STATES.has(d.state)).length;
+  const blocked = total - ready - busy;
+
+  /**
+   * COUNTED BY STATE, NOT SUMMED. "3 quarantined" and "3 offline" send an operator to two different
+   * places — one to the device's own screen, one to the host that stopped reporting it — and "3
+   * need attention" sends them to neither. The labels are `DEVICE_STATE`'s, so this sentence and
+   * the fleet table cannot come to call the same device two different things.
+   */
+  const counts = {};
+  for (const d of state.devices) {
+    if (d.state === 'READY' || BUSY_STATES.has(d.state)) continue;
+    const label = (DEVICE_STATE[d.state]?.label || d.state).toLowerCase();
+    counts[label] = (counts[label] || 0) + 1;
+  }
+  const blockedWords = Object.entries(counts).map(([label, n]) => `${n} ${label}`).join(', ');
+
+  /** Always true, whatever the fleet is doing. Safe as the body of any "nothing is happening" card. */
+  const sentence = total === 0
+    ? 'No devices are registered. Start a worker and one appears within a heartbeat.'
+    : ready > 0
+      ? `${ready} of ${total} device${total === 1 ? '' : 's'} ready to allocate.`
+      : busy > 0 && blocked > 0
+        ? `Nothing can be allocated: ${busy} in use, ${blockedWords}.`
+        : busy > 0
+          ? 'Every device is in use. Each one returns to the pool on its own.'
+          : `Nothing can be allocated — ${blockedWords}.`;
+
+  /**
+   * The same answer for the zero case only, and NULL the rest of the time — so a caller that has a
+   * positive sentence of its own cannot render this one by accident.
+   */
+  const none = ready > 0 ? null : sentence;
+
+  return { total, ready, busy, blocked, blockedWords, sentence, none };
+}
+
 function fleetHeadline() {
-  const free = state.devices.filter((d) => d.state === 'READY').length;
+  const cap = capacityState();
+  const free = cap.ready;
   const waiting = queuedSessions().length;
   const held = state.sessions.filter((x) => LIVE_SESSION_STATES.has(x.state) && x.deviceId).length;
 
   if (!state.devices.length) {
-    return { capacity: 'No devices are registered. Start a worker and one appears within a heartbeat.', queue: '', waiting: 0 };
+    return { capacity: cap.sentence, queue: '', waiting: 0 };
   }
 
+  /**
+   * "EVERY DEVICE IS IN USE" WAS A GUESS DRESSED AS A COUNT. It was the else-branch of `free === 0`,
+   * so it said "in use" about a fleet that was entirely quarantined — see `capacityState`. The
+   * positive half keeps the design's word ("free"); only the zero case, which was the wrong one,
+   * defers to the allocator's own sentence.
+   */
   const capacity = free === 0
-    ? 'Every device is in use.'
+    ? cap.none
     : `${free} of ${state.devices.length} device${state.devices.length === 1 ? '' : 's'} free.`;
 
   /**
@@ -2186,10 +2252,19 @@ function fleetHeadline() {
    * already "now" — so the bound is computed for a full farm and for nothing else.
    */
   const eta = free === 0 ? nextGuaranteedFree() : null;
+  /**
+   * THE FALLBACK IS NOT UNCONDITIONAL, AND THAT WAS THE SECOND HALF OF THE SAME BUG. "The farm
+   * hands over the moment a lease ends" is a promise about a lease, and a farm whose devices are
+   * all quarantined has none — nobody is holding anything, so nothing is going to end. A person
+   * told this waits for a handover that cannot happen, which is exactly what the queue was
+   * reported doing. It is the right fallback only where something is actually busy.
+   */
   const frees = eta
     ? `the next ${eta.name} frees in at most ${eta.inWords}.`
     // The design's own fallback, for a farm whose held sessions carry no lease to derive from.
-    : 'the farm hands over the moment a lease ends.';
+    : cap.busy > 0
+      ? 'the farm hands over the moment a lease ends.'
+      : `no device is coming back on its own — ${cap.blockedWords}.`;
 
   const queue = waiting === 0
     // Worth saying on a full farm: "nobody is waiting" plus a bound is the difference between
@@ -6454,18 +6529,31 @@ function screenSessionsBody(rows = state.sessions) {
               const st = SESSION_STATE[s.state] || { label: s.state, tone: '' };
               return h('tr', null,
                 h('td', null, pill(st.label, st.tone, { live: s.state === 'ACTIVE' })),
-                h('td', null, h('div', { class: 'row tight' },
-                  h('code', { text: s.id }),
-                  btn('copy', 'tiny ghost', async () => {
-                    try { await navigator.clipboard.writeText(s.id); toast('Session id copied', s.id, 'ok'); }
-                    catch { toast('Could not copy', 'Select the text instead.', 'bad'); }
-                  }),
+                h('td', null, h('div', { class: 'stack none' },
+                  /**
+                   * THE TEST'S NAME, WHERE THE SUITE SENT ONE (`mfarm:name`, migration 048).
+                   *
+                   * ABOVE the id, never instead of it. The id is what `mfarm app install --session`
+                   * takes and what the WebDriver URL carries in its password half — the caption at
+                   * the foot of this table promises it in full — so the name is added to the cell
+                   * rather than swapped into it.
+                   */
+                  s.name ? h('span', { class: 'fleet-name', text: s.name }) : null,
+                  h('div', { class: 'row tight' },
+                    h('code', { class: s.name ? 'caption' : '', text: s.id }),
+                    btn('copy', 'tiny ghost', async () => {
+                      try { await navigator.clipboard.writeText(s.id); toast('Session id copied', s.id, 'ok'); }
+                      catch { toast('Could not copy', 'Select the text instead.', 'bad'); }
+                    }),
+                  ),
                 )),
                 // Both directions are navigable: a run lists its sessions, and a session names its
                 // run. Without this the flat list is still flat — you can find a run only if you
                 // already knew to look for it.
                 h('td', null, s.run
-                  ? btn(s.run.runId, 'tiny ghost', () => go(`#/runs/${encodeURIComponent(s.run.runId)}`))
+                  ? btn(s.run.name || s.run.runId, 'tiny ghost',
+                      () => go(`#/runs/${encodeURIComponent(s.run.runId)}`),
+                      { title: s.run.name ? `Run ${s.run.runId}` : '' })
                   : h('span', { class: 'caption', text: '—' })),
                 h('td', { text: deviceLabel(s) }),
                 h('td', { text: s.region || '—' }),
@@ -6630,7 +6718,21 @@ function screenRuns() {
             h('thead', null, h('tr', null,
               ['Run', 'Tests', 'Build', 'Sessions', 'Live', 'Started', 'Last activity', ''].map((t) => h('th', { text: t })))),
             h('tbody', null, rows.map((r) => h('tr', null,
-              h('td', null, h('code', { text: r.runId })),
+              /**
+               * THE NAME ON TOP, THE ID UNDER IT — and both, always, when there are two.
+               *
+               * `mfarm:runId` is the join key back to CI (a number, from `$GITHUB_RUN_ID`) and
+               * `mfarm:runName` is what a person scans for ("this morning's expenses run"). A row
+               * that showed only the name would break the click-through to the CI job that is half
+               * the reason the id exists; one that showed only the id is what this table was, and
+               * is unreadable at CI volume. A run that sent no name keeps the id alone rather than
+               * growing an empty line.
+               */
+              h('td', null, r.name
+                ? h('span', { class: 'stack none' },
+                    h('span', { class: 'fleet-name', text: r.name }),
+                    h('code', { class: 'caption', text: r.runId }))
+                : h('code', { text: r.runId })),
               h('td', null, runOutcome(r)),
               h('td', null, runBuild(r)),
               h('td', { class: 'tnum', text: String(r.sessions.total) }),
@@ -6677,8 +6779,11 @@ function screenRun(id) {
 
   const run = d.run;
   return [
-    pageHead([{ label: 'Farm' }, { label: 'Runs', to: '#/runs' }], run.runId,
-      `${run.sessions.total} session${run.sessions.total === 1 ? '' : 's'}, `
+    // The name is the title when there is one, and the id moves into the subtitle rather than
+    // disappearing — the id is what somebody pastes into their CI search.
+    pageHead([{ label: 'Farm' }, { label: 'Runs', to: '#/runs' }], run.name || run.runId,
+      `${run.name ? `${run.runId} · ` : ''}`
+      + `${run.sessions.total} session${run.sessions.total === 1 ? '' : 's'}, `
       + `${run.sessions.live} still live.`),
     h('div', { class: 'statgrid mb-gap' },
       runStat('Tests', runOutcome(run),
@@ -6785,12 +6890,25 @@ function screenRun(id) {
       d.sessions.length
         ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
             h('thead', null, h('tr', null,
-              ['State', 'Session', 'Tests', 'Device', 'Build', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
+              ['State', 'Test', 'Tests', 'Device', 'Build', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
             h('tbody', null, d.sessions.map((sn) => {
               const st = SESSION_STATE[sn.state] || { label: sn.state, tone: '' };
               return h('tr', null,
                 h('td', null, pill(st.label, st.tone, { live: sn.state === 'ACTIVE' })),
-                h('td', null, h('code', { text: sn.id })),
+                /**
+                 * WHAT THIS SESSION IS, not what it is called — `mfarm:name` (migration 048).
+                 *
+                 * This column was the session uuid, which is the one fact on the row nobody is
+                 * looking for: on a run of eight it read as eight identical rows, and "which phone
+                 * is on the OTP scenario" had no answer until every session had ended and posted a
+                 * result. The id stays underneath, because it is what the API and the artifact
+                 * index are keyed on.
+                 */
+                h('td', null, sn.name
+                  ? h('span', { class: 'stack none' },
+                      h('span', { class: 'fleet-name', text: sn.name }),
+                      h('code', { class: 'caption', text: short(sn.id) }))
+                  : h('code', { text: sn.id })),
                 h('td', null, sn.tests?.total
                   ? h('span', { class: 'row tight' },
                       sn.tests.failed > 0
@@ -7023,7 +7141,7 @@ function screenQueueBody() {
                   detail ? leaseBlock(detail) : h('p', { class: 'caption', text: 'Lease time is only reported for your own session.' }),
                 );
               }))
-            : empty('Nobody is using the farm right now.', 'Every device is on its clean snapshot.'),
+            : empty('Nobody is using the farm right now.', capacityState().sentence),
         ),
         card('Waiting', {},
           waiting.length
@@ -7036,7 +7154,7 @@ function screenQueueBody() {
                 ),
                 ticker('since', s.createdAt, { prefix: 'waiting ', cls: 'secondary' }),
               )))
-            : empty('Nobody is waiting.', 'All devices are available.'),
+            : empty('Nobody is waiting.', capacityState().sentence),
           waiting.length
             ? h('p', { class: 'caption mt-md', text: 'No estimated availability is shown: it would need every holder’s remaining lease, and the API reports that only for your own session. A guess dressed as a number is worse than nothing.' })
             : null,

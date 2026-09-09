@@ -36,6 +36,7 @@ const MFARM_PREFIX = 'mfarm:';
  */
 const MFARM_KEYS = new Set([
   'region', 'tier', 'ttlMinutes', 'queueTimeoutSeconds', 'sessionId', 'appId', 'runId',
+  'runName', 'name', 'deviceClass',
 ]);
 
 function rejectUnknownMfarmKeys(caps: Record<string, unknown>): void {
@@ -73,6 +74,36 @@ export interface ParsedCapabilities {
    * created by the caller, because that needs the tenant's database scope and this file is pure.
    */
   runId?: string;
+  /**
+   * `mfarm:runName` — what the SUITE calls this run, as opposed to `mfarm:runId`, which is what CI
+   * calls it. Both are wanted at once and they disagree: the id is the join key back to the CI job
+   * (`$GITHUB_RUN_ID`, a number) and the name is what a person scans a list for
+   * (`Android_UAE_Expenses_08_09_2026_06_53_38`). See migration 048.
+   */
+  runName?: string;
+  /**
+   * `mfarm:name` — the TEST this session is running, set at creation.
+   *
+   * This is LambdaTest's `lt:options.name` and BrowserStack's `name`, and it is here for the reason
+   * they have it: the name is the only thing that makes a list of live sessions legible, and it has
+   * to arrive at the START of the test. `test_results.name` carries it too, but not until the suite
+   * posts a result — which is after the test finished, and never at all for a passing one.
+   */
+  name?: string;
+  /**
+   * `mfarm:deviceClass` — WHICH KIND OF DEVICE, by profile id (ADR-0016), or `null` for this
+   * farm's unprofiled ones.
+   *
+   * The allocator has taken this since migration 037 and `POST /v1/sessions` has passed it since;
+   * the hub never did, so a WebDriver client could ask for a tier ("physical") and not for a class
+   * ("mfarm-x1-pro"). On a fleet of one kind that is invisible. On a mixed fleet it means a suite
+   * pinned to a screen geometry gets whatever was free.
+   *
+   * TWO FIELDS, mirroring `AllocationRequest`, and for its reason: "no profile" is itself a class
+   * somebody can ask for, and one nullable value cannot distinguish it from "any device at all".
+   */
+  deviceClass?: string | null;
+  matchDeviceClass: boolean;
   /** How long to wait for capacity before giving up. 0 = fail immediately. */
   queueTimeoutSeconds: number;
   /**
@@ -251,6 +282,30 @@ function interpret(
     }
   }
 
+  /**
+   * A NAME FOR THE RUN NEEDS A RUN TO NAME. Without `mfarm:runId` there is no row to put it on, so
+   * accepting it would mean discarding an instruction — the thing `rejectUnknownMfarmKeys` exists
+   * to prevent, arrived at from the other direction.
+   */
+  const runName = label(caps, `${MFARM_PREFIX}runName`, 200);
+  if (runName !== undefined && runId === undefined) {
+    throw invalidArgument(
+      `\`${MFARM_PREFIX}runName\` names a run, so it needs \`${MFARM_PREFIX}runId\` beside it — ` +
+      'the id is what groups the sessions; the name is what a person reads.',
+    );
+  }
+
+  const name = label(caps, `${MFARM_PREFIX}name`, 300);
+
+  /**
+   * The device class, and the one capability here whose ABSENCE and whose EXPLICIT NULL mean
+   * different things — see `deviceClass` on `ParsedCapabilities`. `null` is "an unprofiled device,
+   * specifically"; leaving the key out is "any device you can drive".
+   */
+  const hasDeviceClass = `${MFARM_PREFIX}deviceClass` in caps
+    && caps[`${MFARM_PREFIX}deviceClass`] !== undefined;
+  const deviceClass = hasDeviceClass ? (str(caps, `${MFARM_PREFIX}deviceClass`) ?? null) : undefined;
+
   const ttlMinutes = int(caps, `${MFARM_PREFIX}ttlMinutes`, 1, 240);
   const maxQueue = opts.maxQueueTimeoutSeconds ?? 600;
   const queueTimeoutSeconds = int(caps, `${MFARM_PREFIX}queueTimeoutSeconds`, 0, maxQueue) ?? 0;
@@ -264,6 +319,21 @@ function interpret(
       [ttlMinutes !== undefined, `${MFARM_PREFIX}ttlMinutes`, '`mfarm run --ttl`'],
       [caps[`${MFARM_PREFIX}queueTimeoutSeconds`] !== undefined,
         `${MFARM_PREFIX}queueTimeoutSeconds`, '`mfarm run --wait`'],
+      /**
+       * Same rule, and the one most likely to be set by accident: a suite that migrates to
+       * `mfarm run` keeps its capabilities, and a device class among them is an instruction to an
+       * allocator that already finished.
+       *
+       * The remedy names `POST /v1/sessions` rather than a CLI flag, because there is no CLI flag —
+       * `mfarm run` takes `--tier`, `--ttl` and `--wait` and no `--profile`. Pointing at one that
+       * does not exist would be worse than pointing at nothing: it reads as a fix and costs an
+       * afternoon.
+       *
+       * `mfarm:name` is NOT in this list — it labels the session rather than choosing the device,
+       * so it is meaningful on both paths.
+       */
+      [hasDeviceClass, `${MFARM_PREFIX}deviceClass`,
+        'the `profile` field on `POST /v1/sessions`, which is what allocated it'],
     ] as const).find(([present]) => present);
     if (conflict) {
       throw invalidArgument(
@@ -281,7 +351,8 @@ function interpret(
 
   return {
     platform, region, tier, ttlMinutes, queueTimeoutSeconds, upstream, protocol, bindSessionId,
-    appRef, appRefRaw, runId,
+    appRef, appRefRaw, runId, runName, name,
+    deviceClass, matchDeviceClass: hasDeviceClass,
   };
 }
 
@@ -319,6 +390,27 @@ function str(caps: Record<string, unknown>, key: string): string | undefined {
     throw invalidArgument(`\`${key}\` must be a non-empty string.`);
   }
   return v.trim();
+}
+
+/**
+ * A human label: trimmed, non-empty, and bounded.
+ *
+ * TRUNCATED RATHER THAN REFUSED, which is the opposite of what `str` does and deliberate. A
+ * capability that CHOOSES something — a region, an app, a device class — must be refused when it is
+ * wrong, because the alternative is doing something other than what it says. A label chooses
+ * nothing: it is the caller's most useful payload arriving slightly too long, and failing their
+ * session over a scenario title with an unusually verbose Examples row would trade the whole test
+ * for a cosmetic bound. `results.ts` makes the same call about a stack trace, for the same reason.
+ *
+ * The cut is MARKED, so nobody debugs a name that silently stops.
+ */
+function label(caps: Record<string, unknown>, key: string, max: number): string | undefined {
+  const v = caps[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'string') throw invalidArgument(`\`${key}\` must be a string.`);
+  const text = v.trim();
+  if (text === '') return undefined;
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
 function int(caps: Record<string, unknown>, key: string, min: number, max: number): number | undefined {

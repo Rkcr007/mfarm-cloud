@@ -356,8 +356,8 @@ export async function sessionRoutes(app: FastifyInstance) {
     const rows = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.device_id, s.region, s.created_at, s.started_at, s.ended_at,
-                s.end_reason, d.local_id AS device_local_id, d.model AS device_model,
-                s.run_id, r.external_id AS run_external_id,
+                s.end_reason, s.name, d.local_id AS device_local_id, d.model AS device_model,
+                s.run_id, r.external_id AS run_external_id, r.name AS run_name,
                 s.expires_at, u.email AS holder_email
            FROM sessions s
            LEFT JOIN devices d ON d.id = s.device_id
@@ -387,6 +387,13 @@ export async function sessionRoutes(app: FastifyInstance) {
     return {
       sessions: rows.map((r: Record<string, unknown>) => ({
         id: r.id,
+        /**
+         * The TEST this session is running, from `mfarm:name` (migration 048).
+         *
+         * The reason this list is worth reading during a run rather than after it: two phones and
+         * two uuids say nothing, and two phones with scenario names on them say which one is stuck.
+         */
+        name: r.name ?? null,
         state: r.state,
         region: r.region,
         deviceId: r.device_id,
@@ -404,7 +411,9 @@ export async function sessionRoutes(app: FastifyInstance) {
         holder: r.holder_email ?? null,
         // Both ids: the uuid is what links to the run, `runId` is the name the caller gave it and
         // the only one they will recognise in their own CI.
-        run: r.run_id ? { id: r.run_id, runId: r.run_external_id } : null,
+        run: r.run_id
+          ? { id: r.run_id, runId: r.run_external_id, name: r.run_name ?? null }
+          : null,
       })),
     };
   });
@@ -414,8 +423,8 @@ export async function sessionRoutes(app: FastifyInstance) {
     const row = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.device_id, s.fence, s.region, s.created_at, s.started_at,
-                s.expires_at, s.ended_at, s.end_reason,
-                s.run_id, r.external_id AS run_external_id,
+                s.expires_at, s.ended_at, s.end_reason, s.name,
+                s.run_id, r.external_id AS run_external_id, r.name AS run_name,
                 -- WHAT WAS ASKED FOR, so the console can tell whether it got it.
                 --
                 -- The constraints column is where migration 006 records the scheduling inputs so
@@ -516,11 +525,15 @@ export async function sessionRoutes(app: FastifyInstance) {
     return {
       session: {
         id: row.id, state: row.state, deviceId: row.device_id,
+        /** The test, from `mfarm:name` or the `mfarm-name` hook. Null when the suite never said. */
+        name: row.name ?? null,
         ...(standing ? { queue: queueJson(standing) } : {}),
         fence: row.fence === null ? null : Number(row.fence),
         region: row.region, createdAt: row.created_at, startedAt: row.started_at,
         expiresAt: row.expires_at, endedAt: row.ended_at, endReason: row.end_reason,
-        run: row.run_id ? { id: row.run_id, runId: row.run_external_id } : null,
+        run: row.run_id
+          ? { id: row.run_id, runId: row.run_external_id, name: row.run_name ?? null }
+          : null,
         // Sent only when the caller actually constrained — see the query. Absent means "anything
         // was acceptable", which is a different thing from "asked for nothing and got nothing".
         ...(row.matched_profile

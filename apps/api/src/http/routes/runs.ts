@@ -35,6 +35,7 @@ const LIVE_STATES = ['QUEUED', 'ALLOCATING', 'ACTIVE'];
 interface RunRow {
   id: string;
   external_id: string;
+  name: string | null;
   created_at: Date;
   completed_at: Date | null;
   session_count: string;
@@ -66,7 +67,7 @@ interface RunRow {
  * build for a run that touched three of them would be the same lie the schema refuses to store.
  */
 const LIST_SQL = `
-  SELECT r.id, r.external_id, r.created_at, r.completed_at,
+  SELECT r.id, r.external_id, r.name, r.created_at, r.completed_at,
          agg.session_count, agg.live_count, agg.ended_count,
          agg.first_session_at, agg.last_activity_at, agg.build_count,
          b.id AS build_id, b.package_name, b.version_name,
@@ -118,6 +119,14 @@ function runJson(r: RunRow) {
     id: r.id,
     /** What the caller wrote in `mfarm:runId`. Their id, and the one they will search for. */
     runId: r.external_id,
+    /**
+     * What the caller wrote in `mfarm:runName` — the readable half (migration 048).
+     *
+     * NULL is ordinary and stays null rather than falling back to `runId`. A caller reading this
+     * needs to be able to tell "they named it" from "we are showing you the id again", and the
+     * console makes that choice for itself.
+     */
+    name: r.name,
     createdAt: r.created_at,
     /**
      * `completed` once the SUITE said so, `incomplete` until then — never `failed` (migration 031).
@@ -236,6 +245,13 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     const sessions = await withTenant(orgId, async (c) => {
       const { rows } = await c.query(
         `SELECT s.id, s.state, s.region, s.created_at, s.started_at, s.ended_at, s.end_reason,
+                -- The TEST this session is running (migration 048). Sent from the mfarm:name
+                -- capability at creation, so it is here for a LIVE session too -- which is the only
+                -- time the question "which scenario is that phone on?" can still be acted on.
+                --
+                -- No backticks in here: this is inside a JS template literal, and one ends the
+                -- string on a line of prose. TS1005 then points at the next SQL keyword.
+                s.name,
                 d.local_id AS device_local_id, d.model AS device_model,
                 -- The session's own column, for the reason the list query above documents: the
                 -- webdriver_sessions join this replaced was on a row a client's quit deletes, so
@@ -321,6 +337,8 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       run: runJson(run),
       sessions: sessions.map((r: Record<string, unknown>) => ({
         id: r.id,
+        /** The test, from `mfarm:name`. Null for a session that never said — never invented. */
+        name: r.name ?? null,
         state: r.state,
         region: r.region,
         device: r.device_local_id ?? r.device_model ?? null,

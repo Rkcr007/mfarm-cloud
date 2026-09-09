@@ -518,6 +518,28 @@ covered by the suite only.
 
 ---
 
+## Found by reading the product against a competitor, 2026-09-09
+
+Not from using the farm — from an authenticated review plus four LambdaTest specs (`docs/ltcomp/`)
+read against the code. Worth separating, because the hit rate is different: **the documents claimed
+eleven gaps and roughly a third of them were already built.** The command timeline, the video player
+with failure-seek, the UI hierarchy inspector, per-device host heartbeat and the metering ingest were
+all shipped and all listed as missing. Grep the section's verb before budgeting the work — the same
+lesson as HANDOFF entry 75 and as the two wrong entries this register itself carried.
+
+| id | what | status |
+|---|---|---|
+| D28 | **Four surfaces answered "can a session start?" from the SESSION table.** With five devices quarantined and nothing running, the console said "Every device is on its clean snapshot", "All devices are available" and "Every device is in use" on three panels while its own header said 0 of 5 ready. The fourth — `fleetHeadline`, whose `'Every device is in use.'` was the else-branch of `free === 0` — the review had not spotted. **Seventh instance of the false-premise family.** | Fixed 2026-09-09 by `capacityState()`, one allocator-derived read model. Three tests, each verified RED first. **Not yet seen on the farm.** |
+| D29 | **`fleetHeadline` promised a queued caller "the farm hands over the moment a lease ends" on a farm where nobody held a lease.** Same function, separate defect: the fallback was unconditional, so an unbounded wait read as an imminent one. | Fixed 2026-09-09. The fallback now applies only where something is actually busy. |
+| D30 | **The hub took no name, so a session was anonymous for exactly the window somebody would look at it.** `test_results.name` arrives only when the suite posts a result — after the test ended, and never for a passing one. The Runs screen showed uuids during a run. | Fixed 2026-09-09, migration 048 (`mfarm:name`, `mfarm:runName`). **Not yet deployed.** |
+| D31 | **An error message I wrote pointed at `mfarm run --profile`, a flag that does not exist** — the CLI has `--tier`, `--ttl` and `--wait`. Caught by reading `bin.ts`, not by any test. A remedy that reads as a fix and is not costs more than no remedy. | Fixed before commit, 2026-09-09. |
+
+**Still open from that review, and named so nobody assumes otherwise:** a run lists only its
+FAILURES as test rows, so every passing test's name is now recorded and rendered nowhere; Runs has no
+search, filter or pagination; API keys have no label, scope, expiry or last-used; migration 044's
+host disk/CPU/agent-version reaches Prometheus and has no console read endpoint; the metering ingest
+has no usage view; there is no share link and no customer-facing tunnel.
+
 ## Suite health
 
 The order-dependent `attempts.test.ts` flake is **fixed** — it was a real billing bug (the usage
@@ -527,3 +549,6 @@ One unidentified failure in five full runs on 2026-09-05, name not captured, thr
 it. Recorded rather than called resolved: an intermittent failure nobody has seen twice is not the
 same as one that has gone. A sixth full run, later the same day on `dc7299c`, was clean — which
 raises the clean count and settles nothing, for the same reason.
+
+Three more clean full runs on 2026-09-09 on the migration-048 branch. Same reading as the sixth: it
+raises the clean count and settles nothing about a failure nobody has reproduced.

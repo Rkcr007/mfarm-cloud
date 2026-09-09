@@ -296,6 +296,110 @@ describe('capability negotiation', () => {
     );
   });
 
+  /**
+   * THE TWO LABELS THAT MAKE A DASHBOARD READABLE — migration 048.
+   *
+   * `mfarm:name` is the test, `mfarm:runName` is the run. Both are the capabilities every
+   * commercial farm takes (`lt:options.name` / `lt:options.build`), and both are here because a
+   * suite migrating off one of those arrives with them already set in its `@Before`.
+   */
+  test('a session can be told which test it is, and a run what it is called', () => {
+    const p = parseCapabilities({
+      capabilities: {
+        alwaysMatch: {
+          platformName: 'android', 'mfarm:region': 'eu-1',
+          'mfarm:runId': '4471', 'mfarm:runName': 'Android_UAE_Expenses_08_09_2026',
+          'mfarm:name': 'search and view pending expenses',
+        },
+        firstMatch: [{}],
+      },
+    }, opts);
+    assert.equal(p.name, 'search and view pending expenses');
+    assert.equal(p.runName, 'Android_UAE_Expenses_08_09_2026');
+    assert.equal(p.runId, '4471');
+    assert.ok(!('mfarm:name' in p.upstream), 'labels are ours and never reach the automation server');
+  });
+
+  /**
+   * A LABEL IS TRUNCATED; A CHOICE IS REFUSED. See `label()` — losing a whole session over a
+   * verbose Cucumber Examples row would trade the test for a cosmetic bound.
+   */
+  test('an over-long test name is cut rather than costing the caller their session', () => {
+    const p = parseCapabilities({
+      capabilities: {
+        alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1', 'mfarm:name': 'x'.repeat(400) },
+        firstMatch: [{}],
+      },
+    }, opts);
+    assert.equal(p.name!.length, 300);
+    assert.ok(p.name!.endsWith('…'), 'a cut name says it was cut');
+  });
+
+  test('a run name with no run id names nothing, so it is refused', () => {
+    assert.throws(() => parseCapabilities({
+      capabilities: {
+        alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1', 'mfarm:runName': 'nightly' },
+        firstMatch: [{}],
+      },
+    }, opts), /needs .mfarm:runId. beside it/);
+  });
+
+  /**
+   * ASKING FOR NO CLASS AND ASKING FOR NOTHING ARE DIFFERENT QUESTIONS — the reason
+   * `AllocationRequest` has two fields, arriving at the hub for the first time.
+   */
+  test('a device class can be asked for, including the unprofiled one', () => {
+    const asked = parseCapabilities({
+      capabilities: {
+        alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1', 'mfarm:deviceClass': 'mfarm-x1-pro' },
+        firstMatch: [{}],
+      },
+    }, opts);
+    assert.equal(asked.deviceClass, 'mfarm-x1-pro');
+    assert.equal(asked.matchDeviceClass, true);
+
+    const unprofiled = parseCapabilities({
+      capabilities: {
+        alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1', 'mfarm:deviceClass': null },
+        firstMatch: [{}],
+      },
+    }, opts);
+    assert.equal(unprofiled.deviceClass, null);
+    assert.equal(unprofiled.matchDeviceClass, true, 'null is an ASK for the unprofiled devices');
+
+    const silent = parseCapabilities({
+      capabilities: { alwaysMatch: { platformName: 'android', 'mfarm:region': 'eu-1' }, firstMatch: [{}] },
+    }, opts);
+    assert.equal(silent.matchDeviceClass, false, 'saying nothing constrains nothing');
+  });
+
+  test('a device class cannot be asked for on a session whose device was already chosen', () => {
+    assert.throws(() => parseCapabilities({
+      capabilities: {
+        alwaysMatch: {
+          platformName: 'android',
+          'mfarm:sessionId': '3f2504e0-4f89-11d3-9a0c-0305e82c3301',
+          'mfarm:deviceClass': 'mfarm-x1-pro',
+        },
+        firstMatch: [{}],
+      },
+    }, opts), /cannot be combined with/);
+
+    // But a NAME can. It labels the session rather than choosing the device, so it is meaningful on
+    // both paths — and `mfarm run` is exactly where a suite has no other way to say what it is.
+    const bound = parseCapabilities({
+      capabilities: {
+        alwaysMatch: {
+          platformName: 'android',
+          'mfarm:sessionId': '3f2504e0-4f89-11d3-9a0c-0305e82c3301',
+          'mfarm:name': 'the wrong password does not sign anyone in',
+        },
+        firstMatch: [{}],
+      },
+    }, opts);
+    assert.equal(bound.name, 'the wrong password does not sign anyone in');
+  });
+
   test('an unknown mfarm: capability is refused, in both dialects', () => {
     // The typo this exists for. Ignoring it would start a session on a device with no app on it and
     // report whatever the launcher happened to show.
@@ -572,6 +676,176 @@ describe('command proxy', () => {
       assert.equal(r.statusCode, 404, id);
       assert.equal(r.json().value.error, 'invalid session id', id);
     }
+  });
+});
+
+/**
+ * THE HUB CONTRACT A JAVA SUITE CAN ACTUALLY MEET.
+ *
+ * `POST /v1/sessions/:id/result` is the better API and stays the documented one. It is also the API
+ * a Cucumber `@After` cannot call without a new HTTP client, a new dependency and somewhere to put
+ * the key — which is why every commercial farm also takes the report through the driver the
+ * teardown already holds. These tests are the acceptance criteria for that path.
+ */
+describe('labels and the reporting hook', () => {
+  async function openNamed(extra: Record<string, unknown>): Promise<string> {
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA), payload: androidCaps(extra),
+    });
+    assert.equal(r.statusCode, 200, r.body);
+    return r.json().value.sessionId;
+  }
+
+  const script = (sid: string, body: string) => app.inject({
+    method: 'POST', url: `/wd/hub/session/${sid}/execute/sync`, headers: auth(keyA),
+    payload: { script: body, args: [] },
+  });
+
+  const resultsOf = (sid: string) => withSystem(async (c) =>
+    (await c.query('SELECT name, status FROM test_results WHERE session_id = $1 ORDER BY reported_at', [sid])).rows);
+
+  const nameOf = (sid: string) => withSystem(async (c) =>
+    (await c.query('SELECT name FROM sessions WHERE id = $1', [sid])).rows[0]?.name ?? null);
+
+  /**
+   * THE NAME IS THERE WHILE THE SESSION IS STILL RUNNING. That is the whole point of taking it as a
+   * capability rather than reading it off a posted result: a result arrives after the test ended,
+   * and the session somebody wants named is the one that has not.
+   */
+  test('a session carries its test name from the moment it is created', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openNamed({ 'mfarm:name': 'search and view pending expenses' });
+    assert.equal(await nameOf(sid), 'search and view pending expenses');
+    assert.equal(await sessionState(sid), 'ACTIVE', 'still live, and already named');
+  });
+
+  test('a run remembers what the first session called it, and later ones do not rename it', async () => {
+    await clearFleet();
+    await seedDevices(2);
+    await openNamed({ 'mfarm:runId': 'rn-1', 'mfarm:runName': 'Android_UAE_Expenses_09_09' });
+    await openNamed({ 'mfarm:runId': 'rn-1', 'mfarm:runName': 'something else entirely' });
+
+    const rows = await withSystem(async (c) =>
+      (await c.query('SELECT name FROM runs WHERE external_id = $1', ['rn-1'])).rows);
+    assert.equal(rows.length, 1, 'one run, joined twice');
+    assert.equal(rows[0].name, 'Android_UAE_Expenses_09_09',
+      'the label must not move under a reader partway through a run');
+  });
+
+  /** The `lambda-status` shape, which is what a migrating teardown already sends. */
+  test('executeScript reports an outcome without the suite holding an API client', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openNamed({ 'mfarm:name': 'the wrong password does not sign anyone in' });
+
+    const r = await script(sid, 'mfarm-status=failed');
+    assert.equal(r.statusCode, 200, r.body);
+    assert.deepEqual(r.json(), { value: null }, 'the W3C envelope a client will try to parse');
+
+    const rows = await resultsOf(sid);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].status, 'failed');
+    assert.equal(rows[0].name, 'the wrong password does not sign anyone in',
+      'the hook has no room for a name, so it uses the one the session already has');
+
+    // NOT FORWARDED. `mfarm-status=failed` is not a script and Appium would fail it.
+    assert.ok(!recorded.some((x) => x.url.endsWith('/execute/sync')),
+      'the hook was intercepted, not proxied');
+  });
+
+  test('the hook can also name the test, for a suite that learns the name late', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openNamed({});
+    assert.equal(await nameOf(sid), null, 'nothing is invented for a session that never said');
+
+    assert.equal((await script(sid, 'mfarm-name=checkout applies a promo')).statusCode, 200);
+    assert.equal(await nameOf(sid), 'checkout applies a promo');
+
+    await script(sid, 'mfarm-status=passed');
+    assert.equal((await resultsOf(sid))[0].name, 'checkout applies a promo');
+  });
+
+  /**
+   * EVERY OTHER SCRIPT IS SOMEBODY ELSE'S. A hook that threw on an unfamiliar payload would break
+   * ordinary automation — `mobile: shell`, a scroll helper, a deep link — to serve a convenience.
+   */
+  test('a script that is not ours is proxied untouched', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openNamed({});
+    await script(sid, 'mobile: shell');
+    assert.ok(recorded.some((x) => x.url.endsWith('/execute/sync')), 'ordinary scripts still go upstream');
+    assert.equal((await resultsOf(sid)).length, 0);
+  });
+
+  /**
+   * A MALFORMED HOOK IS REFUSED RATHER THAN FORWARDED. `mfarm-status=pased` is unambiguously aimed
+   * at this hook and unambiguously wrong; sending it upstream would answer a typo in a status word
+   * with "unknown command" from Appium.
+   */
+  test('a misspelled status names the words it would have accepted', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openNamed({});
+    const r = await script(sid, 'mfarm-status=pased');
+    assert.equal(r.statusCode, 400);
+    assert.match(r.json().value.message, /passed, failed, skipped/);
+    assert.equal((await resultsOf(sid)).length, 0, 'nothing was recorded from a report we could not read');
+  });
+
+  /**
+   * WRITTEN IS NOT SHOWN.
+   *
+   * A column the console never reads is indistinguishable from one that was never written, and this
+   * repo has shipped that exact defect before — an asset that served fine and was loaded by nothing.
+   * The console reads three endpoints for these labels, so all three are asserted here rather than
+   * only the table the row landed in.
+   */
+  test('the names reach the endpoints the console actually reads', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const sid = await openNamed({
+      'mfarm:name': 'a category opens the medicine catalogue',
+      'mfarm:runId': 'rn-read', 'mfarm:runName': 'Nightly_09_09',
+    });
+
+    const list = await app.inject({ method: 'GET', url: '/v1/sessions', headers: auth(keyA) });
+    const listed = list.json().sessions.find((x: { id: string }) => x.id === sid);
+    assert.equal(listed.name, 'a category opens the medicine catalogue', 'GET /v1/sessions');
+    assert.equal(listed.run.name, 'Nightly_09_09', 'the run name rides on the session row too');
+
+    const detail = await app.inject({ method: 'GET', url: `/v1/sessions/${sid}`, headers: auth(keyA) });
+    assert.equal(detail.json().session.name, 'a category opens the medicine catalogue',
+      'GET /v1/sessions/:id');
+
+    const runs = await app.inject({ method: 'GET', url: '/v1/runs', headers: auth(keyA) });
+    const run = runs.json().runs.find((x: { runId: string }) => x.runId === 'rn-read');
+    assert.equal(run.name, 'Nightly_09_09', 'GET /v1/runs');
+
+    const one = await app.inject({ method: 'GET', url: '/v1/runs/rn-read', headers: auth(keyA) });
+    const body = one.json();
+    assert.equal(body.run.name, 'Nightly_09_09', 'GET /v1/runs/:id');
+    assert.equal(body.sessions[0].name, 'a category opens the medicine catalogue',
+      'the run detail names its sessions — the table a person opens during a run');
+  });
+
+  /**
+   * THE CLASS IS NAMED IN THE REFUSAL, because it changes what the reader should do. "No android
+   * device is free" says wait; "none of class mfarm-x1-pro" says check whether this farm has one.
+   */
+  test('a device class that no device has fails by naming the class', async () => {
+    await clearFleet();
+    await seedDevices(1);
+    const r = await app.inject({
+      method: 'POST', url: '/wd/hub/session', headers: auth(keyA),
+      payload: androidCaps({ 'mfarm:deviceClass': 'mfarm-x1-pro' }),
+    });
+    assert.equal(r.statusCode, 500, r.body);
+    const v = r.json().value;
+    assert.equal(v['mfarm:code'], 'no_capacity');
+    assert.match(v.message, /class mfarm-x1-pro/);
   });
 });
 

@@ -32,7 +32,9 @@ The filename stays because a lot of things link to it.
   [RUNBOOK.md](RUNBOOK.md) (start, ship, stop), [DOMAIN_PLAN.md](DOMAIN_PLAN.md).
 - **Using it** — [EXECUTION_MODEL.md](EXECUTION_MODEL.md) (how a suite actually runs),
   [ci.md](ci.md), [RENDER_BASELINE.md](RENDER_BASELINE.md) (what SwiftShader can and cannot test),
-  [../examples/medishop-suite/README.md](../examples/medishop-suite/README.md).
+  [../examples/medishop-suite/README.md](../examples/medishop-suite/README.md), and
+  [../examples/java-testng/README.md](../examples/java-testng/README.md) for a Java/TestNG/Cucumber
+  suite moving off LambdaTest.
 - **Building on it** — [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md),
   [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md), [adrs/](adrs/) (26 decisions; there is no 0013).
 - **The record** — [../HANDOFF.md](../HANDOFF.md), the numbered session log. **Trust its dated

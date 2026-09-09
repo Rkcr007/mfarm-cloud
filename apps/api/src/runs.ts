@@ -80,15 +80,31 @@ export interface Run {
  */
 export async function findOrCreateRun(
   c: PoolClient,
-  opts: { orgId: string; externalId: string },
+  opts: { orgId: string; externalId: string; name?: string },
 ): Promise<Run> {
   const { rows: inserted } = await c.query<{ id: string }>(
-    `INSERT INTO runs (org_id, external_id) VALUES ($1, $2)
+    `INSERT INTO runs (org_id, external_id, name) VALUES ($1, $2, $3)
      ON CONFLICT (org_id, external_id) DO NOTHING
      RETURNING id`,
-    [opts.orgId, opts.externalId],
+    [opts.orgId, opts.externalId, opts.name ?? null],
   );
   if (inserted[0]) return { id: inserted[0].id, externalId: opts.externalId, created: true };
+
+  /**
+   * THE FIRST SESSION'S NAME IS THE RUN'S NAME, and later ones do not overwrite it (migration 048).
+   *
+   * Not a precedence quibble: a suite whose sessions disagree about the run name has a bug, and the
+   * one worth showing is the one that created the run — every other choice makes the label change
+   * under a reader partway through a run. `WHERE name IS NULL` is the whole rule: a run created
+   * before anybody sent a name can still acquire one, and a name already set is never traded for a
+   * different one.
+   */
+  if (opts.name !== undefined) {
+    await c.query(
+      'UPDATE runs SET name = $2 WHERE external_id = $1 AND name IS NULL',
+      [opts.externalId, opts.name],
+    );
+  }
 
   const { rows } = await c.query<{ id: string }>(
     'SELECT id FROM runs WHERE external_id = $1',

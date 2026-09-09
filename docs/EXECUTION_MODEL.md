@@ -50,9 +50,9 @@ and the farm installs it before the session opens. `appium:app` still works and 
 on the device host; the two are mutually exclusive and the hub refuses both rather than picking one.
 
 The recognised vendor namespace is now: `mfarm:region`, `mfarm:tier`, `mfarm:ttlMinutes`,
-`mfarm:sessionId`, `mfarm:queueTimeoutSeconds`, `mfarm:appId`, `mfarm:runId`. Anything else under
-the `mfarm:` prefix is **refused** — that rule was documented below before it was true, and is now
-enforced.
+`mfarm:sessionId`, `mfarm:queueTimeoutSeconds`, `mfarm:appId`, `mfarm:runId`, `mfarm:runName`,
+`mfarm:name`, `mfarm:deviceClass`. Anything else under the `mfarm:` prefix is **refused** — that
+rule was documented below before it was true, and is now enforced.
 
 ### Which sessions belong together?
 
@@ -458,14 +458,91 @@ is removed. An injection test is only as good as its ability to fail; see HANDOF
 
 ---
 
+### 4.9 The labels a dashboard is built on — BUILT (2026-09-09)
+
+Migration 048, and the `mfarm-status` script hook.
+
+**What was wrong.** Open the Runs screen while a suite is running and it showed sessions by uuid.
+Which of the two phones was on *search and view pending expenses* and which was stuck on an OTP
+screen was not a question this console could answer, and it is the first question anybody asks.
+
+The farm HAD the name — `test_results.name` carries it — but not until the suite posted a result,
+which is after the test finished, and never at all for a passing one. So for the whole time somebody
+would actually want to look, every session was anonymous.
+
+Every commercial farm takes this as a **capability**, at session creation, because that is the only
+moment where the name is both known and useful. A suite arriving from one of them already sets it.
+
+```js
+{
+  platformName: 'Android',
+  'mfarm:region': 'lab',
+  'mfarm:runId': process.env.GITHUB_RUN_ID,              // the join key back to CI
+  'mfarm:runName': 'Android_UAE_Expenses_09_09_2026',    // what a person scans for
+  'mfarm:name': scenario.getName(),                      // the test
+  'mfarm:deviceClass': 'mfarm-x1-pro',                   // optional; omit for any device
+}
+```
+
+**Why `runId` and `runName` are two fields.** Both are wanted at once and they disagree. The id is
+what will match the Actions run (`$GITHUB_RUN_ID`, a number); the name is what somebody scans a list
+for. One field forced to be both means choosing which of "click through to the CI job" and "find
+this morning's expenses run" the customer keeps. The **first** session of a run sets the name and
+later ones do not change it — a label that moves under a reader partway through a run is worse than
+no label.
+
+**`mfarm:deviceClass` asks the allocator a question it has been able to answer since migration
+037.** `POST /v1/sessions` has passed `profile` / `matchProfile` since ADR-0025; the hub never did,
+so a WebDriver client could ask for a *tier* (`physical`) and not for a *class* (`mfarm-x1-pro`). On
+a fleet of one kind that is invisible; on a mixed one a suite pinned to a screen geometry got
+whatever was free. Two fields rather than one nullable value, for the reason `AllocationRequest`
+gives: `null` means "an unprofiled device, specifically", and omitting the key means "any device".
+A class the farm has none of now fails **naming the class**, because that changes what the reader
+should do — waiting works for a busy class and never works for one that does not exist here.
+
+#### The reporting hook, and why it is not just the REST endpoint
+
+`POST /v1/sessions/:id/result` is the better API and stays the documented one — it is the only one
+that can carry a stack trace, a duration and a failure classification. It is also an API a Cucumber
+`@After` cannot call without a new HTTP client, a new dependency and somewhere to put the key.
+
+So the same report is accepted through the driver the teardown already holds:
+
+```java
+driver.executeScript("mfarm-status=" + (scenario.isFailed() ? "failed" : "passed"));
+driver.quit();   // AFTER, always — there is no driver to report through once the session ends
+```
+
+This is `lambda-status` renamed, and that is the entire point: a suite porting its teardown changes
+one string. `mfarm-name=<test>` is there too, for a suite that learns its name late. Both write the
+**same row** through the **same function** as the REST endpoint (`recordTestResult`) — a farm where
+the outcome depends on which door you used is a farm whose numbers cannot be trusted.
+
+Three rules the hook keeps:
+
+- **Anything that is not `mfarm-…` is proxied untouched.** Every `executeScript` a suite makes for
+  its own purposes — `mobile: shell`, a scroll helper, a deep link — passes through this code, and a
+  hook that threw on an unfamiliar payload would break ordinary automation to serve a convenience.
+- **A malformed hook is refused, not forwarded.** `mfarm-status=pased` is unambiguously aimed here
+  and unambiguously wrong; forwarding it would answer a typo in a status word with Appium's "unknown
+  command".
+- **It is recorded as a step**, like any other command. It is a thing the suite did, it took time,
+  and a timeline that hid it would leave a gap at exactly the interesting moment.
+
+**What is still not built:** the name is shown on the Runs, Run and Sessions screens, but a run
+still lists only its *failures* as test rows. Every passing test's name is now written down and
+rendered nowhere. That is the next slice, not this one.
+
 ## 5. Other capabilities worth having
 
 | capability | why |
 |---|---|
-| `mfarm:runId` | see 4.2 — the one that matters |
+| ~~`mfarm:runId`~~ | built, see 4.2 — the one that matters |
 | ~~`mfarm:appId`~~ | built, see 4.1 |
-| `mfarm:name` | a human label per session, so the Sessions list reads as test names |
-| `mfarm:build` | commit sha / branch, for "which commit broke it" |
+| ~~`mfarm:name`~~ | built, see 4.9 — a human label per session, so the Sessions list reads as test names |
+| ~~`mfarm:runName`~~ | built, see 4.9. **Not** what this table used to call `mfarm:build`: that name is taken. In MFARM a "build" is an APK in the app library, and a second meaning for the word on the same screen would have been unreadable |
+| `mfarm:commit` / `mfarm:branch` | what the old `mfarm:build` row was really asking for — "which commit broke it". Still unbuilt, and now unambiguous |
+| ~~`mfarm:deviceClass`~~ | built, see 4.9. The allocator has taken a class since migration 037 and only the console could ask for one |
 | `mfarm:video` | opt in per session, since it costs CPU |
 | `mfarm:leaseMinutes` | a long soak test and a 30-second smoke test want different leases |
 | `mfarm:shard` / `mfarm:priority` | only meaningful past two devices; design now, build later |

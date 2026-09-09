@@ -1,6 +1,7 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-09-06**, at `303585f` / migration 038 / ADR-0027.
+Last updated **2026-09-09**, at migration 048 / ADR-0027. (Entry 77 is the newest; the header
+sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
 [`docs/STATUS.md`](docs/STATUS.md) — what the product is, what works, what is pending, what it costs.
@@ -3992,3 +3993,84 @@ when the feature is broken. See issues 37 and 38.
     link to it, and it says why it shrank — a page that stops being the answer should explain
     itself rather than quietly redirect. README, HANDOFF's header and START_HERE all retarget to the
     three, and every internal link in all five files was checked to resolve.
+
+77. **THE HUB LEARNED TO TAKE A LABEL, AND FOUR PANELS STOPPED READING CAPACITY OFF THE SESSION
+    TABLE.** 2026-09-09. Migration 048.
+
+    Rakesh had gathered five competitor/gap documents into `docs/ltcomp/` — a LambdaTest Automation
+    clone spec, a Real Device clone spec, the App Automation context for his own Java suite, an
+    authenticated MFARM review, and a development brief joining them. He asked what we actually need
+    so an automation script runs here with a good experience, iOS out of scope.
+
+    **A third of the "P0 gaps" in those documents were already built, and saying so was the most
+    useful part of the answer.** The command timeline (`commandLog.ts`, migration 041, `stepsCard`),
+    the video player with failure-seek (045, `failureOffsetSeconds`, the "Watch the failure"
+    deep-link from the run screen), the UI hierarchy inspector, per-device `hostLastSeenAt`, and the
+    metering ingest are all shipped. The review had them as missing. **Same shape as entry 75 and as
+    `docs/DEFECTS.md`'s own two wrong entries: a document about the product is not evidence about the
+    product.** Grep the verb before budgeting the work.
+
+    **What WAS wrong, and was smaller than the review said.** The P0 "state consistency" defect is
+    real and I found a fourth instance the review missed. Four surfaces answered "can a session
+    start?" and three answered it from `state.sessions`: the queue card, both Waiting empty states,
+    and — the one nobody had noticed — `fleetHeadline`, whose `'Every device is in use.'` was the
+    else-branch of `free === 0`. With five devices quarantined and no session anywhere, the console
+    said "Every device is on its clean snapshot", "All devices are available" and "Every device is in
+    use" on three panels while its own header said 0 of 5. Every sentence was true about sessions and
+    false about capacity. `fleetHeadline` also promised a queued caller that "the farm hands over the
+    moment a lease ends" on a farm where nobody held a lease, so nothing was ever going to end.
+
+    `capacityState()` derives it once from device state, splitting three ways — ready / busy /
+    blocked — because a busy device comes back on its own and a quarantined one needs a person, and
+    telling somebody to wait for the second is the actual harm. Three regression tests, each verified
+    RED against the unfixed file before being kept.
+
+    **The real adoption gap was not a console feature; it was the hub contract.** The accepted
+    namespace was `region, tier, ttlMinutes, queueTimeoutSeconds, sessionId, appId, runId` — no name.
+    So a session was anonymous until the suite POSTed a result, which is after the test finished and
+    never for a passing one. The Runs screen showed uuids for exactly the window somebody would be
+    looking. Added:
+
+    - **`mfarm:name`** — the test, at creation. `lt:options.name`, and the reason their dashboards
+      read.
+    - **`mfarm:runName`** — the readable half. Two fields because `runId` is the join key back to CI
+      (`$GITHUB_RUN_ID`, a number) and the name is what a person scans for. First session sets it;
+      later ones do not move it. **Deliberately not called `mfarm:build`**, which is what
+      `EXECUTION_MODEL.md` §5 had on its wish list: in MFARM a "build" is an APK in the app library
+      and a second meaning on the same screen would be unreadable. §5 now says so and reassigns the
+      old row to `mfarm:commit` / `mfarm:branch`, which is what it was really asking for.
+    - **`mfarm:deviceClass`** — the allocator has taken `profile`/`matchProfile` since migration 037
+      and `POST /v1/sessions` has passed it since ADR-0025; **the hub never did**. Two fields, not
+      one nullable one, so "the unprofiled devices, specifically" stays askable. A class the farm
+      lacks now fails naming the class, because waiting works for a busy class and never for an
+      absent one.
+    - **`executeScript("mfarm-status=passed|failed|skipped")`** and `mfarm-name=`. This is
+      `lambda-status` renamed, and that is the whole point — a Java `@After` changes one string
+      instead of acquiring an HTTP client, a dependency and somewhere to put the key. It writes the
+      same row through the same function as the REST endpoint (`recordTestResult`, extracted for
+      this), because a farm where the outcome depends on which door you used has numbers nobody can
+      trust. Non-`mfarm-` scripts proxy untouched; a misspelled status is refused rather than
+      forwarded into Appium's "unknown command".
+
+    **Typed createSession errors were already done** — `no_such_app`, `no_capacity`, `no_region`,
+    `no_automation_endpoint`, `upstream_rejected`, and 401 preserved through `fromApiError`. I had
+    listed them as work; they were not.
+
+    `examples/java-testng/` is the adapter their actual suite needs, with the LambdaTest→MFARM
+    mapping table. Not a library, on purpose: sixty lines of `setCapability` is a file to copy and
+    read, not a jar to publish and trust.
+
+    **Three things this entry should be held to.** The `rollback.test.ts` gate caught both new CHECK
+    constraints and they are recorded in `ACCEPTED_NEW_CHECKS` with the reason they are safe (new
+    nullable columns; the previous release writes neither, and `name IS NULL` is the first disjunct).
+    A TS1005 pointing at prose was the backtick-in-a-SQL-comment trap again — third time. And an
+    error message I wrote pointed at `mfarm run --profile`, **a flag that does not exist**; the CLI
+    has `--tier`, `--ttl`, `--wait`. Caught by checking `bin.ts` rather than by any test, which is
+    the same lesson as always: a remedy that reads as a fix and is not costs an afternoon.
+
+    **Not built, and named so nobody thinks it was:** a run still lists only its FAILURES as test
+    rows. Every passing test's name is now written down and rendered nowhere. Runs has no search,
+    filter or pagination. API keys still have no label, scope, expiry or last-used. There is still no
+    host read endpoint for disk/CPU/agent version (migration 044 feeds Prometheus only), no usage
+    view over the metering that exists, no share link, and no customer-facing tunnel. Deployment of
+    this branch has not happened; nothing here has been seen on hardware.
