@@ -31,7 +31,7 @@ Shortcuts, if you already know what you want:
 | | |
 |---|---|
 | Get it running | [docs/START_HERE.md](docs/START_HERE.md) |
-| Run your suite on it | [examples/medishop-suite/](examples/medishop-suite/README.md) · [docs/ci.md](docs/ci.md) |
+| Run your suite on it | [examples/medishop-suite/](examples/medishop-suite/README.md) (JavaScript) · [examples/java-testng/](examples/java-testng/README.md) (Java/TestNG/Cucumber) · [docs/ci.md](docs/ci.md) |
 | How execution works | [docs/EXECUTION_MODEL.md](docs/EXECUTION_MODEL.md) |
 | The session log | [HANDOFF.md](HANDOFF.md) — trust its dated entries over its summaries |
 | Every decision in full | [docs/adrs/](docs/adrs/) |
@@ -46,6 +46,7 @@ packages/protocol/ the shared contract
 deploy/            deploy scripts, and the checks that verify a farm is really live
 docs/              STATUS, DEFECTS, DIRECTION — everything else is reference
 examples/          a worked suite: 8 tests, one build, one run, real outcomes
+                   plus the Java adapter for a suite arriving from another farm
 ```
 
 ## Verifying it

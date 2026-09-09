@@ -55,6 +55,20 @@ const ACCEPTED_NEW_CHECKS: string[] = [
   'orgs.orgs_evidence_retention_days_check',
 
   /**
+   * Migration 048, the labels a session and a run carry. Both constrain ONLY columns 048 itself
+   * adds — `sessions.name` and `runs.name` — and both are nullable with no default.
+   *
+   * Safe in the direction this guard asks about. Roll the CODE back against a 048 schema and it
+   * writes `sessions` and `runs` exactly as it always did, naming neither column, so both are NULL
+   * — and `name IS NULL` is the first disjunct of each CHECK. There is no write the previous
+   * release makes that these reject. The bound they enforce only ever applies to a value a caller
+   * of the NEW release sent, which is the point of putting it in the schema rather than in one of
+   * the two handlers that write it.
+   */
+  'sessions.sessions_name_len',
+  'runs.runs_name_len',
+
+  /**
    * Migration 024, failure classification (spec §18). All four constrain ONLY columns that did not
    * exist at the baseline — `failure_class` and `failure_reason`, both nullable and both added by
    * the same migration.

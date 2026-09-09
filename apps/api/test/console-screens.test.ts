@@ -969,6 +969,73 @@ describe('the copy rules hold', () => {
   });
 
   /**
+   * A QUARANTINED FLEET IS NOT AN IDLE ONE — the 2026-09-09 review's P0, reproduced.
+   *
+   * With every device quarantined and no session anywhere, four surfaces read their capacity off
+   * `state.sessions` and each said the farm was fine: the queue card and both Waiting empty states
+   * claimed devices were available or sitting on a clean snapshot, and `fleetHeadline` — whose
+   * "every device is in use" was the else-branch of `free === 0` — claimed they were all busy. The
+   * header, reading the devices, said 0 of 5. A person deciding whether to dispatch a CI job got
+   * three answers and no way to tell which one was load-bearing.
+   *
+   * The assertion is on the WORDS because the words were the defect. Nothing else about these
+   * screens was wrong.
+   */
+  function seedDeadFleet() {
+    seed({ name: 'queue' });
+    mod.state.devices = ['dev-1', 'dev-2', 'dev-3', 'dev-4', 'dev-5'].map((id) => ({
+      ...mod.state.devices[0], id, state: 'QUARANTINED',
+    }));
+    // Nothing is holding a device and nothing is waiting for one: the exact state in which the
+    // session table has nothing to say and three panels said it anyway.
+    mod.state.available = 0;
+    mod.state.sessions = [];
+    mod.state.held = null;
+    mod.state.detail = null;
+  }
+
+  test('a fleet with nothing allocatable never reads as available or in use', () => {
+    seedDeadFleet();
+    for (const screen of ['queue', 'fleet', 'devices'] as const) {
+      const text = textOf(mod.SCREENS[screen]());
+      assert.doesNotMatch(text, /All devices are available/i, `${screen} claims availability`);
+      assert.doesNotMatch(text, /Every device is (in use|on its clean snapshot)/i,
+        `${screen} claims the devices are busy or clean`);
+    }
+  });
+
+  /**
+   * AND IT SAYS WHY, in the vocabulary of the fleet table rather than a lump sum: "5 quarantined"
+   * sends somebody to the device screen, "5 need attention" sends them nowhere.
+   */
+  test('a fleet with nothing allocatable names what is wrong with it', () => {
+    seedDeadFleet();
+    const text = textOf(mod.SCREENS.queue());
+    assert.match(text, /Nothing can be allocated/i, 'the queue does not say the farm is unusable');
+    assert.match(text, /5 quarantined/i, 'the count is not broken down by state');
+  });
+
+  /**
+   * THE HANDOVER PROMISE NEEDS A LEASE TO END.
+   *
+   * `fleetHeadline` told anybody queued that "the farm hands over the moment a lease ends" whenever
+   * it could not compute an ETA — including on a farm where nobody holds anything, so no lease is
+   * ever going to end and the wait is unbounded by a person, not by a timer.
+   */
+  test('a queue on a dead fleet is not promised a handover', () => {
+    seedDeadFleet();
+    mod.state.sessions = [{
+      id: 'sess-q', state: 'QUEUED', deviceId: null, device: null, region: 'lab',
+      createdAt: new Date(Date.now() - 30_000).toISOString(),
+      startedAt: null, expiresAt: null, endedAt: null, endReason: null,
+    }];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.doesNotMatch(text, /hands over the moment a lease ends/i,
+      'promises a handover no lease can deliver');
+    assert.match(text, /no device is coming back on its own/i);
+  });
+
+  /**
    * NO LIVE VIEW IS A PROPERTY OF THE DEVICE, NOT A FAULT.
    *
    * This panel is otherwise identical to the ones reporting a real failure, so the words are the

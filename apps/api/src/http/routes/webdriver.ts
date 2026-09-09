@@ -1,6 +1,7 @@
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, activate, release } from '../../allocator.ts';
+import { recordTestResult } from './results.ts';
 import { requireTenant } from '../server.ts';
 import { sessionBindingFromBasic } from '../../auth.ts';
 import { mintSessionToken, type SessionClaims } from '../../tokens.ts';
@@ -10,7 +11,7 @@ import { describeAppRef, resolveAppRef, type ResolvedApp } from '../../appref.ts
 import { awaitAppAction, requestAppAction } from '../../appactions.ts';
 import { findOrCreateRun, stampSessionRun, type Run } from '../../runs.ts';
 import {
-  WebDriverError, invalidSessionId, sessionNotCreated, toW3cBody, fromApiError,
+  WebDriverError, invalidSessionId, sessionNotCreated, toW3cBody, fromApiError, invalidArgument,
 } from '../webdriver/errors.ts';
 import { parseTunnelAutomationUrl } from '@mfarm/protocol';
 import { callOverTunnel } from '../automation-tunnel.ts';
@@ -285,7 +286,8 @@ export async function webdriverRoutes(app: FastifyInstance) {
     // a run that happened and produced nothing, and that is exactly what somebody will come looking
     // for. Names are per-org and reused on purpose, so this creates one row per run, not per test.
     const run = caps.runId
-      ? await withTenant(orgId, (c) => findOrCreateRun(c, { orgId, externalId: caps.runId! }))
+      ? await withTenant(orgId, (c) => findOrCreateRun(c,
+          { orgId, externalId: caps.runId!, ...(caps.runName ? { name: caps.runName } : {}) }))
       : null;
 
     // Two ways in, and which one it is decides who owns the device afterwards.
@@ -329,6 +331,16 @@ export async function webdriverRoutes(app: FastifyInstance) {
         platform: caps.platform,
         tier: caps.tier ?? null,
         ttlMinutes: caps.ttlMinutes,
+        /**
+         * The device CLASS, when the suite asked for one (migration 037, `mfarm:deviceClass`).
+         *
+         * `matchProfile` is what carries the ASKING — see `AllocationRequest`. A suite that names
+         * no class allocates exactly as it did before, which is the whole fleet; one that names a
+         * class queues for that class rather than taking whatever was free, and a farm with none of
+         * that class says so instead of running the suite on the wrong screen.
+         */
+        profile: caps.deviceClass ?? null,
+        matchProfile: caps.matchDeviceClass,
         // A device with no automation server cannot serve this session. Demanding the capability up
         // front is the difference between "no capacity" and allocating, failing, and trying again.
         // `app-install` joins it when there is a build to put on the device, for the same reason:
@@ -349,7 +361,7 @@ export async function webdriverRoutes(app: FastifyInstance) {
           // not any of it had elapsed — and when the abandon predicate was broken it claimed two
           // minutes for a wait of one poll. See `clientGone`.
           const waited = Math.round(wait.waitedMs / 1000);
-          const want = `${caps.platform} device ${wanted(build)}`;
+          const want = `${caps.platform} device ${wanted(build, caps)}`;
           throw sessionNotCreated(
             wait.gaveUp === 'never_waited'
               ? `No ${want} is free in region ${region}. Set the \`mfarm:queueTimeoutSeconds\` capability to wait for one instead of failing.`
@@ -411,6 +423,21 @@ export async function webdriverRoutes(app: FastifyInstance) {
             { ...where, allocatedBy: 'client' }, { at: 'session-created' });
         }
       }
+
+      /**
+       * THE SESSION LEARNS WHAT TEST IT IS (migration 048), before anything can go wrong downstream.
+       *
+       * Here rather than after the upstream `createSession`, and that ordering is the point: the
+       * question this capability answers is "which scenario is the phone that is stuck on?", and a
+       * session that hangs installing an app or waiting on Appium is exactly the one somebody is
+       * looking at. A name written after the device answered would be missing from every session
+       * worth naming.
+       *
+       * INSIDE THE TRY, so a failure to label still releases the device. Not swallowed, though —
+       * unlike a timeline event, this is a thing the caller ASKED for, and a session running under
+       * the wrong name is worse than one that refused to start.
+       */
+      if (caps.name) await nameSession(orgId, sessionId, caps.name);
 
       const target = await withSystem(async (c) => {
         const { rows } = await c.query(
@@ -760,6 +787,35 @@ export async function webdriverRoutes(app: FastifyInstance) {
       const startedHr = process.hrtime.bigint();
       const elapsedMs = () => Number((process.hrtime.bigint() - startedHr) / 1_000_000n);
 
+      /**
+       * A HOOK THE SUITE ALREADY KNOWS HOW TO CALL.
+       *
+       * `executeScript("lambda-status=failed")` is how a LambdaTest suite reports its outcome, and
+       * `browserstack_executor` is how a BrowserStack one does. Both exist because the reporting
+       * hook has to run inside a teardown that already holds a driver and often nothing else — no
+       * HTTP client configured for the farm, no credential in scope, no session id it has bothered
+       * to keep. `POST /v1/sessions/:id/result` is the better API and stays the documented one; it
+       * is also the API a Java `@After` cannot call without new code, a new dependency and a place
+       * to put the key. This is the same report through the door the suite already has open.
+       *
+       * INTERCEPTED, NEVER FORWARDED. `mfarm-…` is not a script and Appium would fail it — which is
+       * the correct outcome for a typo and the wrong one for the hook.
+       */
+      if (isExecute(commandPath) && hasBody) {
+        const handled = await runScriptHook(orgId, req.params.sessionId, req.body, req.log);
+        if (handled) {
+          // Recorded like any other step. The hook is a command the suite issued, it took time, and
+          // a timeline that hid it would leave an unexplained gap at exactly the interesting moment.
+          record(orgId, req.params.sessionId, {
+            method: req.method, path: commandPath, status: 200,
+            durationMs: elapsedMs(), startedAt, error: null,
+          });
+          // The W3C envelope, because that is what the client will try to parse. `null` is what
+          // Appium returns for a script with no return value, which is what this is.
+          return reply.code(200).type('application/json').send(JSON.stringify({ value: null }));
+        }
+      }
+
       const res = await callUpstream(
         `${row.upstream_base_url}${upstreamPath}`,
         {
@@ -906,9 +962,120 @@ export async function webdriverRoutes(app: FastifyInstance) {
     return { sessionId, deviceId: row.device_id, fence: Number(row.fence) };
   }
 
-  /** What the no-capacity message should say we were looking for. */
-  const wanted = (build: ResolvedApp | null) =>
-    build ? 'with an automation server that can install apps' : 'with an automation server';
+  /**
+   * Is this the `executeScript` endpoint?
+   *
+   * BOTH DIALECTS. W3C spells it `execute/sync` (and `execute/async`); JSONWP spelled it `execute`,
+   * and the Appium 1.x clients a lot of suites are still pinned to send exactly that — the same
+   * suites this hook exists to spare a rewrite.
+   */
+  const isExecute = (path: string) =>
+    path === 'execute' || path === 'execute/sync' || path === 'execute/async';
+
+  /** `mfarm-status=failed` → `['status', 'failed']`. Anything else is not ours. */
+  const HOOK = /^mfarm-(status|name)\s*=\s*([\s\S]*)$/;
+
+  /**
+   * Handle a `mfarm-…` script, or decline so the command goes upstream unchanged.
+   *
+   * DECLINING IS THE COMMON CASE and has to be cheap and total: every `executeScript` a suite makes
+   * for its own purposes — `mobile: shell`, a scroll helper, a deep link — passes through here, and
+   * a hook that threw on an unfamiliar payload would break ordinary automation to serve a
+   * convenience. So anything that is not exactly our prefix is somebody else's script.
+   *
+   * A MALFORMED HOOK IS REFUSED, not passed on. `mfarm-status=pased` is unambiguously aimed at this
+   * hook and unambiguously wrong, and forwarding it would hand Appium a script it cannot run — so
+   * the suite would get "unknown command" for what is really a typo in a status word. This is the
+   * one case where saying no is more useful than being liberal.
+   */
+  async function runScriptHook(
+    orgId: string,
+    sessionId: string,
+    body: unknown,
+    log: { info(o: object, m: string): void; warn(o: object, m: string): void },
+  ): Promise<boolean> {
+    const script = (body as { script?: unknown } | null)?.script;
+    if (typeof script !== 'string') return false;
+    const m = HOOK.exec(script.trim());
+    if (!m) return false;
+
+    const [, verb, rawValue] = m;
+    const value = rawValue.trim();
+
+    if (verb === 'name') {
+      if (!value) throw invalidArgument('`mfarm-name=` needs a name after the equals sign.');
+      await nameSession(orgId, sessionId, value.slice(0, 300));
+      return true;
+    }
+
+    /**
+     * The status word, and the whole vocabulary this hub will accept.
+     *
+     * `lambda-status` takes `passed`/`failed` and BrowserStack takes `passed`/`failed` too, so a
+     * suite that ports its teardown across sends one of those two — and `skipped` is here because
+     * `test_results` has always had it and a reporting hook that could not say it would force a
+     * skipped test to be recorded as a lie.
+     */
+    const STATUSES = ['passed', 'failed', 'skipped'] as const;
+    const status = STATUSES.find((x) => x === value.toLowerCase());
+    if (!status) {
+      throw invalidArgument(
+        `\`mfarm-status\` must be one of ${STATUSES.join(', ')} — got "${value}".`,
+      );
+    }
+
+    /**
+     * THE NAME COMES FROM THE SESSION, because the hook has no room to carry one.
+     *
+     * This is the whole reason `mfarm:name` and this hook are one feature rather than two: a
+     * teardown sending only a status has already told us the test's name at `@Before`, and a result
+     * row needs one. A session that never said falls back to a label that is honestly about the
+     * session rather than pretending to be a test name somebody chose.
+     */
+    const named = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query<{ name: string | null }>(
+        'SELECT name FROM sessions WHERE id = $1', [sessionId]);
+      return rows[0]?.name ?? null;
+    });
+
+    await recordTestResult({
+      orgId, sessionId, status,
+      name: named ?? `session ${sessionId.slice(0, 8)}`,
+    }, log);
+
+    log.info({ sessionId, status, viaHook: true }, 'suite reported a result through executeScript');
+    return true;
+  }
+
+  /**
+   * Write the test's name onto the session — `mfarm:name`, and the `mfarm-name` script hook.
+   *
+   * LAST WRITE WINS, which is the opposite of the run's rule one file over, and the difference is
+   * what each thing IS. A run is one row that many sessions join, so a later session renaming it
+   * would move the label under a reader. A session is one test, and the two writers here are the
+   * same caller at two moments — the capability at `@Before`, the hook when the suite learns
+   * something better (a retry number, a parameterised Examples row). The later one is the one they
+   * meant.
+   */
+  async function nameSession(orgId: string, sessionId: string, name: string): Promise<void> {
+    await withTenant(orgId, (c) => c.query(
+      'UPDATE sessions SET name = $2 WHERE id = $1', [sessionId, name]));
+  }
+
+  /**
+   * What the no-capacity message should say we were looking for.
+   *
+   * THE CLASS IS NAMED WHEN ONE WAS ASKED FOR, because it changes what the reader should do about
+   * it. "No android device is free" sends somebody to the fleet to wait; "no android device of
+   * class mfarm-x1-pro is free" sends them to check whether this farm has one at all — and on a
+   * farm that has none, waiting is not a thing that will ever work.
+   */
+  const wanted = (build: ResolvedApp | null, caps: ParsedCapabilities) => {
+    const cls = !caps.matchDeviceClass ? ''
+      : caps.deviceClass === null ? ' of no device class (unprofiled)'
+      : ` of class ${caps.deviceClass}`;
+    return `${cls} ${build ? 'with an automation server that can install apps' : 'with an automation server'}`.trim();
+  };
 
   /**
    * Turn `mfarm:appId` into a build, or refuse the session naming what was not found.

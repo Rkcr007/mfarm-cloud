@@ -97,6 +97,155 @@ const resultJson = (r: ResultRow) => ({
   occurredAt: (r.occurred_at ?? r.reported_at),
 });
 
+/**
+ * What a caller is reporting, whichever door they came in by.
+ *
+ * TWO DOORS, ONE WRITER — and the second one is why this is a function rather than a route body.
+ * `POST /v1/sessions/:id/result` is the explicit REST call; `executeScript("mfarm-status=failed")`
+ * is the same report arriving through the WebDriver session a suite already has open, which is how
+ * every suite migrating off LambdaTest or BrowserStack is written. They must write the same row,
+ * request the same evidence and emit the same timeline event: a farm where the outcome depends on
+ * which door you used is a farm whose numbers cannot be trusted.
+ */
+export interface TestReport {
+  orgId: string;
+  sessionId: string;
+  status: 'passed' | 'failed' | 'skipped';
+  name: string;
+  failure?: string;
+  durationMs?: number;
+  failureReason?: string;
+  occurredAt?: string;
+}
+
+/** Just enough of a Fastify logger for the capture path, so this is callable from anywhere. */
+interface ReportLog {
+  info(o: object, m: string): void;
+  warn(o: object, m: string): void;
+}
+
+/**
+ * Record one test's outcome, and everything that follows from it.
+ *
+ * Returns the row. Throws `badRequest` for a contradictory report and `notFound` for a session this
+ * org cannot see — both of which the WebDriver hook maps onto its own error shape.
+ */
+export async function recordTestResult(report: TestReport, log: ReportLog): Promise<ResultRow> {
+  const { orgId, sessionId, status, name, failureReason } = report;
+
+  /**
+   * Only a failed test has a failure to classify.
+   *
+   * Refused rather than ignored. A suite sending `status: 'passed'` with a reason attached has a
+   * bug in its reporting hook, and silently dropping half of a contradictory pair would let that
+   * bug live forever while quietly skewing every count built on the column. The database has the
+   * same constraint; this is the version that says so in words the caller can act on.
+   */
+  if (failureReason !== undefined && status !== 'failed') {
+    throw badRequest(`failureReason is only meaningful on a failed test; this one is "${status}".`);
+  }
+  // Derived, never accepted — see ResultBody. `classifyReason` is total over the schema's enum,
+  // so this cannot be undefined here, but the fallback keeps that from being a silent assumption.
+  const failureClass = failureReason === undefined ? null : classifyReason(failureReason) ?? null;
+
+  /**
+   * PARSED HERE, CLAMPED IN SQL. A timestamp from a caller is a claim, not a fact: a reporter
+   * with a skewed clock — or somebody who would simply like their failure to appear before the
+   * run started — must not be able to write a timeline that could not have happened.
+   *
+   * Unparseable is treated as absent rather than as a 400. The result is what this endpoint
+   * exists for, and losing it over a malformed optional field would be the same mistake
+   * `boundFailure` refuses to make with an oversized stack.
+   */
+  const claimed = report.occurredAt ? new Date(report.occurredAt) : null;
+  const occurredAt = claimed && !Number.isNaN(claimed.getTime()) ? claimed.toISOString() : null;
+
+  const row = await withTenant(orgId, async (c) => {
+    // The org comes from the SESSION, and the INSERT ... SELECT is what ties them together in
+    // one statement: there is no window in which a caller could name a session it does not own
+    // and have the row written under an org it does.
+    //
+    // `occurred_at` is clamped to the session's own lifetime by the GREATEST/LEAST pair: not
+    // before the session was created, and not after now. A suite reporting mid-run gets its own
+    // timestamp through untouched, which is the case this is for.
+    const { rows } = await c.query<ResultRow>(
+      `INSERT INTO test_results
+         (org_id, session_id, name, status, failure, duration_ms, failure_class, failure_reason,
+          occurred_at)
+       SELECT s.org_id, s.id, $2, $3, $4, $5, $6, $7,
+              CASE WHEN $8::timestamptz IS NULL THEN NULL
+                   ELSE LEAST(GREATEST($8::timestamptz, s.created_at), now()) END
+         FROM sessions s WHERE s.id = $1
+       RETURNING *`,
+      [sessionId, name.trim(), status, boundFailure(report.failure), report.durationMs ?? null,
+       failureClass, failureReason ?? null, occurredAt],
+    );
+    return rows[0] ?? null;
+  });
+
+  if (!row) throw notFound('Session');
+
+  /**
+   * A FAILED TEST ASKS FOR ITS OWN EVIDENCE (migration 040).
+   *
+   * This is the moment the control plane learns something went wrong, and until now it did
+   * nothing with it — the only capture was at teardown, after Appium force-stops the app, which
+   * is why the screenshot a person opens to see the failure reliably shows the launcher.
+   *
+   * NEVER FAILS THE RESULT. The whole call is wrapped, and a capture that cannot be requested
+   * is logged and dropped. The suite's report is the thing that matters and it is already
+   * written by the time this runs; evidence is a bonus and must not be able to turn a recorded
+   * failure into a 500 that the reporting hook then retries. `request_capture` already returns
+   * NULL rather than raising for every ordinary decline — no device, wrong fence, no capability,
+   * one already pending — so a throw here means something genuinely unexpected.
+   *
+   * BOTH VERBS, and neither is redundant. The screenshot says what the screen looked like; the
+   * logcat says what the app was saying while it got there, and a crash usually shows in one and
+   * not the other. `request_capture` coalesces each independently, so a session failing thirty
+   * tests requests at most one of each per beat rather than sixty.
+   */
+  if (status === 'failed') {
+    /**
+     * THE LINE THE TIMELINE WAS MISSING (migration 042).
+     *
+     * Nine event kinds described what the FARM did and none described what the TEST did, so a
+     * timeline could say the device was allocated at 10:30:04 and not that the test failed at
+     * 10:31:43 — which is the line somebody opened the page for.
+     *
+     * Recorded before the captures are requested, so a run watched live shows the failure and
+     * then its evidence arriving, in that order, which is the order they happened in.
+     */
+    await recordSessionEvent(orgId, sessionId, 'test-failed', {
+      testResultId: row.id,
+      test: row.name,
+      failureClass,
+      failureReason: failureReason ?? null,
+      // The message, bounded hard. A timeline entry is a headline; the full stack is one click
+      // away on the result itself, and a 10k stack inside a jsonb detail would be carried by
+      // every SSE frame of a live run.
+      message: row.failure ? row.failure.split('\n')[0].slice(0, 300) : null,
+    });
+
+    const context = JSON.stringify({ source: 'test-failure', testResultId: row.id, test: row.name });
+    for (const kind of ['screenshot', 'logcat'] as const) {
+      try {
+        const { rows: cap } = await withTenant(orgId, (c) =>
+          c.query<{ id: string | null }>('SELECT request_capture($1,$2,$3,$4::jsonb) AS id',
+            [orgId, sessionId, kind, context]));
+        if (cap[0]?.id) {
+          log.info({ sessionId, kind, actionId: cap[0].id, testResultId: row.id },
+            'failed test requested a capture');
+        }
+      } catch (e) {
+        // Warn, not error: nothing is broken for the caller and the result is safely recorded.
+        log.warn({ err: e, sessionId, kind }, 'could not request a capture for a failed test');
+      }
+    }
+  }
+
+  return row;
+}
+
 export async function resultRoutes(app: FastifyInstance): Promise<void> {
   /**
    * POST /v1/sessions/:id/result — one test's outcome.
@@ -142,121 +291,9 @@ export async function resultRoutes(app: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const { orgId } = requireTenant(req);
-      const sessionId = req.params.id;
-      const { status, name, failureReason } = req.body;
-
-      /**
-       * Only a failed test has a failure to classify.
-       *
-       * Refused rather than ignored. A suite sending `status: 'passed'` with a reason attached has a
-       * bug in its reporting hook, and silently dropping half of a contradictory pair would let that
-       * bug live forever while quietly skewing every count built on the column. The database has the
-       * same constraint; this is the version that says so in words the caller can act on.
-       */
-      if (failureReason !== undefined && status !== 'failed') {
-        throw badRequest(
-          `failureReason is only meaningful on a failed test; this one is "${status}".`,
-        );
-      }
-      // Derived, never accepted — see ResultBody. `classifyReason` is total over the schema's enum,
-      // so this cannot be undefined here, but the fallback keeps that from being a silent assumption.
-      const failureClass = failureReason === undefined ? null : classifyReason(failureReason) ?? null;
-
-      /**
-       * PARSED HERE, CLAMPED IN SQL. A timestamp from a caller is a claim, not a fact: a reporter
-       * with a skewed clock — or somebody who would simply like their failure to appear before the
-       * run started — must not be able to write a timeline that could not have happened.
-       *
-       * Unparseable is treated as absent rather than as a 400. The result is what this endpoint
-       * exists for, and losing it over a malformed optional field would be the same mistake
-       * `boundFailure` refuses to make with an oversized stack.
-       */
-      const claimed = req.body.occurredAt ? new Date(req.body.occurredAt) : null;
-      const occurredAt = claimed && !Number.isNaN(claimed.getTime()) ? claimed.toISOString() : null;
-
-      const row = await withTenant(orgId, async (c) => {
-        // The org comes from the SESSION, and the INSERT ... SELECT is what ties them together in
-        // one statement: there is no window in which a caller could name a session it does not own
-        // and have the row written under an org it does.
-        //
-        // `occurred_at` is clamped to the session's own lifetime by the GREATEST/LEAST pair: not
-        // before the session was created, and not after now. A suite reporting mid-run gets its own
-        // timestamp through untouched, which is the case this is for.
-        const { rows } = await c.query<ResultRow>(
-          `INSERT INTO test_results
-             (org_id, session_id, name, status, failure, duration_ms, failure_class, failure_reason,
-              occurred_at)
-           SELECT s.org_id, s.id, $2, $3, $4, $5, $6, $7,
-                  CASE WHEN $8::timestamptz IS NULL THEN NULL
-                       ELSE LEAST(GREATEST($8::timestamptz, s.created_at), now()) END
-             FROM sessions s WHERE s.id = $1
-           RETURNING *`,
-          [sessionId, name.trim(), status, boundFailure(req.body.failure), req.body.durationMs ?? null,
-           failureClass, failureReason ?? null, occurredAt],
-        );
-        return rows[0] ?? null;
-      });
-
-      if (!row) throw notFound('Session');
-
-      /**
-       * A FAILED TEST ASKS FOR ITS OWN EVIDENCE (migration 040).
-       *
-       * This is the moment the control plane learns something went wrong, and until now it did
-       * nothing with it — the only capture was at teardown, after Appium force-stops the app, which
-       * is why the screenshot a person opens to see the failure reliably shows the launcher.
-       *
-       * NEVER FAILS THE RESULT. The whole call is wrapped, and a capture that cannot be requested
-       * is logged and dropped. The suite's report is the thing that matters and it is already
-       * written by the time this runs; evidence is a bonus and must not be able to turn a recorded
-       * failure into a 500 that the reporting hook then retries. `request_capture` already returns
-       * NULL rather than raising for every ordinary decline — no device, wrong fence, no capability,
-       * one already pending — so a throw here means something genuinely unexpected.
-       *
-       * BOTH VERBS, and neither is redundant. The screenshot says what the screen looked like; the
-       * logcat says what the app was saying while it got there, and a crash usually shows in one and
-       * not the other. `request_capture` coalesces each independently, so a session failing thirty
-       * tests requests at most one of each per beat rather than sixty.
-       */
-      if (status === 'failed') {
-        /**
-         * THE LINE THE TIMELINE WAS MISSING (migration 042).
-         *
-         * Nine event kinds described what the FARM did and none described what the TEST did, so a
-         * timeline could say the device was allocated at 10:30:04 and not that the test failed at
-         * 10:31:43 — which is the line somebody opened the page for.
-         *
-         * Recorded before the captures are requested, so a run watched live shows the failure and
-         * then its evidence arriving, in that order, which is the order they happened in.
-         */
-        await recordSessionEvent(orgId, sessionId, 'test-failed', {
-          testResultId: row.id,
-          test: row.name,
-          failureClass,
-          failureReason: failureReason ?? null,
-          // The message, bounded hard. A timeline entry is a headline; the full stack is one click
-          // away on the result itself, and a 10k stack inside a jsonb detail would be carried by
-          // every SSE frame of a live run.
-          message: row.failure ? row.failure.split('\n')[0].slice(0, 300) : null,
-        });
-
-        const context = JSON.stringify({ source: 'test-failure', testResultId: row.id, test: row.name });
-        for (const kind of ['screenshot', 'logcat'] as const) {
-          try {
-            const { rows: cap } = await withTenant(orgId, (c) =>
-              c.query<{ id: string | null }>('SELECT request_capture($1,$2,$3,$4::jsonb) AS id',
-                [orgId, sessionId, kind, context]));
-            if (cap[0]?.id) {
-              req.log.info({ sessionId, kind, actionId: cap[0].id, testResultId: row.id },
-                'failed test requested a capture');
-            }
-          } catch (e) {
-            // Warn, not error: nothing is broken for the caller and the result is safely recorded.
-            req.log.warn({ err: e, sessionId, kind }, 'could not request a capture for a failed test');
-          }
-        }
-      }
-
+      // The whole handler is now the shared writer — see `recordTestResult`. What stays here is the
+      // schema above (which is this door's contract, not the writer's) and the 201.
+      const row = await recordTestResult({ orgId, sessionId: req.params.id, ...req.body }, req.log);
       return reply.code(201).send({ result: resultJson(row) });
     },
   );

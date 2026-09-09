@@ -64,6 +64,12 @@ session joins it, so a suite that dies halfway leaves a run that simply stops gr
 falls back to `$GITHUB_RUN_ID` on its own, and omits the capability entirely when neither is set —
 running locally with no run is the normal case.
 
+**And one line names the test.** `mfarm:name` puts the scenario's name on the session at the moment
+it is created, so the console's Runs and Sessions screens read as test names rather than uuids —
+while the suite is still running, which is the only time "which phone is stuck?" can be acted on.
+`mfarm:runName` does the same for the run: `mfarm:runId` is the id CI already has and the name is
+what a person scans a list for.
+
 **And one more line tells it how they went.** WebDriver has no concept of an assertion — the farm
 watches a session open, drive a device and close, and that looks identical whether every test passed
 or every one failed. So the suite has to say:
@@ -78,6 +84,16 @@ await fetch(`${HUB}/v1/sessions/${driver.sessionId}/result`, {
 
 `driver.sessionId` is the farm's own session id — the hub hands back its id rather than Appium's, so
 one id spans your test log, the API, the artifact index and the invoice, with no correlation step.
+
+A suite whose teardown cannot easily make an HTTP call has a second door — the status goes through
+the driver it already holds, which is how a Java or C# suite migrating off another farm is written:
+
+```js
+await driver.executeScript('mfarm-status=failed', []);   // before deleteSession()
+```
+
+It writes the same row through the same code as the POST above. What it cannot carry is the stack,
+which is why this suite uses the REST call.
 
 Where your runner gives a hook the outcome, this really is one line. WebdriverIO:
 
