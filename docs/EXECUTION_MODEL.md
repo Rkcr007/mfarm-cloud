@@ -460,7 +460,7 @@ is removed. An injection test is only as good as its ability to fail; see HANDOF
 
 ### 4.9 The labels a dashboard is built on — BUILT (2026-09-09)
 
-Migration 048, and the `mfarm-status` script hook.
+Migration 048 and ADR-0033, and the `mfarm-status` script hook.
 
 **What was wrong.** Open the Runs screen while a suite is running and it showed sessions by uuid.
 Which of the two phones was on *search and view pending expenses* and which was stuck on an OTP
