@@ -4420,3 +4420,48 @@ when the feature is broken. See issues 37 and 38.
     signed-out landing markup, not the screen — the sign-in controls stay in the DOM at
     `display:none` after login, which `DEFECTS.md` already records as a non-defect. Screenshots are
     the reliable instrument here; text extraction is not.
+
+86. **THE REGISTER'S REAL DEFECTS ARE CLOSED, AND THE FIRST FIX WAS A HALF-FIX.** 2026-09-11,
+    `e157535`.
+
+    "Known and not fixed" had four entries. Two are not defects and now say so: the CSP `webrtc`
+    warning is deliberate (ADR-0007), and app network capture is an unbuilt feature that needs its
+    own privacy decision. The other two are fixed.
+
+    **`mfarm-deploy.sh` no longer reports failure on a deploy that worked.** A container name left by
+    an out-of-band `docker compose up -d api` made compose answer `Conflict`, and `set -e` ended the
+    script on that line — skipping the verification step, which is the only part that decides whether
+    a deploy happened. The restart is now non-fatal, clears the name, retries once, and **continues
+    to verify whatever happens**. The message parse is in `lib/restart-conflict.sh` with executed
+    tests, including that a busy PORT is not a container to remove: "is already in use" is said about
+    ports and volumes too, and removing a container because a port was taken is precisely the wrong
+    action.
+
+    **The Steps table folds repeated commands — and my first version fixed the wrong noise.** The
+    recorded defect said "repeated SUCCESSFUL commands" and I implemented exactly that, with a rule I
+    was pleased with: a failed step is the row the table exists for, so it never folds. Then I opened
+    a real trace off this farm and found what an Appium suite actually makes — a `WebDriverWait`
+    polling `no such element` — and **one session in the register with eighteen of them in a row**.
+    The dominant noise is repeated FAILED lookups. My fix touched none of it.
+
+    Failures fold too now, keeping **the last one of a run**, because in a polling wait that is the
+    attempt the suite acted on and the ones before it are the wait working. Verified on that exact
+    session: `20 steps, 17 failed, 12 rows hidden`, with `5–17 POST element ×13 — no such element —
+    while waiting` in plain type and **row 18 still red**. A slow step breaks a run in both kinds.
+
+    **The lesson is where the defect text came from.** It was written by reading a screen, so it
+    described the noise visible on a short manual session. The noise that mattered was in a stored
+    trace nobody had opened, and looking would have cost one query.
+
+    **D43 came out of the CSS for the above.** Five variables painted from their fallback and never
+    from a token — `--accent-line`, `--c-ok`, `--c-bad`, `--t-dim`, `--mf-accent-text` — so those
+    colours never changed with the theme, which is the exact failure `theme.test.ts` exists for. Two
+    were minutes old; three had been sitting in the stylesheet. **Yesterday's D42 guard deliberately
+    skipped them**, on the grounds that a fallback cannot paint nothing. It took writing two more to
+    notice that *invisible* and *wrong* are different failures. A fallback hides a typo; it does not
+    forgive one.
+
+    **Still open and needing hardware**: the device host's checkout is behind on `dumpLogcat`'s
+    `-v year -v UTC`, so the console cannot time-align a captured log to a failure on this farm. The
+    lab was stopped during this work, so that waits for its next start — which is also when
+    `up_since` first gets stamped and the cost display lights up.
