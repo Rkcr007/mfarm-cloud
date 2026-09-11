@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Four, as of 2026-09-11** — forty recorded, thirty-six closed. The four below are named at the
+**Four, as of 2026-09-11** — forty-one recorded, thirty-seven closed. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
 here rather than being quietly absent.
 
@@ -621,6 +621,22 @@ resolve out of order, which is the one ordering a test awaiting its own call can
 catches D40. **It does not catch D39**, and nothing in this repo does: a click lost between a
 mousedown and a re-render needs a browser, and the only instrument that found it was pressing the
 button on the deployed farm.
+
+## Found by opening the screen I had just shipped, 2026-09-11
+
+| id | what | status |
+|---|---|---|
+| D41 | **The Health screen rendered completely blank on the deployed farm.** `usageCard` passed `style` as a STRING; `h()` writes styles through CSSOM because the console's CSP kills the style attribute, and a real `CSSStyleDeclaration` throws on an indexed write. One throw inside `render()` produces no tree at all — nav and chrome present, content area empty. | Fixed 2026-09-11: static styling moved to a `.usagebars` class, only the computed height written as an object. **Verified RED** — restoring the string fails ten tests including the new one. |
+
+**THE TEST FOR THIS ALREADY EXISTED AND COULD NOT FIRE.** `dom-shim.ts` has refused indexed style
+writes since the last time this shape cost something, and `console-screens.test.ts` calls every
+screen. It passed anyway, because `usageCard` returns a "Loading…" card while `state.usage.loaded`
+is false — which is what every seeded test left it as. **The branch that draws the bars was
+unreachable in the suite while being the only one a real farm ever renders.** A guard only guards
+code that runs, and seeding state chooses which code that is. Two tests now seed past the early
+return — one for the chart, one for a host reporting uptime and cost.
+
+Same family as D39: shipped, tested, green, and broken on the first screen anybody opened.
 
 ## Suite health
 

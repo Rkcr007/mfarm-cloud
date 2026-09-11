@@ -7491,13 +7491,24 @@ function usageCard() {
     h('p', { class: 'caption' },
       `${(seconds / 3600).toFixed(1)} device-hours over ${days.length} day${days.length === 1 ? '' : 's'} `
       + 'with any usage. This is time a device was HELD by a session — not time a host was powered on.'),
-    h('div', { class: 'row tight mt-md', style: 'align-items: flex-end; gap: 3px; height: 64px;' },
-      days.map((d) => h('span', {
+    /**
+     * STYLE AS AN OBJECT, NEVER A STRING — and the first version of this shipped as a string.
+     *
+     * `h()` writes styles through CSSOM (`Object.assign(n.style, v)`) because the console's CSP is
+     * `style-src 'self'` and the style ATTRIBUTE is killed silently. Assigning a STRING to that
+     * object writes it character by character, and a real `CSSStyleDeclaration` throws on an
+     * indexed write — which took the whole Health screen blank, since one throw inside `render()`
+     * produces no tree at all.
+     *
+     * Everything static is a class (`.usagebars`); only the height is computed, which is the exact
+     * division `h()`'s own comment asks for.
+     */
+    h('div', { class: 'usagebars' },
+      days.map((d) => h('i', {
         // Title rather than an axis: thirty labels under thirty bars is unreadable at this width,
         // and the shape is what the card is for.
         title: `${d.day} · ${(d.deviceSeconds / 3600).toFixed(2)} device-hours`,
-        style: `flex: 1; min-width: 3px; border-radius: 2px; background: var(--accent);`
-          + ` height: ${Math.max(3, Math.round((d.deviceSeconds / peak) * 64))}px;`,
+        style: { height: `${Math.max(3, Math.round((d.deviceSeconds / peak) * 64))}px` },
       }))),
     h('p', { class: 'caption mt-sm', text: `${days[0].day} → ${days[days.length - 1].day}` }),
   );
