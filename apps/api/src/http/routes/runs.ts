@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { withTenant } from '../../db.ts';
 import { requireTenant } from '../server.ts';
-import { notFound } from '../errors.ts';
+import { badRequest, notFound } from '../errors.ts';
 import { timeline, recordRunEvent, subscribe, type PublishedEvent } from '../../executionEvents.ts';
 import { clientGone } from '../clientGone.ts';
 
@@ -171,7 +171,71 @@ function runJson(r: RunRow) {
       skipped: Number(r.tests_skipped ?? 0),
       sessionsReporting: Number(r.sessions_reporting ?? 0),
     },
+    /**
+     * The run's outcome as one word — the same three the console's badge has always rendered.
+     *
+     * DERIVED HERE BECAUSE THE FILTER AND THE BADGE MUST BE THE SAME TRUTH. Before this the console
+     * computed the category from `tests` and the API knew nothing about it; adding a `status=`
+     * filter that re-derived it in SQL would have created a second definition, and a list that
+     * disagrees with the badge on the rows inside it is the D35 defect wearing different clothes —
+     * four surfaces answering one question from different tables.
+     *
+     * `not-reported` is not a failure and not a pass. WebDriver has no concept of an assertion, so
+     * a run whose suite never called `POST /v1/sessions/:id/result` was never measured, and calling
+     * that green would put a reassuring number on something nobody checked.
+     */
+    outcome: outcomeOf(r),
+    /** Still going. Deliberately SEPARATE from `outcome`: a run can be live and already failing. */
+    live: Number(r.live_count ?? 0) > 0,
   };
+}
+
+/** The one definition. `LIST_SQL`'s `outcome` expression below must match it exactly. */
+function outcomeOf(r: RunRow): 'passed' | 'failed' | 'not-reported' {
+  if (Number(r.tests_total ?? 0) === 0) return 'not-reported';
+  return Number(r.tests_failed ?? 0) > 0 ? 'failed' : 'passed';
+}
+
+/**
+ * A page boundary, as one opaque string.
+ *
+ * OPAQUE ON PURPOSE. It carries a timestamp and a uuid, and a caller who reads that will eventually
+ * build one by hand — at which point the shape can never change. Base64url of a JSON pair, returned
+ * by this API and handed back unread.
+ *
+ * It encodes no org. A cursor from another tenant selects rows RLS will not return, so the worst a
+ * forged one does is produce an empty page.
+ */
+function encodeCursor(createdAt: Date, id: string): string {
+  return Buffer.from(JSON.stringify({ t: createdAt.toISOString(), i: id })).toString('base64url');
+}
+
+function decodeCursor(raw: string): { createdAt: string; id: string } {
+  try {
+    const v = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (typeof v?.t !== 'string' || !UUID.test(v?.i ?? '')) throw new Error('shape');
+    if (Number.isNaN(new Date(v.t).getTime())) throw new Error('date');
+    return { createdAt: v.t, id: v.i };
+  } catch {
+    // A 400 rather than an ignored parameter: silently returning page one to somebody who asked for
+    // page four is how a paginating client loops forever without ever seeing an error.
+    throw badRequest('`cursor` is not a cursor this API issued. Use the `nextCursor` from a previous response.');
+  }
+}
+
+/**
+ * An ISO timestamp from a query string.
+ *
+ * Refuses garbage rather than substituting a default, for the reason `account.ts` gives about the
+ * same shape: a caller who asked for a window and silently got everything would read the answer as
+ * being about the window they named.
+ */
+function parseWhen(raw: string, field: string): string {
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) {
+    throw badRequest(`\`${field}\` is not a date this API understands. Use an ISO 8601 timestamp.`);
+  }
+  return d.toISOString();
 }
 
 /** Exactly what Postgres will accept for a uuid, so a run named "nightly" is a lookup, not a 500. */
@@ -198,18 +262,103 @@ async function resolveRunId(orgId: string, key: string): Promise<string | null> 
 }
 
 export async function runRoutes(app: FastifyInstance): Promise<void> {
-  /** GET /v1/runs — the whole org's, newest first. The Runs screen's only query. */
-  app.get<{ Querystring: { limit?: string } }>('/runs', async (req) => {
+  /**
+   * GET /v1/runs — the org's runs, newest first, with the handles a team needs to find one.
+   *
+   * This took only `limit` until 2026-09-11, which is correct for a lab with nineteen runs and
+   * useless the first week somebody runs CI daily: the answer to "what happened to the expenses
+   * suite this morning" was to page through everything or to already know the run id.
+   *
+   *   q       substring of the run's id or its name, case-insensitive
+   *   status  passed | failed | not-reported | live — the words the badge already uses
+   *   from/to an ISO window over created_at
+   *   cursor  keyset, from a previous response's nextCursor
+   *
+   * KEYSET RATHER THAN OFFSET. A run list is a feed with writes landing at its head, so an OFFSET
+   * page-2 silently repeats or skips rows whenever a run is created between requests — and the
+   * moment anyone pages is exactly when CI is busy. `(created_at, id)` is a total order and
+   * `runs_org_created_idx` already covers it.
+   */
+  app.get<{ Querystring: {
+    limit?: string; q?: string; status?: string; from?: string; to?: string; cursor?: string;
+  } }>('/runs', async (req) => {
     const { orgId } = requireTenant(req);
     const limit = Math.min(Math.max(Number(req.query.limit ?? 50) || 50, 1), 200);
+
+    const where: string[] = [];
+    // $1 is the limit and $2 is LIVE_STATES throughout, so filters start at $3.
+    const params: unknown[] = [limit, LIVE_STATES];
+    const p = (v: unknown) => `$${params.push(v)}`;
+
+    const q = (req.query.q ?? '').trim();
+    if (q) {
+      /**
+       * ILIKE over both handles, because the two are different questions asked the same way: the id
+       * is what CI knows (`$GITHUB_RUN_ID`) and the name is what a person remembers
+       * (`Android_UAE_Expenses_…`). Searching only one means half of all searches silently fail.
+       *
+       * A LEADING-WILDCARD ILIKE CANNOT USE AN INDEX, and that is a deliberate trade at this size:
+       * a farm with thousands of runs should reach for pg_trgm, which is an extension this database
+       * does not have and not one to add speculatively. Named here so the day it gets slow, the
+       * reason is already written down rather than rediscovered.
+       */
+      const like = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+      where.push(`(r.external_id ILIKE ${p(like)} ESCAPE '\\' OR r.name ILIKE ${p(like)} ESCAPE '\\')`);
+    }
+
+    const status = (req.query.status ?? '').trim();
+    if (status) {
+      /**
+       * The SAME three words `outcomeOf` returns, plus `live`. Expressed against the identical
+       * aggregate columns rather than re-counted, so the filter cannot select a row whose badge
+       * then disagrees with it.
+       */
+      const byStatus: Record<string, string> = {
+        'failed': 'COALESCE(t.tests_failed, 0) > 0',
+        'passed': 'COALESCE(t.tests_total, 0) > 0 AND COALESCE(t.tests_failed, 0) = 0',
+        'not-reported': 'COALESCE(t.tests_total, 0) = 0',
+        'live': 'COALESCE(agg.live_count, 0) > 0',
+      };
+      const clause = byStatus[status];
+      if (!clause) {
+        throw badRequest(
+          `\`status\` must be one of ${Object.keys(byStatus).join(', ')} — got ${JSON.stringify(status)}.`,
+        );
+      }
+      where.push(clause);
+    }
+
+    if (req.query.from) where.push(`r.created_at >= ${p(parseWhen(req.query.from, 'from'))}`);
+    if (req.query.to) where.push(`r.created_at <= ${p(parseWhen(req.query.to, 'to'))}`);
+
+    if (req.query.cursor) {
+      const cur = decodeCursor(req.query.cursor);
+      // Strictly "older than", with `id` breaking ties so two runs created in the same millisecond
+      // cannot hide each other across a page boundary.
+      where.push(`(r.created_at, r.id) < (${p(cur.createdAt)}::timestamptz, ${p(cur.id)}::uuid)`);
+    }
+
+    const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = await withTenant(orgId, async (c) => {
       const r = await c.query<RunRow>(
-        `${LIST_SQL} ORDER BY r.created_at DESC LIMIT $1`,
-        [limit, LIVE_STATES],
+        // One extra row, to answer "is there another page" without a second count query -- which on
+        // a filtered ILIKE would cost the same scan twice to tell the caller something this already
+        // knows.
+        `${LIST_SQL} ${filter} ORDER BY r.created_at DESC, r.id DESC LIMIT $1 + 1`,
+        params,
       );
       return r.rows;
     });
-    return { runs: rows.map(runJson) };
+
+    const page = rows.slice(0, limit);
+    const more = rows.length > limit;
+    return {
+      runs: page.map(runJson),
+      /** Null when this is the last page, so a caller can stop without counting. */
+      nextCursor: more && page.length
+        ? encodeCursor(page[page.length - 1].created_at, page[page.length - 1].id)
+        : null,
+    };
   });
 
   /**
