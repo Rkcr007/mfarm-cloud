@@ -32,7 +32,22 @@ the account.
 These diverge by twenty hours in the incident above, and a reader who conflated them would conclude
 the meter was broken. The Health screen carries both, adjacent, with the distinction in the copy.
 
-### `hosts.up_since`, stamped at registration
+### `hosts.up_since`, stamped on a beat after a gap
+
+**Corrected 2026-09-11, the day it shipped.** The first version wrote this column only in the
+registration upsert, and it never fired: the farm was stopped overnight, brought back, and recorded
+**twelve heartbeats and zero registrations** while `up_since` stayed NULL. `/workers/heartbeat`'s own
+comment had said so all along — registration is something *"a healthy agent never performs, because
+its stored capability fingerprint has not changed"*. It is maintained on the heartbeat now, which is
+the path a host actually returns by.
+
+**A GAP IN BEATS IS WHAT "CAME UP" MEANS**, not the state column. A host quarantined by an *operator*
+keeps beating, so a rule keyed on "state is not UP" would rewrite this to `now()` on every beat for
+as long as the quarantine lasted — reporting a machine that had been on for a week as up for five
+seconds. The reaper quarantines at 90 seconds of silence, so a gap past two minutes means the machine
+genuinely went away.
+
+### The registration path, which was the original mechanism
 
 A worker registers once per boot. Not on *every* registration, though: ADR-0027 has a host
 re-register when its device set changes, which on a laptop with a phone plugged in is routine and

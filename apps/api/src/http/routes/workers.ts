@@ -365,7 +365,32 @@ export async function workerRoutes(app: FastifyInstance) {
     const videoMode = loadConfig().videoRecording;
     const { row, resets, actions } = await withSystem(async (c) => {
       const { rows } = await c.query(
-        `UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1
+        // `up_since` IS MAINTAINED HERE, NOT ONLY AT REGISTRATION (migration 050, ADR-0035).
+        //
+        // It was written only in the register upsert, and this handler's own comment eight lines
+        // below says why that was wrong: registration is something "a healthy agent never
+        // performs, because its stored capability fingerprint has not changed". The farm was
+        // stopped overnight and brought back on 2026-09-11 and the column stayed NULL -- twelve
+        // heartbeats, zero registrations. The feature could not fire on the only path a host
+        // actually returns by.
+        //
+        // A GAP IN BEATS IS WHAT "CAME UP" MEANS. Not the state column: a host quarantined by an
+        // OPERATOR keeps beating, and a rule keyed on "state is not UP" would rewrite this to now()
+        // on every beat for as long as the quarantine lasted, reporting a machine that had been on
+        // for a week as up for five seconds. The reaper quarantines at 90s of silence, so a gap
+        // past two minutes means the machine genuinely went away.
+        //
+        // SET reads the OLD row, so `last_heartbeat_at` below is the PREVIOUS beat, not the one
+        // being written on the line above it.
+        `UPDATE hosts SET
+           last_heartbeat_at = now(),
+           up_since = CASE
+             WHEN up_since IS NULL THEN now()
+             WHEN last_heartbeat_at IS NULL THEN now()
+             WHEN last_heartbeat_at < now() - interval '2 minutes' THEN now()
+             ELSE up_since
+           END
+          WHERE id = $1
           RETURNING state, quarantine_source`,
         [hostId],
       );
