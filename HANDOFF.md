@@ -4282,3 +4282,50 @@ when the feature is broken. See issues 37 and 38.
     **Five keys minted for the check, five revoked by label in one statement** — which is ADR-0034
     demonstrating its own argument. Before 049 those would have been five indistinguishable prefixes
     sitting beside the live deploy key, and revoking them would have meant guessing.
+
+83. **RUNS BECAME FINDABLE, AND THEN THE FILTER FOUND TWO DEFECTS IN ITSELF — ONE OF WHICH I
+    DIAGNOSED WRONG FIRST.** 2026-09-11, `7357eed`.
+
+    `GET /v1/runs` took only `limit`: correct for nineteen runs, useless the first week anyone runs
+    CI daily. It now takes `q`, `status`, `from`/`to` and a keyset `cursor`, and the console has a
+    search box, four status chips and Load more.
+
+    **Two decisions worth keeping.** Keyset rather than OFFSET, because a run list is a feed with
+    writes landing at its head — there is a test that creates a run BETWEEN page one and page two
+    and asserts page two neither repeats nor swallows a row. And the `status` filter and the row's
+    badge are **one derivation**: `outcome` is computed server-side and the console's pill now reads
+    it instead of re-deriving the category from counts. That is the D35 lesson applied before
+    shipping rather than after, for the first time in this repo.
+
+    **Then I pressed a chip on the farm and it did nothing.** *Not reported* looked active above
+    rows reading ALL PASSED and 1 FAILED.
+
+    **I filed that as a stale-response race and I was wrong.** The story was plausible —
+    `refreshRuns` racing the 5s poll — and I shipped a generation guard for it with two tests. Then
+    the network panel settled it: on a failed press there was **no request at all**, and a race
+    makes two. `refreshRuns` is not in the poll loop; the poll refreshes devices, sessions, actions
+    and held, and touches `refreshApps` only on the apps screen.
+
+    **The real one.** `render()` replaces the screen wholesale and the poll calls it whenever fleet
+    data changed — most five-second ticks on a live farm. A button rebuilt between a mousedown and
+    its mouseup never receives the click. The box on the chip was a **focus ring**, not an active
+    state. Fixed by keeping the chip elements across renders and writing only their class, which is
+    the treatment the search input already had — I had cached the input for exactly this reason and
+    did not think to ask what else rendered inside the same loop.
+
+    The race is real too and is kept as **D40**, honestly separated: a filter pressed while the
+    route's initial load is in flight would apply the older answer. Its tests still go red without
+    the guard. Two defects, one symptom, and only one of them was the one I saw.
+
+    **Third time this register has named a cause that did not survive checking**, and the cheap
+    instrument each time was to ask what the page actually DID rather than what the code could do.
+
+    **Verified on the deployed farm by driving it**: five chip presses, five requests, five correct
+    results — 18 failed, 7 passed, 4 not reported, 0 live, each matching what the API returns for
+    that status — and a second press of the same chip clearing the filter. **Load more is untested
+    by hand**: 29 runs against a page size of 50 means there is no second page to press it on.
+
+    **And nothing in this repo catches D39.** A click lost between a mousedown and a re-render needs
+    a browser. `console-runs-loader.test.ts` — the first LOADER test here, stubbing `fetch` so
+    answers resolve out of order — catches D40 and could never have caught D39. The register says
+    so rather than implying the suite covers it.
