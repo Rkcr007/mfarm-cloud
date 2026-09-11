@@ -2531,3 +2531,9 @@ kbd {
  * scanning, and ten at a time turns that into scrolling rather than reading. Capped in `vh` so it
  * never grows past the viewport on a tall screen. */
 .logbody.tall { height: min(60vh, 640px); }
+
+/* --------------------------------------------------------------- usage chart (ADR-0035)
+   One bar per day of metered device time. Everything static lives here; only the bar's HEIGHT is
+   written at runtime, which is the rule `h()` states for using `style` at all. */
+.usagebars { display: flex; align-items: flex-end; gap: 3px; height: 64px; margin-top: var(--s-md); }
+.usagebars > i { flex: 1 1 0; min-width: 3px; border-radius: 2px; background: var(--accent); display: block; }

@@ -318,6 +318,55 @@ describe('the runs screens', () => {
     assert.match(textOf(mod.SCREENS.runs()), /2 builds/);
   });
 
+  /**
+   * THE BRANCH SEEDING HIDES, and it shipped a blank Health screen on 2026-09-11.
+   *
+   * `usageCard` returns a "Loading…" card while `state.usage.loaded` is false — which is what every
+   * other test here leaves it as, so the card that DRAWS the bars was unreachable in this file while
+   * being the only thing a real farm ever renders. The bars passed `style` as a STRING; `h()` writes
+   * styles through CSSOM, a real `CSSStyleDeclaration` throws on an indexed write, and one throw
+   * inside `render()` produces no tree at all.
+   *
+   * `dom-shim` has refused indexed style writes since the last time this shape cost something. It
+   * could not help, because nothing ever took the branch. A guard only guards code that runs.
+   */
+  test('the usage chart draws its bars — the branch `loaded: false` hides', () => {
+    seed({ name: 'health' });
+    Object.assign(mod.state.usage, {
+      loaded: true,
+      window: { from: '2026-09-01T00:00:00.000Z', to: null },
+      total: { device_seconds: 3600 },
+      byDay: [
+        { day: '2026-09-01', deviceSeconds: 1200, artifactBytes: 0, egressBytes: 0 },
+        { day: '2026-09-03', deviceSeconds: 2400, artifactBytes: 0, egressBytes: 0 },
+      ],
+    });
+    const tree = mod.SCREENS.health();
+    assert.ok(countElements(tree) > 0, 'health produced no elements with usage loaded');
+    assert.match(textOf(tree), /device-hours/);
+  });
+
+  test('a host that is up reports its uptime and cost on Health', () => {
+    seed({ name: 'health' });
+    mod.state.hosts = {
+      loaded: true,
+      rate: { hourly: 65, currency: '₹' },
+      list: [{
+        id: 'h1', hostname: 'mfarm-lab', region: 'lab', state: 'UP',
+        upSince: new Date(Date.now() - 7200_000).toISOString(),
+        uptimeSeconds: 7200, costSinceUp: 130,
+        lastHeartbeatAt: new Date().toISOString(), protocolVersion: 2,
+        cores: 16, memoryMb: 65536, quarantine: null,
+        devices: { total: 4, ready: 4 },
+        machine: null,
+      }],
+    };
+    const text = textOf(mod.SCREENS.health());
+    assert.match(text, /mfarm-lab/);
+    assert.match(text, /up 2h/);
+    assert.match(text, /130/);
+  });
+
   test('a run id that resolves to nothing says so, rather than loading forever', () => {
     seed({ name: 'run', id: 'never-ran' });
     mod.state.runDetail = { id: 'never-ran', run: null, sessions: [], loaded: true };
