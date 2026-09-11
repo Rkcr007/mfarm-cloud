@@ -557,6 +557,13 @@ could not mint another key, because `requireOrgAdmin` needs a user session. The 
 rotation was impossible, since revoking one of four unlabelled prefixes is a guess about whether CI
 stops.
 
+**Verified on the farm 2026-09-11, both halves.** `examples/python-pytest` ran **3 passed in 56s**
+on real Cuttlefish with an `automation`-scoped key, so the narrow scope does not cost a suite
+anything; the same key asking to delete a session's evidence got **403** naming the scope that can.
+The five keys minted for that check were then revoked by their labels in one statement — which is
+the feature demonstrating its own point, since before 049 they would have been five indistinguishable
+prefixes beside the live deploy key.
+
 **And one entry above was written too strongly — corrected 2026-09-11 by looking at the screen.**
 This paragraph used to say "a run lists only its FAILURES as test rows, so every passing test's name
 is now recorded and rendered nowhere." The second half is false for the shape that matters. The run
