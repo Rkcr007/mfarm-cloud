@@ -4205,3 +4205,53 @@ when the feature is broken. See issues 37 and 38.
     LambdaTest. Only pytest claimed the pass. The design held under a case nobody had constructed
     for it, and the reason I have evidence at all is that the hub writes down what it forwards
     (ADR-0029) — without the command trace this would be one unexplainable green tick.
+
+81. **A KEY SAYS WHAT IT IS FOR, AND THE REVIEW'S FRAMING OF WHY WAS WRONG.** 2026-09-11,
+    `55614c2`, migration 049, ADR-0034.
+
+    Rakesh picked named/scoped API keys as the next priority from four options. The 2026-09-09
+    review had it as P1 — *"New API key creates immediately, with no name, scope, expiry, or
+    confirmation. A harmless exploratory click created a live org-wide credential."*
+
+    **Reading that as a blast-radius problem would have produced the wrong feature, and checking the
+    code first is what stopped it.** `requireOrgAdmin` calls `requireUser`, so an API key already
+    cannot mint another key, change the team, change retention or enroll an agent. That boundary
+    predates this work. **The actual defect is that ROTATION IS IMPOSSIBLE**: with four unlabelled
+    prefixes and no record of use, revoking one is a coin flip on whether CI stops, so nobody
+    rotates and a leaked key stays valid forever. The org cannot reduce its own exposure — which is
+    worse than any single key being over-powered.
+
+    **Scope names a boundary that already existed rather than a permission matrix.** Exactly three
+    tenant routes destroy data (`DELETE /artifacts/:id`, `/sessions/:id/artifacts`,
+    `/sessions/:id/record`), so `automation` — the default for new keys — is every key that does not
+    need them. A capability list was the alternative and would have been eleven strings of which the
+    code checks one: aspiration in a column, reading as a security feature while enforcing nothing.
+
+    **The label requirement went in `createApiKey`'s SIGNATURE, not in a validated field**, and the
+    compiler immediately found all 19 places that minted an anonymous key. That is the argument for
+    putting a rule in a type rather than in a handler.
+
+    **`rollback.test.ts` caught a genuine hazard and is the most valuable test in this repo.** My
+    first version made `label` NOT NULL with no default. Roll the API image back to a release whose
+    `createApiKey` inserts `(org_id, prefix, key_hash)` and minting fails outright — a rollback
+    would have taken key creation down completely. The column now carries a DEFAULT whose only
+    purpose is that rollback, and nothing in the new code relies on it. I had written the migration
+    believing it was obviously backward-compatible; the guard disagreed and was right.
+
+    **Verified on the deployed farm, and the console told the truth about two different nulls.** The
+    live key reads `last used 11/09/2026, 07:40:36` — so `touchKey` fires in production — while the
+    revoked ones read *"not used since this farm started recording it"* rather than "never used".
+    Rendering "never used" over a live CI credential would be an invitation to revoke it, and the
+    distinction only exists because the column is newer than the keys.
+
+    **What is NOT verified.** The dialog was opened and cancelled rather than submitted: minting a
+    real credential on production was not necessary to see the screen, and the API half has 24 tests
+    against a real Postgres. And no suite has yet run with an `automation` key — the examples were
+    run with `full` ones before this existed. The scope refuses only evidence deletion, which
+    neither example does, so they should be unaffected; "should be" is the phrase this register
+    exists to catch.
+
+    **Four instrument defects in one day** — a verify script guessing two field names, a test using
+    `x-csrf-token` where the server wants `x-mfarm-csrf`, and a deploy-wait loop whose grep matched
+    the commit in "origin/main is 55614c2" rather than in the serving-image line, so it reported a
+    deploy that had not happened. Each looked like a finding about the product for a few minutes.
