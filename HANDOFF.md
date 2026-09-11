@@ -4381,3 +4381,42 @@ when the feature is broken. See issues 37 and 38.
     `up_since` for the first time. That is the moment to look at the status bar — and to set
     `HOST_HOURLY_COST=65` in `deploy/.env`, which is unset, so today the farm would show hours
     without money.
+
+85. **AN EXPLORATION PASS, TWO DEFECTS IN MY OWN DAY-OLD CODE, AND A CONTEXT DOCUMENT THAT NAMES ITS
+    EVIDENCE.** 2026-09-11, `5a052f2`.
+
+    Rakesh asked for a document somebody could be handed cold — what the app is, what genuinely works
+    today, how it works — and asked that it be produced by exploring the app rather than by reading
+    the repo. Doing it in that order is what made it worth anything.
+
+    **The first screen I opened was blank.** Health, which I had shipped an hour earlier. `usageCard`
+    passed `style` as a string; `h()` writes styles through CSSOM because the console's CSP kills the
+    style attribute, and a real `CSSStyleDeclaration` throws on an indexed write. One throw inside
+    `render()` produces no tree at all. **The guard for this already existed** — `dom-shim` has
+    refused indexed style writes since the last time this shape cost something — and could not fire,
+    because `usageCard` returns early while `state.usage.loaded` is false and every seeded test left
+    it that way. **A guard only guards code that runs, and seeding chooses which code that is** (D41).
+
+    **Then the chart was invisible.** Fourteen bars, correct widths and heights, painting nothing.
+    Every check available said it was fine: the CSS was served, the class matched, the elements
+    existed. The only instrument that could see it was asking the browser for a COMPUTED style —
+    `rgba(0, 0, 0, 0)`. `var(--accent)` is not a token in this design system, and **CSS drops a
+    property with an undefined variable silently**. `theme.test.ts` now refuses any `var(--x)` with
+    no definition and no fallback, and it found a second one in the same two lines immediately
+    (D42).
+
+    **Then the app was driven end to end and it works.** Allocate → live view at 49–50 fps, 35 ms,
+    direct path → install MediShop, worker-confirmed in 4.5 s → launch, 5.6 s → **tap Sign In on the
+    streamed screen and watch the app answer "Invalid credentials"** → release, powerwash, and a
+    3.7 MB logcat plus a 152 KB screenshot captured without being asked. That tap is the whole
+    product in one round trip: browser, data channel, device, app, back.
+
+    **`docs/APP_CONTEXT.md` is the deliverable**, and its rule is that every capability claim names
+    how it was verified — by hand, by script, or only by tests — and that section 6 (what does NOT
+    work) is as long as section 4. It ends by telling a reader to open the thing and press buttons,
+    because the three defects above were all invisible to 1,590 passing tests.
+
+    **One instrument note worth keeping.** `get_page_text` on this console returns the HIDDEN
+    signed-out landing markup, not the screen — the sign-in controls stay in the DOM at
+    `display:none` after login, which `DEFECTS.md` already records as a non-defect. Screenshots are
+    the reliable instrument here; text extraction is not.
