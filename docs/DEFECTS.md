@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Four, as of 2026-09-11** — thirty-eight recorded, thirty-four closed. The four below are named at the
+**Four, as of 2026-09-11** — forty recorded, thirty-six closed. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
 here rather than being quietly absent.
 
@@ -543,9 +543,21 @@ lesson as HANDOFF entry 75 and as the two wrong entries this register itself car
 | D37 | **The hub took no name, so a session was anonymous for exactly the window somebody would look at it.** `test_results.name` arrives only when the suite posts a result — after the test ended, and never for a passing one. The Runs screen showed uuids during a run. | Fixed 2026-09-09, migration 048. **CLOSED 2026-09-11 on real Cuttlefish** — `deploy/verify-hub-contract.mjs`, 30/30. A session read back its test name before any result was posted, and the Runs screen shows `Android_UAE_Expenses_2026_09_10_23_54_48` over its CI id instead of a uuid. |
 | D38 | **An error message I wrote pointed at `mfarm run --profile`, a flag that does not exist** — the CLI has `--tier`, `--ttl` and `--wait`. Caught by reading `bin.ts`, not by any test. A remedy that reads as a fix and is not costs more than no remedy. | Fixed before commit, 2026-09-09. |
 
-**Still open from that review, and named so nobody assumes otherwise:** migration 044's host
-disk/CPU/agent-version reaches Prometheus and has no console read endpoint; the metering ingest has
-no usage view; there is no share link and no customer-facing tunnel.
+**Still open from that review, and named so nobody assumes otherwise:** there is no share link and
+no customer-facing tunnel.
+
+**~~Host disk/CPU reaches Prometheus with no console read endpoint~~ and ~~the metering ingest has no
+usage view~~ — CLOSED 2026-09-11, ADR-0035, migration 050.** `GET /v1/hosts` is the read model;
+Health carries a Machines card with disk, load and memory **and the age of the reading**, plus a
+per-day usage chart. **The "agent version" half is NOT closed and is not being claimed**: there is
+no such column on `hosts`, only `protocol_version`, which is what the agent speaks rather than what
+somebody shipped.
+
+**And the review's framing would have produced the wrong feature.** It asked for a per-org usage
+view. On 2026-09-11 the device host ran twenty hours idle after a two-minute check — ~₹1,350 — and
+the meter correctly recorded almost nothing, because usage is what a SESSION holds and cost is what a
+HOST burns while powered on. A usage page alone would have shown an empty chart while the money left.
+ADR-0035 reports both and keeps them apart.
 
 **~~Runs has no search, filter or pagination~~ — CLOSED 2026-09-11.** `GET /v1/runs` takes `q`,
 `status`, `from`, `to` and a keyset `cursor`; the console has a debounced search box, status chips

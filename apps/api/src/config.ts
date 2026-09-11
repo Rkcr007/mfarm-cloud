@@ -96,6 +96,20 @@ export interface Config {
    * writes ~2.2 GB/day at the measured bitrate, and keeping only what explains a red run is a
    * rounding error against that.
    */
+  /**
+   * What ONE HOST-HOUR COSTS THE OPERATOR, and the currency to say it in.
+   *
+   * CONFIGURATION, NEVER A DEFAULT, because MFARM is self-hosted: what a device host costs is a
+   * fact about somebody's cloud bill, and a number invented in this file would be rendered by the
+   * console as though the farm had measured it. Unset means the console shows elapsed time with no
+   * money in it — which is still the sentence that matters, since "up 20h" is alarming on its own.
+   *
+   * One rate rather than a column per host: the device host is ~95% of this farm's bill, so a
+   * single number is within a rounding error of the truth and a per-host rate is a table, a
+   * migration and an admin screen for a farm with two machines.
+   */
+  hostHourlyCost: number | null;
+  costCurrency: string;
   videoRecording: 'off' | 'failures' | 'all';
   /**
    * How long a kept recording lives. SHORTER THAN ARTIFACTS BY DEFAULT — three days against
@@ -593,6 +607,25 @@ export function parseConfig(env: Env): Config {
    * quietly meaning `off` is exactly the kind of configuration that is discovered weeks later by
    * somebody looking for a recording that was never made.
    */
+  /**
+   * Refused rather than ignored when it is not a number. An operator who set HOST_HOURLY_COST and
+   * got silence would believe the console was showing them a cost, and every figure on the page
+   * would then be missing the thing they configured it for.
+   */
+  let hostHourlyCost: number | null = null;
+  const costRaw = (env.HOST_HOURLY_COST ?? '').trim();
+  if (costRaw) {
+    const n = Number(costRaw);
+    if (!Number.isFinite(n) || n < 0) {
+      problems.push(`HOST_HOURLY_COST must be a non-negative number, not ${JSON.stringify(costRaw)}`);
+    } else {
+      hostHourlyCost = n;
+    }
+  }
+  // A symbol or code, printed verbatim. Not validated against a currency list: this farm bills in
+  // rupees, somebody else's in dollars, and a list is a thing to be wrong about.
+  const costCurrency = (env.COST_CURRENCY ?? '₹').trim() || '₹';
+
   const videoRaw = (env.VIDEO_RECORDING ?? 'off').trim().toLowerCase();
   if (!['off', 'failures', 'all'].includes(videoRaw)) {
     problems.push(`VIDEO_RECORDING must be one of off | failures | all, not ${JSON.stringify(videoRaw)}`);
@@ -686,6 +719,8 @@ export function parseConfig(env: Env): Config {
     artifactDir,
     artifactMaxUploadBytes,
     artifactRetentionHours,
+    hostHourlyCost,
+    costCurrency,
     videoRecording,
     videoRetentionHours,
     commandRetentionHours,
@@ -747,6 +782,8 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     artifactDir: c.artifactDir,
     artifactMaxUploadBytes: c.artifactMaxUploadBytes,
     artifactRetentionHours: c.artifactRetentionHours,
+    hostHourlyCost: c.hostHourlyCost ?? 'unset (elapsed time shown without a cost)',
+    costCurrency: c.costCurrency,
     videoRecording: c.videoRecording,
     videoRetentionHours: c.videoRetentionHours,
     commandRetentionHours: c.commandRetentionHours,

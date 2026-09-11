@@ -6,7 +6,7 @@ import { loadConfig } from '../../config.ts';
 import { createApiKey, revokeApiKey } from '../../auth.ts';
 import { createEnrollment, listEnrollments, revokeEnrollment } from '../../enrollment.ts';
 import { hashPassword } from '../../users.ts';
-import { usage } from '../../metering.ts';
+import { usage, usageByDay } from '../../metering.ts';
 import { counts, deviceReliability } from '../../attempts.ts';
 
 /**
@@ -151,8 +151,9 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       ?? new Date((to ?? new Date()).getTime() - 30 * 24 * 3600_000);
     if (to && from >= to) throw badRequest('`from` must be earlier than `to`.');
 
-    const [consumed, counted, devices] = await Promise.all([
+    const [consumed, byDay, counted, devices] = await Promise.all([
       usage(orgId, from, to),
+      usageByDay(orgId, from, to),
       counts(orgId, from, to),
       deviceReliability(orgId, from, to),
     ]);
@@ -162,6 +163,9 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       // server's clock again, presented as though it had bounded the query.
       window: { from, to: to ?? null },
       usage: consumed,
+      // The same totals, split by UTC day -- see `usageByDay`. A sum cannot tell a steady drip from
+      // one runaway suite on Tuesday, and that is the only question a usage page is asked.
+      byDay,
       attempts: counted,
       // "How often does a particular device fail" — the §2 question, per device, over this window.
       deviceReliability: devices,
