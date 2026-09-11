@@ -591,13 +591,24 @@ register: **grep the verb, then go and look at the screen.**
 
 | id | what | status |
 |---|---|---|
-| D39 | **A filter chip could light up over a list that ignored it.** `refreshRuns` is called both by the Runs filter and by the 5s poll, so a poll that left BEFORE a chip was pressed landed AFTER it and replaced the filtered rows with everything. Seen on the deployed farm minutes after shipping the feature: *Not reported* was active above rows reading ALL PASSED and 1 FAILED. The API was correct — `?status=not-reported` returned four rows, all `not-reported`. | Fixed 2026-09-11 by a generation counter, the same guard `loadRunDetail` already carried and whose comment says why. **Verified RED** by disabling it: exactly the two race tests failed. |
+| D39 | **A filter chip could light up over a list that ignored it, and the press was simply LOST.** Seen on the deployed farm minutes after shipping the feature: *Not reported* looked active above rows reading ALL PASSED and 1 FAILED. `render()` replaces the screen wholesale and the poll calls it whenever fleet data changed — most five-second ticks on a live farm — so a button rebuilt between a mousedown and its mouseup never receives the click. The box on the chip was a focus ring, not an active state. | Fixed 2026-09-11 by keeping the chip elements across renders and writing only their class, the same treatment the search input already had. |
+| D40 | **Two overlapping `refreshRuns` calls could apply their answers in either order** — a filter pressed while the route's initial load was still in flight would have the older, unfiltered answer land last. Found while investigating D39 and NOT the cause of it. | Fixed 2026-09-11 by a generation counter, the guard `loadRunDetail` already carried. **Verified RED**: exactly the two race tests fail without it. |
+
+**THE FIRST CAUSE I WROTE FOR D39 WAS WRONG, AND THIS IS THE THIRD TIME THIS REGISTER HAS DONE
+THAT.** The entry said the 5s poll's unfiltered request was landing on top of the filtered one.
+**The poll does not call `refreshRuns` at all** — it refreshes devices, sessions, actions and held,
+and only calls `refreshApps` on the apps screen. What gave it away was the network panel: on the
+failed press there was **no request at all**, and a race would have made two. A cause that explains
+the symptom is not the same as the cause, and the cheap way to tell them apart was to look at what
+the page actually asked for.
 
 **It needed a new kind of test, and that is the durable part.** Every console test in this repo
 seeds `state` and calls a screen — a RENDERER test, which cannot see a bug in the code that fills
 the state. `console-runs-loader.test.ts` is the first LOADER test: it stubs `fetch` so responses
-resolve out of order, which is the one ordering a test awaiting its own call can never produce. The
-feature shipped with 20 tests and this defect was invisible to all of them.
+resolve out of order, which is the one ordering a test awaiting its own call can never produce. It
+catches D40. **It does not catch D39**, and nothing in this repo does: a click lost between a
+mousedown and a re-render needs a browser, and the only instrument that found it was pressing the
+button on the deployed farm.
 
 ## Suite health
 
