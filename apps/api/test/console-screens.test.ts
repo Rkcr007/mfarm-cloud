@@ -330,6 +330,61 @@ describe('the runs screens', () => {
    * `dom-shim` has refused indexed style writes since the last time this shape cost something. It
    * could not help, because nothing ever took the branch. A guard only guards code that runs.
    */
+  /**
+   * REPEATED SUCCESSES FOLD; FAILURES AND SLOW STEPS NEVER DO.
+   *
+   * Seeded past `commands.loaded`, for the reason the usage-chart test below exists: the branch that
+   * renders anything at all is unreachable while the loader has not run, which is how a blank
+   * screen shipped on 2026-09-11.
+   */
+  test('a run of identical successful steps collapses, and the count stays honest', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const sessionId = 'sess-1';
+    const base = { status: 200, failed: false, error: null, durationMs: 40, startedAt: new Date().toISOString() };
+    const items = [];
+    for (let i = 1; i <= 9; i++) items.push({ ...base, seq: i, method: 'GET', path: 'screenshot' });
+    mod.state.commands = { sessionId, items, truncated: false, loaded: true, expanded: new Set() };
+
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /×9/, 'nine identical successes should fold into one row');
+    // The real number must survive folding: a table that says "1 step" when the suite made nine is
+    // a worse defect than the noise it removed.
+    assert.match(text, /9 steps/);
+    assert.match(text, /8 repeats folded/);
+  });
+
+  test('a FAILED step is never folded away', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const sessionId = 'sess-1';
+    const base = { status: 200, failed: false, error: null, durationMs: 40, startedAt: new Date().toISOString() };
+    const items = [];
+    for (let i = 1; i <= 4; i++) items.push({ ...base, seq: i, method: 'POST', path: 'element' });
+    items.push({ ...base, seq: 5, method: 'POST', path: 'element', failed: true, status: 404, error: 'no such element' });
+    for (let i = 6; i <= 9; i++) items.push({ ...base, seq: i, method: 'POST', path: 'element' });
+    mod.state.commands = { sessionId, items, truncated: false, loaded: true, expanded: new Set() };
+
+    const text = textOf(mod.SCREENS.cockpit());
+    // The failure splits the run in two and keeps its own row — the point of the whole feature.
+    assert.match(text, /no such element/, 'the failing step must still be a row of its own');
+    assert.match(text, /×4/, 'the successes either side should fold');
+  });
+
+  test('a SLOW step is never folded away either', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const sessionId = 'sess-1';
+    const base = { status: 200, failed: false, error: null, durationMs: 40, startedAt: new Date().toISOString() };
+    const items = [];
+    for (let i = 1; i <= 4; i++) items.push({ ...base, seq: i, method: 'GET', path: 'screenshot' });
+    items.push({ ...base, seq: 5, method: 'GET', path: 'screenshot', durationMs: 9000 });
+    for (let i = 6; i <= 9; i++) items.push({ ...base, seq: i, method: 'GET', path: 'screenshot' });
+    mod.state.commands = { sessionId, items, truncated: false, loaded: true, expanded: new Set() };
+
+    const text = textOf(mod.SCREENS.cockpit());
+    // Surfacing a nine-second click is the whole reason the slow threshold exists; folding it into
+    // "×9" would undo that.
+    assert.match(text, /9000ms/, 'the slow step must keep its own row');
+  });
+
   test('the usage chart draws its bars — the branch `loaded: false` hides', () => {
     seed({ name: 'health' });
     Object.assign(mod.state.usage, {

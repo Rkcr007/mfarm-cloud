@@ -228,7 +228,11 @@ export const state = {
   // The WebDriver steps for whichever session the cockpit is showing (migration 041). Keyed by
   // session for the same reason `artifacts` is: navigating between two sessions must never show one
   // session's steps under the other's heading.
-  commands: { sessionId: null, items: [], truncated: false, loaded: false },
+  commands: {
+    sessionId: null, items: [], truncated: false, loaded: false,
+    /** First `seq` of each collapsed run the reader has opened. Cleared when the session changes. */
+    expanded: new Set(),
+  },
   /**
    * The element inspector. `nodes` is the last dump, `picked` the node under the last click.
    *
@@ -5738,16 +5742,20 @@ function connectCard(sess) {
  */
 async function loadCommands(sessionId) {
   if (state.commands.sessionId === sessionId && state.commands.loaded) return;
-  state.commands = { sessionId, items: [], truncated: false, loaded: false };
+  state.commands = { sessionId, items: [], truncated: false, loaded: false, expanded: new Set() };
   try {
     const out = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/commands?limit=500`);
     if (state.commands.sessionId !== sessionId) return;
     state.commands = {
       sessionId, items: out.commands || [], truncated: Boolean(out.nextAfter), loaded: true,
+      // A FRESH SET PER LOAD, which is also how a run opened on one session stops being open on
+      // the next: `seq` restarts at 1 for every session, so carrying the set over would silently
+      // expand an unrelated run.
+      expanded: new Set(),
     };
   } catch {
     if (state.commands.sessionId !== sessionId) return;
-    state.commands = { sessionId, items: [], truncated: false, loaded: true };
+    state.commands = { sessionId, items: [], truncated: false, loaded: true, expanded: new Set() };
   }
 }
 
@@ -5768,6 +5776,74 @@ async function loadCommands(sessionId) {
  * out of order is not a step list — the value is in what came immediately before the red one — so
  * the order is the order they ran, and the summary line above carries the count.
  */
+/**
+ * Consecutive identical SUCCESSES, gathered into runs.
+ *
+ * WHAT IS NEVER GROUPED IS THE WHOLE DESIGN. A failed step is never folded away — it is the row the
+ * table exists for. Neither is a SLOW one: the point of the slow threshold is to surface a click
+ * that took nine seconds, and hiding it inside "×12" would undo that. So a slow or failed command
+ * BREAKS a run, which means a run of twelve screenshots containing one slow one renders as
+ * collapsed / slow / collapsed — the interesting row stays exactly where it was, with its
+ * neighbours out of the way.
+ *
+ * Grouped on `method + path` only. Never on the response, because two calls that returned 200 and
+ * 404 are not the same step even where the request was identical.
+ */
+function groupSteps(steps, slowMs) {
+  const out = [];
+  for (const c of steps) {
+    const key = `${c.method} ${c.path || '/'}`;
+    const collapsible = !c.failed && !(c.durationMs >= slowMs);
+    const last = out[out.length - 1];
+    if (collapsible && last?.collapsible && last.key === key) last.items.push(c);
+    else out.push({ key, collapsible, items: [c] });
+  }
+  return out;
+}
+
+/** One ordinary step row. */
+function stepRow(c, slowMs) {
+  return h('tr', { class: c.failed ? 'step-bad' : '' },
+    h('td', { class: 'tnum caption', text: String(c.seq) }),
+    h('td', null, h('code', { text: `${c.method} ${c.path || '/'}` })),
+    h('td', null, c.failed
+      // The W3C code where there is one; the bare status otherwise. A step that never got an answer
+      // has neither, and "no answer" is the most important thing this table can say — it means the
+      // device stopped talking, not that the test failed.
+      ? pill(c.error || (c.status === null ? 'no answer' : String(c.status)), 'bad')
+      : h('span', { class: 'caption tnum', text: String(c.status) })),
+    h('td', { class: `tnum ${c.durationMs >= slowMs ? 'step-slow' : 'caption'}`,
+              text: c.durationMs == null ? '—' : `${c.durationMs}ms` }),
+    h('td', { class: 'caption', text: new Date(c.startedAt).toLocaleTimeString() }),
+  );
+}
+
+/**
+ * A run of identical successes, as one row that can be opened.
+ *
+ * IT REPORTS THE SLOWEST OF THE RUN, not the total. A total answers "how long did twelve screenshots
+ * take", which nobody asks; the slowest answers "was any of these the problem", which is the
+ * question the table is for — and because slow steps break a run, this figure is always under the
+ * threshold and is therefore a statement that none of them was interesting.
+ */
+function stepRunRow(group, slowMs) {
+  const first = group.items[0];
+  const last = group.items[group.items.length - 1];
+  const slowest = Math.max(...group.items.map((c) => c.durationMs ?? 0));
+  return h('tr', { class: 'step-run' },
+    h('td', { class: 'tnum caption', text: `${first.seq}–${last.seq}` }),
+    h('td', null,
+      h('button', {
+        class: 'linkish', type: 'button',
+        title: 'Show each of these steps',
+        onclick: () => { state.commands.expanded.add(first.seq); render(); },
+      }, h('code', { text: group.key }), h('span', { class: 'caption', text: ` ×${group.items.length}` }))),
+    h('td', null, h('span', { class: 'caption tnum', text: String(first.status) })),
+    h('td', { class: 'tnum caption', text: `${slowest}ms max` }),
+    h('td', { class: 'caption', text: new Date(first.startedAt).toLocaleTimeString() }),
+  );
+}
+
 function stepsCard(sess) {
   const id = sess.id;
   if (state.commands.sessionId !== id || !state.commands.loaded) {
@@ -5785,11 +5861,31 @@ function stepsCard(sess) {
    */
   const SLOW_MS = 3000;
 
+  /**
+   * At least this many identical successes before they become one row.
+   *
+   * Two is not noise; nine `GET screenshot 200` in a row is, and on a real suite it is hundreds with
+   * the one interesting step buried among them. Three is the smallest number where collapsing
+   * removes more than it hides.
+   */
+  const RUN_MIN = 3;
+
+  const groups = groupSteps(steps, SLOW_MS);
+  const collapsedRuns = groups.filter((g) => g.collapsible && g.items.length >= RUN_MIN);
+  const hiddenCount = collapsedRuns.reduce(
+    (n, g) => n + (state.commands.expanded.has(g.items[0].seq) ? 0 : g.items.length - 1), 0);
+
   return card('Steps', {
+    /**
+     * THE COUNT IS ALWAYS THE REAL ONE. Collapsing rows must not change how many steps this session
+     * is reported to have — a table that quietly says "14 steps" when the suite made 60 is a worse
+     * defect than the noise it was folding away. The hidden figure is stated separately.
+     */
     aside: h('span', { class: 'caption', text: !loaded
       ? 'loading…'
       : `${steps.length}${state.commands.truncated ? '+' : ''} step${steps.length === 1 ? '' : 's'}`
-        + (failed.length ? `, ${failed.length} failed` : '') }),
+        + (failed.length ? `, ${failed.length} failed` : '')
+        + (hiddenCount ? `, ${hiddenCount} repeat${hiddenCount === 1 ? '' : 's'} folded` : '') }),
   },
     !loaded
       ? h('p', { class: 'caption', text: 'Loading…' })
@@ -5798,19 +5894,10 @@ function stepsCard(sess) {
             h('div', { class: 'tablewrap' }, h('table', { class: 'table wide steps' },
               h('thead', null, h('tr', null,
                 ['#', 'Command', 'Status', 'Took', 'At'].map((t) => h('th', { text: t })))),
-              h('tbody', null, steps.map((c) => h('tr', { class: c.failed ? 'step-bad' : '' },
-                h('td', { class: 'tnum caption', text: String(c.seq) }),
-                h('td', null, h('code', { text: `${c.method} ${c.path || '/'}` })),
-                h('td', null, c.failed
-                  // The W3C code where there is one; the bare status otherwise. A step that never
-                  // got an answer has neither, and "no answer" is the most important thing this
-                  // table can say — it means the device stopped talking, not that the test failed.
-                  ? pill(c.error || (c.status === null ? 'no answer' : String(c.status)), 'bad')
-                  : h('span', { class: 'caption tnum', text: String(c.status) })),
-                h('td', { class: `tnum ${c.durationMs >= SLOW_MS ? 'step-slow' : 'caption'}`,
-                          text: c.durationMs == null ? '—' : `${c.durationMs}ms` }),
-                h('td', { class: 'caption', text: new Date(c.startedAt).toLocaleTimeString() }),
-              ))),
+              h('tbody', null, groups.map((g) =>
+                g.collapsible && g.items.length >= RUN_MIN && !state.commands.expanded.has(g.items[0].seq)
+                  ? stepRunRow(g, SLOW_MS)
+                  : g.items.map((c) => stepRow(c, SLOW_MS)))),
             )),
             state.commands.truncated
               ? h('p', { class: 'caption mt-md', text:

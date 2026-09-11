@@ -29,6 +29,10 @@ IMAGE_REPO="${MFARM_IMAGE_REPO:-ghcr.io/rkcr007/mfarm-api}"
 API_PORT="${API_PORT:-3000}"
 STATE_DIR="$REPO_ROOT/deploy/.state"
 
+# The conflict parse lives in lib/ so it can be executed by a test — see restart-conflict.test.mjs.
+# shellcheck source=deploy/lib/restart-conflict.sh
+. "$REPO_ROOT/deploy/lib/restart-conflict.sh"
+
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 die()  { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
@@ -117,7 +121,47 @@ MFARM_IMAGE="$IMAGE" docker compose -f "$COMPOSE" run --rm migrate
 # the worker — which is not in this compose file at all — keeps its devices booted. That is the
 # whole point of deploying one service rather than "the stack".
 say "Restarting the API onto $IMAGE"
-MFARM_IMAGE="$IMAGE" docker compose -f "$COMPOSE" up -d --no-deps api
+
+# A NAME CONFLICT MUST NOT SKIP THE PROOF BELOW.
+#
+# This failed once on a deploy that had actually WORKED: an out-of-band `docker compose up -d api`
+# had left a container under a different project name, so compose answered
+#
+#   Conflict. The container name "/…_mfarm-api-1" is already in use
+#
+# and `set -e` ended the script right here. The new image was running and the migration had applied;
+# what was lost was the verification step — which is the only part that decides whether a deploy
+# happened at all. Reporting failure on a working deploy trains people to ignore the failure.
+#
+# So the restart is allowed to fail, once, and is retried after clearing the stale name. Whatever
+# the outcome, the script CONTINUES to section 3 and lets the running process answer for itself. A
+# genuinely broken restart still fails the deploy — just in the place that can tell.
+restart_api() {
+  MFARM_IMAGE="$IMAGE" docker compose -f "$COMPOSE" up -d --no-deps api 2>&1
+}
+
+if ! OUT="$(restart_api)"; then
+  printf '%s\n' "$OUT"
+  case "$OUT" in
+    *"is already in use"*|*Conflict*)
+      # Parsed by `lib/restart-conflict.sh`, which has its own tests: docker's wording has moved
+      # between versions, and a regex that silently stopped matching would put this back to square
+      # one with nothing to say so.
+      STALE="$(mfarm_conflict_container "$OUT")"
+      if [ -n "$STALE" ]; then
+        note "removing the stale container \"$STALE\" and retrying once"
+        docker rm -f "$STALE" >/dev/null 2>&1 || true
+        OUT="$(restart_api)" || true
+        printf '%s\n' "$OUT"
+      fi
+      ;;
+    *)
+      # Not a name conflict. Say so plainly and still go and ask what is running, because the
+      # answer to that is what the next person needs either way.
+      note "the restart reported an error; verifying what is actually running anyway"
+      ;;
+  esac
+fi
 
 # ---------------------------------------------------------------- 3. proof
 #

@@ -485,7 +485,7 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   cursor: pointer;
   border-radius: var(--r-sm, 6px);
 }
-.fleet-open:hover .fleet-name { color: var(--mf-accent-text, var(--accent-text)); }
+.fleet-open:hover .fleet-name { color: var(--accent-text, #C9BCF0); }
 .fleet-open:focus-visible { outline: 2px solid var(--b-focus); outline-offset: 3px; }
 
 /* Key/value row. */
@@ -1752,9 +1752,9 @@ kbd {
   color: var(--t-caption, #6A6A6A);
 }
 .step-label { color: var(--t-help, #787878); font-size: 13px; }
-.step.done .step-mark { border-color: var(--c-ok, #4E9E6A); color: var(--c-ok, #4E9E6A); }
+.step.done .step-mark { border-color: var(--ok-dot, #6FCB63); color: var(--ok-dot, #6FCB63); }
 .step.done .step-label { color: var(--t-body, #D4D4D4); }
-.step.failed .step-mark { border-color: var(--c-bad, #C6545F); color: var(--c-bad, #C6545F); }
+.step.failed .step-mark { border-color: var(--bad-dot, #E0505F); color: var(--bad-dot, #E0505F); }
 .step.failed .step-label { color: var(--t-primary, #F1F1F1); }
 .step.active .step-mark {
   border-color: var(--mf-accent, #755EB8);
@@ -2537,3 +2537,14 @@ kbd {
    written at runtime, which is the rule `h()` states for using `style` at all. */
 .usagebars { display: flex; align-items: flex-end; gap: 3px; height: 64px; }
 .usagebars > i { flex: 1 1 0; min-width: 3px; border-radius: 2px; background: var(--mf-accent, #755EB8); display: block; }
+
+/* --------------------------------------------------------------- collapsed step runs
+   A run of identical successful commands, folded into one row that opens. The trigger is a real
+   button for the keyboard and for assistive tech; it just does not look like one inside a table. */
+.table.steps tbody tr.step-run td { color: var(--t-caption, #6A6A6A); }
+.linkish {
+  background: none; border: 0; padding: 0; font: inherit; color: inherit;
+  cursor: pointer; text-align: left;
+}
+.linkish:hover code { color: var(--accent-text, #C9BCF0); }
+.linkish:focus-visible { outline: 2px solid var(--mf-accent-line, rgba(117, 94, 184, .42)); outline-offset: 2px; }
