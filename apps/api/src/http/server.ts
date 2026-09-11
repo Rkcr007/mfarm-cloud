@@ -126,6 +126,31 @@ export function requireTenant(req: FastifyRequest): { orgId: string } {
   return { orgId: req.principal.orgId };
 }
 
+/**
+ * The caller may DESTROY this org's data — the same tenant boundary as `requireTenant`, plus the
+ * scope check an API key now carries (migration 049).
+ *
+ * WHY THIS IS A SEPARATE FUNCTION RATHER THAN A FLAG. There are exactly three routes behind it and
+ * they all delete evidence, so the question "which endpoints can a CI key not reach?" is answered
+ * by finding the callers of this name. A boolean parameter on `requireTenant` would answer it with
+ * a grep for `true`.
+ *
+ * A SIGNED-IN PERSON ALWAYS PASSES. Scope is a property of a key, not of a human: a member deleting
+ * a recording from the console is the console working as designed, and ADR-0034 is about what a
+ * credential left in a CI runner can do unattended. Restricting the person too would mean the
+ * console could not offer a button the product already has.
+ */
+export function requireTenantDestructive(req: FastifyRequest): { orgId: string } {
+  const { orgId } = requireTenant(req);
+  if (req.principal?.kind === 'tenant' && req.principal.scope !== 'full') {
+    throw forbidden(
+      'This API key has the `automation` scope, which cannot delete evidence. '
+      + 'Use a key with the `full` scope, or delete it from the console.',
+    );
+  }
+  return { orgId };
+}
+
 /** A logged-in person specifically — for anything that is about the human rather than the org. */
 export function requireUser(req: FastifyRequest): {
   userId: string; orgId: string; role: string; sessionId: string;

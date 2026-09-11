@@ -118,8 +118,8 @@ before(async () => {
     orgA = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent) VALUES ('apps-a','A',50) RETURNING id`)).rows[0].id;
     orgB = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent) VALUES ('apps-b','B',50) RETURNING id`)).rows[0].id;
   });
-  keyA = (await createApiKey(orgA)).plaintext;
-  keyB = (await createApiKey(orgB)).plaintext;
+  keyA = (await createApiKey(orgA, 'test fixture — apps', { scope: 'full' })).plaintext;
+  keyB = (await createApiKey(orgB, 'test fixture — apps', { scope: 'full' })).plaintext;
   ({ hostId: hostA, token: workerA } = await seedHost('apps-test-host-a'));
   ({ hostId: hostB, token: workerB } = await seedHost('apps-test-host-b'));
   deviceA = await seedDevice(hostA, ['screen-stream', 'input-datachannel', 'snapshot-reset', 'app-install']);

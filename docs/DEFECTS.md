@@ -544,9 +544,18 @@ lesson as HANDOFF entry 75 and as the two wrong entries this register itself car
 | D38 | **An error message I wrote pointed at `mfarm run --profile`, a flag that does not exist** — the CLI has `--tier`, `--ttl` and `--wait`. Caught by reading `bin.ts`, not by any test. A remedy that reads as a fix and is not costs more than no remedy. | Fixed before commit, 2026-09-09. |
 
 **Still open from that review, and named so nobody assumes otherwise:** Runs has no search, filter
-or pagination; API keys have no label, scope, expiry or last-used; migration 044's host
-disk/CPU/agent-version reaches Prometheus and has no console read endpoint; the metering ingest has
-no usage view; there is no share link and no customer-facing tunnel.
+or pagination; migration 044's host disk/CPU/agent-version reaches Prometheus and has no console
+read endpoint; the metering ingest has no usage view; there is no share link and no customer-facing
+tunnel.
+
+**~~API keys have no label, scope, expiry or last-used~~ — CLOSED 2026-09-11, ADR-0034, migration
+049.** Labels are required at creation, keys carry a scope (`automation` cannot delete evidence),
+an optional expiry enforced in `authenticate`, an approximate last-used, and the person who minted
+them. The console asks in a dialog instead of minting on click. **The framing in the review was
+wrong in a way worth keeping**: this reads as a blast-radius problem and is not one — a key already
+could not mint another key, because `requireOrgAdmin` needs a user session. The defect was that
+rotation was impossible, since revoking one of four unlabelled prefixes is a guess about whether CI
+stops.
 
 **And one entry above was written too strongly — corrected 2026-09-11 by looking at the screen.**
 This paragraph used to say "a run lists only its FAILURES as test rows, so every passing test's name

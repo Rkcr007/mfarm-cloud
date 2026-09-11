@@ -77,7 +77,7 @@ before(async () => {
       [`dev-health-${randomUUID().slice(0, 8)}`],
     )).rows[0].id;
   });
-  key = (await createApiKey(orgId)).plaintext;
+  key = (await createApiKey(orgId, 'test fixture — device-health-fields', { scope: 'full' })).plaintext;
 
   const r = await app.inject({
     method: 'POST', url: '/v1/workers/register',

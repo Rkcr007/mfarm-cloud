@@ -5,7 +5,7 @@ import { withTenant, withSystem } from '../../db.ts';
 import { recordSessionEvent } from '../../executionEvents.ts';
 import { loadConfig } from '../../config.ts';
 import { appStore, BlobTooLargeError } from '../../appstore.ts';
-import { requireTenant, requireWorker } from '../server.ts';
+import { requireTenant, requireTenantDestructive, requireWorker } from '../server.ts';
 import { badRequest, conflict, notFound } from '../errors.ts';
 
 /**
@@ -300,7 +300,7 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
   }
 
   app.delete<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {
-    const { orgId } = requireTenant(req);
+    const { orgId } = requireTenantDestructive(req);
     const rows = await withTenant(orgId, async (c) => (await c.query<{
       sha256: string; blob_orphaned: boolean;
     }>('SELECT sha256, blob_orphaned FROM delete_artifact($1, $2)', [orgId, req.params.id])).rows);
@@ -313,7 +313,7 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete<{ Params: { id: string } }>('/sessions/:id/artifacts', async (req, reply) => {
-    const { orgId } = requireTenant(req);
+    const { orgId } = requireTenantDestructive(req);
     const rows = await withTenant(orgId, async (c) => (await c.query<{
       sha256: string; blob_orphaned: boolean;
     }>('SELECT sha256, blob_orphaned FROM delete_session_evidence($1, $2)', [orgId, req.params.id])).rows);
@@ -343,7 +343,7 @@ export async function artifactRoutes(app: FastifyInstance): Promise<void> {
    * one that says so in its path.
    */
   app.delete<{ Params: { id: string } }>('/sessions/:id/record', async (req, reply) => {
-    const { orgId } = requireTenant(req);
+    const { orgId } = requireTenantDestructive(req);
     try {
       const rows = await withTenant(orgId, async (c) => (await c.query<{
         sha256: string; blob_orphaned: boolean;

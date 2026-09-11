@@ -69,6 +69,26 @@ const ACCEPTED_NEW_CHECKS: string[] = [
   'runs.runs_name_len',
 
   /**
+   * Migration 049, what an API key says about itself. Both constrain ONLY columns 049 itself adds
+   * to `api_keys`, and BOTH ARE SAFE ONLY BECAUSE OF A DEFAULT THIS TEST FORCED INTO THE MIGRATION.
+   *
+   * `scope` is NOT NULL DEFAULT 'full'. Roll the code back and `createApiKey` inserts
+   * (org_id, prefix, key_hash) exactly as it always did; `scope` takes 'full', which the CHECK
+   * accepts — and 'full' is also the authority that release expects every key to have, so a
+   * rolled-back farm behaves as it did rather than mysteriously refusing deletes.
+   *
+   * `label` is NOT NULL, which on its own would have made rollback WORSE THAN A GAMBLE — the old
+   * insert names no label, so minting a key would have failed outright on a rolled-back image. The
+   * first version of 049 did exactly that and this guard is what caught it. It now carries
+   * `DEFAULT 'unnamed — created before keys had labels'`, so the old insert produces a row that is
+   * both NOT NULL and inside the length bound. The requirement lives in the route and in
+   * `createApiKey`'s signature, where a person sees the error, rather than in a constraint that
+   * only a rollback would ever meet.
+   */
+  'api_keys.api_keys_scope_known',
+  'api_keys.api_keys_label_len',
+
+  /**
    * Migration 024, failure classification (spec §18). All four constrain ONLY columns that did not
    * exist at the baseline — `failure_class` and `failure_reason`, both nullable and both added by
    * the same migration.

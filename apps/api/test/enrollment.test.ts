@@ -60,8 +60,8 @@ before(async () => {
     orgB = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent)
                            VALUES ($1,'B',50) RETURNING id`, [`enroll-b-${randomUUID()}`])).rows[0].id;
   });
-  keyA = (await createApiKey(orgA)).plaintext;
-  keyB = (await createApiKey(orgB)).plaintext;
+  keyA = (await createApiKey(orgA, 'test fixture — enrollment', { scope: 'full' })).plaintext;
+  keyB = (await createApiKey(orgB, 'test fixture — enrollment', { scope: 'full' })).plaintext;
   app = await buildServer({ logger: false });
 });
 

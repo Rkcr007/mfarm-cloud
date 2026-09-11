@@ -81,9 +81,23 @@ interface MemberRow {
 
 interface KeyRow {
   prefix: string;
+  label: string;
+  scope: string;
   created_at: Date;
   revoked_at: Date | null;
+  expires_at: Date | null;
+  last_used_at: Date | null;
+  created_by_email: string | null;
 }
+
+/**
+ * How long a key may be asked to live.
+ *
+ * A ceiling rather than a policy: a key that outlives the project is the same as no expiry, and a
+ * caller asking for 20 years has almost certainly typed days where they meant something else. Two
+ * years is longer than any CI credential should survive and short enough to be a real bound.
+ */
+const MAX_KEY_DAYS = 730;
 
 export async function accountRoutes(app: FastifyInstance): Promise<void> {
   /**
@@ -411,33 +425,91 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
     const { orgId } = requireUser(req);
     const rows = await withTenant(orgId, async (c) => {
       const r = await c.query<KeyRow>(
-        `SELECT prefix, created_at, revoked_at FROM api_keys
-          WHERE org_id = $1 ORDER BY revoked_at IS NOT NULL, created_at DESC`,
+        // `created_by` joined to an email here rather than returned as a uuid, because the question
+        // this list answers is "whose key is this and can I revoke it", and a uuid answers neither.
+        // LEFT JOIN: 049 sets the column NULL when its creator leaves the org, and a key outliving
+        // the person who minted it is precisely a key somebody should be looking at.
+        `SELECT k.prefix, k.label, k.scope, k.created_at, k.revoked_at, k.expires_at, k.last_used_at,
+                u.email AS created_by_email
+           FROM api_keys k
+           LEFT JOIN users u ON u.id = k.created_by
+          WHERE k.org_id = $1 ORDER BY k.revoked_at IS NOT NULL, k.created_at DESC`,
         [orgId],
       );
       return r.rows;
     });
+    const now = Date.now();
     return {
       keys: rows.map((k) => ({
         prefix: k.prefix,
+        label: k.label,
+        scope: k.scope,
         createdAt: k.created_at.toISOString(),
+        createdBy: k.created_by_email,
         revokedAt: k.revoked_at ? k.revoked_at.toISOString() : null,
+        expiresAt: k.expires_at ? k.expires_at.toISOString() : null,
+        // Computed here rather than left to the console, because "is this key still working" is
+        // one question with one answer and two clients would eventually disagree about it.
+        expired: Boolean(k.expires_at && k.expires_at.getTime() <= now),
+        // Approximate by construction -- see migration 049. Null means "not since this column
+        // existed", which is NOT the same as "never used" and is why the console says so.
+        lastUsedAt: k.last_used_at ? k.last_used_at.toISOString() : null,
       })),
     };
   });
 
-  /** POST /v1/account/api-keys — mint one. The plaintext in this response is the only copy. */
-  app.post('/account/api-keys', async (req, reply) => {
-    const { orgId } = requireOrgAdmin(req);
-    const { plaintext, prefix } = await createApiKey(orgId);
-    return reply.code(201).send({
-      key: {
-        prefix,
-        // Named so a client cannot mistake it for something retrievable later.
-        plaintextShownOnce: plaintext,
-      },
-    });
-  });
+  /**
+   * POST /v1/account/api-keys — mint one. The plaintext in this response is the only copy.
+   *
+   * A LABEL IS REQUIRED, and that is the whole point of ADR-0034. This endpoint used to take no
+   * body at all, so the console's button minted an anonymous org-wide credential on one click and
+   * an audit produced a live key by accident. A credential you cannot identify is a credential you
+   * cannot safely revoke, which is why nobody rotates.
+   *
+   * The scope DEFAULTS TO `automation` — the narrow one. A caller who needs evidence deletion says
+   * so; the common case, a CI key, gets the smaller authority without having to know it exists.
+   */
+  app.post<{ Body: { label?: unknown; scope?: unknown; expiresInDays?: unknown } }>(
+    '/account/api-keys',
+    async (req, reply) => {
+      const { orgId, userId } = requireOrgAdmin(req);
+
+      const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+      if (!label) {
+        throw badRequest(
+          'A key needs a label saying what it is for — "gha-qa", "nightly-regression". '
+          + 'It is what makes the key identifiable later, and revoking one you cannot identify is a guess.',
+        );
+      }
+      if (label.length > 120) throw badRequest('A label is at most 120 characters.');
+
+      const rawScope = req.body?.scope ?? 'automation';
+      if (rawScope !== 'automation' && rawScope !== 'full') {
+        throw badRequest(`\`scope\` must be "automation" or "full" — got ${JSON.stringify(rawScope)}.`);
+      }
+
+      let expiresAt: Date | null = null;
+      if (req.body?.expiresInDays !== undefined && req.body?.expiresInDays !== null) {
+        const days = Number(req.body.expiresInDays);
+        if (!Number.isFinite(days) || days <= 0 || days > MAX_KEY_DAYS) {
+          throw badRequest(`\`expiresInDays\` must be a number between 1 and ${MAX_KEY_DAYS}, or omitted for a key that never expires.`);
+        }
+        expiresAt = new Date(Date.now() + days * 86_400_000);
+      }
+
+      const created = await createApiKey(orgId, label, { scope: rawScope, expiresAt, createdBy: userId });
+      return reply.code(201).send({
+        key: {
+          prefix: created.prefix,
+          label,
+          scope: created.scope,
+          expiresAt: created.expiresAt ? created.expiresAt.toISOString() : null,
+          // Named so a client cannot mistake it for something retrievable later.
+          plaintextShownOnce: created.plaintext,
+        },
+      });
+    },
+  );
 
   /** DELETE /v1/account/api-keys/:prefix — revoke. Idempotent from the caller's side. */
   app.delete<{ Params: { prefix: string } }>('/account/api-keys/:prefix', async (req) => {
