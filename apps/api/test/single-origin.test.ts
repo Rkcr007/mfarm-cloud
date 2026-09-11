@@ -93,7 +93,7 @@ before(async () => {
       [`one-origin-${randomUUID().slice(0, 8)}`],
     )).rows[0].id;
   });
-  apiKey = (await createApiKey(orgId)).plaintext;
+  apiKey = (await createApiKey(orgId, 'test fixture — single-origin', { scope: 'full' })).plaintext;
   tunnelHost = await seedHost(DATA_PLANE_TUNNEL_ENDPOINT);
   directHost = await seedHost('wss://worker-direct.example:8443');
 });

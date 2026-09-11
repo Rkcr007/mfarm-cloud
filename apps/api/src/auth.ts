@@ -9,8 +9,19 @@ import { withSystem } from './db.ts';
  * register a host. Routes declare which they require; there is no "any authenticated caller" tier.
  */
 
+/**
+ * What an API key may do (migration 049).
+ *
+ * `automation` is what a CI job needs and nothing more; `full` is what every key could do before
+ * this existed. The one thing the pair actually gates is evidence deletion — see the migration for
+ * why that is the honest boundary and a capability matrix is not.
+ */
+export type KeyScope = 'automation' | 'full';
+
 export type Principal =
-  | { kind: 'tenant'; orgId: string; keyId: string }
+  // `scope` is absent for a signed-in person on purpose: a human's authority comes from their
+  // membership role, and giving them a key scope would invite code to check the wrong one.
+  | { kind: 'tenant'; orgId: string; keyId: string; scope: KeyScope }
   | { kind: 'worker'; hostId: string; region: string }
   // A logged-in person, from `users.ts`. Structurally identical to `SessionPrincipal` there and
   // restated rather than imported, because users.ts already imports this module and a cycle between
@@ -124,13 +135,37 @@ export async function authenticate(bearer: string | undefined): Promise<Principa
   if (token.startsWith('mfk_')) {
     return withSystem(async (c) => {
       const { rows } = await c.query(
-        `SELECT id, org_id, key_hash FROM api_keys
+        `SELECT id, org_id, key_hash, scope, expires_at, last_used_at FROM api_keys
           WHERE prefix = $1 AND revoked_at IS NULL`,
         [prefix],
       );
       if (rows.length === 0) return null;
       if (!safeEqualHex(rows[0].key_hash, presented)) return null;
-      return { kind: 'tenant', orgId: rows[0].org_id, keyId: rows[0].id } satisfies Principal;
+
+      /**
+       * AN EXPIRED KEY AUTHENTICATES AS NOTHING, not as a refused principal (migration 049).
+       *
+       * Returning null means the presenter gets exactly the answer a presenter of nonsense gets. A
+       * 403 reading "that key expired on the 3rd" would confirm the key was real, which is a fact
+       * worth having if you found it in a log and do not know whether it is worth trying elsewhere.
+       *
+       * Compared in the application rather than in the WHERE clause so that the row is still read:
+       * a future audit trail wants to know that an expired key was PRESENTED, which a query that
+       * filtered it out could never report.
+       */
+      const expiresAt: Date | null = rows[0].expires_at;
+      if (expiresAt && expiresAt.getTime() <= Date.now()) return null;
+
+      await touchKey(c, rows[0].id, rows[0].last_used_at);
+
+      return {
+        kind: 'tenant',
+        orgId: rows[0].org_id,
+        keyId: rows[0].id,
+        // A row written before 049's default, or by hand, still has to produce a valid scope rather
+        // than `undefined` leaking into an authorization check.
+        scope: rows[0].scope === 'automation' ? 'automation' : 'full',
+      } satisfies Principal;
     });
   }
 
@@ -151,15 +186,57 @@ export async function authenticate(bearer: string | undefined): Promise<Principa
   return null;
 }
 
-/** Issue a tenant API key. Returns the plaintext once; it is unrecoverable afterwards. */
-export async function createApiKey(orgId: string): Promise<{ plaintext: string; prefix: string }> {
+/**
+ * How stale `last_used_at` is allowed to get.
+ *
+ * THE POINT OF THE COLUMN IS "is anything still using this key", and five minutes is far finer than
+ * that question needs. Writing it on every request would put an UPDATE on every authenticated call
+ * — including every WebDriver command the hub proxies, which is hundreds per minute per running
+ * session — to sharpen a value nobody reads at that resolution.
+ */
+const LAST_USED_STALE_MS = 5 * 60_000;
+
+/**
+ * Record that a key was used, at most once every `LAST_USED_STALE_MS`.
+ *
+ * FAILURE HERE MUST NOT COST THE REQUEST ITS AUTHENTICATION. This is bookkeeping: if the UPDATE
+ * fails the caller still presented a valid credential, and refusing them would turn a full disk
+ * into an outage of the whole API. Swallowed deliberately, and the write is fire-and-forget for the
+ * same reason — authentication is on the hot path of every request in the system.
+ */
+async function touchKey(
+  c: { query: (sql: string, params: unknown[]) => Promise<unknown> },
+  keyId: string,
+  lastUsedAt: Date | null,
+): Promise<void> {
+  if (lastUsedAt && Date.now() - lastUsedAt.getTime() < LAST_USED_STALE_MS) return;
+  try {
+    await c.query('UPDATE api_keys SET last_used_at = now() WHERE id = $1', [keyId]);
+  } catch { /* bookkeeping; never worth failing a valid credential over */ }
+}
+
+/**
+ * Issue a tenant API key. Returns the plaintext once; it is unrecoverable afterwards.
+ *
+ * `label` is required by the signature as well as by the column, so that a caller cannot mint an
+ * anonymous key by omitting an argument — which is exactly how the console produced four of them.
+ */
+export async function createApiKey(
+  orgId: string,
+  label: string,
+  opts: { scope?: KeyScope; expiresAt?: Date | null; createdBy?: string | null } = {},
+): Promise<{ plaintext: string; prefix: string; scope: KeyScope; expiresAt: Date | null }> {
   const { plaintext, prefix, hash } = generateApiKey();
+  const scope: KeyScope = opts.scope ?? 'automation';
+  const expiresAt = opts.expiresAt ?? null;
   await withSystem((c) =>
-    c.query('INSERT INTO api_keys (org_id, prefix, key_hash) VALUES ($1, $2, $3)', [
-      orgId, prefix, hash,
-    ]),
+    c.query(
+      `INSERT INTO api_keys (org_id, prefix, key_hash, label, scope, expires_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [orgId, prefix, hash, label, scope, expiresAt, opts.createdBy ?? null],
+    ),
   );
-  return { plaintext, prefix };
+  return { plaintext, prefix, scope, expiresAt };
 }
 
 export async function revokeApiKey(orgId: string, prefix: string): Promise<boolean> {

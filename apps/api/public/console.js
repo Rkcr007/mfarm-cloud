@@ -174,7 +174,7 @@ export const state = {
    * `newKey` holds a freshly minted secret for exactly as long as the page shows it. It is never
    * written anywhere else, because the server cannot return it a second time.
    */
-  org: { members: [], keys: [], loaded: false, newKey: null },
+  org: { members: [], keys: [], loaded: false, newKey: null, newKeyLabel: null },
   /**
    * The pairing screen's own state — ADR-0014.
    *
@@ -7898,7 +7898,7 @@ function screenSettings() {
       admin ? btn('New API key', 'primary', () => createKey()) : null),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
-        state.org.newKey ? card('Your new key', { class: 'highlight' },
+        state.org.newKey ? card(`Your new key — ${state.org.newKeyLabel || ''}`.trim().replace(/ —$/, ''), { class: 'highlight' },
           h('p', { class: 'caption' },
             'Copy this now. It is not stored anywhere and cannot be shown again — if you lose it, '
             + 'revoke it and make another.'),
@@ -7910,7 +7910,7 @@ function screenSettings() {
                 toast('Copied', 'The key is on your clipboard.');
               } catch { toast('Could not copy', 'Select the text and copy it manually.', 'bad'); }
             }),
-            btn('Done', 'tiny ghost', () => { state.org.newKey = null; render(); }),
+            btn('Done', 'tiny ghost', () => { state.org.newKey = null; state.org.newKeyLabel = null; render(); }),
           ),
         ) : null,
 
@@ -7918,15 +7918,7 @@ function screenSettings() {
 
         card('API keys', {},
           pending || (state.org.keys.length
-            ? h('div', { class: 'stack' }, [...live, ...dead].map((k) => h('div', { class: 'inset row between' },
-                h('div', { class: 'stack tight' },
-                  h('span', { class: 'row tight' },
-                    h('span', { class: 'mono secondary', text: `${k.prefix}…` }),
-                    k.revokedAt ? h('span', { class: 'pill', text: 'revoked' }) : null),
-                  h('p', { class: 'caption', text: k.revokedAt ? `revoked ${when(k.revokedAt)}` : `created ${when(k.createdAt)}` }),
-                ),
-                admin && !k.revokedAt ? btn('Revoke', 'tiny danger', () => revokeKey(k)) : null,
-              )))
+            ? h('div', { class: 'stack' }, [...live, ...dead].map(keyRow(admin)))
             : empty('No API keys yet.', 'A key is what a CI job or an Appium suite authenticates with.'))),
       ),
       h('div', { class: 'rail' },
@@ -8013,16 +8005,112 @@ function removeMember(m) {
   });
 }
 
-async function createKey() {
-  try {
-    const { key } = await api('/v1/account/api-keys', { method: 'POST' });
-    // Held in memory only, and only until the person dismisses it. The server keeps a hash.
-    state.org.newKey = key.plaintextShownOnce;
-    await refreshOrg();
-    render();
-  } catch (e) {
-    toast('Could not create a key', e.message, 'bad');
-  }
+/**
+ * Mint a key, having first asked what it is for.
+ *
+ * THIS USED TO BE ONE CLICK AND NO DIALOG, and that is the defect ADR-0034 is about. An
+ * exploratory press during an audit produced a live org-wide credential that never expired, and
+ * the only thing separating it from the CI key beside it was a timestamp. The cost is not that one
+ * key is too powerful — it is that with four unlabelled prefixes nobody can revoke any of them
+ * without gambling on whether CI stops, so nobody ever rotates.
+ */
+/**
+ * One API key, said in the order somebody deciding whether to revoke it reads.
+ *
+ * THE LABEL IS THE HEADING AND THE PREFIX IS SECONDARY, which is the inversion that matters: the
+ * prefix identifies the key to the SYSTEM and the label identifies it to the PERSON, and the person
+ * is the one holding the Revoke button. Before migration 049 there was only the prefix, so this
+ * card listed four indistinguishable credentials.
+ */
+function keyRow(admin) {
+  return (k) => {
+    // Dead for a different reason than revoked, and the distinction is worth a word: a revoked key
+    // was somebody's decision, an expired one is the clock doing what it was told, and "why did CI
+    // stop" has a different answer in each case.
+    const state = k.revokedAt ? 'revoked' : k.expired ? 'expired' : null;
+
+    /**
+     * NULL IS NOT "NEVER USED" and must not be rendered as it.
+     *
+     * `last_used_at` starts null for every key that existed before 049, including ones in daily
+     * use. Printing "never used" over a live CI credential would be an invitation to revoke it, so
+     * the honest sentence names the column's age rather than the key's.
+     */
+    const used = k.lastUsedAt
+      ? `last used ${when(k.lastUsedAt)}`
+      : 'not used since this farm started recording it';
+
+    return h('div', { class: 'inset row between' },
+      h('div', { class: 'stack tight' },
+        h('span', { class: 'row tight' },
+          h('strong', { text: k.label }),
+          state ? h('span', { class: 'pill', text: state }) : null,
+          // Only the narrow scope is called out. A badge on every row would be noise, and `full`
+          // is the one worth noticing -- it is the key that can delete a recording.
+          k.scope === 'full' ? h('span', { class: 'pill', text: 'full' }) : null),
+        h('span', { class: 'row tight' },
+          h('span', { class: 'mono secondary', text: `${k.prefix}…` }),
+          h('span', { class: 'caption', text: used })),
+        h('p', { class: 'caption', text: [
+          k.revokedAt ? `revoked ${when(k.revokedAt)}` : `created ${when(k.createdAt)}`,
+          k.createdBy ? `by ${k.createdBy}` : null,
+          k.revokedAt ? null : k.expiresAt ? `${k.expired ? 'expired' : 'expires'} ${when(k.expiresAt)}` : 'no expiry',
+        ].filter(Boolean).join(' · ') }),
+      ),
+      admin && !k.revokedAt ? btn('Revoke', 'tiny danger', () => revokeKey(k)) : null,
+    );
+  };
+}
+
+function createKey() {
+  const labelInput = h('input', {
+    class: 'field', type: 'text', placeholder: 'gha-qa', autocomplete: 'off', maxLength: 120,
+  });
+  // `automation` first AND selected: the narrow one is the common case, and a list whose first
+  // entry is the powerful one is a list that gets accepted without reading.
+  const scopeSelect = h('select', { class: 'field' },
+    h('option', { value: 'automation', selected: true, text: 'Automation — run tests' }),
+    h('option', { value: 'full', text: 'Full — run tests and delete evidence' }));
+  const expirySelect = h('select', { class: 'field' },
+    h('option', { value: '90', selected: true, text: '90 days' }),
+    h('option', { value: '30', text: '30 days' }),
+    h('option', { value: '365', text: 'A year' }),
+    h('option', { value: '', text: 'Never' }));
+
+  formDialog({
+    title: 'New API key',
+    lead: 'The key itself is shown once and never again. What you write here is how you will recognise it later.',
+    fields: [
+      h('label', { class: 'stack tight' },
+        h('span', { class: 'micro', text: 'What is it for' }), labelInput,
+        h('p', { class: 'caption', text: 'The name of the job or suite that will hold it. Revoking a key you cannot identify is a guess.' })),
+      h('label', { class: 'stack tight' },
+        h('span', { class: 'micro', text: 'Scope' }), scopeSelect,
+        h('p', { class: 'caption', text: 'Automation covers everything a test run does. Full additionally lets the key delete recordings, screenshots and logs — which a CI job has no reason to do.' })),
+      h('label', { class: 'stack tight' },
+        h('span', { class: 'micro', text: 'Expires' }), expirySelect,
+        h('p', { class: 'caption', text: 'An expiry is what turns rotation from a plan into a default. A key with none works until somebody revokes it.' })),
+    ],
+    submit: 'Create key',
+    onSubmit: async () => {
+      const label = labelInput.value.trim();
+      if (!label) { toast('A key needs a label', 'Say what it is for, so it can be recognised later.', 'bad'); return; }
+      const days = expirySelect.value;
+      try {
+        const { key } = await api('/v1/account/api-keys', {
+          method: 'POST',
+          body: { label, scope: scopeSelect.value, ...(days ? { expiresInDays: Number(days) } : {}) },
+        });
+        // Held in memory only, and only until the person dismisses it. The server keeps a hash.
+        state.org.newKey = key.plaintextShownOnce;
+        state.org.newKeyLabel = key.label;
+        await refreshOrg();
+        render();
+      } catch (e) {
+        toast('Could not create a key', e.message, 'bad');
+      }
+    },
+  });
 }
 
 function revokeKey(k) {

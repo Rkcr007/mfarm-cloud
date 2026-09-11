@@ -121,7 +121,7 @@ before(async () => {
       [`attempts-${randomUUID().slice(0, 8)}`],
     )).rows[0].id;
   });
-  apiKey = (await createApiKey(orgId)).plaintext;
+  apiKey = (await createApiKey(orgId, 'test fixture — attempts', { scope: 'full' })).plaintext;
 
   const r = await app.inject({
     method: 'POST', url: '/v1/workers/register',

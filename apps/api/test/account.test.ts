@@ -262,7 +262,7 @@ describe('api keys', () => {
   test('an admin can mint a key, and the plaintext works', async () => {
     // This is the endpoint that makes the farm usable by anyone who does not have SSH to the box.
     const s = await signIn(ADMIN);
-    const res = await as(s, 'POST', '/v1/account/api-keys');
+    const res = await as(s, 'POST', '/v1/account/api-keys', { label: 'admin mints one' });
     assert.equal(res.statusCode, 201);
     const { prefix, plaintextShownOnce } = res.json().key;
     assert.ok(plaintextShownOnce.length > 20);
@@ -277,7 +277,7 @@ describe('api keys', () => {
 
   test('listing never returns the secret', async () => {
     const s = await signIn(ADMIN);
-    const created = await as(s, 'POST', '/v1/account/api-keys');
+    const created = await as(s, 'POST', '/v1/account/api-keys', { label: 'listing never leaks' });
     const secret = created.json().key.plaintextShownOnce;
 
     const list = await as(s, 'GET', '/v1/account/api-keys');
@@ -288,7 +288,7 @@ describe('api keys', () => {
 
   test('a plain member cannot mint or revoke', async () => {
     const s = await signIn(MEMBER);
-    assert.equal((await as(s, 'POST', '/v1/account/api-keys')).statusCode, 403);
+    assert.equal((await as(s, 'POST', '/v1/account/api-keys', { label: 'a member may not' })).statusCode, 403);
     assert.equal((await as(s, 'DELETE', '/v1/account/api-keys/whatever')).statusCode, 403);
   });
 
@@ -299,7 +299,7 @@ describe('api keys', () => {
 
   test('revoking a key stops it authenticating', async () => {
     const s = await signIn(ADMIN);
-    const created = await as(s, 'POST', '/v1/account/api-keys');
+    const created = await as(s, 'POST', '/v1/account/api-keys', { label: 'about to be revoked' });
     const { prefix, plaintextShownOnce } = created.json().key;
 
     assert.equal((await as(s, 'DELETE', `/v1/account/api-keys/${prefix}`)).statusCode, 200);
@@ -318,7 +318,7 @@ describe('api keys', () => {
 
   test("one org cannot revoke another org's key", async () => {
     const outsider = await signIn(OUTSIDER);
-    const theirKey = (await as(outsider, 'POST', '/v1/account/api-keys')).json().key;
+    const theirKey = (await as(outsider, 'POST', '/v1/account/api-keys', { label: 'another org\'s key' })).json().key;
 
     const admin = await signIn(ADMIN);
     const res = await as(admin, 'DELETE', `/v1/account/api-keys/${theirKey.prefix}`);

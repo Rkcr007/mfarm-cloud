@@ -167,8 +167,8 @@ before(async () => {
        VALUES ($1,'wd-test-host','UP',1,64,262144,'wss://wd-worker.example:8443',$2,$3,$4, now()) RETURNING id`,
       [REGION, upstreamUrl, wt.prefix, wt.hash])).rows[0].id;
   });
-  keyA = (await createApiKey(orgA)).plaintext;
-  keyB = (await createApiKey(orgB)).plaintext;
+  keyA = (await createApiKey(orgA, 'test fixture — webdriver', { scope: 'full' })).plaintext;
+  keyB = (await createApiKey(orgB, 'test fixture — webdriver', { scope: 'full' })).plaintext;
   app = await buildServer({ logger: false });
 });
 

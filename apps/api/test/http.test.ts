@@ -61,8 +61,8 @@ before(async () => {
        VALUES ($1,'http-test-host','UP',1,64,262144,'wss://worker-1.example:8443', now()) RETURNING id`,
       [REGION])).rows[0].id;
   });
-  keyA = (await createApiKey(orgA)).plaintext;
-  keyB = (await createApiKey(orgB)).plaintext;
+  keyA = (await createApiKey(orgA, 'test fixture — http', { scope: 'full' })).plaintext;
+  keyB = (await createApiKey(orgB, 'test fixture — http', { scope: 'full' })).plaintext;
   app = await buildServer({ logger: false });
 });
 
@@ -108,7 +108,7 @@ describe('auth boundary', () => {
   });
 
   test('a revoked key stops working', async () => {
-    const temp = await createApiKey(orgA);
+    const temp = await createApiKey(orgA, 'test fixture — http', { scope: 'full' });
     assert.equal((await app.inject({ method: 'GET', url: '/v1/devices', headers: auth(temp.plaintext) })).statusCode, 200);
     await withSystem((c) => c.query('UPDATE api_keys SET revoked_at = now() WHERE prefix = $1', [temp.prefix]));
     assert.equal((await app.inject({ method: 'GET', url: '/v1/devices', headers: auth(temp.plaintext) })).statusCode, 401);

@@ -183,7 +183,7 @@ describe('CSRF', () => {
     // A key is never attached automatically, so there is nothing to forge. Requiring a token here
     // would break every existing machine client for no gain.
     const { createApiKey } = await import('../src/auth.ts');
-    const key = await createApiKey(orgId);
+    const key = await createApiKey(orgId, 'test fixture — auth-login', { scope: 'full' });
     const res = await app.inject({
       method: 'POST', url: '/v1/sessions',
       headers: { authorization: `Bearer ${key.plaintext}` },

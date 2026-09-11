@@ -172,7 +172,7 @@ before(async () => {
     orgId = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent)
                             VALUES ('agent-org','Agent',50) RETURNING id`)).rows[0].id;
   });
-  tenantKey = (await createApiKey(orgId)).plaintext;
+  tenantKey = (await createApiKey(orgId, 'test fixture — agent', { scope: 'full' })).plaintext;
   app = await buildServer({ logger: false });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();

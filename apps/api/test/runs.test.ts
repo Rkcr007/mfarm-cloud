@@ -182,8 +182,8 @@ before(async () => {
        RETURNING id`,
       [REGION, upstreamUrl, wt.prefix, wt.hash])).rows[0].id;
   });
-  keyA = (await createApiKey(orgA)).plaintext;
-  keyB = (await createApiKey(orgB)).plaintext;
+  keyA = (await createApiKey(orgA, 'test fixture — runs', { scope: 'full' })).plaintext;
+  keyB = (await createApiKey(orgB, 'test fixture — runs', { scope: 'full' })).plaintext;
   app = await buildServer({ logger: false });
 });
 
