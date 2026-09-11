@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Two, as of 2026-09-11** — forty-three recorded, forty-one closed. The two left are the CSP
+**Two, as of 2026-09-11** — forty-four recorded, forty-two closed. The two left are the CSP
 `webrtc` warning, which is deliberate, and app network capture, which is an unbuilt feature needing
 its own privacy decision rather than a defect. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
@@ -689,6 +689,23 @@ ones they should not.
 **The lesson is about where the defect text came from.** It was written by reading the screen, so it
 described the noise that was visible on a short manual session. The noise that matters was in a
 trace nobody had opened. Reading a stored trace before fixing would have cost one query.
+
+## Found by bringing the lab up to verify, 2026-09-11
+
+| id | what | status |
+|---|---|---|
+| D44 | **`hosts.up_since` never got stamped, so the whole cost display was dead on arrival.** Migration 050 wrote it in the registration upsert only. The farm was stopped overnight and brought back: **twelve heartbeats, zero registrations**, column still NULL. `/workers/heartbeat`'s own comment already said registration is something "a healthy agent never performs, because its stored capability fingerprint has not changed" — I had read that file to write the feature and not read that sentence. | Fixed 2026-09-11: maintained on the heartbeat, stamped when there is a GAP in beats rather than when state is not UP. **Verified RED** — all four new tests fail without it. |
+
+**THE FEATURE WAS BUILT, TESTED, SHIPPED, DEPLOYED AND INERT.** Fourteen tests covered it, including
+one asserting a stopped host reports no uptime; every one of them seeded `up_since` directly, so
+none could see that nothing ever writes it. The only thing that found it was starting the machine
+and looking at the column — which is the exact check the ADR's own "not yet verified" note asked for
+and which I wrote down rather than performed.
+
+**The gap rule is the interesting half.** Keying on "state is not UP" is the obvious implementation
+and is wrong: an operator-quarantined host keeps beating, so it would rewrite `up_since` to `now()`
+on every beat and report a machine that had been on for a week as up for five seconds. A gap in
+beats is what "came up" means.
 
 ## Suite health
 

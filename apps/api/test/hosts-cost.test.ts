@@ -134,6 +134,76 @@ describe('what a machine costs to leave on', () => {
   });
 });
 
+describe('a host says when it came up, on the path it actually comes back by', () => {
+  /**
+   * THE MECHANISM THIS REPLACES DID NOT FIRE. `up_since` was written only in the register upsert,
+   * and `/workers/heartbeat`'s own comment says registration is something "a healthy agent never
+   * performs, because its stored capability fingerprint has not changed". The farm was stopped
+   * overnight and brought back on 2026-09-11: twelve heartbeats, zero registrations, column still
+   * NULL. Verified by looking at the farm, which is the only reason it was found.
+   */
+  const beat = (token: string) => app.inject({
+    method: 'POST', url: '/v1/workers/heartbeat',
+    headers: { authorization: `Bearer ${token}` },
+    payload: { devices: [] },
+  });
+
+  let token = '';
+  let hostId = '';
+
+  before(async () => {
+    const { generateWorkerToken } = await import('../src/auth.ts');
+    const t = generateWorkerToken();
+    token = t.plaintext;
+    hostId = await withSystem(async (c) => (await c.query(
+      `INSERT INTO hosts (region, hostname, state, protocol_version, token_prefix, token_hash, last_heartbeat_at)
+       VALUES ($1,$2,'UP',2,$3,$4, now()) RETURNING id`,
+      [REGION, `beater-${REGION}`, t.prefix, t.hash])).rows[0].id);
+  });
+
+  const upSince = () => withSystem(async (c) =>
+    (await c.query('SELECT up_since, last_heartbeat_at FROM hosts WHERE id = $1', [hostId])).rows[0]);
+
+  test('the FIRST beat stamps it — this is the case that was silently broken', async () => {
+    assert.equal((await upSince()).up_since, null);
+    assert.equal((await beat(token)).statusCode, 200);
+    assert.ok((await upSince()).up_since, 'a beat from a host with no up_since must stamp one');
+  });
+
+  test('an ordinary beat does NOT move it', async () => {
+    const before = (await upSince()).up_since;
+    await beat(token);
+    assert.equal((await upSince()).up_since.getTime(), before.getTime(),
+      'a running host must keep the time it came up, or the number always reads as seconds');
+  });
+
+  test('A BEAT AFTER A GAP STAMPS A NEW ONE — the machine went away and came back', async () => {
+    const before = (await upSince()).up_since;
+    // Backdate the previous beat past the gap threshold. The reaper quarantines at 90s of silence,
+    // so anything past two minutes means the machine genuinely stopped.
+    await withSystem((c) => c.query(
+      `UPDATE hosts SET last_heartbeat_at = now() - interval '10 minutes' WHERE id = $1`, [hostId]));
+
+    await beat(token);
+    assert.ok((await upSince()).up_since.getTime() > before.getTime(),
+      'a beat after a silence is a new up period');
+  });
+
+  test('AN OPERATOR QUARANTINE DOES NOT RESET IT ON EVERY BEAT', async () => {
+    // The trap a state-based rule would fall into. A host quarantined by a person keeps beating, and
+    // keying on "state is not UP" would rewrite this to now() on every beat — reporting a machine
+    // that had been on for a week as up for five seconds.
+    await withSystem((c) => c.query(
+      `UPDATE hosts SET state = 'QUARANTINED', quarantine_source = 'operator', quarantined_at = now()
+        WHERE id = $1`, [hostId]));
+    const before = (await upSince()).up_since;
+
+    await beat(token);
+    await beat(token);
+    assert.equal((await upSince()).up_since.getTime(), before.getTime());
+  });
+});
+
 describe('who may see it', () => {
   test('a shared host and this org’s own host are visible', async () => {
     const names = (await hosts()).json().hosts.map((h: { hostname: string }) => h.hostname);
