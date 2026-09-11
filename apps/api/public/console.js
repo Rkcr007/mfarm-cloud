@@ -6780,6 +6780,20 @@ function runStat(label, value, note) {
  */
 let runSearchInput = null;
 let runSearchTimer = null;
+/**
+ * The chips, built once and kept.
+ *
+ * FOR THE SAME REASON THE SEARCH INPUT IS CACHED, and it took a second defect to see it. `render()`
+ * replaces the screen wholesale and the poll calls it whenever fleet data changed — which on a live
+ * farm is most five-second ticks. A button rebuilt between a mousedown and the mouseup that follows
+ * never receives the click at all: the press lands on an element that is no longer in the document,
+ * and the chip is left looking focused above a list it never filtered. No request is made, which is
+ * how it is told apart from a filter that ran and returned the wrong rows.
+ *
+ * Kept elements, class updated per render. The handler closes over `value` only, so it stays correct
+ * however often the surrounding screen is rebuilt.
+ */
+const runChips = new Map();
 
 function runsFilterBar() {
   if (!runSearchInput) {
@@ -6800,14 +6814,23 @@ function runsFilterBar() {
   }
   runSearchInput.value = state.runsQuery.q;
 
-  const chip = (value, label) => btn(label, state.runsQuery.status === value ? 'tiny' : 'tiny ghost',
-    async () => {
-      // Pressing the active chip clears it, so the filter needs no separate "all" affordance.
-      state.runsQuery.status = state.runsQuery.status === value ? '' : value;
-      state.runsQuery.cursor = null;
-      await refreshRuns();
-      render();
-    });
+  const chip = (value, label) => {
+    let el = runChips.get(value);
+    if (!el) {
+      el = btn(label, 'tiny ghost', async () => {
+        // Pressing the active chip clears it, so the filter needs no separate "all" affordance.
+        state.runsQuery.status = state.runsQuery.status === value ? '' : value;
+        state.runsQuery.cursor = null;
+        await refreshRuns();
+        render();
+      });
+      runChips.set(value, el);
+    }
+    // The only thing that varies per render. Written directly rather than by rebuilding, which is
+    // the whole point of keeping the element.
+    el.className = state.runsQuery.status === value ? 'btn tiny' : 'btn tiny ghost';
+    return el;
+  };
 
   return h('div', { class: 'row between mb-gap' },
     h('div', { class: 'row tight' }, runSearchInput),
