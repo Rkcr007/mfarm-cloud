@@ -4103,3 +4103,57 @@ when the feature is broken. See issues 37 and 38.
     capacity fix has not been seen with a quarantined fleet in front of it — which is the exact state
     it was written for. Every defect in `docs/DEFECTS.md` was found by using the farm and none by the
     suite; this branch has only the suite behind it so far.
+
+79. **THE HUB CONTRACT ON REAL DEVICES — 30/30 — AND TWO THINGS I HAD WRITTEN DOWN WRONG.**
+    2026-09-11, `975693f`, migration 048.
+
+    Entry 78 deployed ADR-0033 and said plainly that the important half was unverified: no session
+    had carried a name to a real device, no `mfarm-status` hook had been through a live driver, and
+    the capacity fix had not been seen with the quarantined fleet it was written for. This closes
+    all three.
+
+    **The free one first, and the ordering mattered.** The quarantined fleet D35 was written for
+    EXISTED while `mfarm-lab` was stopped, and starting the lab destroys it. So before touching the
+    expensive half: header `0 of 5 ready`, Fleet *"Nothing can be allocated — 5 quarantined."*, and
+    both Waiting empty states repeating that same sentence. Four surfaces, one answer, where three
+    of them used to say "All devices are available" and "Every device is in use". D36 too — nobody
+    held a lease, and the false promise that "the farm hands over the moment a lease ends" was
+    correctly absent. Neither check cost a rupee.
+
+    **`deploy/verify-hub-contract.mjs`, 30/30 on real Cuttlefish.** Two devices at once, because
+    "the first session names the run and later ones do not move it" is a claim about two sessions.
+    It asserts the session reads back its test name BEFORE any result is posted (the whole point of
+    048 — that is the window a person is looking in); that `mfarm:deviceClass=mfarm-x1-pro` lands on
+    the X1 Pro and the session records what was asked for; that an absent class is refused NAMING
+    the class; that the teardown hook writes a row named from the session rather than a uuid
+    fallback; that a misspelled status is refused AND THE SESSION SURVIVES IT; and that an ordinary
+    `executeScript` still reaches Appium — `mobile: getDeviceTime` comes back with the device's own
+    clock, which is the regression this feature could most easily have caused.
+
+    **The first run was 27/30, and all three failures were mine.** The run name lives at
+    `session.run.name` and the counts at `session.tests.total`; my script guessed the flat spellings
+    and reported a working farm as broken. Third time this project has had an instrument defect read
+    as a real finding — the encode measurement was the last one. **A verification script is code
+    under test until its first green run.**
+
+    **Then the correction worth more than the verification.** This log, `STATUS.md` and `DEFECTS.md`
+    all said a run "lists only its failures as test rows, so every passing test's name is written
+    down and rendered nowhere." I said it to Rakesh this morning as the largest remaining product
+    gap. **It is false for the shape that matters.** The run screen's Sessions table has a TEST
+    column: with one test per session — the LambdaTest shape, and what `examples/java-testng/`
+    migrates — every test renders by name, passing ones with a green PASSED pill. My own run shows
+    exactly that. What is actually missing is the many-tests-per-session case, where
+    `medishop-after-036` shows `c9dd5f62-8959-…` · PASSED 3/3 and PASSED 5/5: eight passing tests,
+    counted, none named. Smaller and later than what I had been carrying. **Three sources agreed
+    with each other and none of them had looked at the screen.**
+
+    **And the register had two of every id.** D28-D31 were used TWICE — once by the 2026-09-07 video
+    series and the 2026-09-08 exploratory series, once by the 2026-09-09 competitor review, which
+    started again at 28. Nothing outside `DEFECTS.md` pointed at the wrong one, but a register whose
+    ids do not identify anything is worse than no ids. Renumbered to D35-D38. The next id is the one
+    after the highest in the FILE, not after the last thing you personally wrote.
+
+    **What this does NOT prove.** Every session here was opened by a script sending raw JSON to
+    `/wd/hub/session`. `examples/java-testng/MfarmCapabilities.java` is still a file nobody has
+    compiled, and no Maven/TestNG/Cucumber suite has run against this farm. The contract is
+    verified; the adapter for it is not.

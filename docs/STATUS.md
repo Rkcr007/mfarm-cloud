@@ -5,6 +5,9 @@ Re-derived 2026-09-07 at `5089232` / migration 043 / ADR-0029 — **and deployed
 code, the farm or `git` on that day, not carried forward from the last version of this page. Two
 numbers on the last version had decayed and are corrected here; see §5.
 
+**Updated 2026-09-11** at `975693f` / migration 048: the hub contract is now verified on real
+devices, and one claim this page made about test rows was too strong and is corrected in §4.6.
+
 Two other documents complete the picture and nothing else is required reading:
 
 | | |
@@ -51,8 +54,8 @@ while the expensive half is off.
 Stopped VMs still bill for disks. Only deleting the disks stops that, and that throws away the farm.
 
 **Current state: `mfarm-lab` STOPPED, `mfarm-cp` RUNNING.** That is the resting state, not a
-half-finished one. It was up on 2026-09-07 to verify the execution work on real devices and to take
-the encode measurement, and returned to rest afterwards.
+half-finished one. It was last up on 2026-09-11 to put the migration-048 hub contract on real
+devices (`deploy/verify-hub-contract.mjs`, 30/30), and returned to rest afterwards.
 
 ---
 
@@ -71,7 +74,7 @@ the encode measurement, and returned to rest afterwards.
 | **Video / recording** | **Not built. The gate is now measured (2026-09-07) and it decided the design.** `screenrecord` costs the Flutter canvas a third of its frame rate and doubles ordinary UI's dropped frames, so guest-side encode — which is both `screenrecord` and scrcpy — is not available here. | S5 must encode on the HOST, reusing `cvd`'s WebRTC encoder; that path does not exist yet. The immediate alternative is video for physical devices only. `RENDER_BASELINE.md`. |
 | **Execution timeline UI** | **Built (2026-09-07).** A *What happened* card on the run screen, and a *Steps* card on the session screen with the failing WebDriver commands in red (ADR-0029). | Red is reserved for a test failing; an incident is amber. The distinction the run screen already kept, kept here too. |
 | **Failure evidence** | **Built (2026-09-07).** A failed result requests its own screenshot and logcat, each naming the test (migration 040). | Up to one beat — ten seconds — after the assertion. The step trace is what makes a late screenshot readable. |
-| **Hub contract** | **Extended and DEPLOYED 2026-09-09** (`7faf06c`, migration 048, ADR-0033).** A session takes its test name at creation (`mfarm:name`), a run takes a readable one (`mfarm:runName`), a suite can ask for a device class (`mfarm:deviceClass`), and an outcome can be reported through the driver the teardown already holds (`executeScript("mfarm-status=…")`). `examples/java-testng/` is the adapter for a suite arriving from LambdaTest. | Names are shown on Runs, Run and Sessions. A run still lists only its **failures** as test rows, so every passing test's name is written down and rendered nowhere. **Verified on the deployed hub only** — the parser refuses an unknown key naming all ten capabilities, and refuses `runName` without `runId`. **Not yet exercised against a device**: `mfarm-lab` is stopped, so no session has actually carried a name end to end. |
+| **Hub contract** | **Extended and DEPLOYED 2026-09-09** (`7faf06c`, migration 048, ADR-0033).** A session takes its test name at creation (`mfarm:name`), a run takes a readable one (`mfarm:runName`), a suite can ask for a device class (`mfarm:deviceClass`), and an outcome can be reported through the driver the teardown already holds (`executeScript("mfarm-status=…")`). `examples/java-testng/` is the adapter for a suite arriving from LambdaTest. | **VERIFIED ON REAL CUTTLEFISH 2026-09-11** — `deploy/verify-hub-contract.mjs`, 30/30: a session reads back its test name before any result is posted, `mfarm:deviceClass=mfarm-x1-pro` lands on the X1 Pro, an absent class is refused *naming the class*, the teardown hook writes a named row through the driver, a misspelled status is refused without killing the session, an ordinary `executeScript` still reaches Appium, and the second session joins the run without renaming it. Seen on the console: Runs shows `Android_UAE_Expenses_…` over its CI id. The remaining gap is narrower than this page used to claim — see §4.6. |
 | **Queue** | **Working, fair (ADR-0028), and it says where you stand (migration 043).** FIFO within an org, round-robin across them, per-org caps, device-class matching (ADR-0025). A queued caller gets a position and, where one can be proved, an estimate. | The estimate reads the lease, so it is the LATEST a device frees — usually pessimistic — and it is omitted rather than guessed where no lease is readable. |
 
 ---
@@ -146,7 +149,25 @@ until then the `<video>` was covered only by tests against seeded state.
 Arm D of the perturbation measurement drove one of four, and an idle device publishes almost no
 frames, so it showed that three idle recorders are free rather than that four working ones are.
 
-### 6. A device arriving still restarts the agent
+### 6. Test rows — and the claim this page used to make about them was too strong
+
+**Corrected 2026-09-11 by looking at the screen rather than at this page.** Both this document and
+`DEFECTS.md` said a run "lists only its failures as test rows, so every passing test's name is
+written down and rendered nowhere". The second half is false for the shape that matters.
+
+The run screen's **Sessions** table has a TEST column. With **one test per session** — the
+LambdaTest shape, one Appium session per Cucumber scenario, and exactly what `examples/java-testng/`
+migrates — every test renders by name, passing ones included. Seen on the farm: run
+`verify-hub-1789084488716` lists *Expenses: a cardholder submits a claim* · PASSED 1/1 beside
+*Expenses: a claim over the limit is refused* · 1 FAILED 0/1.
+
+**What is genuinely missing:** a session running SEVERAL tests collapses to one row with a count.
+`medishop-after-036-1788482936` on the same farm is the picture — two rows reading
+`c9dd5f62-8959-44e0-8e24-bb84675621ba` · PASSED 3/3 and PASSED 5/5. Eight passing tests, counted,
+none named. That is the case test rows are for, and it is smaller and later than "the console cannot
+show a test".
+
+### 7. A device arriving still restarts the agent
 
 Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes common.
 
