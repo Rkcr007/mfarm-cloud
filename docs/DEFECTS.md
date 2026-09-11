@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Four, as of 2026-09-08** — thirty-four recorded, thirty closed. The four below are named at the
+**Four, as of 2026-09-11** — thirty-eight recorded, thirty-four closed. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
 here rather than being quietly absent.
 
@@ -520,6 +520,15 @@ covered by the suite only.
 
 ## Found by reading the product against a competitor, 2026-09-09
 
+**These four were D28-D31 until 2026-09-11, and those numbers were already taken.** The 2026-09-07
+video series and the 2026-09-08 exploratory series had used D28 to D34; this section started again
+at D28, so the register carried two D28s, two D29s, two D30s and two D31s for two days. Nothing
+outside this file pointed at the wrong one -- `STATUS.md` and `EXECUTION_ROADMAP.md` both meant the
+older series -- but a register whose ids do not identify anything is worse than no ids. Renumbered
+to D35-D38, which is also why a defect register needs the same "read the LIVE state first" rule as
+everything else here: the next id is the one after the highest in the FILE, not the one after the
+last thing you personally wrote.
+
 Not from using the farm — from an authenticated review plus four LambdaTest specs (`docs/ltcomp/`)
 read against the code. Worth separating, because the hit rate is different: **the documents claimed
 eleven gaps and roughly a third of them were already built.** The command timeline, the video player
@@ -529,16 +538,31 @@ lesson as HANDOFF entry 75 and as the two wrong entries this register itself car
 
 | id | what | status |
 |---|---|---|
-| D28 | **Four surfaces answered "can a session start?" from the SESSION table.** With five devices quarantined and nothing running, the console said "Every device is on its clean snapshot", "All devices are available" and "Every device is in use" on three panels while its own header said 0 of 5 ready. The fourth — `fleetHeadline`, whose `'Every device is in use.'` was the else-branch of `free === 0` — the review had not spotted. **Seventh instance of the false-premise family.** | Fixed 2026-09-09 by `capacityState()`, one allocator-derived read model. Three tests, each verified RED first. Deployed at `7faf06c`; `verify-console.sh` is 64/64 against it. **Not yet seen with a quarantined fleet in front of it** — that needs `mfarm-lab` up. |
-| D29 | **`fleetHeadline` promised a queued caller "the farm hands over the moment a lease ends" on a farm where nobody held a lease.** Same function, separate defect: the fallback was unconditional, so an unbounded wait read as an imminent one. | Fixed 2026-09-09. The fallback now applies only where something is actually busy. |
-| D30 | **The hub took no name, so a session was anonymous for exactly the window somebody would look at it.** `test_results.name` arrives only when the suite posts a result — after the test ended, and never for a passing one. The Runs screen showed uuids during a run. | Fixed 2026-09-09, migration 048. Deployed at `7faf06c` and probed on the box: the hub names all ten capabilities and enforces the runId rule. **No session has carried a name to a real device yet.** |
-| D31 | **An error message I wrote pointed at `mfarm run --profile`, a flag that does not exist** — the CLI has `--tier`, `--ttl` and `--wait`. Caught by reading `bin.ts`, not by any test. A remedy that reads as a fix and is not costs more than no remedy. | Fixed before commit, 2026-09-09. |
+| D35 | **Four surfaces answered "can a session start?" from the SESSION table.** With five devices quarantined and nothing running, the console said "Every device is on its clean snapshot", "All devices are available" and "Every device is in use" on three panels while its own header said 0 of 5 ready. The fourth — `fleetHeadline`, whose `'Every device is in use.'` was the else-branch of `free === 0` — the review had not spotted. **Seventh instance of the false-premise family.** | Fixed 2026-09-09 by `capacityState()`, one allocator-derived read model. Three tests, each verified RED first. Deployed at `7faf06c`. **CLOSED 2026-09-11, seen with the quarantined fleet it was written for** — with `mfarm-lab` stopped and all five devices quarantined, the header said `0 of 5 ready`, Fleet said *Nothing can be allocated — 5 quarantined.*, and BOTH Waiting empty states repeated that same sentence. Four surfaces, one answer. |
+| D36 | **`fleetHeadline` promised a queued caller "the farm hands over the moment a lease ends" on a farm where nobody held a lease.** Same function, separate defect: the fallback was unconditional, so an unbounded wait read as an imminent one. | Fixed 2026-09-09. **CLOSED 2026-09-11 on the same quarantined fleet as D28** — nobody held a lease and the promise was correctly absent. |
+| D37 | **The hub took no name, so a session was anonymous for exactly the window somebody would look at it.** `test_results.name` arrives only when the suite posts a result — after the test ended, and never for a passing one. The Runs screen showed uuids during a run. | Fixed 2026-09-09, migration 048. **CLOSED 2026-09-11 on real Cuttlefish** — `deploy/verify-hub-contract.mjs`, 30/30. A session read back its test name before any result was posted, and the Runs screen shows `Android_UAE_Expenses_2026_09_10_23_54_48` over its CI id instead of a uuid. |
+| D38 | **An error message I wrote pointed at `mfarm run --profile`, a flag that does not exist** — the CLI has `--tier`, `--ttl` and `--wait`. Caught by reading `bin.ts`, not by any test. A remedy that reads as a fix and is not costs more than no remedy. | Fixed before commit, 2026-09-09. |
 
-**Still open from that review, and named so nobody assumes otherwise:** a run lists only its
-FAILURES as test rows, so every passing test's name is now recorded and rendered nowhere; Runs has no
-search, filter or pagination; API keys have no label, scope, expiry or last-used; migration 044's
-host disk/CPU/agent-version reaches Prometheus and has no console read endpoint; the metering ingest
-has no usage view; there is no share link and no customer-facing tunnel.
+**Still open from that review, and named so nobody assumes otherwise:** Runs has no search, filter
+or pagination; API keys have no label, scope, expiry or last-used; migration 044's host
+disk/CPU/agent-version reaches Prometheus and has no console read endpoint; the metering ingest has
+no usage view; there is no share link and no customer-facing tunnel.
+
+**And one entry above was written too strongly — corrected 2026-09-11 by looking at the screen.**
+This paragraph used to say "a run lists only its FAILURES as test rows, so every passing test's name
+is now recorded and rendered nowhere." The second half is false for the shape that matters. The run
+screen's **Sessions** table has a TEST column, so with one test per session — the LambdaTest shape,
+one Appium session per Cucumber scenario, and what `examples/java-testng/` migrates — every test
+renders by name, passing ones with a green PASSED pill. Verified on the farm: run
+`verify-hub-1789084488716` lists *Expenses: a cardholder submits a claim* · PASSED 1/1 and *Expenses:
+a claim over the limit is refused* · 1 FAILED 0/1.
+
+**What is actually missing is narrower:** a session that runs SEVERAL tests shows one row carrying
+the session's name and a count. The same farm's `medishop-after-036-1788482936` is the picture of it
+— two rows reading `c9dd5f62-8959-44e0-8e24-bb84675621ba` · PASSED 3/3 and PASSED 5/5, eight passing
+tests counted and none named. That is the case test rows are for, and it is a smaller and later job
+than "the console cannot show a test". Same lesson as HANDOFF 75 and 77, this time against my own
+register: **grep the verb, then go and look at the screen.**
 
 ## Suite health
 
