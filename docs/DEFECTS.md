@@ -38,7 +38,9 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Four, as of 2026-09-11** — forty-two recorded, thirty-eight closed. The four below are named at the
+**Two, as of 2026-09-11** — forty-three recorded, forty-one closed. The two left are the CSP
+`webrtc` warning, which is deliberate, and app network capture, which is an unbuilt feature needing
+its own privacy decision rather than a defect. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
 here rather than being quietly absent.
 
@@ -132,9 +134,9 @@ hairline and not a shadow — `design-tokens.css` reserves depth for the device 
 | what | why it is still here |
 |---|---|
 | `Unrecognized Content-Security-Policy directive 'webrtc'` on every page load | Chrome does not implement CSP3's `webrtc` directive. ADR-0007 sets it deliberately; it changes nothing and costs one console warning. Removing it would lose the statement of intent, keeping it costs noise in the place a developer looks for problems. |
-| `mfarm-deploy.sh` reported failure on a deploy that succeeded | A stale container name — `Conflict. The container name "/…_mfarm-api-1" is already in use` — left by an out-of-band `docker compose up -d api`. The new image was running and the migration applied; the script errored and skipped its own verification step, which is the part that matters. |
+| ~~`mfarm-deploy.sh` reported failure on a deploy that succeeded~~ | **FIXED 2026-09-11.** The restart is no longer fatal: a name conflict clears the stale container and retries once, and **whatever happens the script continues to its verification step**, which is the only part that decides whether a deploy happened. Reporting failure on a working deploy teaches people to ignore the failure. The message parse lives in `lib/restart-conflict.sh` with its own tests, including that a busy PORT is not a container to remove. |
 | No app network traffic anywhere | `network-capture` is a capability NAME in `protocol.ts` with no implementation. The Steps table is the WebDriver command trace, not what the app under test requested. A per-session proxy is real work and needs its own privacy decision (ADR-0029 stores no bodies). |
-| The Steps table does not collapse repeated successful commands | Nine identical `GET screenshot 200` rows on a short session; hundreds on a real suite, with the interesting one buried. |
+| ~~The Steps table does not collapse repeated successful commands~~ | **FIXED 2026-09-11.** Three or more consecutive identical successes fold into one row that opens on click. **A failed step is never folded, and neither is a slow one** — those are the rows the table exists for, so either one breaks a run and keeps its place. The card's own count stays the real number, with the folded figure stated separately: a table reading "1 step" when the suite made nine would be a worse defect than the noise. |
 
 
 **This section read "nothing, twenty-eight closed" for about four hours and was wrong the whole
@@ -645,6 +647,19 @@ the class matched, fourteen elements existed with correct geometry. The only thi
 was asking the browser for a COMPUTED style, which returned `rgba(0, 0, 0, 0)`. The guard now in
 `theme.test.ts` is the cheap source-level version of that question, and it found the second
 undefined token in the same rule the moment it was written.
+
+## Found while fixing the ones above, 2026-09-11
+
+| id | what | status |
+|---|---|---|
+| D43 | **Five CSS variables were painted from their fallback and never from a token**, so those colours never changed with the theme — the exact failure `theme.test.ts` was written for. `--accent-line` for `--mf-accent-line`, `--c-ok`/`--c-bad` for `--ok-dot`/`--bad-dot`, `--t-dim` for `--t-caption`, and a `--mf-accent-text` that never existed. Two were minutes old; three had been sitting in the stylesheet. **None of them was visible** — a fallback paints. | Fixed 2026-09-11. The D42 guard could not catch these: it exempts anything with a fallback, on the grounds that a fallback cannot paint nothing. A second assertion now says a fallback must still name a token that exists. |
+
+**A FALLBACK HIDES A TYPO; IT DOES NOT FORGIVE ONE.** This is the interesting half of D42's
+follow-up. `var(--t-dim, #8A8A94)` renders correctly in dark theme and is frozen there — a token is
+how a value learns about the theme, and a fallback is what it does while the theme has not loaded.
+The guard written yesterday deliberately skipped these because they cannot render as *nothing*; it
+took writing two more of them to notice that invisible and wrong are different failures and both
+need a check.
 
 ## Suite health
 

@@ -268,4 +268,32 @@ describe('every token the console reads is defined', () => {
       'console.css reads CSS variables nothing defines. CSS drops the property silently, so this '
       + 'renders as an invisible element rather than as an error — see the usage chart, 2026-09-11.');
   });
+
+  /**
+   * A FALLBACK HIDES A TYPO; IT DOES NOT FORGIVE ONE.
+   *
+   * `var(--t-dim, #8A8A94)` paints, so nothing looks broken and the check above deliberately skips
+   * it. But `--t-dim` does not exist, so that colour is FROZEN: it is the same in light theme as in
+   * dark, which is the precise failure this file was written for — a token is how a value learns
+   * about the theme, and a fallback is what it does when the theme has not loaded.
+   *
+   * Five of these were found the day this test was written: two minutes old, three that had been
+   * sitting in the stylesheet. None of them was visible. All five were one-word typos —
+   * `--accent-line` for `--mf-accent-line`, `--c-ok` for `--ok-dot`.
+   */
+  test('a `var(--x, fallback)` still names a token that exists', () => {
+    const defined = new Set<string>();
+    for (const src of [tokens, css]) {
+      for (const m of src.matchAll(/(--[a-z0-9-]+)\s*:/gi)) defined.add(m[1]);
+    }
+
+    const frozen = new Set<string>();
+    for (const m of css.matchAll(/var\(\s*(--[a-z0-9-]+)\s*,/gi)) {
+      if (!defined.has(m[1])) frozen.add(m[1]);
+    }
+
+    assert.deepEqual([...frozen].sort(), [],
+      'these are painted from their fallback and never from a token, so they do not change with the '
+      + 'theme. A fallback is for a token that exists; if nothing defines it, the name is a typo.');
+  });
 });
