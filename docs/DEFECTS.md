@@ -587,6 +587,18 @@ tests counted and none named. That is the case test rows are for, and it is a sm
 than "the console cannot show a test". Same lesson as HANDOFF 75 and 77, this time against my own
 register: **grep the verb, then go and look at the screen.**
 
+## Found by using the runs filter, 2026-09-11
+
+| id | what | status |
+|---|---|---|
+| D39 | **A filter chip could light up over a list that ignored it.** `refreshRuns` is called both by the Runs filter and by the 5s poll, so a poll that left BEFORE a chip was pressed landed AFTER it and replaced the filtered rows with everything. Seen on the deployed farm minutes after shipping the feature: *Not reported* was active above rows reading ALL PASSED and 1 FAILED. The API was correct — `?status=not-reported` returned four rows, all `not-reported`. | Fixed 2026-09-11 by a generation counter, the same guard `loadRunDetail` already carried and whose comment says why. **Verified RED** by disabling it: exactly the two race tests failed. |
+
+**It needed a new kind of test, and that is the durable part.** Every console test in this repo
+seeds `state` and calls a screen — a RENDERER test, which cannot see a bug in the code that fills
+the state. `console-runs-loader.test.ts` is the first LOADER test: it stubs `fetch` so responses
+resolve out of order, which is the one ordering a test awaiting its own call can never produce. The
+feature shipped with 20 tests and this defect was invisible to all of them.
+
 ## Suite health
 
 The order-dependent `attempts.test.ts` flake is **fixed** — it was a real billing bug (the usage

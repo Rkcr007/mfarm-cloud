@@ -95,7 +95,7 @@ export const state = {
    * calls `refreshRuns()`, which reads this, so a refresh that landed while somebody was reading
    * page three used to reset them to page one of everything.
    */
-  runsQuery: { q: '', status: '', cursor: null, more: false, loading: false },
+  runsQuery: { q: '', status: '', cursor: null, more: false, loading: false, gen: 0 },
   /** `GET /runs/:id` for the run detail screen: the rollup plus every session in it. */
   runDetail: null,
   /** `GET /devices/:id/quarantine-log` for the device detail screen. One device at a time. */
@@ -1230,8 +1230,20 @@ async function refreshActions() {
  * Everything else — the poll, a filter change, a new search — REPLACES, because a poll that
  * appended would grow the table forever.
  */
-async function refreshRuns({ append = false } = {}) {
+export async function refreshRuns({ append = false } = {}) {
   const query = state.runsQuery;
+  /**
+   * WHICH QUESTION THIS ANSWER IS TO, so a slower one cannot land on top of a newer one.
+   *
+   * Found by clicking, not by a test. `refreshRuns()` is also called by the 5s poll, so a poll that
+   * started BEFORE a filter was pressed finishes AFTER it and replaces the filtered rows with
+   * everything — leaving the chip lit above a list that ignores it. Intermittent by construction:
+   * it needs a poll in flight at the moment of the click, which is a one-in-five chance at a 5s
+   * interval and never in a test that awaits its own call.
+   *
+   * `loadRunDetail` guards the same shape for the same reason, and its comment says so.
+   */
+  const gen = ++query.gen;
   const params = new URLSearchParams({ limit: '50' });
   if (query.q) params.set('q', query.q);
   if (query.status) params.set('status', query.status);
@@ -1248,6 +1260,9 @@ async function refreshRuns({ append = false } = {}) {
   }
 
   const out = await api(`/v1/runs?${params}`);
+  // A newer request has been made since this one left; its answer is the current one.
+  if (gen !== state.runsQuery.gen) return;
+
   const page = out.runs || [];
   state.runs = append ? [...state.runs, ...page] : page;
   state.runsQuery.cursor = out.nextCursor;
