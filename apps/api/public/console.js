@@ -7503,7 +7503,7 @@ function usageCard() {
      * Everything static is a class (`.usagebars`); only the height is computed, which is the exact
      * division `h()`'s own comment asks for.
      */
-    h('div', { class: 'usagebars' },
+    h('div', { class: 'usagebars mt-md' },
       days.map((d) => h('i', {
         // Title rather than an axis: thirty labels under thirty bars is unreadable at this width,
         // and the shape is what the card is for.

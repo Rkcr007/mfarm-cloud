@@ -227,3 +227,45 @@ describe('the bring-up choreography moves', () => {
       'depth lands because the flat rule stops matching, not because a fourth rule fires');
   });
 });
+
+/**
+ * EVERY CSS VARIABLE THE CONSOLE READS MUST EXIST SOMEWHERE THAT DEFINES IT.
+ *
+ * `background: var(--accent)` shipped on 2026-09-11 and painted nothing. There is no `--accent` in
+ * this design system — the token is `--mf-accent` — and **CSS fails silently on an undefined
+ * variable**: the property is simply dropped. The usage chart rendered fourteen bars with correct
+ * widths and heights, fully transparent, occupying sixty-four pixels of nothing. Both the unit
+ * tests and the deployed-asset checks passed, because the file was served, the class matched and
+ * the elements existed. The only instrument that could see it was asking the browser for a computed
+ * style.
+ *
+ * This is the cheap guard for the whole family, and it is source-level like everything else here:
+ * collect every `var(--x)` the console reads and every `--x:` anything defines, and refuse a read
+ * with no definition. A var with a FALLBACK is exempt — `var(--maybe, #755EB8)` degrades to a real
+ * colour by construction, which is the pattern the rest of this stylesheet already uses.
+ */
+describe('every token the console reads is defined', () => {
+  test('no `var(--x)` without either a definition or a fallback', () => {
+    const defined = new Set<string>();
+    for (const src of [tokens, css]) {
+      for (const m of src.matchAll(/(--[a-z0-9-]+)\s*:/gi)) defined.add(m[1]);
+    }
+
+    // Browsers define these; the design system does not have to.
+    const BUILT_IN = new Set(['--webkit-']);
+
+    const missing = new Set<string>();
+    for (const m of css.matchAll(/var\(\s*(--[a-z0-9-]+)\s*([,)])/gi)) {
+      const [, name, next] = m;
+      // `var(--x, fallback)` cannot paint nothing, so it is not this defect.
+      if (next === ',') continue;
+      if (defined.has(name)) continue;
+      if ([...BUILT_IN].some((p) => name.startsWith(p))) continue;
+      missing.add(name);
+    }
+
+    assert.deepEqual([...missing].sort(), [],
+      'console.css reads CSS variables nothing defines. CSS drops the property silently, so this '
+      + 'renders as an invisible element rather than as an error — see the usage chart, 2026-09-11.');
+  });
+});

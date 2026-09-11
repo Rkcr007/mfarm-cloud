@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Four, as of 2026-09-11** — forty-one recorded, thirty-seven closed. The four below are named at the
+**Four, as of 2026-09-11** — forty-two recorded, thirty-eight closed. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
 here rather than being quietly absent.
 
@@ -626,6 +626,7 @@ button on the deployed farm.
 
 | id | what | status |
 |---|---|---|
+| D42 | **The usage chart drew fourteen fully transparent bars.** `background: var(--accent)` — and this design system has no `--accent`, only `--mf-accent`. **CSS drops a property with an undefined variable silently**, so the elements existed with correct widths and heights and painted nothing: sixty-four pixels of empty card. A second one in the same two lines, `margin-top: var(--s-md)`, where `--s-*` is the SURFACE colour scale and spacing is done with utility classes. | Fixed 2026-09-11. `theme.test.ts` now refuses any `var(--x)` in `console.css` that nothing defines and that has no fallback — it caught the second one immediately. |
 | D41 | **The Health screen rendered completely blank on the deployed farm.** `usageCard` passed `style` as a STRING; `h()` writes styles through CSSOM because the console's CSP kills the style attribute, and a real `CSSStyleDeclaration` throws on an indexed write. One throw inside `render()` produces no tree at all — nav and chrome present, content area empty. | Fixed 2026-09-11: static styling moved to a `.usagebars` class, only the computed height written as an object. **Verified RED** — restoring the string fails ten tests including the new one. |
 
 **THE TEST FOR THIS ALREADY EXISTED AND COULD NOT FIRE.** `dom-shim.ts` has refused indexed style
@@ -637,6 +638,13 @@ code that runs, and seeding state chooses which code that is. Two tests now seed
 return — one for the chart, one for a host reporting uptime and cost.
 
 Same family as D39: shipped, tested, green, and broken on the first screen anybody opened.
+
+**D42 came out of the same two lines and needed a different instrument again.** Once Health rendered,
+the chart was still invisible — and every check available said it was fine: the CSS file was served,
+the class matched, fourteen elements existed with correct geometry. The only thing that could see it
+was asking the browser for a COMPUTED style, which returned `rgba(0, 0, 0, 0)`. The guard now in
+`theme.test.ts` is the cheap source-level version of that question, and it found the second
+undefined token in the same rule the moment it was written.
 
 ## Suite health
 
