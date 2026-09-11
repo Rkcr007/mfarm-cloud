@@ -350,10 +350,12 @@ describe('the runs screens', () => {
     // The real number must survive folding: a table that says "1 step" when the suite made nine is
     // a worse defect than the noise it removed.
     assert.match(text, /9 steps/);
-    assert.match(text, /8 repeats folded/);
+    // Nine commands become one row, so eight rows are missing — a different number from the
+    // "×9" on the row itself, which is why the summary does not repeat that word.
+    assert.match(text, /8 rows hidden/);
   });
 
-  test('a FAILED step is never folded away', () => {
+  test('a LONE failure between two runs keeps its own row', () => {
     seed({ name: 'cockpit', id: 'sess-1' });
     const sessionId = 'sess-1';
     const base = { status: 200, failed: false, error: null, durationMs: 40, startedAt: new Date().toISOString() };
@@ -367,6 +369,57 @@ describe('the runs screens', () => {
     // The failure splits the run in two and keeps its own row — the point of the whole feature.
     assert.match(text, /no such element/, 'the failing step must still be a row of its own');
     assert.match(text, /×4/, 'the successes either side should fold');
+  });
+
+  /**
+   * THE PATTERN A REAL SUITE ACTUALLY MAKES, taken from a trace on this farm:
+   *
+   *   1 POST element  no such element   ← a WebDriverWait, polling
+   *   2 POST element  no such element
+   *   3 POST element  no such element
+   *   4 POST element  200               ← the element arrived
+   *
+   * One session in the register has eighteen of those in a row. The first version of this feature
+   * folded only successes and left every one of them on screen, which fixed the complaint on paper
+   * and on no trace this farm has.
+   */
+  test('a run of identical FAILURES folds, and keeps the last one', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const sessionId = 'sess-1';
+    const base = { status: 404, failed: true, error: 'no such element', durationMs: 120, startedAt: new Date().toISOString() };
+    const items = [];
+    for (let i = 1; i <= 8; i++) items.push({ ...base, seq: i, method: 'POST', path: 'element' });
+    items.push({ seq: 9, method: 'POST', path: 'element', status: 200, failed: false, error: null, durationMs: 90, startedAt: new Date().toISOString() });
+    mod.state.commands = { sessionId, items, truncated: false, loaded: true, expanded: new Set() };
+
+    const text = textOf(mod.SCREENS.cockpit());
+    // Seven fold; the eighth — the attempt the suite acted on — stays.
+    assert.match(text, /×7/);
+    assert.match(text, /while waiting/, 'the folded row says these were a wait, not failures to read');
+    // Seven commands fold into one row: six rows are missing, and the row says ×7.
+    assert.match(text, /6 rows hidden/);
+    // And the surviving failure is still on screen as itself.
+    assert.match(text, /no such element/);
+  });
+
+  test('a failing run does NOT fold into the success that ended it', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const sessionId = 'sess-1';
+    const t = new Date().toISOString();
+    const items = [
+      ...Array.from({ length: 4 }, (_, i) => ({
+        seq: i + 1, method: 'POST', path: 'element', status: 404, failed: true,
+        error: 'no such element', durationMs: 100, startedAt: t,
+      })),
+      { seq: 5, method: 'POST', path: 'element', status: 200, failed: false, error: null, durationMs: 80, startedAt: t },
+    ];
+    mod.state.commands = { sessionId, items, truncated: false, loaded: true, expanded: new Set() };
+
+    const text = textOf(mod.SCREENS.cockpit());
+    // Three fold, one failure survives, and the 200 is its own row — a run must not span the moment
+    // the wait started succeeding.
+    assert.match(text, /×3/);
+    assert.match(text, /5 steps/);
   });
 
   test('a SLOW step is never folded away either', () => {

@@ -136,7 +136,7 @@ hairline and not a shadow — `design-tokens.css` reserves depth for the device 
 | `Unrecognized Content-Security-Policy directive 'webrtc'` on every page load | Chrome does not implement CSP3's `webrtc` directive. ADR-0007 sets it deliberately; it changes nothing and costs one console warning. Removing it would lose the statement of intent, keeping it costs noise in the place a developer looks for problems. |
 | ~~`mfarm-deploy.sh` reported failure on a deploy that succeeded~~ | **FIXED 2026-09-11.** The restart is no longer fatal: a name conflict clears the stale container and retries once, and **whatever happens the script continues to its verification step**, which is the only part that decides whether a deploy happened. Reporting failure on a working deploy teaches people to ignore the failure. The message parse lives in `lib/restart-conflict.sh` with its own tests, including that a busy PORT is not a container to remove. |
 | No app network traffic anywhere | `network-capture` is a capability NAME in `protocol.ts` with no implementation. The Steps table is the WebDriver command trace, not what the app under test requested. A per-session proxy is real work and needs its own privacy decision (ADR-0029 stores no bodies). |
-| ~~The Steps table does not collapse repeated successful commands~~ | **FIXED 2026-09-11.** Three or more consecutive identical successes fold into one row that opens on click. **A failed step is never folded, and neither is a slow one** — those are the rows the table exists for, so either one breaks a run and keeps its place. The card's own count stays the real number, with the folded figure stated separately: a table reading "1 step" when the suite made nine would be a worse defect than the noise. |
+| ~~The Steps table does not collapse repeated successful commands~~ | **FIXED 2026-09-11.** Runs of three or more identical consecutive commands fold into one row that opens on click. **A slow step never folds** — surfacing a nine-second click is what the threshold is for. The card's count stays the real number and states rows-hidden separately: a table reading "1 step" when the suite made nine would be worse than the noise. |
 
 
 **This section read "nothing, twenty-eight closed" for about four hours and was wrong the whole
@@ -660,6 +660,35 @@ how a value learns about the theme, and a fallback is what it does while the the
 The guard written yesterday deliberately skipped these because they cannot render as *nothing*; it
 took writing two more of them to notice that invisible and wrong are different failures and both
 need a check.
+
+## The first fix was a half-fix, 2026-09-11
+
+**The recorded defect said "repeated SUCCESSFUL commands" and I implemented exactly that**, with a
+rule I was pleased with: a failed step is the row the table exists for, so it never folds. Then a
+real trace off this farm showed what an Appium suite makes:
+
+```
+1 POST element  no such element   ← a WebDriverWait, polling
+2 POST element  no such element
+3 POST element  no such element
+4 POST element  200               ← the element arrived
+```
+
+One session in this register has **eighteen** of those in a row. **The dominant noise in a real
+suite is repeated FAILED lookups**, so the first version fixed the complaint on paper and on no
+trace this farm has ever produced.
+
+Failures now fold too, with the difference that carries the argument: **the LAST failure of a run is
+always shown**, because in a polling wait it is the attempt the suite acted on — the one before the
+element appeared, or the one where it gave up. The twelve before it are the wait working. A success
+run has no such special member and folds whole. A folded failure run says *"no such element — while
+waiting"* in plain type rather than in the red pill an individual failure gets, because red is
+reserved for a step somebody should look at and the whole claim of that row is that these are the
+ones they should not.
+
+**The lesson is about where the defect text came from.** It was written by reading the screen, so it
+described the noise that was visible on a short manual session. The noise that matters was in a
+trace nobody had opened. Reading a stored trace before fixing would have cost one query.
 
 ## Suite health
 
