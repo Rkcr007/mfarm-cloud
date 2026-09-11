@@ -4329,3 +4329,55 @@ when the feature is broken. See issues 37 and 38.
     a browser. `console-runs-loader.test.ts` — the first LOADER test here, stubbing `fetch` so
     answers resolve out of order — catches D40 and could never have caught D39. The register says
     so rather than implying the suite covers it.
+
+84. **THE FARM LEARNED WHAT BEING READY COSTS, AND THE FEATURE I WAS ASKED FOR WOULD NOT HAVE
+    CAUGHT IT.** 2026-09-11, `cf729a7`, migration 050, ADR-0035.
+
+    The device host ran for **twenty hours and forty-eight minutes** after a verification that needed
+    it for two — roughly **₹1,350** — on a farm whose operating design is "the device host is ~95% of
+    the bill, so it is stopped between sessions". The status bar read *4 of 5 ready* the whole time.
+    True, and silent about the fact that ready is the expensive state.
+
+    Rakesh picked "usage and cost view" off a list of four. **The usage half would not have helped**,
+    and noticing that before building it is the whole of this entry. `metering_events` records
+    device-seconds per org and records them correctly; across those twenty hours it recorded a few
+    minutes, because the devices were idle. The per-org usage page the product review asked for
+    would have shown a nearly empty chart while the money left the account.
+
+    **Usage is what a SESSION holds. Cost is what a HOST burns while powered on.** They differed by
+    twenty hours in the incident, so the Health screen now carries both, adjacent, with the
+    distinction in the copy — a reader who conflated them would conclude the meter was broken.
+
+    **The design decisions that took the most thought were all about refusing to invent a number.**
+    `up_since` is not backfilled, because `now()` would claim every existing host booted the instant
+    the migration ran. Uptime is null for a stopped host, because `up_since` on a DOWN machine is the
+    last time it came up and subtracting it reports a VM switched off on Tuesday as having run four
+    days. `HOST_HOURLY_COST` is configuration with no default, because MFARM is self-hosted and a
+    rate invented in `config.ts` would be rendered as though the farm had measured it — unset shows
+    elapsed time with no money, which still catches this, since "host up 20h" is alarming alone. And
+    the status-bar segment is hidden when nothing is on rather than reading zero, because a permanent
+    ₹0 is a number people stop seeing.
+
+    It also stamps `up_since` only when the host had actually gone away: ADR-0027 has a host
+    re-register when its device set changes, and stamping unconditionally would reset the clock every
+    time somebody plugged in a handset.
+
+    **A second review gap closed as a side effect, and a third deliberately not claimed.** Migration
+    044's disk, load and memory had reached Prometheus and nothing else since 2026-09-07; `GET
+    /v1/hosts` is the read model, and Health's card headed *"What this page cannot see"* — whose text
+    read "the API exposes no host read endpoint" — is **deleted rather than softened**. Fifth
+    comments-as-rumour instance here. The "agent version" half is NOT closed: there is no such
+    column, only `protocol_version`, which is what the agent speaks rather than what somebody
+    shipped, and relabelling it would have been the same class of lie.
+
+    **VERIFIED ON THE FARM ONLY AS FAR AS THE DATA, AND THE PREDICTION HELD.** Both hosts read
+    `up_since: null`, because neither has re-registered since 050 — so the cost segment correctly
+    does NOT appear, which is the non-backfill decision behaving exactly as designed on real rows.
+    The lab's 044 gauges are live (`stats_at` minutes old), so the Machines card has real numbers to
+    show. **The console itself is unchecked by eye**: the browser session expired and the console
+    password is not readable from here.
+
+    **The cost path lights up on the next lab start**, when the worker re-registers and stamps
+    `up_since` for the first time. That is the moment to look at the status bar — and to set
+    `HOST_HOURLY_COST=65` in `deploy/.env`, which is unset, so today the farm would show hours
+    without money.
