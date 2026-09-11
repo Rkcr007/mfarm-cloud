@@ -5777,28 +5777,60 @@ async function loadCommands(sessionId) {
  * the order is the order they ran, and the summary line above carries the count.
  */
 /**
- * Consecutive identical SUCCESSES, gathered into runs.
+ * Consecutive identical commands, gathered into runs.
  *
- * WHAT IS NEVER GROUPED IS THE WHOLE DESIGN. A failed step is never folded away — it is the row the
- * table exists for. Neither is a SLOW one: the point of the slow threshold is to surface a click
- * that took nine seconds, and hiding it inside "×12" would undo that. So a slow or failed command
- * BREAKS a run, which means a run of twelve screenshots containing one slow one renders as
- * collapsed / slow / collapsed — the interesting row stays exactly where it was, with its
- * neighbours out of the way.
+ * TWO KINDS OF NOISE, AND THEY NEED DIFFERENT TREATMENT. The first version of this folded only
+ * SUCCESSES, on the reasoning that a failed step is the row the table exists for. Then a real trace
+ * from this farm showed what an Appium suite actually produces:
  *
- * Grouped on `method + path` only. Never on the response, because two calls that returned 200 and
- * 404 are not the same step even where the request was identical.
+ *   1 POST element  no such element   ← a WebDriverWait, polling
+ *   2 POST element  no such element
+ *   3 POST element  no such element
+ *   4 POST element  200               ← the element arrived
+ *
+ * — and one session in the register has EIGHTEEN of those in a row. The dominant noise in a real
+ * suite is repeated FAILED lookups, so a rule that only folded successes fixed the complaint on
+ * paper and not on any trace this farm has.
+ *
+ * So failures fold too, with one difference that carries the whole argument: **the LAST failure of
+ * a run is always shown.** In a polling wait it is the attempt the suite acted on — the one that
+ * returned before the element appeared, or the one where it gave up. The twelve before it are the
+ * wait working. For successes there is no such special member, so the run folds whole.
+ *
+ * A SLOW STEP STILL BREAKS A RUN, in both kinds. The slow threshold exists to surface a click that
+ * took nine seconds, and hiding it inside "×12" would undo that.
+ *
+ * Grouped on `method + path` AND on whether it failed. Two calls that returned 200 and 404 are not
+ * the same step even where the request was identical, and a run must not span the moment a wait
+ * started succeeding.
  */
 function groupSteps(steps, slowMs) {
   const out = [];
   for (const c of steps) {
     const key = `${c.method} ${c.path || '/'}`;
-    const collapsible = !c.failed && !(c.durationMs >= slowMs);
+    const failed = Boolean(c.failed);
+    // Slow is never foldable, whichever kind it is.
+    const collapsible = !(c.durationMs >= slowMs);
     const last = out[out.length - 1];
-    if (collapsible && last?.collapsible && last.key === key) last.items.push(c);
-    else out.push({ key, collapsible, items: [c] });
+    if (collapsible && last?.collapsible && last.key === key && last.failed === failed) {
+      last.items.push(c);
+    } else {
+      out.push({ key, collapsible, failed, items: [c] });
+    }
   }
   return out;
+}
+
+/**
+ * What a run renders as: the folded part, and the members that stay visible.
+ *
+ * The asymmetry is the point — see `groupSteps`. A failed run keeps its last member, because in a
+ * polling wait that is the attempt that mattered. A successful run has no such member.
+ */
+function splitRun(group) {
+  return group.failed
+    ? { folded: group.items.slice(0, -1), shown: group.items.slice(-1) }
+    : { folded: group.items, shown: [] };
 }
 
 /** One ordinary step row. */
@@ -5826,19 +5858,25 @@ function stepRow(c, slowMs) {
  * question the table is for — and because slow steps break a run, this figure is always under the
  * threshold and is therefore a statement that none of them was interesting.
  */
-function stepRunRow(group, slowMs) {
-  const first = group.items[0];
-  const last = group.items[group.items.length - 1];
-  const slowest = Math.max(...group.items.map((c) => c.durationMs ?? 0));
+function stepRunRow(group, folded, slowMs) {
+  const first = folded[0];
+  const last = folded[folded.length - 1];
+  const slowest = Math.max(...folded.map((c) => c.durationMs ?? 0));
   return h('tr', { class: 'step-run' },
     h('td', { class: 'tnum caption', text: `${first.seq}–${last.seq}` }),
     h('td', null,
       h('button', {
         class: 'linkish', type: 'button',
         title: 'Show each of these steps',
-        onclick: () => { state.commands.expanded.add(first.seq); render(); },
-      }, h('code', { text: group.key }), h('span', { class: 'caption', text: ` ×${group.items.length}` }))),
-    h('td', null, h('span', { class: 'caption tnum', text: String(first.status) })),
+        onclick: () => { state.commands.expanded.add(group.items[0].seq); render(); },
+      }, h('code', { text: group.key }), h('span', { class: 'caption', text: ` ×${folded.length}` }))),
+    /**
+     * A FOLDED FAILURE RUN SAYS SO IN WORDS, not with the red pill an individual failure gets. Red
+     * is reserved for a step somebody should look at, and the whole claim of this row is that these
+     * are the ones they should not — the attempt that mattered is on the line below, still red.
+     */
+    h('td', null, h('span', { class: 'caption',
+      text: group.failed ? `${first.error || first.status} — while waiting` : String(first.status) })),
     h('td', { class: 'tnum caption', text: `${slowest}ms max` }),
     h('td', { class: 'caption', text: new Date(first.startedAt).toLocaleTimeString() }),
   );
@@ -5871,9 +5909,14 @@ function stepsCard(sess) {
   const RUN_MIN = 3;
 
   const groups = groupSteps(steps, SLOW_MS);
-  const collapsedRuns = groups.filter((g) => g.collapsible && g.items.length >= RUN_MIN);
-  const hiddenCount = collapsedRuns.reduce(
-    (n, g) => n + (state.commands.expanded.has(g.items[0].seq) ? 0 : g.items.length - 1), 0);
+  const hiddenCount = groups.reduce((n, g) => {
+    const { folded } = splitRun(g);
+    if (!g.collapsible || folded.length < RUN_MIN) return n;
+    if (state.commands.expanded.has(g.items[0].seq)) return n;
+    // `folded.length` rows become one, so `- 1`. A failed run's surviving last member is in
+    // `shown` and was never part of this count.
+    return n + folded.length - 1;
+  }, 0);
 
   return card('Steps', {
     /**
@@ -5885,7 +5928,10 @@ function stepsCard(sess) {
       ? 'loading…'
       : `${steps.length}${state.commands.truncated ? '+' : ''} step${steps.length === 1 ? '' : 's'}`
         + (failed.length ? `, ${failed.length} failed` : '')
-        + (hiddenCount ? `, ${hiddenCount} repeat${hiddenCount === 1 ? '' : 's'} folded` : '') }),
+        // "rows hidden", not "repeats folded": a folded run of seven shows "×7" on its own row, so
+        // a summary also saying "7" invites the reader to think those are different sevens. This
+        // number is the one thing the other is not — how many table rows are missing.
+        + (hiddenCount ? `, ${hiddenCount} row${hiddenCount === 1 ? '' : 's'} hidden` : '') }),
   },
     !loaded
       ? h('p', { class: 'caption', text: 'Loading…' })
@@ -5894,10 +5940,15 @@ function stepsCard(sess) {
             h('div', { class: 'tablewrap' }, h('table', { class: 'table wide steps' },
               h('thead', null, h('tr', null,
                 ['#', 'Command', 'Status', 'Took', 'At'].map((t) => h('th', { text: t })))),
-              h('tbody', null, groups.map((g) =>
-                g.collapsible && g.items.length >= RUN_MIN && !state.commands.expanded.has(g.items[0].seq)
-                  ? stepRunRow(g, SLOW_MS)
-                  : g.items.map((c) => stepRow(c, SLOW_MS)))),
+              h('tbody', null, groups.map((g) => {
+                const { folded, shown } = splitRun(g);
+                const fold = g.collapsible
+                  && folded.length >= RUN_MIN
+                  && !state.commands.expanded.has(g.items[0].seq);
+                return fold
+                  ? [stepRunRow(g, folded, SLOW_MS), ...shown.map((c) => stepRow(c, SLOW_MS))]
+                  : g.items.map((c) => stepRow(c, SLOW_MS));
+              })),
             )),
             state.commands.truncated
               ? h('p', { class: 'caption mt-md', text:
