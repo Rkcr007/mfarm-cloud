@@ -96,6 +96,15 @@ export const state = {
    * page three used to reset them to page one of everything.
    */
   runsQuery: { q: '', status: '', cursor: null, more: false, loading: false, gen: 0 },
+  /**
+   * The machines, and what leaving them on costs (migration 050, `GET /v1/hosts`).
+   *
+   * Admin-only, so a member's console simply never fills this and every surface reading it has to
+   * cope with an empty list rather than with a permission error.
+   */
+  hosts: { list: [], rate: null, loaded: false },
+  /** Metered consumption, fetched when Health is opened rather than on the 5s poll — see `loadUsage`. */
+  usage: { byDay: [], total: null, window: null, loaded: false },
   /** `GET /runs/:id` for the run detail screen: the rollup plus every session in it. */
   runDetail: null,
   /** `GET /devices/:id/quarantine-log` for the device detail screen. One device at a time. */
@@ -1215,6 +1224,40 @@ async function refreshOrg() {
   state.org.loaded = true;
 }
 
+/**
+ * The machines behind the fleet.
+ *
+ * FAILS QUIETLY ON PURPOSE. Only an owner or admin may read `/v1/hosts`, and a member opening the
+ * console must not be shown an error for a request they did not make — the cost segment simply does
+ * not appear for them, which is the correct amount of information for somebody who cannot act on it.
+ */
+async function refreshHosts() {
+  try {
+    const out = await api('/v1/hosts');
+    state.hosts = { list: out.hosts || [], rate: out.rate || null, loaded: true };
+  } catch {
+    state.hosts = { list: [], rate: null, loaded: true };
+  }
+}
+
+/**
+ * What this org actually consumed.
+ *
+ * NOT ON THE POLL. This is a thirty-day aggregate over an append-only table; it does not change
+ * meaningfully between two five-second ticks, and putting it on the poll would run a GROUP BY over
+ * a month of events twelve times a minute to redraw the same bars.
+ */
+async function loadUsage() {
+  try {
+    const out = await api('/v1/account/usage');
+    state.usage = {
+      byDay: out.byDay || [], total: out.usage || {}, window: out.window || null, loaded: true,
+    };
+  } catch {
+    state.usage = { byDay: [], total: null, window: null, loaded: true };
+  }
+}
+
 async function refreshApps() {
   state.apps = (await api('/v1/apps')).apps || [];
 }
@@ -1387,7 +1430,7 @@ async function refreshHeld(force = false) {
 }
 
 async function refreshAll() {
-  await Promise.all([refreshDevices(), refreshSessions(), refreshApps(), refreshActions(), refreshRuns()]);
+  await Promise.all([refreshDevices(), refreshSessions(), refreshApps(), refreshActions(), refreshRuns(), refreshHosts()]);
   await refreshHeld();
   // When the data on screen was last known to be true. The API-loss toast reads it to say how
   // stale the page is, which is the only thing that makes "the connection is down" actionable.
@@ -1533,6 +1576,9 @@ export function loadForRoute() {
   // Two reads for one screen, deliberately: the device row and its audit log are different
   // endpoints with different lifetimes, and the screen renders correctly with either one missing.
   if (name === 'device') return Promise.all([loadDevice(id), loadQuarantineLog(id)]);
+  // Health carries the usage card. Fetched on arrival rather than on the poll, because it is a
+  // thirty-day aggregate that does not change between five-second ticks.
+  if (name === 'health') return loadUsage();
   return Promise.resolve();
 }
 
@@ -1578,6 +1624,22 @@ function paintNavIcons() {
   }
 }
 
+/**
+ * "20h 48m", "3m", "2d 4h" — a length of time at a glance.
+ *
+ * SEPARATE FROM `duration()`, which renders mm:ss for a session that ran for ninety seconds. A host
+ * that has been up for most of a day rendered as `1248:36` is a number nobody reads as alarming.
+ */
+function compactDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d) return h ? `${d}d ${h}h` : `${d}d`;
+  if (h) return m ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+
 function renderChrome() {
   const held = heldSession();
 
@@ -1598,6 +1660,40 @@ function renderChrome() {
   $('fs-queue').textContent = waiting === 0 ? 'nobody waiting'
     : waiting === 1 ? '1 waiting'
       : `${waiting} waiting`;
+
+  /**
+   * WHAT BEING READY IS COSTING, and only when something is actually powered on.
+   *
+   * The sentence this farm needed on 2026-09-11 and did not have. The bar read "4 of 5 ready" for
+   * twenty hours and forty-eight minutes after a check that took two minutes, which was true and
+   * useless: ready is the expensive state, and nothing in the product said so.
+   *
+   * TIME FIRST, MONEY SECOND AND ONLY IF CONFIGURED. "up 20h" is the alarming half and it needs no
+   * rate; a farm whose operator never set `HOST_HOURLY_COST` still gets the warning. Showing an
+   * invented currency figure would be worse than showing none.
+   *
+   * HIDDEN ENTIRELY WHEN NOTHING IS UP, rather than reading zero. A permanent "₹0" is a number
+   * people stop seeing, and the whole value of this segment is that its appearance means something.
+   */
+  const burning = state.hosts.list.filter((h) => h.uptimeSeconds !== null);
+  const burnEl = $('fs-burn');
+  if (!burning.length) {
+    burnEl.hidden = true;
+  } else {
+    const seconds = Math.max(...burning.map((h) => h.uptimeSeconds));
+    const money = state.hosts.rate
+      ? burning.reduce((sum, h) => sum + (h.costSinceUp ?? 0), 0)
+      : null;
+    const label = burning.length === 1 ? 'host up' : `${burning.length} hosts up`;
+    burnEl.textContent = money === null
+      ? `${label} ${compactDuration(seconds)}`
+      : `${label} ${compactDuration(seconds)} · ~${state.hosts.rate.currency}${Math.round(money).toLocaleString()}`;
+    burnEl.title = state.hosts.rate
+      ? `Billing at ${state.hosts.rate.currency}${state.hosts.rate.hourly}/hour while powered on, `
+        + 'whether or not any device is allocated. Stop the device host when you are done with it.'
+      : 'A device host is powered on. Set HOST_HOURLY_COST to see what that costs.';
+    burnEl.hidden = false;
+  }
 
   // The one place that already resolved the name correctly, now through the shared helper so it
   // cannot drift from the six that did not.
@@ -7366,6 +7462,47 @@ function lastCheck(d) {
   return { text: 'no check recorded', tone: '' };
 }
 
+/**
+ * What this org CONSUMED, as opposed to what the machines cost to leave on.
+ *
+ * TWO DIFFERENT QUESTIONS ON ONE SCREEN, and the copy has to keep them apart or the page is worse
+ * than either alone. Device-seconds are metered per org and are real; host-hours are what the farm
+ * bills whether or not anybody allocates anything. On 2026-09-11 those two numbers were twenty
+ * hours apart, and a reader who conflated them would have concluded the meter was broken.
+ *
+ * A BAR PER DAY, drawn in CSS. A month of totals is one number and answers nothing anybody acts on
+ * — whether that was a steady drip or one runaway suite on Tuesday is the entire question, and the
+ * two are indistinguishable in a sum.
+ */
+function usageCard() {
+  if (!state.usage.loaded) return card('Usage', {}, h('p', { class: 'caption', text: 'Loading…' }));
+
+  const days = state.usage.byDay || [];
+  const seconds = Number(state.usage.total?.device_seconds ?? 0);
+  if (!days.length) {
+    return card('Usage', {},
+      empty('Nothing metered in the last 30 days.',
+        'Device time is recorded by the worker as sessions run. A farm nobody has used reports none — '
+        + 'which is not the same as a farm that was switched off, and the Machines card above is where that shows.'));
+  }
+
+  const peak = Math.max(...days.map((d) => d.deviceSeconds), 1);
+  return card('Usage', {},
+    h('p', { class: 'caption' },
+      `${(seconds / 3600).toFixed(1)} device-hours over ${days.length} day${days.length === 1 ? '' : 's'} `
+      + 'with any usage. This is time a device was HELD by a session — not time a host was powered on.'),
+    h('div', { class: 'row tight mt-md', style: 'align-items: flex-end; gap: 3px; height: 64px;' },
+      days.map((d) => h('span', {
+        // Title rather than an axis: thirty labels under thirty bars is unreadable at this width,
+        // and the shape is what the card is for.
+        title: `${d.day} · ${(d.deviceSeconds / 3600).toFixed(2)} device-hours`,
+        style: `flex: 1; min-width: 3px; border-radius: 2px; background: var(--accent);`
+          + ` height: ${Math.max(3, Math.round((d.deviceSeconds / peak) * 64))}px;`,
+      }))),
+    h('p', { class: 'caption mt-sm', text: `${days[0].day} → ${days[days.length - 1].day}` }),
+  );
+}
+
 function screenHealth() {
   const byState = {};
   for (const d of state.devices) byState[d.state] = (byState[d.state] || 0) + 1;
@@ -7480,21 +7617,61 @@ function screenHealth() {
          * the amber edge every other "read this" surface in the console has, and a title that says
          * what it is for rather than what it is about.
          */
-        card('What this page cannot see', { class: 'gate waiting' },
-          // The heartbeat is the number this screen most wants, and POST /v1/workers/heartbeat is
-          // the only route that touches it — worker-authenticated and write-only. There is no read
-          // endpoint for host state, so this says so instead of showing a dot that means nothing.
-          h('p', { class: 'help', text: 'Worker heartbeat and host state are not readable from the console: the only heartbeat route is the workers’ own write path, and the API exposes no host read endpoint.' }),
-          /**
-           * HOW TO RECOGNISE IT ANYWAY, which is the half that makes naming the blind spot useful.
-           *
-           * "Its devices leave READY" is true of a quarantine too, so on its own it does not tell
-           * anybody which of the two they are looking at. The distinguishing clause is that nobody
-           * quarantined them — a fleet losing devices with an empty quarantine history is a dead
-           * host, and that is a diagnosis somebody can act on from this screen.
-           */
-          h('p', { class: 'caption mt-sm', text: 'A dead host shows up indirectly, as devices leaving READY without anybody quarantining them.' }),
-        ),
+        /**
+         * THE MACHINES — and this card replaces one headed "What this page cannot see".
+         *
+         * That card said, correctly at the time, that "the API exposes no host read endpoint". It
+         * was true from the day it was written until `GET /v1/hosts` shipped, and a sentence like
+         * that is exactly the kind this repo has been bitten by four times: a statement about a
+         * constraint, left standing after the constraint went. Deleted rather than softened.
+         *
+         * Empty for a member, who cannot read the endpoint at all — see `refreshHosts`.
+         */
+        state.hosts.list.length
+          ? card('Machines', {},
+              h('p', { class: 'caption' },
+                'The hosts your devices run on. A host is billed while it is POWERED ON, whether or '
+                + 'not anything is allocated on it — which is not the same question as the usage below.'),
+              h('div', { class: 'stack mt-md' }, state.hosts.list.map((hst) => {
+                const st = { UP: 'ok', QUARANTINED: 'bad', DOWN: '' }[hst.state] ?? '';
+                const disk = hst.machine?.diskTotalBytes
+                  ? Math.round(100 - (hst.machine.diskFreeBytes / hst.machine.diskTotalBytes) * 100)
+                  : null;
+                return h('div', { class: 'inset stack tight' },
+                  h('span', { class: 'row tight' },
+                    h('strong', { text: hst.hostname }),
+                    pill(hst.state.toLowerCase(), st),
+                    hst.uptimeSeconds !== null
+                      ? h('span', { class: 'caption', text: `up ${compactDuration(hst.uptimeSeconds)}` })
+                      : null,
+                    // Money only where a rate is configured. See `config.ts`: an invented figure
+                    // would be rendered as though the farm had measured it.
+                    hst.costSinceUp !== null
+                      ? h('span', { class: 'caption', text: `~${state.hosts.rate.currency}${Math.round(hst.costSinceUp).toLocaleString()} so far` })
+                      : null),
+                  h('p', { class: 'caption', text: [
+                    `${hst.devices.ready}/${hst.devices.total} devices ready`,
+                    hst.region,
+                    hst.lastHeartbeatAt ? `beat ${ago(hst.lastHeartbeatAt)}` : 'never beat',
+                  ].join(' · ') }),
+                  /**
+                   * Migration 044's gauges, WITH THE AGE OF THE READING. All five are green on a
+                   * host that stopped reporting an hour before its disk filled, so a number here
+                   * without "as of" attached would be the most confident wrong answer on the page.
+                   */
+                  hst.machine
+                    ? h('p', { class: 'caption', text: [
+                        disk === null ? null : `disk ${disk}% used`,
+                        hst.machine.load1 === null ? null : `load ${hst.machine.load1.toFixed(2)}`,
+                        hst.machine.memTotalMb ? `mem ${Math.round(100 - (hst.machine.memAvailableMb / hst.machine.memTotalMb) * 100)}% used` : null,
+                        `as of ${ago(hst.machine.at)}`,
+                      ].filter(Boolean).join(' · ') })
+                    : h('p', { class: 'caption', text: 'This host has reported no machine stats yet.' }),
+                );
+              })),
+            )
+          : null,
+        usageCard(),
         activityCard(),
       ),
     ),
@@ -8448,6 +8625,14 @@ function pollSignature() {
     held: stable(state.held),
     detail: stable(state.detail),
     error: state.error,
+    /**
+     * Rounded to the MINUTE, deliberately. Including raw uptime would make the signature differ on
+     * every poll and re-render the whole console every five seconds — which is exactly what
+     * `pollSignature` exists to avoid. A minute is the resolution the segment displays anyway.
+     */
+    burn: state.hosts.list
+      .map((h) => `${h.id}:${h.uptimeSeconds === null ? '-' : Math.floor(h.uptimeSeconds / 60)}`)
+      .join(','),
   });
 }
 
@@ -8457,7 +8642,9 @@ function startPoll() {
     if (document.hidden || !state.me) return;
     try {
       const before = pollSignature();
-      await Promise.all([refreshDevices(), refreshSessions(), refreshActions()]);
+      // `refreshHosts` rides the poll so the cost segment keeps counting up while somebody watches
+      // it, which is the entire point of a number that is supposed to make them act.
+      await Promise.all([refreshDevices(), refreshSessions(), refreshActions(), refreshHosts()]);
       if (state.route.name === 'apps') await refreshApps();
       await refreshHeld();
       if (state.route.name === 'cockpit' && state.detail?.id === state.route.id

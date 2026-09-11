@@ -89,3 +89,50 @@ export async function usage(orgId: string, from: Date, to: Date | null) {
     return Object.fromEntries(rows.map((r) => [r.kind, r.total])) as Partial<Record<MeterKind, number>>;
   });
 }
+
+export interface UsageDay {
+  /** `YYYY-MM-DD`, UTC. */
+  day: string;
+  deviceSeconds: number;
+  artifactBytes: number;
+  egressBytes: number;
+}
+
+/**
+ * The same numbers, by day.
+ *
+ * A SINGLE THIRTY-DAY TOTAL IS NOT A USAGE VIEW. "You used 41 device-hours" answers nothing anybody
+ * acts on: whether that was a steady drip or one runaway suite on Tuesday is the entire question,
+ * and the two are indistinguishable in a sum.
+ *
+ * BUCKETED IN UTC, deliberately and stated on the wire, because `occurred_at` is a UTC instant and
+ * the alternative — bucketing in the server's local zone — makes the same data produce different
+ * days depending on where the container runs. A console that wants local days can re-bucket; it
+ * cannot un-bucket.
+ *
+ * DAYS WITH NO USAGE ARE ABSENT rather than zero-filled. Filling them here would mean inventing
+ * rows for a window the caller chose, and a caller plotting a chart needs to decide for itself
+ * whether a gap is a zero or the edge of its data.
+ */
+export async function usageByDay(orgId: string, from: Date, to: Date | null): Promise<UsageDay[]> {
+  return withSystem(async (c) => {
+    const { rows } = await c.query(
+      `SELECT to_char(date_trunc('day', occurred_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+              sum(quantity) FILTER (WHERE kind = 'device_seconds')::float8 AS device_seconds,
+              sum(quantity) FILTER (WHERE kind = 'artifact_bytes')::float8 AS artifact_bytes,
+              sum(quantity) FILTER (WHERE kind = 'egress_bytes')::float8   AS egress_bytes
+         FROM metering_events
+        WHERE org_id = $1 AND occurred_at >= $2
+          AND ($3::timestamptz IS NULL OR occurred_at < $3)
+        GROUP BY 1
+        ORDER BY 1`,
+      [orgId, from, to],
+    );
+    return rows.map((r) => ({
+      day: r.day as string,
+      deviceSeconds: Number(r.device_seconds ?? 0),
+      artifactBytes: Number(r.artifact_bytes ?? 0),
+      egressBytes: Number(r.egress_bytes ?? 0),
+    }));
+  });
+}

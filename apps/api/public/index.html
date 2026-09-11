@@ -245,6 +245,16 @@
         work once, here. `renderChrome` writes it.
       -->
       <span class="seg" id="fs-queue">—</span>
+      <!--
+        WHAT BEING READY COSTS. Hidden unless a device host is actually powered on, because a farm
+        at rest should say nothing here — a permanent "₹0" is a number people stop reading, and the
+        whole value of this segment is that it appears.
+
+        It exists because on 2026-09-11 the device host ran for twenty hours and forty-eight minutes
+        after a check that needed two, and this bar said "4 of 5 ready" the entire time. True, and
+        silent about the fact that ready is the expensive state. `renderChrome` writes it.
+      -->
+      <span class="seg warn" id="fs-burn" hidden>—</span>
       <span class="seg" id="fs-holding">Holding <b id="fs-held">—</b></span>
     </button>
 

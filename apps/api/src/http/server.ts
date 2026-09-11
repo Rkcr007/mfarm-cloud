@@ -17,6 +17,7 @@ import { workerRoutes } from './routes/workers.ts';
 import { webdriverRoutes } from './routes/webdriver.ts';
 import { appRoutes } from './routes/apps.ts';
 import { runRoutes } from './routes/runs.ts';
+import { hostRoutes } from './routes/hosts.ts';
 import { resultRoutes } from './routes/results.ts';
 import { reap } from '../allocator.ts';
 import {
@@ -566,6 +567,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(appRoutes, { prefix: '/v1' });
   await app.register(artifactRoutes, { prefix: '/v1' });
   await app.register(runRoutes, { prefix: '/v1' });
+  await app.register(hostRoutes, { prefix: '/v1' });
   await app.register(resultRoutes, { prefix: '/v1' });
 
   // The WebDriver hub, mounted at both spellings the world uses: Appium 2 clients default to `/`,

@@ -120,8 +120,8 @@ export async function workerRoutes(app: FastifyInstance) {
       const { rows } = await c.query(
         `INSERT INTO hosts (region, hostname, state, protocol_version, capabilities,
                             cores, memory_mb, endpoint, automation_endpoint,
-                            token_prefix, token_hash, last_heartbeat_at, org_id)
-         VALUES ($1,$2,'UP',$3,$4::jsonb,$5,$6,$7,$8,$9,$10, now(), $11)
+                            token_prefix, token_hash, last_heartbeat_at, org_id, up_since)
+         VALUES ($1,$2,'UP',$3,$4::jsonb,$5,$6,$7,$8,$9,$10, now(), $11, now())
          ON CONFLICT (hostname) DO UPDATE SET
            region = EXCLUDED.region,
            -- REGISTRATION NO LONGER LIFTS A QUARANTINE, and that is the fix rather than an
@@ -144,6 +144,24 @@ export async function workerRoutes(app: FastifyInstance) {
            automation_endpoint = EXCLUDED.automation_endpoint,
            token_prefix = EXCLUDED.token_prefix, token_hash = EXCLUDED.token_hash,
            last_heartbeat_at = now(),
+           -- WHEN THIS MACHINE CAME UP (migration 050) -- and only when it had actually gone away.
+           --
+           -- A worker registers once per boot, so a registration usually IS the boot. But not
+           -- always: ADR-0027 has a host re-register when its device set changes, which on a laptop
+           -- with a phone plugged in is routine and does not restart the machine. Stamping now()
+           -- unconditionally would reset the clock on a farm that had been up for a day every time
+           -- somebody plugged in a handset, and the number people read to decide "should this be
+           -- switched off" would quietly always be small.
+           --
+           -- So: keep the existing value while the host was already UP, and stamp only when it was
+           -- DOWN, QUARANTINED, or has never reported one.
+           --
+           -- NO BACKTICKS IN HERE: this is inside a JS template literal and one ends the string on
+           -- a line of prose. TS1005 then points at the next SQL keyword, not at the quote.
+           up_since = CASE
+             WHEN hosts.state = 'UP' AND hosts.up_since IS NOT NULL THEN hosts.up_since
+             ELSE now()
+           END,
            -- Only ever set, never cleared here: an enrolled host keeps its org across
            -- re-registrations, and a fleet-secret host stays NULL because that is what it sends.
            org_id = COALESCE(EXCLUDED.org_id, hosts.org_id)
