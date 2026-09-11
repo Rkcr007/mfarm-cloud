@@ -4157,3 +4157,51 @@ when the feature is broken. See issues 37 and 38.
     `/wd/hub/session`. `examples/java-testng/MfarmCapabilities.java` is still a file nobody has
     compiled, and no Maven/TestNG/Cucumber suite has run against this farm. The contract is
     verified; the adapter for it is not.
+
+80. **A SUITE IN A LANGUAGE THIS REPO HAD NEVER USED, RUNNING THE SAME HOUR IT WAS WRITTEN.**
+    2026-09-11, `c290950`.
+
+    Rakesh asked whether any test can execute here regardless of language and framework, or whether
+    specific capabilities have to be built for each. The way to answer it was not to reason about
+    W3C WebDriver but to write a suite in a language with no presence in this repo and see what the
+    farm did.
+
+    **`examples/python-pytest/` — three tests, written and green on real Cuttlefish within the hour,
+    with zero farm-side changes.** No capability, no adapter, no migration, no deploy. Deliberately
+    the same three assertions as `medishop-suite/specs/login.spec.js` against the same app, so the
+    only variable is the language. The console shows `MediShop_pytest_11_09_2026_00_13_40` ·
+    ALL PASSED 3/3, three named rows on three devices (cf-2, cf-1, cf-3).
+
+    **So the answer is: nothing to build, for anything that speaks WebDriver.** The `mfarm:`
+    namespace is a JSON object every language can construct, and the result hook is `executeScript`,
+    which every client already has. What is NOT covered is a framework that does not speak WebDriver
+    at all — Espresso and native UIAutomator go through `adb shell am instrument`, Maestro drives its
+    own agent. Grepped for it: there is no instrumentation door anywhere in `apps/api` or
+    `workers/agent`. Those need a new EXECUTION PATH, not a new capability, and that is a much bigger
+    piece of work than the question implies.
+
+    **The client trap is the same one in both languages, wearing different clothes.** WebdriverIO
+    drops `user`/`key` for hostnames it does not recognise as cloud providers; Python's stack can
+    drop `https://key@host/…` userinfo. Both end at "Missing or invalid credentials" for a request
+    that looked right. `conftest.py` subclasses `AppiumConnection` to set the header explicitly, and
+    says why.
+
+    **AND THE PART WORTH THE WHOLE EXERCISE.** I ran a deliberately-failing test to check the
+    example's failure path before shipping it — and **it PASSED**. A test asserting that copy which
+    exists nowhere in the app is on screen, reported green.
+
+    The instinct was that my selector helper was vacuous, which would have made all three passing
+    tests meaningless. It was not: a diagnostic on a real device returned `showing(absent) -> False`
+    and `find_elements(absent) -> 0`. Four re-runs of the identical file failed correctly. **The
+    anomaly is roughly one in six and I could not reproduce it or explain it**, so it is written down
+    in the example's README rather than smoothed away.
+
+    What the hub's own trace says about that session: six element lookups and then nothing — no
+    `execute/sync`, no `DELETE`. The client went quiet mid-poll. `sessionsReporting=0`.
+
+    **The farm did not claim a pass.** With nothing reported it shows "Not reported", which is
+    exactly the refusal to infer an outcome from a session ending that
+    `docs/ltcomp/mfarm-ci-session-console-analysis.md` §10 names as the thing not to copy from
+    LambdaTest. Only pytest claimed the pass. The design held under a case nobody had constructed
+    for it, and the reason I have evidence at all is that the hub writes down what it forwards
+    (ADR-0029) — without the command trace this would be one unexplainable green tick.

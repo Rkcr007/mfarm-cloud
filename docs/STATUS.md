@@ -167,7 +167,18 @@ migrates — every test renders by name, passing ones included. Seen on the farm
 none named. That is the case test rows are for, and it is smaller and later than "the console cannot
 show a test".
 
-### 7. A device arriving still restarts the agent
+### 7. Frameworks that do not speak WebDriver
+
+**Not a capability — an execution path, and none exists.** `/wd/hub` is the only automation entrance
+in this repo; there is no `adb shell am instrument` door anywhere in `apps/api` or `workers/agent`.
+
+Anything with an Appium client already works in any language, and `examples/python-pytest/` is the
+evidence: a suite in a language this repo had never used, written and green on real devices the same
+hour, with zero farm-side changes. **Espresso, native UIAutomator and Maestro are the ones that do
+not fit** — they are instrumentation, not WebDriver. Worth costing only if somebody actually arrives
+with such a suite.
+
+### 8. A device arriving still restarts the agent
 
 Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes common.
 
