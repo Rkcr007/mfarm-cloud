@@ -88,6 +88,14 @@ export const state = {
    * from — a sequential suite ends every session before starting the next.
    */
   runs: [],
+  /**
+   * What the Runs screen is currently asking for, and where it has got to.
+   *
+   * HELD IN STATE RATHER THAN IN THE DOM so the 5s poll cannot undo a filter mid-typing: the poll
+   * calls `refreshRuns()`, which reads this, so a refresh that landed while somebody was reading
+   * page three used to reset them to page one of everything.
+   */
+  runsQuery: { q: '', status: '', cursor: null, more: false, loading: false },
   /** `GET /runs/:id` for the run detail screen: the rollup plus every session in it. */
   runDetail: null,
   /** `GET /devices/:id/quarantine-log` for the device detail screen. One device at a time. */
@@ -1215,8 +1223,35 @@ async function refreshActions() {
   state.actions = (await api('/v1/app-actions?limit=100')).actions || [];
 }
 
-async function refreshRuns() {
-  state.runs = (await api('/v1/runs?limit=50')).runs || [];
+/**
+ * The Runs list, under whatever filter is on screen.
+ *
+ * `append` is what "Load more" passes: the same query with the cursor the last page returned.
+ * Everything else — the poll, a filter change, a new search — REPLACES, because a poll that
+ * appended would grow the table forever.
+ */
+async function refreshRuns({ append = false } = {}) {
+  const query = state.runsQuery;
+  const params = new URLSearchParams({ limit: '50' });
+  if (query.q) params.set('q', query.q);
+  if (query.status) params.set('status', query.status);
+  if (append && query.cursor) params.set('cursor', query.cursor);
+
+  /**
+   * A POLL MUST NOT THROW AWAY PAGES SOMEBODY LOADED. `refreshRuns()` with no arguments runs every
+   * five seconds, and a plain re-fetch of the first page would silently collapse a reader from
+   * three pages back to one — while they were looking at it. So a replacing fetch asks for as many
+   * rows as are already on screen, rounded up to the page size and capped at the API's own ceiling.
+   */
+  if (!append && state.runs.length > 50) {
+    params.set('limit', String(Math.min(200, Math.ceil(state.runs.length / 50) * 50)));
+  }
+
+  const out = await api(`/v1/runs?${params}`);
+  const page = out.runs || [];
+  state.runs = append ? [...state.runs, ...page] : page;
+  state.runsQuery.cursor = out.nextCursor;
+  state.runsQuery.more = Boolean(out.nextCursor);
 }
 
 /**
@@ -6613,7 +6648,18 @@ function runBuild(run) {
  */
 function runOutcome(run) {
   const t = run.tests || { total: 0, passed: 0, failed: 0, skipped: 0, sessionsReporting: 0 };
-  if (t.total === 0) {
+  /**
+   * THE CATEGORY COMES FROM THE SERVER (`run.outcome`), the counts from `tests`.
+   *
+   * This function used to decide the category itself, which was fine while it was the only place
+   * that asked. The moment Runs grew a `status=` filter there were two derivations of one question
+   * — and a list that selects rows by one rule and labels them by another is the D35 family exactly:
+   * four surfaces answering "what happened here" from different tables. `outcome` is missing only
+   * on a payload older than this deploy, so the old rule stays as the fallback rather than as the
+   * rule.
+   */
+  const outcome = run.outcome ?? (t.total === 0 ? 'not-reported' : t.failed > 0 ? 'failed' : 'passed');
+  if (outcome === 'not-reported') {
     return h('span', {
       class: 'caption', text: 'Not reported',
       title: 'Your suite has not reported any outcomes. The farm does not run your tests and '
@@ -6621,7 +6667,7 @@ function runOutcome(run) {
     });
   }
   return h('span', { class: 'row tight' },
-    t.failed > 0 ? pill(`${t.failed} failed`, 'bad') : pill('all passed', 'ok'),
+    outcome === 'failed' ? pill(`${t.failed} failed`, 'bad') : pill('all passed', 'ok'),
     h('span', { class: 'caption tnum', text: `${t.passed}/${t.total}` }),
     t.skipped > 0 ? h('span', { class: 'caption', text: `${t.skipped} skipped` }) : null,
   );
@@ -6707,11 +6753,64 @@ function runStat(label, value, note) {
   );
 }
 
+/**
+ * The filter bar over the Runs table.
+ *
+ * SEARCH IS DEBOUNCED AND THE INPUT IS NOT RE-CREATED ON EVERY KEYSTROKE. `render()` replaces the
+ * screen wholesale, so an input rebuilt per character loses focus and the caret — the bug that makes
+ * a search box feel broken. The element is cached across renders and only its value is authoritative.
+ *
+ * The status words are the badge's own: a chip called "passed" and a row reading "all passed" have
+ * to be the same question, and the server derives both from one expression (see `runs.ts`).
+ */
+let runSearchInput = null;
+let runSearchTimer = null;
+
+function runsFilterBar() {
+  if (!runSearchInput) {
+    runSearchInput = h('input', {
+      class: 'field', type: 'search', placeholder: 'Search run id or name…',
+      value: state.runsQuery.q, autocomplete: 'off',
+    });
+    runSearchInput.addEventListener('input', () => {
+      clearTimeout(runSearchTimer);
+      // Long enough that a typed word is one request, short enough to feel immediate.
+      runSearchTimer = setTimeout(async () => {
+        state.runsQuery.q = runSearchInput.value.trim();
+        state.runsQuery.cursor = null;
+        await refreshRuns();
+        render();
+      }, 250);
+    });
+  }
+  runSearchInput.value = state.runsQuery.q;
+
+  const chip = (value, label) => btn(label, state.runsQuery.status === value ? 'tiny' : 'tiny ghost',
+    async () => {
+      // Pressing the active chip clears it, so the filter needs no separate "all" affordance.
+      state.runsQuery.status = state.runsQuery.status === value ? '' : value;
+      state.runsQuery.cursor = null;
+      await refreshRuns();
+      render();
+    });
+
+  return h('div', { class: 'row between mb-gap' },
+    h('div', { class: 'row tight' }, runSearchInput),
+    h('div', { class: 'row tight' },
+      chip('failed', 'Failed'),
+      chip('passed', 'Passed'),
+      chip('not-reported', 'Not reported'),
+      chip('live', 'Live')),
+  );
+}
+
 function screenRuns() {
   const rows = state.runs;
+  const filtered = Boolean(state.runsQuery.q || state.runsQuery.status);
   return [
     pageHead([{ label: 'Farm' }], 'Runs',
       'One row per CI job, not per test. A suite joins a run by setting the mfarm:runId capability.'),
+    runsFilterBar(),
     card(null, { class: 'flush' },
       rows.length
         ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
@@ -6749,10 +6848,34 @@ function screenRuns() {
               h('td', { class: 'right' }, btn('Open', 'tiny ghost', () => go(`#/runs/${encodeURIComponent(r.runId)}`))),
             ))),
           ))
-        : empty('No runs yet.',
-            'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do. '
-            + 'The farm groups sessions by it; it does not run your tests and cannot judge them.'),
+        /**
+         * TWO DIFFERENT EMPTIES, and telling them apart is the whole point. "No runs yet" under an
+         * active filter is a lie that sends somebody to check their CI configuration when the
+         * answer is that they typed a name with a typo in it.
+         */
+        : filtered
+          ? empty('No runs match that.',
+              'Nothing here has that id or name under the filters you have set. Clear them to see the whole list.')
+          : empty('No runs yet.',
+              'Add mfarm:runId to your suite\'s capabilities — any id your CI already has will do. '
+              + 'The farm groups sessions by it; it does not run your tests and cannot judge them.'),
     ),
+    // Only where there IS another page. A permanently visible "Load more" that does nothing on the
+    // last page is the control people learn to distrust.
+    state.runsQuery.more
+      ? h('div', { class: 'row center mt-md' },
+          btn(state.runsQuery.loading ? 'Loading…' : 'Load more', 'ghost', async () => {
+            if (state.runsQuery.loading) return;
+            state.runsQuery.loading = true;
+            render();
+            try {
+              await refreshRuns({ append: true });
+            } finally {
+              state.runsQuery.loading = false;
+              render();
+            }
+          }))
+      : null,
     h('p', { class: 'caption mt-md',
       text: 'Pass and fail come from the suite, never from the farm — WebDriver has no concept of '
         + 'an assertion. A run reading "Not reported" ran, but nothing told us how it went: post to '
