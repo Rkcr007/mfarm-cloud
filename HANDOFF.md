@@ -4255,3 +4255,30 @@ when the feature is broken. See issues 37 and 38.
     `x-csrf-token` where the server wants `x-mfarm-csrf`, and a deploy-wait loop whose grep matched
     the commit in "origin/main is 55614c2" rather than in the serving-image line, so it reported a
     deploy that had not happened. Each looked like a finding about the product for a few minutes.
+
+82. **THE NARROW SCOPE COSTS A SUITE NOTHING, MEASURED.** 2026-09-11, `35c1518`.
+
+    Entry 81 shipped ADR-0034 and named what it had not proved: no suite had run with an
+    `automation`-scoped key, and "should be unaffected" is the phrase this register exists to catch.
+
+    **Both halves now checked on real Cuttlefish.** `examples/python-pytest` with an
+    `automation` key: **3 passed in 56s**, three named rows, same as with a `full` one. The same key
+    asking to delete a session's evidence: **403**, naming the scope that can. The scope is real in
+    exactly one direction and invisible in the other, which is what it was designed to be.
+
+    **The plaintext never entered this conversation.** Keys were minted by `createApiKey` inside the
+    running API container and piped straight into the test container's environment, so what came
+    back was test output and a prefix. Worth keeping as the pattern for any future check that needs
+    a live credential.
+
+    **A false alarm on the way, and it was mine again.** The first attempt produced three errors in
+    0.34 seconds and looked like the scope refusing session creation. It was not: a raw
+    `POST /wd/hub/session` with an `automation` key returns **200**, and the suite passes. The key
+    my shell extracted in that first run was malformed, and the `case "$KEY" in mfk_*)` guard I had
+    written to catch exactly that matched anyway, because a trailing-junk key still starts with
+    `mfk_`. **A validity check that only looks at a prefix is not a validity check.** Fifth
+    instrument defect in two days.
+
+    **Five keys minted for the check, five revoked by label in one statement** — which is ADR-0034
+    demonstrating its own argument. Before 049 those would have been five indistinguishable prefixes
+    sitting beside the live deploy key, and revoking them would have meant guessing.
