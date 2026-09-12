@@ -122,10 +122,91 @@ Four defects, and three of them only existed because the pieces were joined:
    already treats as a refusal rather than a fault. **Found in a browser against a real client;
    every test was green.**
 
-## What is NOT verified
+## Amendment, 2026-09-12 — the last hop is BUILT, and it was not before
 
-**The device's proxy setting on real hardware.** Everything downstream of `adb shell settings put
-global http_proxy <host>:<port>` is exercised by pointing a real HTTP client at the same listener,
-which is what an Android guest does once that setting is in place. What has not been run is that one
-command against a live Cuttlefish guest, and whether the setting survives the reset between
-sessions. That needs a lab session and is recorded in `docs/STATUS.md` §4 rather than assumed here.
+**This ADR was accepted while the feature could not work.** Everything above is true of the parts;
+nothing joined them to a device. `DeviceProxy` had exactly one caller in the repo and it was its own
+test — nothing in `workers/agent` ever constructed one, so no listener existed on any farm — and
+nothing anywhere ran `settings put global http_proxy`, so no guest was ever pointed at one. The
+section this replaces called that gap "one `adb` command not yet run against a live guest". It was
+not a command waiting to be run; it was a hop with no code behind it, described as tested because
+everything *downstream* of it was.
+
+The end-to-end test is the reason this was invisible. It stands a real `DeviceProxy` up itself and
+points an HTTP client at it, which is a faithful model of what an Android guest does **once the
+setting is in place** — and therefore proves every link except the one that puts it in place. A
+green suite said the feature worked; a farm would have said `mfarm:tunnel` did nothing at all.
+
+### What was added
+
+**The control plane OFFERS, the agent CONVERGES.** `WorkerHeartbeatResponse.proxies` carries the
+full set of this host's devices whose live session named a tunnel, re-sent on every beat — the same
+shape as `resets`, for the reason that shape exists: nothing on a device host listens, so anything
+delivered once can be missed once. The agent makes its devices match the set. A device that stops
+appearing has its proxy turned off, so **a session ending is the whole teardown** — there is no
+"proxy off" message to lose, which matters more here than anywhere else in the worker, because what
+leaks when a teardown is missed is a live route from a device into somebody's private network and
+the device is about to be handed to a different tenant. Everything uncertain resolves to OFF: a beat
+that does not arrive changes nothing, and a control plane too old to send the field sends none,
+which reads as "nobody".
+
+**The offer names a device and never the tunnel.** Architecture rule 4 on the path where it matters
+most, and the same chain `routeFor` walks — asked one beat earlier, because a guest has to be TOLD
+to use a proxy and an Android setting is not applied by a request arriving.
+
+**The listener binds the address the DEVICE named, read off the guest.** cvd gives every instance
+its own /30 with the host at the other end — `cf-1` on 192.168.97.2 with the host at .1, `cf-2` on
+.6 with the host at .5 — so the proxy binds that gateway and a request arriving on it came from that
+device's subnet by construction. It is read from the guest's own routing table rather than computed
+from the instance number: the arithmetic is right until cvd renumbers, and a listener bound to a
+wrong-but-plausible address fails as a sixty-second timeout rather than as an error. The trap in
+parsing it is real and is pinned by a test against a captured table — the guest also carries
+`default dev dummy0`, Android's "this network goes nowhere" placeholder, and it comes FIRST.
+
+### `mfarm:tunnel` now requires a capability, which reverses one paragraph above
+
+The **NOT AN ALLOCATION CONSTRAINT** reasoning said `mfarm:tunnel` narrows nothing because "every
+device on this farm can proxy". That was true only in the sense that no device could: nothing
+applied the setting anywhere, so there was nothing to differ about. Now that Cuttlefish implements
+it and an iOS simulator cannot, the choice is between refusing the allocation up front and handing
+back a device that installs a build, runs for four minutes and reaches nothing.
+
+So a session naming a tunnel requires **`network-proxy`**, derived by the hub and by `POST
+/v1/sessions` rather than demanded of the caller — a client should not have to know the second name
+to ask for the first thing. It still does not narrow by device CLASS, which is what that paragraph
+was protecting. The capability is **observed, never configured**: `cuttlefish.ts` declares it only
+after a guest actually answers with a gateway, which is ADR-0003's rule and the rule this repo has
+broken by declaring `recording` with nothing behind it.
+
+**Physical handsets do not declare it yet, deliberately.** `settings put global http_proxy` works
+over adb on a handset; what the agent cannot honestly answer is *which* host address that phone can
+reach, since it depends on a LAN nobody here has observed. Reading it from configuration would be
+exactly the ADR-0003 violation named above, and the failure it produces — a proxy bound to an
+address the phone cannot route to — is a silent timeout. A tunnelled session therefore does not
+allocate a handset, and says so as "no capacity" rather than running and reaching nothing.
+
+## Verified on hardware
+
+**2026-09-12, on the lab (`mfarm-lab`, four Cuttlefish guests, AOSP 17, `CF_RESET_MODE=powerwash`).**
+
+**The Android setting does what this ADR assumed.** `adb shell settings put global http_proxy
+192.168.97.1:8899` against a live guest, with a listener on that address: an app's request arrived
+as `GET http://probe.mfarm.invalid/last-hop` — an absolute-URL proxy request, which is exactly the
+shape `device-proxy.ts` parses and refuses to treat as a path. The guest reaches the host at its
+own gateway, and no reboot or app restart beyond the app itself was needed.
+
+**An `https://` target arrives as a `CONNECT`, exactly as the consequence above predicts.** The
+probe logged `CONNECT clientservices.googleapis.com:443` within seconds. The 405 is not theoretical.
+
+**The setting does NOT survive the reset between sessions, and that is the answer we wanted.** A
+device was allocated, released and reset through the product's own path; its `http_proxy` came back
+`null` while an untouched neighbour kept the value. So the route into a customer's network cannot
+outlive the tenant that opened it, and the agent must re-apply per session — which is what the
+converging sweep does.
+
+## What is still NOT verified
+
+**`https://` through the tunnel**, and it is unbuilt rather than untested — see the consequence
+above. Closing it means a byte-stream channel kind alongside the framed one.
+
+**A handset's reachable host address**, which is why physical devices do not declare `network-proxy`.

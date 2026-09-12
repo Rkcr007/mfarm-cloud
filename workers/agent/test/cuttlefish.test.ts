@@ -23,7 +23,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile, chmod } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CuttlefishDevice, findFleetInstance, profileFlags } from '../src/devices/cuttlefish.ts';
+import { CuttlefishDevice, defaultGatewayFrom, findFleetInstance, profileFlags } from '../src/devices/cuttlefish.ts';
 import { DEVICE_PROFILES } from '../src/devices/profiles.ts';
 
 /**
@@ -1189,5 +1189,51 @@ exit 0
     assert.equal(await exists(old), false, 'the stale recording is swept');
     assert.equal(await exists(fresh), true, 'a recording that could still be writing is left alone');
     assert.equal(await exists(other), true, 'only .webm files are swept');
+  });
+});
+
+/**
+ * The address a guest reaches its host on — ADR-0037's first hop, parsed from the guest's own
+ * routing table.
+ *
+ * THE FIXTURE IS REAL. Every line below was read off `cf-1` on the lab host (AOSP 17, cvd, four
+ * instances) on 2026-09-12 with `adb shell ip route show table all`, trimmed only of the IPv6 rows
+ * that carry no IPv4 gateway. That matters because the trap here is specific to what Cuttlefish
+ * actually emits, and an invented fixture would not contain it.
+ */
+describe('the guest gateway a device proxy binds', () => {
+  const REAL_CF1_TABLE = `224.0.0.0/24 dev buried_eth0 table 1000000015 proto static scope link 
+default dev dummy0 table 1002 proto static scope link 
+default via 192.168.97.1 dev buried_eth0 table 1015 proto static mtu 1500 
+192.168.97.0/30 dev buried_eth0 table 1015 proto static scope link 
+192.168.97.0/30 dev buried_eth0 proto kernel scope link src 192.168.97.2 
+local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1 
+local 192.168.97.2 dev buried_eth0 table local proto kernel scope host src 192.168.97.2 
+broadcast 192.168.97.3 dev buried_eth0 table local proto kernel scope link src 192.168.97.2 `;
+
+  test('reads the host side of the /30 cvd gave this instance', () => {
+    assert.equal(defaultGatewayFrom(REAL_CF1_TABLE), '192.168.97.1');
+  });
+
+  test('does not take dummy0, which is the default with nowhere to go', () => {
+    // `default dev dummy0` comes FIRST in the real table. A parser that matched the bare word
+    // would take that line, find no address in it, and bind the proxy to nothing — and the guest
+    // would then time out against a listener that was never started, with nothing in any log.
+    const dummyOnly = 'default dev dummy0 table 1002 proto static scope link \n';
+    assert.equal(defaultGatewayFrom(dummyOnly), undefined);
+  });
+
+  test('a guest with no route off its own subnet answers nothing', () => {
+    // Which is what `refreshProxyCapability` reads as "this device cannot be proxied", so the
+    // device does not declare `network-proxy` and is never allocated to a tunnelled session.
+    assert.equal(defaultGatewayFrom('192.168.97.0/30 dev buried_eth0 proto kernel scope link\n'), undefined);
+  });
+
+  test('the second instance gets its own gateway, not the first one', () => {
+    // Measured on the lab: cf-1 sits on .2 with the host at .1, cf-2 on .6 with the host at .5.
+    // One shared address would make "which device sent this" a guess about which tenant's network
+    // to open — see the one-listener-per-device note in `device-proxy.ts`.
+    const cf2 = 'default via 192.168.97.5 dev buried_eth0 table 1015 proto static mtu 1500 \n';
+    assert.equal(defaultGatewayFrom(cf2), '192.168.97.5');
   });
 });

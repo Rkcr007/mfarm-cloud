@@ -92,7 +92,7 @@ gcloud compute instances list --project mfarm-lab --format='table(name,status)'
 | **Test rows** | **Built 2026-09-12.** A run's session row unfolds into a row per test, and the session screen lists everything it reported — passing tests named, not only counted. No new endpoint: `/v1/sessions/:id/results` already answered it. | A test that ran and never reported is not here and is not counted as passing — the farm cannot see an assertion. |
 | **Execution timeline UI** | **Built (2026-09-07).** A *What happened* card on the run screen, and a *Steps* card on the session screen with the failing WebDriver commands in red (ADR-0029). | Red is reserved for a test failing; an incident is amber. The distinction the run screen already kept, kept here too. |
 | **Failure evidence** | **Built (2026-09-07).** A failed result requests its own screenshot and logcat, each naming the test (migration 040). | Up to one beat — ten seconds — after the assertion. The step trace is what makes a late screenshot readable. |
-| **Tunnel to a private host** | **Built 2026-09-12 (ADR-0037, migration 052).** `npx @mfarm/cli tunnel` dials out from the customer's network; a session sets `mfarm:tunnel` and the device's HTTP traffic reaches `staging.acme.internal`. The allow-list is enforced in the customer's own client, default deny. Console screen at `#/tunnels`. | **`https://` targets are not proxied yet** — that needs a CONNECT byte-stream channel; the proxy says so rather than failing as a certificate error. And **the Android proxy setting is unverified on hardware**: everything downstream of `adb shell settings put global http_proxy` is tested, that one command is not. |
+| **Tunnel to a private host** | **Built 2026-09-12 (ADR-0037, migration 052), and its last hop wired and verified on hardware the same day.** `npx @mfarm/cli tunnel` dials out from the customer's network; a session sets `mfarm:tunnel`, the beat tells the worker which devices may reach it, and the agent points each guest at a per-device listener on its own host. The allow-list is enforced in the customer's own client, default deny. Console screen at `#/tunnels`. | **`https://` targets are not proxied yet** — that needs a CONNECT byte-stream channel; the proxy says so rather than failing as a certificate error. And **physical handsets do not declare `network-proxy`**, so a tunnelled session does not allocate one — the agent cannot honestly say which host address a phone on somebody's LAN can reach. |
 | **Sharing a failure** | **Built 2026-09-12 (ADR-0036, migration 051).** A revocable, expiring link at `/s/<token>` shows ONE test result — its message, the screenshot captured for it, and the steps between the previous test and this one — to somebody with no account here. Its own page, not the console. | It deliberately carries **no logcat and no recording**, and those are decisions rather than gaps — see the ADR. A link can outlive the evidence it points at, since artifacts go on their org's retention schedule. |
 | **Hub contract** | **Extended and DEPLOYED 2026-09-09** (`7faf06c`, migration 048, ADR-0033).** A session takes its test name at creation (`mfarm:name`), a run takes a readable one (`mfarm:runName`), a suite can ask for a device class (`mfarm:deviceClass`), and an outcome can be reported through the driver the teardown already holds (`executeScript("mfarm-status=…")`). `examples/java-testng/` is the adapter for a suite arriving from LambdaTest. | **VERIFIED ON REAL CUTTLEFISH 2026-09-11** — `deploy/verify-hub-contract.mjs`, 30/30: a session reads back its test name before any result is posted, `mfarm:deviceClass=mfarm-x1-pro` lands on the X1 Pro, an absent class is refused *naming the class*, the teardown hook writes a named row through the driver, a misspelled status is refused without killing the session, an ordinary `executeScript` still reaches Appium, and the second session joins the run without renaming it. Seen on the console: Runs shows `Android_UAE_Expenses_…` over its CI id. The remaining gap is narrower than this page used to claim — see §4.6. |
 | **Queue** | **Working, fair (ADR-0028), and it says where you stand (migration 043).** FIFO within an org, round-robin across them, per-org caps, device-class matching (ADR-0025). A queued caller gets a position and, where one can be proved, an estimate. | The estimate reads the lease, so it is the LATEST a device frees — usually pessimistic — and it is omitted rather than guessed where no lease is readable. |
@@ -195,23 +195,36 @@ the console. Two surfaces close it, and neither adds an endpoint —
 assertion; a suite that crashes before its `afterEach` leaves nothing here, and the card says so
 rather than counting it as passing.
 
-### 7. The tunnel's last hop needs one lab session
+### 7. `https://` through the tunnel, and handsets
 
-**Everything except one `adb` command is built and tested** (ADR-0037). The path from a device's
-HTTP client through both tunnels to a host on the customer's network is exercised end to end over
-real sockets, with a real CLI client and a real private server — `apps/api/test/tunnel-end-to-end.test.ts`.
+**The tunnel's last hop was NOT "one adb command away" — it was unbuilt, and this section said
+otherwise.** ADR-0037 shipped with `DeviceProxy` tested end to end over real sockets and with no
+caller anywhere in the worker: nothing started a listener, nothing ran `settings put global
+http_proxy`, and `mfarm:tunnel` therefore did nothing on a farm. The previous version of this
+section described that as a command waiting to be run against a live guest, because everything
+*downstream* of the command was genuinely tested. It is D47, and it is the clearest example this
+repo has of a feature that a green suite cannot distinguish from a working one.
 
-What has not been run is `adb shell settings put global http_proxy <host>:<port>` against a live
-Cuttlefish guest, and whether that setting survives the reset between sessions. An Android guest
-with that setting makes exactly the request the test makes by pointing an HTTP client at the same
-listener, so what is unverified is the setting, not the path. It needs the lab up for about ten
-minutes.
+**Built and verified on hardware 2026-09-12.** The beat now carries the devices whose live session
+named a tunnel; the agent converges on that set, binding one listener per device on the address the
+guest itself reports as its gateway and pointing the guest at it. Measured on the lab: a WebView
+request arrives at the host listener as an absolute-URL proxy request, and the setting does **not**
+survive the reset between sessions — so a route into a customer's network cannot outlive the tenant
+that opened it. See ADR-0037's amendment for what was added and for the one paragraph it reverses.
 
-**Also unbuilt and deliberately so: `https://` through the tunnel.** It needs a raw byte-stream
+**Still unbuilt and deliberately so: `https://` through the tunnel.** It needs a raw byte-stream
 channel kind beside the framed one, because a CONNECT is a TLS stream rather than a request and a
 response. The proxy answers 405 with a sentence naming the limitation, which is the honest failure —
 accepting the CONNECT and producing a socket that speaks nothing surfaces in an app as a certificate
-error and sends somebody to debug the wrong machine.
+error and sends somebody to debug the wrong machine. The lab confirmed the case is real rather than
+theoretical: a guest pointed at the proxy sent `CONNECT clientservices.googleapis.com:443` within
+seconds of being pointed there.
+
+**Still not offered on physical handsets.** `settings put global http_proxy` works over adb on a
+phone; what the agent cannot honestly answer is which host address a phone on somebody's LAN can
+reach. Reading it from configuration would be a capability declared from config rather than from
+observation — the rule this repo has already broken once — and the failure it produces is a silent
+timeout. So handsets do not declare `network-proxy` and a tunnelled session does not allocate one.
 
 ### 8. Frameworks that do not speak WebDriver
 
@@ -238,7 +251,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 | Migrations | 52; 051 is deployed, **052 is not on the farm yet** |
 | Decisions | 36 ADRs, numbered to 0037 (there is no 0013) |
 | Merged PRs | 173 |
-| Defects | 46 recorded, **44 closed** |
+| Defects | 47 recorded, **45 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |
 | Live view | 49–53 fps, ~39ms round trip, direct path |

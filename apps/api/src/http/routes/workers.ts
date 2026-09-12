@@ -4,7 +4,7 @@ import { withSystem } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import { generateWorkerToken, sha256, safeEqualHex } from '../../auth.ts';
 import { redeemEnrollment, markRedeemed } from '../../enrollment.ts';
-import { negotiate, deviceAutomationEndpoint, classifyReason, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
+import { negotiate, deviceAutomationEndpoint, classifyReason, TUNNEL_CAPABILITY, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
 import { finishRecovery, resetComplete, sessionAttach } from '../../allocator.ts';
 import { ingest, type MeterKind } from '../../metering.ts';
 import { recordInfraRetry } from '../../attempts.ts';
@@ -363,7 +363,7 @@ export async function workerRoutes(app: FastifyInstance) {
     // evaluated cannot be overridden by a test that sets it — the trap `appRoutes` documents and
     // the reason every route file in here calls `loadConfig()` from inside a handler.
     const videoMode = loadConfig().videoRecording;
-    const { row, resets, actions } = await withSystem(async (c) => {
+    const { row, resets, actions, proxies } = await withSystem(async (c) => {
       const { rows } = await c.query(
         // `up_since` IS MAINTAINED HERE, NOT ONLY AT REGISTRATION (migration 050, ADR-0035).
         //
@@ -632,8 +632,47 @@ export async function workerRoutes(app: FastifyInstance) {
         [hostId],
       );
 
+      /**
+       * Which of this host's devices should have their HTTP traffic pointed at the agent's proxy
+       * (ADR-0037, migration 052) — the FIRST hop of the tunnel path, and the one nothing offered.
+       *
+       * THE SAME CHAIN `routeFor` WALKS, asked one beat earlier. `proxy-router.ts` resolves a
+       * device to its live session when a request already exists; this asks the same question
+       * before one does, because the guest has to be TOLD to use a proxy and an Android setting is
+       * not applied by a request arriving. Both read `mfarm:tunnel` from either bag for the reason
+       * `pickTunnel` gives: the hub stores requested capabilities and the allocator stores derived
+       * constraints, and which one carries this key has moved once already.
+       *
+       * THE NAME IS NOT SENT, only the device. See `WorkerHeartbeatResponse.proxies` — a worker
+       * that knew the tunnel name would be a worker that could ask for a different one.
+       *
+       * Re-sent in full on every beat, so a device whose session ENDED simply stops appearing and
+       * the worker turns its proxy off. That is the whole teardown: there is no "proxy off" message
+       * to miss, which matters because the thing being torn down is a route into somebody's
+       * private network.
+       */
+      const { rows: proxies } = await c.query(
+        `SELECT d.id, d.local_id
+           FROM devices d
+           JOIN LATERAL (
+                SELECT s.requested, s.constraints
+                  FROM sessions s
+                 WHERE s.device_id = d.id AND s.state IN ('ACTIVE', 'ALLOCATING')
+                 ORDER BY s.started_at DESC NULLS LAST
+                 LIMIT 1
+           ) s ON true
+          WHERE d.host_id = $1
+            AND COALESCE(
+                  nullif(s.requested   ->> $2, ''), nullif(s.requested   ->> 'tunnel', ''),
+                  nullif(s.constraints ->> $2, ''), nullif(s.constraints ->> 'tunnel', '')
+                ) IS NOT NULL`,
+        [hostId, TUNNEL_CAPABILITY],
+      );
+
       return {
         row: { ...rows[0], state },
+        proxies: proxies.map((p: { id: string; local_id: string }) =>
+          ({ deviceId: p.id, localId: p.local_id })),
         resets: cleaning.map((d: { id: string; fence: string | number; state: string;
                                    session_id: string | null; keep_video: boolean }) => ({
           deviceId: d.id,
@@ -687,7 +726,7 @@ export async function workerRoutes(app: FastifyInstance) {
       };
     });
     // Told on every beat so a host that was quarantined while partitioned learns it must drain.
-    return { ok: true, hostState: row?.state ?? 'DOWN', resets, actions };
+    return { ok: true, hostState: row?.state ?? 'DOWN', resets, actions, proxies };
   });
 
   /**

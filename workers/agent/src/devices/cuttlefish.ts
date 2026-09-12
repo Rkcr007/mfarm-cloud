@@ -249,6 +249,23 @@ export function profileFlags(profile: DeviceProfile | undefined): string[] {
   ];
 }
 
+/**
+ * The IPv4 gateway a guest would send off-net traffic to, out of `ip route show table all`.
+ *
+ * SEPARATE AND EXPORTED so it can be tested against a REAL routing table rather than an imagined
+ * one. The table that matters is not the tidy example: an Android guest carries several, and
+ * Cuttlefish's includes `default dev dummy0` — the platform's "this network goes nowhere"
+ * placeholder, which has no gateway at all. A parser that matched the bare word `default` would
+ * take dummy0's line, find no address, and bind a proxy to nothing; one that took the first line
+ * with an address is right by luck rather than by rule.
+ *
+ * So the rule is `default via <ipv4> dev`, and the first such line wins — on Cuttlefish there is
+ * exactly one, and a guest with two ways off-net can be reached on either.
+ */
+export function defaultGatewayFrom(routeTable: string): string | undefined {
+  return routeTable.match(/^\s*default via (\d{1,3}(?:\.\d{1,3}){3}) dev /m)?.[1];
+}
+
 export class CuttlefishDevice implements DeviceControl {
   readonly info: DeviceInfo;
   private readonly opts: Required<Pick<CuttlefishOptions, 'webrtcPort' | 'gpuMode'>> & CuttlefishOptions;
@@ -388,6 +405,7 @@ export class CuttlefishDevice implements DeviceControl {
     // Before the branch, because start() has two exits and both must publish it.
     await this.refreshAbis();
     await this.refreshRecordingCapability();
+    await this.refreshProxyCapability();
 
     // In powerwash mode there is nothing to take and nothing to be stale: the reset is a first-boot
     // restore, so the whole snapshot apparatus below is skipped rather than kept warm for a path
@@ -895,6 +913,74 @@ export class CuttlefishDevice implements DeviceControl {
       // Leave it undefined. A device that cannot answer getprop has bigger problems, and they will
       // surface somewhere that can say more than this can.
     }
+  }
+
+  /**
+   * Can this guest be pointed at a proxy on its host, and where is its host? (ADR-0037.)
+   *
+   * OBSERVED, NEVER CONFIGURED — the rule this file has broken twice and documents both times. The
+   * capability is declared only when the guest actually answers with a gateway, because the whole
+   * value of declaring it is that a session naming `mfarm:tunnel` is refused a device that cannot
+   * serve it rather than allocated one that silently reaches nothing.
+   *
+   * Cached, because it is read on every beat that turns a proxy on and the answer is a property of
+   * how cvd wired this instance. Cleared by `start()` alone, which is also the only thing that can
+   * change it: a reset restores guest state, not the tap this VM is plugged into.
+   */
+  private async refreshProxyCapability(): Promise<void> {
+    this.gatewayCache = undefined;
+    const gw = await this.proxyHost().catch(() => undefined);
+    const has = this.info.capabilities.includes('network-proxy' as Capability);
+    if (gw && !has) this.info.capabilities = [...this.info.capabilities, 'network-proxy' as Capability];
+    if (!gw && has) {
+      this.info.capabilities = this.info.capabilities.filter((c) => c !== 'network-proxy');
+    }
+  }
+
+  private gatewayCache?: string;
+
+  /**
+   * The host address THIS guest reaches its host on — read from the guest's own routing table.
+   *
+   * ASKED RATHER THAN COMPUTED. cvd gives every instance its own /30 with the host on the other
+   * end (`cf-1` sits on 192.168.97.2 with the host at .1, `cf-2` on .6 with the host at .5), so the
+   * arithmetic `192.168.97.(4N-3)` is correct today and is a silent timeout the day cvd renumbers.
+   * The guest already knows the answer; asking it costs one adb call per boot.
+   *
+   * `default via X dev Y` and not merely `default`: the guest also carries a `default dev dummy0`
+   * with no gateway, which is Android's "this network goes nowhere" placeholder. Matching the bare
+   * word would bind the proxy to nothing at all.
+   */
+  async proxyHost(): Promise<string | undefined> {
+    if (this.gatewayCache) return this.gatewayCache;
+    const out = await run('adb', ['-s', this.adbSerial, 'shell', 'ip', 'route', 'show', 'table', 'all'],
+      process.cwd(), 15_000);
+    const gw = defaultGatewayFrom(out);
+    if (gw) this.gatewayCache = gw;
+    return gw;
+  }
+
+  /**
+   * Point this guest's HTTP traffic at `host:port`, or clear it.
+   *
+   * `settings put global http_proxy` IS THE WHOLE MECHANISM, and it is the one link in ADR-0037's
+   * path that had never been run against a real guest. Verified on the lab 2026-09-12: an app's
+   * request arrives at the host listener as an absolute-URL proxy request, which is exactly the
+   * shape `DeviceProxy` parses.
+   *
+   * `:0` CLEARS IT — that is AOSP's own sentinel for "no proxy", written by the Settings app and
+   * read by `ConnectivityService`. Deleting the key instead leaves stacks that cached the old value
+   * with no change to notice.
+   *
+   * ALREADY-RUNNING APPS DO NOT ALL NOTICE. Android broadcasts the change and WebView and the
+   * platform HTTP stack pick it up, but an app holding its own OkHttp client with a proxy resolved
+   * at construction keeps the old one. The agent applies this BEFORE a session's app is launched,
+   * which is the case that matters; a suite that changes tunnels mid-session does not exist.
+   */
+  async setHttpProxy(value: string | null): Promise<void> {
+    await run('adb',
+      ['-s', this.adbSerial, 'shell', 'settings', 'put', 'global', 'http_proxy', value ?? ':0'],
+      process.cwd(), 15_000);
   }
 
   private async refreshResetCapability(): Promise<void> {

@@ -48,6 +48,13 @@ export const CAPABILITIES = [
   'screenshot',       // a single frame on demand, out of band from the media stream
   'ui-hierarchy',        // the on-screen view tree on demand, for building selectors
   'network-capture',     // per-session proxy: isolation + record/replay + waterfall (v2 decision 9)
+  'network-proxy',       // this device's HTTP traffic can be pointed at a proxy on its own host,
+                         // which is the first hop of ADR-0037's path to the customer's network.
+                         // DECLARED, NOT ASSUMED: ADR-0037 reasoned that `mfarm:tunnel` narrows
+                         // nothing because "every device can proxy", and that was true only while
+                         // no device could — nothing applied the setting at all. An iOS simulator
+                         // still cannot, so a session naming a tunnel requires this and gets "no
+                         // capacity" rather than a device that silently reaches nothing.
   'gpu',                 // hardware rendering available; absent means software rendering only
   'webdriver',           // an automation (Appium) server fronts this device, so it can serve the
                          // WebDriver hub (v2 decision 10). Not required for interactive use.
@@ -318,6 +325,26 @@ export interface WorkerHeartbeatResponse {
    * with `actions`, which is scoped to the calling host and idempotent, so re-sending is harmless.
    */
   actions?: AppActionRequest[];
+  /**
+   * Devices of THIS host that should have their HTTP traffic pointed at the agent's proxy right
+   * now, because the session holding each one named a tunnel (ADR-0037, migration 052).
+   *
+   * A CONVERGING SWEEP, NOT AN EVENT. The full desired set is re-sent on every beat and the worker
+   * makes the device match it — the same shape as `resets`, and for the same reason: the control
+   * plane cannot push, so anything delivered once can be missed once. An agent that restarted
+   * mid-session, or missed a beat while the proxy was being turned on, converges on the next beat
+   * instead of leaving a device that silently reaches nothing for the rest of its lease.
+   *
+   * A DEVICE, AND NOTHING ELSE. The tunnel's NAME is deliberately absent: architecture rule 4 says
+   * a worker names only its own devices, and `proxy-router.ts` resolves the org and the tunnel from
+   * rows when the device actually asks to fetch something. A worker that knew the tunnel name would
+   * be a worker that could ask for a different one.
+   *
+   * Absent rather than `[]` on a control plane that predates this, which an agent reads as "no
+   * device on this host wants a proxy" — and that is the safe direction, because it turns proxies
+   * OFF rather than leaving one on for a device that has changed tenants.
+   */
+  proxies?: Array<{ deviceId: string; localId: string }>;
 }
 
 /**
