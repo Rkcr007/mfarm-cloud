@@ -125,7 +125,12 @@ function infraPayload(over: Record<string, unknown> = {}) {
       load1: 3.2, loadPerCore: 0.2, memUsedPct: 44, memAvailableMb: 36000, memTotalMb: 65536,
     },
     devices: { total: 4, ready: 3, allocated: 1, quarantined: 0, offline: 0 },
-    maintenance: { drained: false, since: null, reason: null, source: null },
+    // What a confirmation dialog has to name: tenants who would notice.
+    sessions: { active: 1 },
+    // Typed loosely so a test can hand back a DRAINED host without TypeScript inferring `null` as
+    // the only possible value of every field from this one literal.
+    maintenance: { drained: false, since: null as string | null, reason: null as string | null,
+                   source: null as string | null },
     cost: { perHour: 65, sinceUp: 195, today: 260, monthToDate: 3100 },
     utilisationPct: 22, alerts: [],
     ...o,
@@ -4625,5 +4630,170 @@ describe('the infrastructure page does not chase its own tail', () => {
       globalThis.fetch = originalFetch;
       mod.state.infra = { data: infraPayload(), loaded: true, error: null, fetchedAt: Date.now(), loading: false };
     }
+  });
+});
+
+/**
+ * The infrastructure OPERATIONS — the buttons, what they say before they act, and who gets them.
+ *
+ * The dom-shim discarded every handler until 2026-09-12, which is how a dead control tested green.
+ * It dispatches now, so these tests press the button and assert on the dialog it opens rather than
+ * on the fact that a button exists — the wiring, not the handler.
+ */
+describe('infrastructure operations', () => {
+  /** The dialog element the console reuses for every confirmation. */
+  const dialogText = () => textOf((globalThis as unknown as {
+    document: { getElementById(id: string): unknown };
+  }).document.getElementById('dialog'));
+
+  test('NO CONTROL IS DRAWN WHILE THE SERVER SAYS IT CANNOT DRAIN', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({ capabilities: { drain: false, power: false, services: false } });
+    const tree = mod.SCREENS.infra();
+    assert.ok(!findByText(tree, 'Drain'), 'a Drain button was drawn with no route behind it');
+    assert.ok(!findByText(tree, 'Resume'));
+  });
+
+  test('a drainable host offers Drain, and a drained one offers Resume', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({ capabilities: { drain: true, power: false, services: false } });
+    assert.ok(findByText(mod.SCREENS.infra(), 'Drain'), 'no Drain button');
+
+    const drained = infraPayload({ capabilities: { drain: true, power: false, services: false } });
+    for (const h of drained.hosts) {
+      h.maintenance = { drained: true, since: new Date(Date.now() - 600_000).toISOString(),
+                        reason: 'kernel upgrade', source: 'operator' };
+    }
+    mod.state.infra.data = drained;
+    const tree = mod.SCREENS.infra();
+    assert.ok(findByText(tree, 'Resume'), 'a drained host offers no way back');
+    assert.ok(!findByText(tree, 'Drain'), 'a drained host still offers Drain');
+  });
+
+  test('a host nobody can reach cannot be drained, and the button says why', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = infraPayload({ capabilities: { drain: true, power: false, services: false } });
+    data.hosts = [{ ...data.hosts[0], reachability: 'unavailable', power: 'unknown' }];
+    mod.state.infra.data = data;
+    const drain = findByText(mod.SCREENS.infra(), 'Drain');
+    assert.ok(drain, 'no Drain button at all');
+    assert.equal(drain.disabled, true,
+      'a silent host could be drained, replacing a quarantine that heals itself with one that does not');
+    assert.match(String(drain.getAttribute('title')), /already left the pool/);
+  });
+
+  /**
+   * THE SENTENCE THIS DIALOG EXISTS FOR. "Drain" sounds like it saves money and it does not: the
+   * machine stays switched on and bills at exactly the rate it billed before. Somebody who wanted
+   * to stop spending and pressed this instead would find out at the end of the month.
+   */
+  test('the confirmation states the impact BEFORE the act, including the cost that does not stop', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({ capabilities: { drain: true, power: false, services: false } });
+    findByText(mod.SCREENS.infra(), 'Drain').click();
+
+    const text = dialogText();
+    // `findByText` returns the last match, so this is whichever host card came second — either is
+    // fine, the assertion is about the dialog's content.
+    assert.match(text, /Drain mfarm-lab/);
+    assert.match(text, /3 ready devices leave the pool/, 'the dialog does not say what it withdraws');
+    assert.match(text, /1 running session continues untouched/,
+      'a session count that reads like a typo is a dialog people stop reading');
+    assert.match(text, /it stays powered on, still costing ₹65\/hour/,
+      'the dialog lets somebody believe draining saves money');
+    assert.match(text, /Nobody is evicted/);
+    assert.match(text, /Reason/, 'no way to say why, for the log');
+    mod.closeOverlays();
+  });
+
+  test('resuming asks too, and does not wear the destructive button', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = infraPayload({ capabilities: { drain: true, power: false, services: false } });
+    for (const h of data.hosts) {
+      h.maintenance = { drained: true, since: new Date(Date.now() - 600_000).toISOString(),
+                        reason: 'kernel upgrade', source: 'operator' };
+    }
+    mod.state.infra.data = data;
+    findByText(mod.SCREENS.infra(), 'Resume').click();
+
+    const text = dialogText();
+    assert.match(text, /back into service/);
+    assert.match(text, /kernel upgrade/, 'the dialog does not recall why it was drained');
+    assert.match(text, /stays quarantined/, 'it does not say a sick device is left alone');
+    /**
+     * Red is for removing things. Reusing it here is how red stops meaning anything.
+     *
+     * Asserted through `findByText` and NOT through `querySelector`: the shim's `querySelector`
+     * always returns a fresh element by design — it says so — so `!dialog.querySelector('.danger')`
+     * is a check that can never come out true, which is the shape this repo keeps shipping.
+     */
+    const dialog = (globalThis as unknown as { document: { getElementById(id: string): unknown } })
+      .document.getElementById('dialog');
+    const confirm = findByText(dialog, 'Resume host');
+    assert.ok(confirm, 'the dialog has no confirm button');
+    assert.ok(!/danger/.test(String(confirm.className)),
+      `putting capacity back wore the destructive styling: "${confirm.className}"`);
+    mod.closeOverlays();
+  });
+
+  test('the operations log renders its rows and its five filters', () => {
+    seed({ name: 'infra', lens: 'events' });
+    mod.state.infraOps = {
+      loaded: true, loading: false,
+      filter: { actor: '', action: '', target: '', outcome: '', from: '' },
+      facets: {
+        actors: [{ userId: 'u1', email: 'someone@mfarm.local' }],
+        actions: ['drain-host', 'resume-host'],
+        targets: [{ kind: 'host', id: 'host-1', label: 'mfarm-lab' }],
+      },
+      rows: [
+        { id: 'o1', requestedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+          actor: { userId: 'u1', email: 'someone@mfarm.local', orgId: 'o1' },
+          action: 'drain-host', target: { kind: 'host', id: 'host-1', label: 'mfarm-lab' },
+          params: {}, result: 'succeeded', detail: '3 device(s) withdrawn.', requestId: 'r1' },
+        { id: 'o2', requestedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+          actor: { userId: 'u1', email: 'someone@mfarm.local', orgId: 'o1' },
+          action: 'drain-host', target: { kind: 'host', id: 'host-1', label: 'mfarm-lab' },
+          params: {}, result: 'unknown', detail: null, requestId: 'r2' },
+      ],
+    };
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /drain-host/);
+    assert.match(text, /someone@mfarm\.local/);
+    assert.match(text, /3 device\(s\) withdrawn/);
+    // Every filter the brief names.
+    for (const label of ['Any time', 'Anyone', 'Any host', 'Any action', 'Any outcome']) {
+      assert.match(text, new RegExp(label), `no ${label} filter`);
+    }
+  });
+
+  test('`unknown` reads as unknown and not as a failure', () => {
+    seed({ name: 'infra', lens: 'events' });
+    mod.state.infraOps = {
+      loaded: true, loading: false,
+      filter: { actor: '', action: '', target: '', outcome: '', from: '' },
+      facets: { actors: [], actions: [], targets: [] },
+      rows: [{ id: 'o1', requestedAt: new Date().toISOString(), finishedAt: null,
+               actor: { userId: null, email: 'someone@mfarm.local', orgId: null },
+               action: 'drain-host', target: { kind: 'host', id: 'h', label: 'mfarm-lab' },
+               params: {}, result: 'unknown', detail: 'The provider stopped answering.', requestId: null }],
+    };
+    const tree = mod.SCREENS.infra();
+    assert.match(textOf(tree), /unknown/);
+    // The tone, not just the word: red would tell an operator the operation definitely failed, and
+    // it definitely might not have.
+    assert.ok(!findByClass(tree, 'pill bad'), '`unknown` was drawn as a failure');
+  });
+
+  test('an empty log says which of the two empties it is', () => {
+    seed({ name: 'infra', lens: 'events' });
+    mod.state.infraOps = {
+      loaded: true, loading: false, rows: [], facets: { actors: [], actions: [], targets: [] },
+      filter: { actor: '', action: '', target: '', outcome: '', from: '' },
+    };
+    assert.match(textOf(mod.SCREENS.infra()), /No infrastructure operation has been performed/);
+
+    mod.state.infraOps.filter.action = 'drain-host';
+    assert.match(textOf(mod.SCREENS.infra()), /Widen the filters/);
   });
 });
