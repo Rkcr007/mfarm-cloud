@@ -4757,3 +4757,64 @@ when the feature is broken. See issues 37 and 38.
 
     Mutation-checked: making `farm-online.sh` start only the relay host — the silent half-farm — is
     caught by the new test.
+
+92. **THE INFRASTRUCTURE OPERATIONS CENTER — the top bar lost its machines and a page gained them.**
+    2026-09-12/13, ADR-0038, migrations 053–055, PRs #178–#182, deployed and verified on the farm.
+
+    The header segment that read `2 hosts up 20h · ~₹410` is gone. It was the right alarm — ADR-0035
+    added it because the device host ran for twenty hours and forty-eight minutes after a check that
+    needed two — and the wrong place: one fact about the machines on a bar that follows the reader
+    around every screen, with no way to act on it, so every reading of it ended in a terminal. It is
+    now a dot on an Infrastructure nav item, in front of a page that can say which host, since when,
+    whether anything is using it, and offer to stop it.
+
+    **Operating the farm is a capability, not a role.** `users.operator` (053) is farm-wide and
+    orthogonal to `memberships.role`, which is per-org. On today's single-tenant farm the two sets
+    are the same three people, which is exactly why it had to be written down now: the day a second
+    tenant arrives, "org admin" would silently come to mean "may stop the production device host".
+    No API key can hold it; it is re-read on every request; only `grant-operator.ts` grants it.
+
+    **Two things were already built and merely unrouted.** `quarantine_host(..., 'operator')` from
+    migration 016 is maintenance mode exactly — it withdraws idle devices, leaves a tenant
+    mid-session alone, and remembers each device's previous state — and had never had a caller
+    outside the reaper. What it had never had is an inverse; 053 adds one, refusing a reaper
+    quarantine for the same reason its counterpart refuses to be argued with by a heartbeat.
+
+    **`up_since` could not answer a single cost question.** It is one timestamp, so it describes only
+    the current power-on; the moment a host stops, yesterday is gone. `host_power_intervals` (054) is
+    derived BY TRIGGER rather than written by the start/stop routes, because most power transitions
+    come from a laptop script, a maintenance event or a reboot — a row written only where the product
+    acts would undercount exactly the hours nobody was watching.
+
+    **The security decision is the allow-list, and it is not defence in depth.** `hosts.hostname` is
+    a string a WORKER chooses for itself at registration. A driver resolving a host name to an
+    instance name would let an agent that registered as `mfarm-cp` put a Stop button for the control
+    plane on the console — and a *misconfigured* agent would do it by accident. `MFARM_POWER_INSTANCES`
+    is configuration; nothing outside it is reachable; the API also refuses to act on the instance it
+    is running on.
+
+    **Scopes cap IAM, which nobody had checked.** `mfarm-cp`'s service account holds only logWriter
+    and metricWriter, and the INSTANCE's OAuth scopes carry no compute scope at all — so granting the
+    role alone changes nothing and the 403 reads like an IAM problem. `set-service-account` needs a
+    TERMINATED instance, so enabling power costs a planned control-plane outage. `RUNBOOK.md` has it.
+
+    **Four defects found by opening the page, not by a test.** A loading branch that pinned a browser
+    tab at 100% CPU; `style` as a string, which computes to nothing under `style-src 'self'`, so every
+    meter would have rendered at zero width; a health panel that listed every hostname; and
+    `beat 0m ago` beside an alert reading `Last heartbeat 53s ago`.
+
+    **And two more that only the DEPLOYED farm could show** (#182). `No heartbeat for 21310 minutes`
+    for a laptop switched off for a fortnight. And the real device host registers as
+    `mfarm-lab.asia-south1-c.c.mfarm-lab.internal`, not `mfarm-lab` — so the allow-list I had written
+    into the runbook would have matched nothing and failed with no error, no log line and no button.
+    Matching loosely would have "fixed" it and destroyed the boundary, so the match stays exact, the
+    mismatch is reported on the page, and the runbook now says to READ the names out of the database.
+
+    **It took four attempts to write a test that failed on the console loop.** Counting fetches
+    passed against the bug; starting from the wrong state passed against it; the correct state made
+    the test HANG rather than fail. See `mfarm-test-seams-for-timing`: a test about WHEN something
+    happens is racing an interval, and it cannot tell a working push from a fallback that landed
+    unless the interval is configurable and wound away from the behaviour under test.
+
+    Not built, and said so on the page rather than quietly: per-service restart (Caddy, coturn,
+    Appium, cvd). It needs the agent to learn a job kind and a fleet-wide agent deployment.
