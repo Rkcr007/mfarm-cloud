@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Two, as of 2026-09-12** — forty-seven recorded, forty-five closed. The two left are the CSP
+**Two, as of 2026-09-12** — forty-eight recorded, forty-six closed. The two left are the CSP
 `webrtc` warning, which is deliberate, and app network capture, which is an unbuilt feature needing
 its own privacy decision rather than a defect. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
@@ -730,6 +730,8 @@ noticing. The countable part of that job is now CI's.
 | id | what | status |
 |---|---|---|
 | D47 | **ADR-0037's first hop had no code behind it, and both the ADR and `STATUS.md` described it as one `adb` command away from verified.** `DeviceProxy` — the listener a device points at — had exactly one caller in the repo, its own test. Nothing in `workers/agent` ever constructed one, so no farm had a listener; nothing anywhere ran `settings put global http_proxy`, so no guest was ever pointed at one. `mfarm:tunnel` allocated a device, validated the name, recorded it on the session and then did nothing at all. **Found by going to the lab to run the one command the documents said was outstanding, and looking for the port to run it against.** | Fixed 2026-09-12. The beat now carries the devices whose live session named a tunnel; the agent converges on that set, binding one listener per device and pointing the guest at it. **Verified RED twice** — deleting the heartbeat's one call fails two tests in `agent.test.ts`, and widening the control plane's session filter fails the teardown test. Verified on the lab against real guests. |
+
+| D48 | **A device that lost a boot race declared no `network-proxy`, and nothing could ever give it back.** The capability is observed by asking the guest for its default route, and `sys.boot_completed` comes up before that route does — so on the lab, three of four guests had it and cf-2 did not. `start()` is the only thing that probes, and it does not run again until the agent restarts, so that device could never be allocated a tunnelled session. **Found by reading the fleet's capabilities on the farm five minutes after shipping the feature** — the tests could not see it, because the race is a property of a real boot. | Fixed 2026-09-12, in two halves: the probe retries on the health poll (upward only — a later loss is usually a wedged adb), and the heartbeat re-registers when the capability fingerprint changes. The second half was missing for **every** device capability, not just this one: `register()`'s comment claimed the agent re-registers whenever the fingerprint changes, and that comparison existed only in `start()`. |
 
 **THE SHAPE IS D44'S AND D29'S, AND IT IS THE THIRD TIME.** Every piece tested, no piece joined —
 and the test that gave the most confidence is the one that hid it. `tunnel-end-to-end.test.ts`
