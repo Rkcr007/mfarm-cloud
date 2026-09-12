@@ -6,8 +6,9 @@ import {
 } from '../../infra/snapshot.ts';
 import { recentEvents } from '../../infra/events.ts';
 import { history, historyFacets, type TargetKind } from '../../infra/audit.ts';
-import { drainHost, resumeHost } from '../../infra/operations.ts';
+import { drainHost, resumeHost, startHost, stopHost, restartHost } from '../../infra/operations.ts';
 import { waitForChange, sseFrame, SSE_KEEPALIVE, streamListeners } from '../../infra/stream.ts';
+import { powerConfigured, instanceFor } from '../../infra/cloud.ts';
 import { GIT_SHA, BUILT_AT, shortSha } from '../../version.ts';
 
 /**
@@ -160,7 +161,15 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
       },
       health: { overall: overallHealth(components), components },
       fleet,
-      hosts,
+      /**
+       * `powerable` PER HOST, not one flag for the page.
+       *
+       * The allow-list is per machine — a farm can have one host it may power and three it may not
+       * — so a page that drew Start and Stop from a single `capabilities.power` would offer them on
+       * every card and 403 on most. The list is configuration on the control plane and is not
+       * derived from anything a worker sends; see `config.ts`.
+       */
+      hosts: hosts.map((h) => ({ ...h, powerable: instanceFor(h.hostname) !== null })),
       cost,
       events,
       /**
@@ -179,8 +188,12 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
          * posts to a 404 — the same defect in a new costume.
          */
         drain: true,
-        /** Needs a cloud credential this VM does not hold. See `capabilities` in the console. */
-        power: false,
+        /**
+         * TRUE ONLY WHEN THIS DEPLOYMENT ACTUALLY HAS A CREDENTIAL AND AN ALLOW-LIST. Not "the code
+         * supports it": a control plane with no `MFARM_POWER_INSTANCES` reports false and the
+         * console draws no Start or Stop, which is the difference between a feature and a 403.
+         */
+        power: powerConfigured(),
         /** Needs the agent to learn a job kind. Its own stage. */
         services: false,
       },
@@ -298,6 +311,45 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
       return resumeHost(req, req.params.id);
     },
   );
+
+  /**
+   * POST /v1/infra/hosts/:id/start · /stop · /restart — the machine itself.
+   *
+   * THE THREE SHARE A SHAPE AND NOT A HANDLER, so that the URL says which one it is. A single
+   * `/power` taking `{action: "stop"}` would put the verb in a body, where it is one validation
+   * slip from being whatever a client sent — and would make the audit log's `action` column a
+   * derived field rather than the route's own name.
+   *
+   * WHAT PROTECTS THIS. The id is a uuid the database resolves; the host it resolves to must be on
+   * the control plane's own allow-list, which is configuration and NOT derived from the hostname a
+   * worker registers with; and the instance must not be the one this process is running on. See
+   * `powerTarget` in `infra/operations.ts` for why the first of those is the real defence.
+   */
+  const powerRoute = (
+    verb: 'start' | 'stop' | 'restart',
+    run: (req: FastifyRequest, id: string, reason?: unknown) => Promise<unknown>,
+  ) => {
+    app.post<{ Params: { id: string }; Body: { reason?: string } }>(
+      `/infra/hosts/:id/${verb}`,
+      {
+        schema: {
+          params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+          body: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { reason: { type: 'string', maxLength: 200 } },
+          },
+        },
+      },
+      async (req) => {
+        requireOperator(req);
+        return run(req, req.params.id, req.body?.reason);
+      },
+    );
+  };
+  powerRoute('start', startHost);
+  powerRoute('stop', stopHost);
+  powerRoute('restart', restartHost);
 
   /* ------------------------------------------------------------------ the live stream */
 

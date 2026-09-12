@@ -117,7 +117,9 @@ function infraPayload(over: Record<string, unknown> = {}) {
     id: 'host-1', hostname: 'mfarm-lab', region: 'lab', state: 'UP',
     power: 'running', reachability: 'live', tunnelConnected: true,
     upSince: new Date(Date.now() - 3 * 3600_000).toISOString(),
-    uptimeSeconds: 3 * 3600, lastHeartbeatAt: new Date().toISOString(), heartbeatAgeSeconds: 4,
+    uptimeSeconds: 3 * 3600 as number | null,
+    lastHeartbeatAt: new Date().toISOString() as string | null,
+    heartbeatAgeSeconds: 4 as number | null,
     protocolVersion: 2, specs: { cores: 16, memoryMb: 65536 },
     machine: {
       at: new Date().toISOString(), ageSeconds: 8, status: 'live',
@@ -127,6 +129,8 @@ function infraPayload(over: Record<string, unknown> = {}) {
     devices: { total: 4, ready: 3, allocated: 1, quarantined: 0, offline: 0 },
     // What a confirmation dialog has to name: tenants who would notice.
     sessions: { active: 1 },
+    /** Per host, because the allow-list is per machine — see `capabilities` in the route. */
+    powerable: false,
     // Typed loosely so a test can hand back a DRAINED host without TypeScript inferring `null` as
     // the only possible value of every field from this one literal.
     maintenance: { drained: false, since: null as string | null, reason: null as string | null,
@@ -4795,5 +4799,128 @@ describe('infrastructure operations', () => {
 
     mod.state.infraOps.filter.action = 'drain-host';
     assert.match(textOf(mod.SCREENS.infra()), /Widen the filters/);
+  });
+});
+
+/**
+ * Powering a machine from the console — the two gates, and the sentence each dialog owes its reader.
+ *
+ * THE TWO GATES ARE THE POINT. `capabilities.power` says this deployment has a credential at all;
+ * `host.powerable` says THIS machine is on the control plane's allow-list. A page that drew from
+ * the first alone would offer Stop on every card and 403 on most — the same defect as offering it
+ * with no credential, which is a control on a premise the server has not confirmed.
+ */
+describe('infrastructure power controls', () => {
+  const dialogText = () => textOf((globalThis as unknown as {
+    document: { getElementById(id: string): unknown };
+  }).document.getElementById('dialog'));
+
+  /** A payload where power is configured and `which` hosts are on the allow-list. */
+  const withPower = (powerable: boolean[], over: Record<string, unknown> = {}) => {
+    const data = infraPayload({
+      capabilities: { drain: true, power: true, services: false }, ...over,
+    });
+    data.hosts.forEach((h, i) => { h.powerable = powerable[i] ?? false; });
+    return data;
+  };
+
+  test('NO POWER CONTROL WITHOUT A CREDENTIAL, however powerable the host claims to be', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = infraPayload({ capabilities: { drain: true, power: false, services: false } });
+    data.hosts.forEach((h) => { h.powerable = true; });
+    mod.state.infra.data = data;
+    const tree = mod.SCREENS.infra();
+    for (const label of ['Start', 'Stop', 'Restart']) {
+      assert.ok(!findByText(tree, label), `${label} was drawn with no cloud driver behind it`);
+    }
+  });
+
+  test('NO POWER CONTROL FOR A HOST THAT IS NOT ON THE ALLOW-LIST', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = withPower([false, false]);
+    const tree = mod.SCREENS.infra();
+    for (const label of ['Start', 'Stop', 'Restart']) {
+      assert.ok(!findByText(tree, label), `${label} was drawn for a host this farm may not power`);
+    }
+    // Drain is unaffected — the two capabilities are separate questions about the same host.
+    assert.ok(findByText(tree, 'Drain'));
+  });
+
+  test('a running, powerable host offers Restart and Stop, and not Start', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = withPower([true, true]);
+    const tree = mod.SCREENS.infra();
+    assert.ok(findByText(tree, 'Stop'));
+    assert.ok(findByText(tree, 'Restart'));
+    assert.ok(!findByText(tree, 'Start'), 'a running machine was offered a Start button');
+  });
+
+  test('a stopped host offers Start, and not Stop', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = withPower([true]);
+    data.hosts = [{ ...data.hosts[0], power: 'stopped', reachability: 'unavailable',
+                    uptimeSeconds: null, powerable: true }];
+    mod.state.infra.data = data;
+    const tree = mod.SCREENS.infra();
+    assert.ok(findByText(tree, 'Start'));
+    assert.ok(!findByText(tree, 'Stop'));
+  });
+
+  /**
+   * A MACHINE WE CANNOT SEE GETS NO POWER BUTTON. `power: 'unknown'` means it has not been heard
+   * from and the control plane never marked it DOWN — pressing Stop there could be a no-op or could
+   * kill a machine that is fine and merely partitioned.
+   */
+  test('a host in an unknown power state is offered a disabled control that explains itself', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = withPower([true]);
+    data.hosts = [{ ...data.hosts[0], power: 'unknown', reachability: 'unknown', powerable: true }];
+    mod.state.infra.data = data;
+    const control = findByText(mod.SCREENS.infra(), 'Power');
+    assert.ok(control, 'no control at all, so nothing explains the gap');
+    assert.equal(control.disabled, true);
+    assert.match(String(control.getAttribute('title')), /cannot tell whether the machine is running/);
+  });
+
+  test('STOPPING NAMES THE SESSIONS IT INTERRUPTS, because that is a decision somebody can make', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = withPower([true, true]);
+    findByText(mod.SCREENS.infra(), 'Stop').click();
+
+    const text = dialogText();
+    assert.match(text, /Stop mfarm-lab/);
+    assert.match(text, /1 running session is INTERRUPTED/,
+      '"this may affect users" is not a decision anybody can make');
+    assert.match(text, /only operation here that actually stops the bill/);
+    assert.match(text, /stops costing ₹65\/hour/);
+    mod.closeOverlays();
+  });
+
+  test('STARTING SAYS THE METER STARTS, and is not dressed as destructive', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = withPower([true]);
+    data.hosts = [{ ...data.hosts[0], power: 'stopped', powerable: true }];
+    mod.state.infra.data = data;
+    findByText(mod.SCREENS.infra(), 'Start').click();
+
+    const text = dialogText();
+    assert.match(text, /billing starts again at ₹65\/hour/);
+    assert.match(text, /cold boot/, 'nothing said the devices are not ready when the host is');
+    const dialog = (globalThis as unknown as { document: { getElementById(id: string): unknown } })
+      .document.getElementById('dialog');
+    assert.ok(!/danger/.test(String(findByText(dialog, 'Start host').className)),
+      'adding capacity wore the destructive styling');
+    mod.closeOverlays();
+  });
+
+  test('RESTARTING SAYS IT SAVES NOTHING, which is the thing people assume it does', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = withPower([true, true]);
+    findByText(mod.SCREENS.infra(), 'Restart').click();
+
+    const text = dialogText();
+    assert.match(text, /not a graceful shutdown/);
+    assert.match(text, /keeps billing throughout — a restart saves nothing/);
+    mod.closeOverlays();
   });
 });

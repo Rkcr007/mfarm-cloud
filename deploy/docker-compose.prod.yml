@@ -237,6 +237,32 @@ services:
       HOST_HOURLY_COST: ${HOST_HOURLY_COST:-}
       COST_CURRENCY: ${COST_CURRENCY:-₹}
 
+      # ---------------------------------------------------------------- power control (ADR-0038)
+      #
+      # WHICH MACHINES A BROWSER MAY SWITCH OFF, and the answer is "none" until somebody writes this
+      # down. Empty is the default and the console then reports `power: false` and draws no Start or
+      # Stop button, which is the honest state for a control plane with no cloud credential.
+      #
+      # THIS LIST IS THE SECURITY BOUNDARY. `hosts.hostname` is a string a WORKER chooses for itself
+      # at registration, so a control plane that resolved host names to instance names would let a
+      # misconfigured agent put a Stop button for the CONTROL PLANE on the console. Nothing outside
+      # this list is reachable. `mfarm-cp` must never appear in it — and the API refuses to act on
+      # the instance it is running on regardless, which is the second lock.
+      #
+      #   MFARM_POWER_INSTANCES=mfarm-lab:asia-south1-c
+      #
+      # Turning this on also needs an IAM role AND a change to the instance's OAuth scopes, which
+      # requires the control plane to be stopped. `docs/RUNBOOK.md` has the commands and says why.
+      MFARM_POWER_INSTANCES: ${MFARM_POWER_INSTANCES:-}
+      GCP_PROJECT: ${GCP_PROJECT:-}
+      # How long a power operation watches the machine before answering. Past this it reports
+      # `accepted` with what it last saw, rather than claiming an outcome nobody has.
+      INFRA_POWER_SETTLE_MS: ${INFRA_POWER_SETTLE_MS:-25000}
+      # The Infrastructure page's live stream: how often it recomputes, and how often a quiet
+      # connection says something so a proxy does not reap it. Separate timers, deliberately.
+      INFRA_STREAM_TICK_MS: ${INFRA_STREAM_TICK_MS:-2000}
+      INFRA_STREAM_KEEPALIVE_MS: ${INFRA_STREAM_KEEPALIVE_MS:-15000}
+
       # ---------------------------------------------------------------- knobs config.ts reads
       #
       # Declared so they can actually be turned. Each was readable by `loadConfig()` and settable

@@ -290,6 +290,44 @@ describe('the operations log is append-only, and the database is what enforces i
       /append-only/);
   });
 
+  /* -------------------------------------------------- migration 055: the in-flight progress note */
+
+  test('AN OPEN ROW MAY SAY WHERE IT GOT TO, without claiming an outcome', async () => {
+    const [{ id }] = await insert();
+    await q(`UPDATE infra_operations SET detail = 'last seen STAGING after 25s' WHERE id = $1`, [id]);
+    const [row] = await q<{ result: string; detail: string; finished_at: Date | null }>(
+      'SELECT result, detail, finished_at FROM infra_operations WHERE id = $1', [id]);
+    assert.equal(row.result, 'accepted', 'a progress note settled the row');
+    assert.equal(row.detail, 'last seen STAGING after 25s');
+    assert.equal(row.finished_at, null);
+  });
+
+  test('...and may then still settle, once', async () => {
+    const [{ id }] = await insert();
+    await q(`UPDATE infra_operations SET detail = 'still starting' WHERE id = $1`, [id]);
+    await q(`UPDATE infra_operations SET result = 'succeeded', finished_at = now() WHERE id = $1`, [id]);
+    await assert.rejects(
+      () => q(`UPDATE infra_operations SET result = 'failed' WHERE id = $1`, [id]),
+      /already settled/);
+  });
+
+  test('an open row cannot be given a finish time while it is still open', async () => {
+    const [{ id }] = await insert();
+    await assert.rejects(
+      () => q(`UPDATE infra_operations SET finished_at = now() WHERE id = $1`, [id]),
+      /still accepted, so it cannot have finished/,
+      'an unfinished operation could claim a duration, which every "how long did that take" query '
+      + 'would then get wrong in the direction of looking complete');
+  });
+
+  test('a progress note still cannot rewrite who did it', async () => {
+    const [{ id }] = await insert();
+    await assert.rejects(
+      () => q(`UPDATE infra_operations SET actor_email = 'someone-else@example.test',
+                      detail = 'still starting' WHERE id = $1`, [id]),
+      /immutable apart from its outcome/);
+  });
+
   test('`unknown` is a settled outcome in its own right, not a flavour of failure', async () => {
     const [{ id }] = await insert();
     await q(`UPDATE infra_operations SET result = 'unknown',
