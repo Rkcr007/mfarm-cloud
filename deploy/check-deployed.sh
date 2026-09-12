@@ -13,7 +13,13 @@ set -uo pipefail
 
 ZONE="${MFARM_ZONE:-asia-south1-c}"
 CP="${MFARM_CP:-mfarm-cp}"
-LAB="${MFARM_LAB:-mfarm-lab}"
+# THE DEVICE HOSTS, PLURAL (S7.2). `MFARM_LABS` is a space-separated list; `MFARM_LAB` is still
+# honoured so every runbook, script and habit that names one host keeps working unchanged.
+#
+# A list rather than a second variable because the number is not two — it is "however many", and a
+# `MFARM_LAB2` would need a `MFARM_LAB3` the first time somebody added one. Every loop below reads
+# the list, so a one-host farm takes exactly the path it always did.
+LABS="${MFARM_LABS:-${MFARM_LAB:-mfarm-lab}}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO_ROOT/deploy/lib/deployed-state.sh"
 
@@ -46,14 +52,27 @@ say "Control plane ($CP)"
 report 'serving image' "$(ssh_on "$CP" "sudo docker ps --filter name=mfarm-api --format '{{.Image}}' | sed 's/.*://'")"
 report 'checkout' "$(ssh_on "$CP" "sudo -u rkcr070707 git -C /home/rkcr070707/mfarm rev-parse HEAD")"
 
-say "Device host ($LAB)"
-if [ "$(running "$LAB")" = "RUNNING" ]; then
-  # The one whose drift changes what the DEVICES do: the worker unit and the boot unit both
-  # ExecStart out of this tree.
-  report 'checkout (worker runs this)' "$(ssh_on "$LAB" "sudo -u rkcr070707 git -C /home/rkcr070707/mfarm rev-parse HEAD")"
-else
-  printf '  \033[33m!\033[0m %-28s stopped — nothing to check, and nothing running\n' 'device host'
-fi
+for LAB in $LABS; do
+  say "Device host ($LAB)"
+  case "$(running "$LAB")" in
+    RUNNING)
+      # The one whose drift changes what the DEVICES do: the worker unit and the boot unit both
+      # ExecStart out of this tree.
+      report 'checkout (worker runs this)' "$(ssh_on "$LAB" "sudo -u rkcr070707 git -C /home/rkcr070707/mfarm rev-parse HEAD")"
+      ;;
+    '')
+      # NOT THE SAME AS STOPPED, and reporting it as such would be the bug this script exists to
+      # avoid. An empty status means gcloud could not describe the instance — a typo in the list, a
+      # VM that was deleted, or no credentials — and calling that "stopped" would quietly drop a
+      # host out of a two-host farm's report while printing something reassuring.
+      printf '  \033[31m✗\033[0m %-28s could not be read — does this instance exist?\n' "$LAB"
+      bad=1
+      ;;
+    *)
+      printf '  \033[33m!\033[0m %-28s stopped — nothing to check, and nothing running\n' "$LAB"
+      ;;
+  esac
+done
 
 if [ "$bad" = 0 ]; then
   printf '\n\033[1mThe farm is running main.\033[0m\n'

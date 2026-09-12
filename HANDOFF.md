@@ -4706,3 +4706,54 @@ when the feature is broken. See issues 37 and 38.
     Verified the way the defect was missed: built the tarball, installed it into an empty directory,
     and ran `mfarm tunnel` from it — it reaches the API-key check instead of a module error, and
     `dependencies` is empty.
+
+91. **THE TOOLING STOPPED ASSUMING ONE DEVICE HOST, AND THE RUNBOOK FOUND MY OWN PLAN WRONG.**
+    2026-09-12. Fourth of the four.
+
+    **Not provisioned — that was the user's call.** A second `n2-standard-16` is ~₹65/hour running
+    and ~₹1,260/month in disk stopped, so what shipped is everything needed to add one, and the
+    `gcloud compute instances create` is left for whoever decides to pay for it.
+
+    `EXECUTION_ROADMAP.md` S7.2 had already audited the control plane and found nothing that assumes
+    a single host — the allocator, the queue, the reaper, the hub, the metrics and the console are
+    per-host already, and `/dp/*` relays through the API rather than naming one worker. That audit
+    held up. What assumed one host was `deploy/`, through `MFARM_LAB=mfarm-lab`.
+
+    **`MFARM_LABS` is a space-separated list** in `farm-online.sh` and `check-deployed.sh`, with
+    `MFARM_LAB` still honoured so no existing runbook or habit changes. Two distinctions came out of
+    building it that the audit had not predicted:
+
+    - **Only the RELAY host is compared to `MFARM_TURN_HOST`.** coturn is a relay, not a device
+      service, so a second host needs no second reserved address — and comparing its ephemeral IP to
+      the relay's name would report DRIFT on every start. That is the always-on warning
+      `farm-online.test.mjs` exists to keep from coming back, and I nearly reintroduced it.
+      `MFARM_RELAY_LAB` names it, defaulting to the first in the list.
+    - **A host that cannot be DESCRIBED is an error, not "stopped".** The old code treated any
+      non-`RUNNING` status as stopped; an empty status means gcloud could not read the instance. On a
+      two-host farm that silently drops a host from the report while printing something reassuring.
+
+    **THE RUNBOOK IS WHERE THE REAL FINDING WAS, and it was in my own first draft.** I wrote §4 as
+    "run `farm-up.sh` on the new box" from memory of what that script is for. Reading it says
+    otherwise: it stands up a **control plane** — secrets, Postgres, the API image, the seed, a
+    console user — before it ever checks for `/dev/kvm`, so running it on a second device host gives
+    you a second control plane with its own empty database. `farm-up.sh`'s own comment says the
+    device host runs `install-worker-service.sh` instead. The real path is
+    `bootstrap_cuttlefish.sh` → `install-build-tools.sh` → `install-worker-service.sh` →
+    `install-farm-service.sh`.
+
+    Two more things the draft had wrong and reading fixed: the variable is `REGION`, not
+    `MFARM_REGION`; and the registration token is read from a **file**, not the environment, so the
+    runbook now says `printf` rather than `echo` — a trailing newline is a token the control plane
+    rejects with a 401 that reads like a wrong token rather than a whitespace one.
+
+    **And I cited a HANDOFF entry number that was about something else.** "It took two attempts —
+    entry 77" — entry 77 is the hub learning to take a label. Replaced with D20, which is checkable
+    in `DEFECTS.md`. `mfarm-handoff-decays` says verify before quoting; this is the third time that
+    has earned its keep.
+
+    **Two stale rows in `STATUS.md` corrected while there**, both verified rather than assumed:
+    deploy has not been manual since ADR-0030 (I watched the timer carry 51ab5f5 to the farm by
+    itself today), and "one device host" is now a funding decision rather than a capability.
+
+    Mutation-checked: making `farm-online.sh` start only the relay host — the silent half-farm — is
+    caught by the new test.

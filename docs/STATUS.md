@@ -83,10 +83,10 @@ gcloud compute instances list --project mfarm-lab --format='table(name,status)'
 | **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the test suite**. All are closed. |
 | **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 52 migrations. API keys are labelled, scoped, expiring and attributed (ADR-0034). | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
-| **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host. A host outage is a farm outage; ADR-0027 and migration 038 reduce what one costs, they do not remove it. |
+| **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host **today**, not by design: the control plane has been audited per-host and the tooling now takes a list, so adding a second is a VM and a runbook rather than code — [`SECOND_HOST.md`](SECOND_HOST.md). Until somebody pays for one, a host outage is still a farm outage. |
 | **Physical devices** | **Built, not currently serving.** Agent, pairing (ADR-0014), org-pinning, the outbound tunnel and the reset story (ADR-0012) are all built. | The farm's one `SM-S918B` is quarantined behind a machine that has not beaten since **2026-08-29**. Nothing is wrong with the code — it needs `npx @mfarm/agent` on that machine. |
 | **Agent** | **Working.** One binary, loopback window, no admin rights (ADR-0009). | A device ARRIVING still re-registers the agent — the heartbeat reconciles devices it knows and cannot create one. Deliberate (ADR-0027). |
-| **Deploy / ops** | **Working, gaps instrumented.** `check-deployed.sh` answers "is this farm running `main`?" for the serving image and both checkouts; `verify-live.sh` asks it too. | **Deploy is manual.** A released commit reaches the farm when somebody runs `mfarm-deploy.sh`. Reported now, not closed. |
+| **Deploy / ops** | **Working.** `check-deployed.sh` answers "is this farm running `main`?" for the serving image and for **each** device host's checkout (it takes `MFARM_LABS`); `verify-live.sh` asks it too. Deploy is **automatic** — `mfarm-autodeploy.timer` pulls every five minutes, health-gates on five consecutive `/ready` answers and refuses to retry a commit that failed (ADR-0030). | The **device host** is deliberately excluded from auto-deploy: fast-forwarding its tree restarts the agent under running sessions, so it is brought forward by hand. |
 | **Observability** | **Working** — Prometheus, Grafana, alert rules, host heartbeat and tunnel metrics. Host disk/load/memory and **what a powered-on host is costing** are now readable in the console (ADR-0035, migration 050). | No worker-side metrics: the agent reports incidents, not gauges. There is no ALERT on an idle host yet — the console shows it, nothing pages about it, and on **2026-09-12 that cost ₹230**: the header read `host up 3h 1m · ~₹196` for three and a half hours and nobody was looking. The instrument works; the absence of a pager is the gap. |
 | **Video / recording** | **Not built. The gate is now measured (2026-09-07) and it decided the design.** `screenrecord` costs the Flutter canvas a third of its frame rate and doubles ordinary UI's dropped frames, so guest-side encode — which is both `screenrecord` and scrcpy — is not available here. | S5 must encode on the HOST, reusing `cvd`'s WebRTC encoder; that path does not exist yet. The immediate alternative is video for physical devices only. `RENDER_BASELINE.md`. |
 | **Test rows** | **Built 2026-09-12.** A run's session row unfolds into a row per test, and the session screen lists everything it reported — passing tests named, not only counted. No new endpoint: `/v1/sessions/:id/results` already answered it. | A test that ran and never reported is not here and is not counted as passing — the farm cannot see an assertion. |
@@ -234,10 +234,10 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1714**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
+| Tests | **1719**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
 | Migrations | 52; 051 is deployed, **052 is not on the farm yet** |
 | Decisions | 36 ADRs, numbered to 0037 (there is no 0013) |
-| Merged PRs | 172 |
+| Merged PRs | 173 |
 | Defects | 46 recorded, **44 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |
@@ -277,7 +277,8 @@ measuring nothing, which is why the first line is first.
 These three documents are the whole picture. The rest is reference, and each sits under one of them:
 
 - **Operating it** — [`START_HERE.md`](START_HERE.md) (closed laptop → a device you can tap),
-  [`RUNBOOK.md`](RUNBOOK.md) (start, ship, stop).
+  [`RUNBOOK.md`](RUNBOOK.md) (start, ship, stop), [`SECOND_HOST.md`](SECOND_HOST.md) (adding a
+  device host, and what is still single afterwards).
 - **Building it** — [`EXECUTION_ROADMAP.md`](EXECUTION_ROADMAP.md), the sequenced plan from here to
   a production execution engine: what each step changes in the schema, in the code, and how it is
   verified.
