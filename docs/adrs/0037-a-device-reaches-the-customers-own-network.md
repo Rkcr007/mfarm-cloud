@@ -226,6 +226,13 @@ Two repairs, because one without the other is inert:
   so the scheduler was choosing from a stale one. This is not specific to this feature — it is why
   no device capability could ever be corrected without a restart.
 
+**The repair was WATCHED working, and the race moved to a different device while we watched.** On
+the restart that deployed it, cf-2 won the race and **cf-3 lost it** — which is the useful half of
+the observation, because it says the race is ordinary rather than a property of one guest. Thirty
+seconds later: `cf-3: reachable at 192.168.97.9 after all — network-proxy restored`, then `what this
+host can do has changed since it registered — re-registering`, and the control plane's device list
+went from three of four to four of four. Both halves, in order, on real hardware.
+
 ## What is still NOT verified
 
 **`https://` through the tunnel**, and it is unbuilt rather than untested — see the consequence
