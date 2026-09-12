@@ -12,7 +12,7 @@ because this project has repeatedly been bitten by documents that were true when
 |---|---|
 | Verified against | `https://farm.mfarm.dev`, commit `5a052f2`, migration `050` |
 | Fleet at the time | 4 Cuttlefish devices READY, 1 physical handset quarantined |
-| Test suite | 1,590 passing across four workspaces |
+| Test suite | 1,607 passing across four workspaces — measured 2026-09-11 |
 | Related reading | [`STATUS.md`](STATUS.md) (where things stand) · [`DEFECTS.md`](DEFECTS.md) (what is wrong) · [`DIRECTION.md`](DIRECTION.md) (why) |
 
 ---
@@ -241,12 +241,12 @@ measuring nothing, which is why the first line is first.
 
 ## 8. How this project finds bugs, and why that matters to a reader
 
-**Forty-two defects are recorded. Almost none were found by the test suite.** They were found by
-using the product. The suite is 1,590 tests and it catches different things — it caught two security
+**Forty-six defects are recorded. Almost none were found by the test suite.** They were found by
+using the product. The suite is over sixteen hundred tests and it catches different things — it caught two security
 regressions this month — but the pattern is consistent enough to be worth stating plainly to anybody
 evaluating this code:
 
-- On 2026-09-11 a feature shipped with 20 passing tests and the screen it was on rendered **blank**,
+- On 2026-09-11 a feature shipped with twenty passing tests and the screen it was on rendered **blank**,
   because a style was passed as a string. A guard for exactly that existed in the test shim and could
   not fire, because the seeded state never reached the branch.
 - The same feature then drew fourteen fully transparent bars, because `var(--accent)` is not a token

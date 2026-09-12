@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Two, as of 2026-09-11** — forty-five recorded, forty-three closed. The two left are the CSP
+**Two, as of 2026-09-11** — forty-six recorded, forty-four closed. The two left are the CSP
 `webrtc` warning, which is deliberate, and app network capture, which is an unbuilt feature needing
 its own privacy decision rather than a defect. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
@@ -707,6 +707,23 @@ and which I wrote down rather than performed.
 and is wrong: an operator-quarantined host keeps beating, so it would rewrite `up_since` to `now()`
 on every beat and report a machine that had been on for a week as up for five seconds. A gap in
 beats is what "came up" means.
+
+## The documents were wrong about the repo, again, 2026-09-11
+
+| id | what | status |
+|---|---|---|
+| D46 | **`STATUS.md` was wrong in five places about facts anybody could count** — 1474 tests against 1607, 49 migrations against 50, 28 ADRs against 34, 27 defects against 45. `APP_CONTEXT.md`, written the same day, had decayed **within hours**. The page opens by promising every number on it "was read from the code, the farm or `git` on that day, not carried forward". | Corrected 2026-09-11, and `deploy/doc-numbers.test.mjs` now derives migrations, ADRs and the highest defect id from the filesystem and fails CI when a document disagrees. **Verified RED** by restoring one stale number: it names the figure and the real one. |
+
+**THE TEST COUNT IS DELIBERATELY NOT ASSERTED.** It moves on most commits, so pinning it would mean
+editing a document in every pull request — and a check people route around is worse than no check.
+Those numbers now carry the date they were taken, which is a claim about a moment and cannot go
+stale because it was never about now. The guard enforces the date rather than the number.
+
+**This is the failure this project keeps having, and it had never been mechanised.** HANDOFF 76 is
+about splitting documents by rate of change so they stop dragging each other out of date;
+`DEFECTS.md` carries two entries where the register was wrong about itself; the HANDOFF summaries
+have been audited for false claims twice. Every one of those corrections was a person re-reading and
+noticing. The countable part of that job is now CI's.
 
 ## Suite health
 
