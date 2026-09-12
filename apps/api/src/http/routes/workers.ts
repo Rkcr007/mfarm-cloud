@@ -384,6 +384,17 @@ export async function workerRoutes(app: FastifyInstance) {
         // being written on the line above it.
         `UPDATE hosts SET
            last_heartbeat_at = now(),
+           -- A BEAT FALSIFIES 'DOWN', exactly as it falsifies a silence quarantine below.
+           --
+           -- 'DOWN' is written by two things: the column default, and an operator stopping the
+           -- machine from the console (ADR-0038). Both are claims that it is not running, and a
+           -- packet from it is the disproof. Without this the stop would be STICKY -- an agent whose
+           -- capability fingerprint has not changed never re-registers, so a host that came back on
+           -- its own would beat forever into a control plane still showing it stopped.
+           --
+           -- Scoped to DOWN on purpose. QUARANTINED is handled below and by migration 016's rules,
+           -- and an operator quarantine is a judgement no packet may overrule.
+           state = CASE WHEN state = 'DOWN' THEN 'UP'::host_state ELSE state END,
            up_since = CASE
              WHEN up_since IS NULL THEN now()
              WHEN last_heartbeat_at IS NULL THEN now()

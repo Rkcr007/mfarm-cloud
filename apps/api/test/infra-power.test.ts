@@ -304,6 +304,42 @@ describe('the happy paths', () => {
     assert.equal((await opsFor(labA)).at(-1)!.result, 'succeeded');
   });
 
+  /**
+   * THE OTHER HALF OF THE ROUND TRIP, and the reason the real lab could not be restarted from the
+   * console after being stopped from it.
+   *
+   * Nothing else writes `hosts.state = 'DOWN'` — the reaper writes QUARANTINED for silence, which
+   * is right for a host that went quiet on its own and wrong for one we just switched off and
+   * watched the provider agree about. Without this the card reads `unknown` forever.
+   */
+  test('A CONFIRMED STOP MARKS THE HOST DOWN, so the page can say `stopped`', async () => {
+    fakeCloud({ status: 'RUNNING' });
+    const res = await post(`/v1/infra/hosts/${labA}/stop`);
+    assert.equal(res.json().result, 'succeeded');
+
+    const [row] = await q<{ state: string }>(
+      'SELECT state::text AS state FROM hosts WHERE id = $1', [labA]);
+    assert.equal(row.state, 'DOWN',
+      'the one moment the control plane KNOWS a machine is off, and it threw the knowledge away');
+
+    const overview = await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie } });
+    const h = overview.json().hosts.find((x: { id: string }) => x.id === labA);
+    assert.equal(h.power, 'stopped', 'the card would offer no way back');
+
+    // Put it back, so the tests after this one see a host that has not been switched off.
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  test('an ACCEPTED stop does NOT mark it down — it is still moving', async () => {
+    fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
+    const res = await post(`/v1/infra/hosts/${labA}/stop`);
+    assert.equal(res.json().result, 'accepted');
+    const [row] = await q<{ state: string }>(
+      'SELECT state::text AS state FROM hosts WHERE id = $1', [labA]);
+    assert.notEqual(row.state, 'DOWN',
+      'a machine that had not finished stopping was recorded as stopped');
+  });
+
   test('a start that settles warns that the devices are not ready yet', async () => {
     fakeCloud({ status: 'TERMINATED' });
     const res = await post(`/v1/infra/hosts/${labA}/start`);
