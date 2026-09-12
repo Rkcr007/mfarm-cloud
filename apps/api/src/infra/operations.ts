@@ -310,6 +310,27 @@ function settleMs(): number {
   return Number(process.env.INFRA_POWER_SETTLE_MS ?? 25_000);
 }
 
+/**
+ * Record that a machine we stopped is not running.
+ *
+ * Nothing else writes `hosts.state = 'DOWN'` except the column default, so this is unambiguous: it
+ * means "this control plane switched it off". It buys two things — the card reads `stopped` and
+ * therefore offers Start rather than a dead end, and 054's trigger closes the power ledger at the
+ * last heartbeat rather than waiting for the reaper to infer it ninety seconds later.
+ *
+ * NEVER FAILS THE OPERATION. The machine is already stopping; refusing the request over bookkeeping
+ * would send somebody to press Stop again on a machine that is on its way off.
+ */
+async function markDown(host: Host): Promise<void> {
+  try {
+    await withSystem((c) =>
+      c.query(`UPDATE hosts SET state = 'DOWN' WHERE id = $1 AND state <> 'DOWN'`, [host.id]));
+  } catch (e) {
+    console.warn(`[infra] stopped ${host.hostname} but could not mark it DOWN: ${(e as Error).message}`);
+  }
+  infraChanged();
+}
+
 /** Resolve a host to the machine it is allowed to power, refusing everything not on the list. */
 async function powerTarget(host: Host) {
   const target = instanceFor(host.hostname);
@@ -481,16 +502,7 @@ async function powerOperation(
        * ONLY ON A CONFIRMED STOP. An `accepted` stop is still moving and the reaper's inference is
        * the honest fallback for it.
        */
-      if (verb === 'stop') {
-        await withSystem((c) =>
-          c.query(`UPDATE hosts SET state = 'DOWN' WHERE id = $1 AND state <> 'DOWN'`, [host.id]))
-          .catch((e: Error) => {
-            // The machine IS stopped; failing the operation over bookkeeping would send somebody to
-            // press Stop again on a machine that is already off.
-            console.warn(`[infra] stopped ${host.hostname} but could not mark it DOWN: ${e.message}`);
-          });
-        infraChanged();
-      }
+      if (verb === 'stop') await markDown(host);
       return {
         result: 'succeeded',
         detail: `${host.hostname} is ${after.state}.`,
@@ -510,6 +522,23 @@ async function powerOperation(
      * start legitimately takes longer. The row stays open so that the log says what it is — a thing
      * in flight — rather than claiming an outcome nobody has.
      */
+    /**
+     * A MACHINE THE PROVIDER CALLS `STOPPING` IS NOT RUNNING, and waiting for TERMINATED to say so
+     * left the branch above never firing on the real farm.
+     *
+     * GCE takes longer than the settle window to finish a stop — measured 2026-09-13, twice: both
+     * console-initiated stops came back `accepted` with "last seen STOPPING", so the `succeeded`
+     * branch that marks the host DOWN was never reached. The card kept reading `running` for a
+     * machine on its way off, until the reaper noticed the silence ninety seconds later.
+     *
+     * STOPPING IS A ONE-WAY STATE. There is no path from it back to RUNNING without a start, so
+     * recording DOWN here is not a guess about the future — and if it somehow were, the next
+     * heartbeat lifts it, exactly as it lifts a silence quarantine.
+     */
+    if (verb === 'stop' && (after.state === 'stopping' || after.state === 'stopped')) {
+      await markDown(host);
+    }
+
     return {
       result: 'accepted',
       detail: `Accepted; last seen ${after.raw || 'unknown'} after ${Math.round(settleMs() / 1000)}s.`,
