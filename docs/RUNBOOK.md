@@ -267,6 +267,41 @@ instance it is running on.
 Restart the API and the Infrastructure page grows Start, Stop and Restart on the listed hosts only.
 `deploy/farm-online.sh` keeps working and is still the right tool when the console itself is down.
 
+### 4. The inventory needs a SECOND role, read-only and project-wide
+
+You cannot scope a `list` to an instance, so the Cloud section cannot use the narrow binding above.
+It gets its own role — no verbs, bound at the project — and that asymmetry is the point: the
+dangerous permissions stay attached to two named machines.
+
+```bash
+gcloud iam roles create mfarmCloudInventory --project "$PROJECT" \
+  --title "MFARM cloud inventory" \
+  --description "Read the project's instances, disks, addresses and snapshots. No verbs." \
+  --permissions compute.instances.list,compute.instances.get,compute.disks.list,compute.addresses.list,compute.snapshots.list \
+  --stage GA
+
+gcloud projects add-iam-policy-binding "$PROJECT" \
+  --member "serviceAccount:$SA" \
+  --role "projects/$PROJECT/roles/mfarmCloudInventory"
+```
+
+### 5. Prices, so the page can show money rather than only sizes
+
+Unset means the estate is listed with its SIZES and no currency, which is still useful. These are
+facts about **your** bill; the product will not invent them.
+
+```bash
+# deploy/.env — asia-south1 list prices as of 2026-09, in rupees. CHECK THEM AGAINST YOUR BILL.
+CLOUD_DISK_RATE=8.5          # per GB per month (pd-balanced)
+CLOUD_SNAPSHOT_RATE=2.2      # per GB per month, on bytes STORED
+CLOUD_ADDRESS_RATE=0.83      # per hour, while NOT on a running instance
+CLOUD_INSTANCE_RATES=mfarm-lab=65,mfarm-cp=2.7
+```
+
+**`CLOUD_ADDRESS_RATE` is the one worth understanding.** GCE bills a reserved address whenever it is
+not attached to a running instance, so stopping the device host *starts* a charge rather than ending
+one. The Cloud section says `BILLED — not on a running instance` against exactly those.
+
 ### Turning it off again
 
 Remove `MFARM_POWER_INSTANCES` and restart. The buttons disappear and the page goes back to saying

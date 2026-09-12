@@ -93,7 +93,9 @@ export async function hostRoutes(app: FastifyInstance): Promise<void> {
            ) d ON true
           -- THE AUTHORIZATION, since this runs on the system pool. A shared host (org_id IS NULL)
           -- serves every tenant; a dedicated one serves exactly its own.
-          WHERE h.org_id IS NULL OR h.org_id = $1
+          -- Retired machines are not part of the fleet (056); their history lives on in the cost
+          -- ledger and the operations log, which is where it belongs.
+          WHERE h.retired_at IS NULL AND (h.org_id IS NULL OR h.org_id = $1)
           ORDER BY h.hostname`,
         [orgId],
       );

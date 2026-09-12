@@ -126,6 +126,22 @@ export interface Config {
   powerInstances: Map<string, { instance: string; zone: string }>;
   /** The cloud project the instances above live in. Required when the list is not empty. */
   gcpProject: string | null;
+  /**
+   * WHAT EACH PIECE OF THE CLOUD ESTATE COSTS — configuration, never a default, for exactly the
+   * reason `hostHourlyCost` is: MFARM is self-hosted, a rate is a fact about somebody else's bill,
+   * and a number invented here would be rendered as though the farm had measured it.
+   *
+   * Unset means the Infrastructure page shows the resource with its SIZE and no money, which is
+   * still the useful half — "you have three snapshots you forgot about" needs no currency.
+   *
+   * `cloudInstanceRates` is PER INSTANCE, because a control plane and a sixteen-core device host do
+   * not cost the same and one rate for both is how the control plane's share stayed invisible.
+   * Anything unnamed falls back to `hostHourlyCost`.
+   */
+  cloudInstanceRates: Map<string, number>;
+  cloudDiskRatePerGbMonth: number | null;
+  cloudSnapshotRatePerGbMonth: number | null;
+  cloudAddressRatePerHour: number | null;
   videoRecording: 'off' | 'failures' | 'all';
   /**
    * How long a kept recording lives. SHORTER THAN ARTIFACTS BY DEFAULT — three days against
@@ -680,6 +696,35 @@ export function parseConfig(env: Env): Config {
     }
   }
   const gcpProject = (env.GCP_PROJECT ?? '').trim() || null;
+
+  /** A non-negative rate, or null, refusing garbage loudly rather than silently dropping it. */
+  const rate = (raw: string | undefined, name: string): number | null => {
+    const text = (raw ?? '').trim();
+    if (!text) return null;
+    const n = Number(text);
+    if (!Number.isFinite(n) || n < 0) {
+      problems.push(`${name} must be a non-negative number, not ${JSON.stringify(text)}`);
+      return null;
+    }
+    return n;
+  };
+  const cloudDiskRatePerGbMonth = rate(env.CLOUD_DISK_RATE, 'CLOUD_DISK_RATE');
+  const cloudSnapshotRatePerGbMonth = rate(env.CLOUD_SNAPSHOT_RATE, 'CLOUD_SNAPSHOT_RATE');
+  const cloudAddressRatePerHour = rate(env.CLOUD_ADDRESS_RATE, 'CLOUD_ADDRESS_RATE');
+
+  /** `CLOUD_INSTANCE_RATES=mfarm-lab=65,mfarm-cp=2.7` — per instance, per hour. */
+  const cloudInstanceRates = new Map<string, number>();
+  for (const entry of (env.CLOUD_INSTANCE_RATES ?? '').split(',').map((e) => e.trim()).filter(Boolean)) {
+    const at = entry.lastIndexOf('=');
+    const name = at === -1 ? '' : entry.slice(0, at).trim();
+    const value = rate(at === -1 ? undefined : entry.slice(at + 1), `CLOUD_INSTANCE_RATES (${entry})`);
+    if (!name || value === null) {
+      if (name) continue; // `rate` already recorded why
+      problems.push(`CLOUD_INSTANCE_RATES entry ${JSON.stringify(entry)} is not "<instance>=<rate>"`);
+      continue;
+    }
+    cloudInstanceRates.set(name, value);
+  }
   if (powerInstances.size > 0 && !gcpProject) {
     problems.push('MFARM_POWER_INSTANCES is set but GCP_PROJECT is not — there is no project to act in');
   }
@@ -781,6 +826,10 @@ export function parseConfig(env: Env): Config {
     costCurrency,
     powerInstances,
     gcpProject,
+    cloudInstanceRates,
+    cloudDiskRatePerGbMonth,
+    cloudSnapshotRatePerGbMonth,
+    cloudAddressRatePerHour,
     videoRecording,
     videoRetentionHours,
     commandRetentionHours,
@@ -850,6 +899,16 @@ export function describeConfig(c: Config): Record<string, string | number | bool
       ? [...c.powerInstances].map(([h, i]) => `${h}->${i.instance}@${i.zone}`).join(', ')
       : 'none (power control disabled)',
     gcpProject: c.gcpProject ?? 'unset',
+    // Named at startup, like the allow-list, so an operator can see what the money on the page is
+    // computed from rather than guessing which rate is missing.
+    cloudRates: [
+      c.cloudInstanceRates.size
+        ? `instances ${[...c.cloudInstanceRates].map(([n, r]) => `${n}=${r}/h`).join(' ')}`
+        : 'instances: HOST_HOURLY_COST for all',
+      `disk ${c.cloudDiskRatePerGbMonth ?? 'unset'}/GB-month`,
+      `snapshot ${c.cloudSnapshotRatePerGbMonth ?? 'unset'}/GB-month`,
+      `address ${c.cloudAddressRatePerHour ?? 'unset'}/hour`,
+    ].join(', '),
     videoRecording: c.videoRecording,
     videoRetentionHours: c.videoRetentionHours,
     commandRetentionHours: c.commandRetentionHours,

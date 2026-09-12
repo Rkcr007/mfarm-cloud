@@ -41,6 +41,7 @@ import { buildServer } from '../src/http/server.ts';
 import { withSystem, closePools } from '../src/db.ts';
 import { upsertUser, cookieValue } from '../src/users.ts';
 import { resetCloudCache } from '../src/infra/cloud.ts';
+import { reconcileOperations } from '../src/infra/reconcile.ts';
 
 let app: FastifyInstance;
 let cookie: string, csrf: string;
@@ -396,6 +397,110 @@ describe('the happy paths', () => {
     await post(`/v1/infra/hosts/${labA}/restart`);
     assert.ok(calls.some((c) => c.method === 'POST' && c.url.endsWith('/reset')),
       'restart did not map onto the provider verb');
+  });
+});
+
+describe('operations that outlive their own request', () => {
+  /**
+   * THE GAP THE REAL FARM LEFT. A GCE stop takes longer than the settle window, so both
+   * console-initiated stops on 2026-09-13 came back `accepted` — honest, and open. Nothing closed
+   * them. An audit log full of operations that never finished stops answering the one question it
+   * exists for: did anything actually change?
+   *
+   * The reconciler ASKS and WRITES DOWN. It never re-issues: two things issuing stops is how a farm
+   * ends up stopped twice and started once.
+   */
+  const openOps = () => q<{ id: string; result: string; detail: string | null }>(
+    `SELECT id, result, detail FROM infra_operations
+      WHERE target_id = $1 ORDER BY requested_at DESC LIMIT 1`, [labA]);
+
+  /**
+   * THE RECONCILER IS FLEET-WIDE, so every test in this file that produced an `accepted` row is one
+   * of its inputs. Settling them first is what makes the counts below mean what they say — without
+   * it the assertions are about whatever the tests above happened to leave lying around, which is
+   * the same class of defect as a fixture that seeds the state it is testing.
+   */
+  beforeEach(async () => {
+    await q(`UPDATE infra_operations SET result = 'noop', finished_at = now(),
+                    detail = 'closed by the test fixture'
+              WHERE result = 'accepted'`);
+  });
+
+  test('a stop that finished after we stopped watching is settled as succeeded', async () => {
+    // Accepted while STOPPING...
+    fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
+    assert.equal((await post(`/v1/infra/hosts/${labA}/stop`)).json().result, 'accepted');
+    assert.equal((await openOps())[0].result, 'accepted');
+
+    // ...and by the time anybody looks again, the machine is off.
+    resetCloudCache();
+    fakeCloud({ status: 'TERMINATED' });
+    const out = await reconcileOperations();
+    assert.equal(out.settled, 1, `nothing was settled (checked ${out.checked})`);
+
+    const [row] = await openOps();
+    assert.equal(row.result, 'succeeded');
+    assert.match(row.detail ?? '', /is stopped/);
+
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  test('one that is STILL going is left alone, not guessed at', async () => {
+    fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
+    await post(`/v1/infra/hosts/${labA}/stop`);
+
+    resetCloudCache();
+    fakeCloud({ status: 'STOPPING' });
+    const out = await reconcileOperations();
+    assert.equal(out.settled, 0);
+    assert.equal(out.gaveUp, 0, 'an operation in flight was settled on its first check');
+    assert.equal((await openOps())[0].result, 'accepted');
+
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  test('one that has been open too long settles as `unknown`, never as failed', async () => {
+    fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
+    await post(`/v1/infra/hosts/${labA}/stop`);
+    /**
+     * WOUND THE HORIZON IN rather than backdating the row. `requested_at` is immutable and 053's
+     * trigger refuses the UPDATE — which is the trigger working, and the reason this knob exists.
+     */
+    process.env.INFRA_OPERATION_GIVE_UP_MS = '0';
+    resetCloudCache();
+    fakeCloud({ status: 'RUNNING' });   // it never got there
+    const out = await reconcileOperations();
+    assert.equal(out.gaveUp, 1);
+
+    const [after] = await openOps();
+    assert.equal(after.result, 'unknown',
+      'an operation whose outcome nobody established was recorded as a failure');
+    assert.match(after.detail ?? '', /which is not the stopped it asked for/);
+
+    delete process.env.INFRA_OPERATION_GIVE_UP_MS;
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  test('an unreachable provider leaves a recent operation open rather than condemning it', async () => {
+    fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
+    await post(`/v1/infra/hosts/${labA}/stop`);
+
+    resetCloudCache();
+    fakeCloud({ vanish: 'always' });
+    const out = await reconcileOperations();
+    assert.equal(out.settled, 0);
+    assert.equal(out.gaveUp, 0);
+    assert.equal((await openOps())[0].result, 'accepted');
+
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  test('a DRAIN is never reconciled — it finished inside its own request', async () => {
+    fakeCloud();
+    await post(`/v1/infra/hosts/${labA}/drain`, { reason: 'not a power op' });
+    const out = await reconcileOperations();
+    assert.equal(out.checked, 0, 'the reconciler is looking at operations that need no reconciling');
+    await post(`/v1/infra/hosts/${labA}/resume`);
   });
 });
 

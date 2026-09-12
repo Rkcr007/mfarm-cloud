@@ -144,6 +144,8 @@ export interface HostSnapshot {
     monthToDate: number | null;
   };
   utilisationPct: number | null;
+  /** WHY it is what it is — "no session ran" and "ran and wasted it" have different fixes. */
+  utilisationBasis: string;
   alerts: Alert[];
 }
 
@@ -276,6 +278,10 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
               AND me.kind = 'device_seconds'
               AND me.occurred_at >= date_trunc('day', now())
          ) m ON true
+        -- THE CURRENT FLEET, and nothing else (056). A machine somebody retired is not a host that
+        -- is down; it is a host that is gone, and counting it kept this page's health rollup amber
+        -- forever over a laptop switched off a fortnight ago.
+        WHERE h.retired_at IS NULL
         ORDER BY h.hostname`,
     );
     return rows;
@@ -369,6 +375,20 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
     const utilisationPct = capacitySeconds && capacitySeconds > 0 && deviceSecondsToday !== null
       ? Math.min(100, Math.round((deviceSecondsToday / capacitySeconds) * 1000) / 10)
       : null;
+    /**
+     * WHY IT IS 0%, which is a different fact from the number and the one an operator acts on.
+     *
+     * `0% used` reads as an accusation, and on a farm where no suite ran today it is not one — the
+     * machine did exactly what was asked of it, which was nothing. The figure was correct and the
+     * page was silently conflating "nobody ran anything" with "somebody ran something and wasted
+     * the host". Those have different fixes: one is "stop the machine", the other is "look at the
+     * suite".
+     */
+    const utilisationBasis = capacitySeconds === null || capacitySeconds === 0
+      ? 'the machine was not powered on today'
+      : deviceSecondsToday === 0
+        ? 'no session ran on it today'
+        : 'device-seconds used over device-seconds paid for';
 
     const alerts: Alert[] = [];
     if (reach === 'unavailable') {
@@ -476,6 +496,7 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         monthToDate: money(poweredMonth, hourly),
       },
       utilisationPct,
+      utilisationBasis,
       alerts,
     };
   });
@@ -546,10 +567,15 @@ export interface CostSnapshot {
    * what it assumes is a number people quote back at you.
    */
   estimatedMonth: { value: number | null; basis: string };
+  /** The same month, projected from the trailing fortnight rather than from the current state. */
+  estimatedMonthAtRecentRate: { value: number | null; basis: string };
   /** Cost per day over the trailing fortnight, oldest first, for the trend. */
   trend: Array<{ date: string; cost: number | null; poweredHours: number }>;
   /** Hosts that were on and barely used. The page's one cost-saving recommendation. */
-  idle: Array<{ hostId: string; hostname: string; poweredHours: number; utilisationPct: number | null; wastedCost: number | null }>;
+  idle: Array<{
+    hostId: string; hostname: string; poweredHours: number;
+    utilisationPct: number | null; wastedCost: number | null;
+  }>;
 }
 
 /** A host under this much utilisation over the trailing day is worth a look. */
@@ -627,6 +653,30 @@ export async function costSnapshot(hosts: HostSnapshot[]): Promise<CostSnapshot>
         : `Assumes the ${running} host${running === 1 ? '' : 's'} that ${running === 1 ? 'is' : 'are'} `
           + 'powered on now stay on for the rest of the month.',
     },
+    /**
+     * THE SECOND PROJECTION, and the page needs both.
+     *
+     * The one above assumes the current state persists, which is deliberately the alarming reading —
+     * it is what makes leaving a host on overnight look like what it costs. But on a farm that is
+     * switched off most of the time it is ALWAYS wrong in the same direction, and a figure that is
+     * always wrong in the same direction is one people learn to discount.
+     *
+     * This is the other half: what the month costs if the next three weeks look like the last two.
+     * Neither is the truth; between them they bracket it, and an operator can see which they are
+     * being asked to worry about.
+     */
+    estimatedMonthAtRecentRate: (() => {
+      if (hourly === null) return { value: null, basis: 'No rate is configured.' };
+      const days = trend.length || 1;
+      const recentSeconds = trend.reduce((sum, r) => sum + Number(r.seconds), 0);
+      const perDay = recentSeconds / days;
+      const daysLeft = daysInMonth - now.getDate();
+      return {
+        value: Number(((monthSeconds + perDay * daysLeft) / 3600 * hourly).toFixed(2)),
+        basis: `Assumes the rest of the month looks like the last ${days} days, which averaged `
+          + `${Math.round((perDay / 3600) * 10) / 10} powered hours a day.`,
+      };
+    })(),
     trend: trend.map((r) => {
       const seconds = Number(r.seconds);
       return {

@@ -1,14 +1,18 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { requireOperator } from '../server.ts';
+import { withSystem } from '../../db.ts';
 import { badRequest } from '../errors.ts';
 import {
   costSnapshot, fleetSnapshot, healthComponents, hostSnapshots, overallHealth, probeDatabase,
 } from '../../infra/snapshot.ts';
 import { recentEvents } from '../../infra/events.ts';
 import { history, historyFacets, type TargetKind } from '../../infra/audit.ts';
-import { drainHost, resumeHost, startHost, stopHost, restartHost } from '../../infra/operations.ts';
+import {
+  drainHost, resumeHost, startHost, stopHost, restartHost, retireHost,
+} from '../../infra/operations.ts';
 import { waitForChange, sseFrame, SSE_KEEPALIVE, streamListeners } from '../../infra/stream.ts';
 import { powerConfigured, instanceFor } from '../../infra/cloud.ts';
+import { cloudInventory, resetInventoryCache } from '../../infra/inventory.ts';
 import { GIT_SHA, BUILT_AT, shortSha } from '../../version.ts';
 
 /**
@@ -196,6 +200,8 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
         power: powerConfigured(),
         /** Needs the agent to learn a job kind. Its own stage. */
         services: false,
+        /** Always available: it is a timestamp, not a machine operation. */
+        retire: true,
       },
     };
   }
@@ -260,6 +266,32 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
         limit: intParam(q.limit, 100, 1, 500),
       }),
     };
+  });
+
+  /**
+   * GET /v1/infra/cloud — everything this app has in the project, not just what runs an agent.
+   *
+   * SEPARATE FROM THE OVERVIEW, deliberately. The overview is the hot path: it is recomputed every
+   * two seconds for every open stream, and four cloud API calls on that tick would be a rate-limit
+   * problem and a latency one. The estate changes when somebody runs a gcloud command, so it is
+   * cached for a minute and fetched when the section is opened.
+   *
+   * `refresh=1` drops the cache, for the one case that matters: somebody has just changed something
+   * in the cloud console and wants to see it.
+   */
+  app.get<{ Querystring: { refresh?: string } }>('/infra/cloud', async (req) => {
+    requireOperator(req);
+    if (req.query.refresh) resetInventoryCache();
+
+    // The fleet's own hostnames, so the inventory can say which instances are running an agent —
+    // matched through the allow-list, because a worker registers under its internal FQDN and a
+    // naive comparison would say none of them is in the fleet.
+    const hostnames = await withSystem(async (c) => {
+      const { rows } = await c.query<{ hostname: string }>(
+        'SELECT hostname FROM hosts WHERE retired_at IS NULL');
+      return new Set(rows.map((r) => r.hostname));
+    });
+    return cloudInventory(hostnames);
   });
 
   /* ------------------------------------------------------------------ operations */
@@ -350,6 +382,32 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
   powerRoute('start', startHost);
   powerRoute('stop', stopHost);
   powerRoute('restart', restartHost);
+
+  /**
+   * POST /v1/infra/hosts/:id/retire — take a machine out of the fleet for good.
+   *
+   * The counterpart to drain and NOT a stronger version of it. Drain says "stop placing work here";
+   * retire says "this is not coming back". The route refuses a host that is still reporting, because
+   * registration un-retires and a live agent registers on start — so retiring one would either
+   * bounce straight back or strand a working machine. See `retireHost`.
+   */
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>(
+    '/infra/hosts/:id/retire',
+    {
+      schema: {
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { reason: { type: 'string', maxLength: 200 } },
+        },
+      },
+    },
+    async (req) => {
+      requireOperator(req);
+      return retireHost(req, req.params.id, req.body?.reason);
+    },
+  );
 
   /* ------------------------------------------------------------------ the live stream */
 

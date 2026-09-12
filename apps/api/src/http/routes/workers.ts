@@ -137,6 +137,17 @@ export async function workerRoutes(app: FastifyInstance) {
            -- clear_silence_quarantine the heartbeat calls, which also restores each device to
            -- what it was doing rather than guessing READY.
            state = CASE WHEN hosts.state = 'QUARANTINED' THEN hosts.state ELSE 'UP' END,
+           -- REGISTRATION UN-RETIRES (056), and only registration does.
+           --
+           -- Retiring says "this machine is not part of the fleet any more". Running the agent on it
+           -- again is a deliberate act by somebody holding the enrollment credential, which is
+           -- exactly the evidence that falsifies the claim -- the same shape as a heartbeat against a
+           -- silence quarantine, and against DOWN.
+           --
+           -- A BEAT ALONE DOES NOT, deliberately. A beat can come from an agent process nobody meant
+           -- to leave running; registration means somebody set the machine up again. Retiring is a
+           -- judgement and only a comparable act should overturn it.
+           retired_at = NULL, retired_by = NULL, retired_reason = NULL,
            protocol_version = EXCLUDED.protocol_version,
            capabilities = EXCLUDED.capabilities,
            cores = EXCLUDED.cores, memory_mb = EXCLUDED.memory_mb,

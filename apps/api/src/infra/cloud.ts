@@ -202,6 +202,16 @@ async function call(method: 'GET' | 'POST', path: string): Promise<Record<string
   return await res.json() as Record<string, unknown>;
 }
 
+/**
+ * A read against the compute API, by full path.
+ *
+ * EXPORTED FOR THE INVENTORY, which lists whole collections rather than acting on one named machine
+ * — a list cannot be scoped to an instance, so it needs its own project-level role. Keeping it on
+ * `call` means both paths share one token, one timeout and one error taxonomy, which is what makes
+ * `answered` mean the same thing everywhere.
+ */
+export const cloudGet = (path: string): Promise<Record<string, unknown>> => call('GET', path);
+
 const url = (t: Target, suffix = '') =>
   `/projects/${encodeURIComponent(t.project)}/zones/${encodeURIComponent(t.zone)}`
   + `/instances/${encodeURIComponent(t.instance)}${suffix}`;

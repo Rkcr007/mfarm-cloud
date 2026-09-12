@@ -19,6 +19,7 @@ import { appRoutes } from './routes/apps.ts';
 import { runRoutes } from './routes/runs.ts';
 import { hostRoutes } from './routes/hosts.ts';
 import { infraRoutes } from './routes/infra.ts';
+import { reconcileOperations } from '../infra/reconcile.ts';
 import { resultRoutes } from './routes/results.ts';
 import { shareRoutes, sharePageRoutes } from './routes/shares.ts';
 import { tunnelRoutes } from './routes/tunnels.ts';
@@ -677,6 +678,35 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
     }, opts.reaperIntervalMs);
     timer.unref?.();
     app.addHook('onClose', async () => clearInterval(timer));
+
+    /**
+     * FINISH THE OPERATIONS THAT OUTLIVED THEIR OWN REQUEST — ADR-0038.
+     *
+     * A power operation watches a machine for twenty-five seconds and then answers honestly; on this
+     * farm a GCE stop takes longer, so it answers `accepted` and the row stays open. Nothing closed
+     * it, and an audit log full of operations that never finished stops answering the question it
+     * exists for: did anything actually change?
+     *
+     * ON THE REAPER'S TIMER RATHER THAN ITS OWN, because it is the same kind of work — a bounded
+     * sweep that reconciles what the world says with what the database believes — and a second timer
+     * would be a second thing to forget to start. It does NOT ride `reap()` itself: a failure to
+     * reach the cloud API must not count as a reaper failure, which is the metric that says sessions
+     * are not being expired.
+     *
+     * SILENT WHEN THERE IS NOTHING TO DO, which is almost always: it costs one indexed query against
+     * a partial index over rows that are nearly all settled.
+     */
+    const reconciler = setInterval(() => {
+      void reconcileOperations()
+        .then((r) => {
+          if (r.settled || r.gaveUp) {
+            app.log.info({ ...r }, 'settled infrastructure operations that outlived their request');
+          }
+        })
+        .catch((err: Error) => app.log.warn({ err }, 'could not reconcile infrastructure operations'));
+    }, opts.reaperIntervalMs);
+    reconciler.unref?.();
+    app.addHook('onClose', async () => clearInterval(reconciler));
   }
 
   return app;

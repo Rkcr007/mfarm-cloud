@@ -209,6 +209,69 @@ reason; a provider that NEVER SPOKE is `unknown`, because the machine may well h
 `catch` reports both as failures, and that is how somebody presses Stop a second time on a machine
 that is already stopping.
 
+### 9. The fleet is what is running an agent; the ESTATE is what you pay for
+
+Those are different sets and the product only knew the first. `#/infra/cloud` lists everything in the
+project — and the reason it had to exist is that **"the farm costs nothing while it is off" was never
+true**:
+
+- the **control plane** serves this very page and had never appeared anywhere in the product, so
+  every cost figure excluded the machine showing it;
+- 180 GB of persistent disk is billed whether or not either VM is running;
+- three snapshots nobody had looked at since August;
+- and GCE bills a reserved address whenever it is **not attached to a running instance** — so
+  stopping a host *starts* a charge on its address rather than ending one. Nothing in a status of
+  `IN_USE` says so, which is why `billed` is derived rather than read off it.
+
+**The headline is the floor**: what the estate costs with every machine switched off. Everything else
+on the page is the variable cost; this is the part that does not go away when you press Stop.
+
+**Listing needs its own role.** You cannot scope a list to an instance, so inventory gets a
+project-level read-only binding while the four power verbs stay bound to two named machines. That
+asymmetry is deliberate and worth keeping visible.
+
+**Rates are configuration and unset by default**, the rule `HOST_HOURLY_COST` already followed. An
+unpriced resource is shown with its SIZE and no money, which is still the useful half — "you have
+three snapshots you forgot about" needs no currency — and the missing rate is named on the page so
+the gap is actionable rather than mysterious. `CLOUD_INSTANCE_RATES` is per instance, because one
+rate for a control plane and a sixteen-core device host is exactly how the control plane's share
+stayed invisible.
+
+### 10. A machine can leave the fleet
+
+Migration 056. A laptop ran an agent once and had not beaten in a fortnight; it was still a CRITICAL
+alert, still the reason two health components could never read healthy, and still counted in the
+headline. **A rollup that is always amber is one people stop reading**, which is the one thing the
+health board must not become.
+
+- **Retire, not delete.** `hosts` cascades to devices and to the power ledger; a timestamp keeps the
+  history and is filtered out of every read that describes the *current* fleet.
+- **The devices go through `quarantine_host`**, the one function that knows how to withdraw them
+  without evicting a tenant mid-session.
+- **Registration un-retires, a beat does not.** Running the agent again is a deliberate act by
+  somebody holding the enrollment credential; a beat can come from a process nobody meant to leave
+  running. Retiring is a judgement and only a comparable act should overturn it.
+- **A machine that is still reporting is refused**, and told to drain instead — retiring one would
+  either bounce back or strand it.
+
+### 11. An operation that outlives its request is still finished
+
+A GCE stop takes longer than the settle window, so a console stop answers `accepted` and leaves the
+row open. Nothing closed it, and an audit log full of operations that never finished stops answering
+the question it exists for.
+
+The reconciler runs on the reaper's timer and **asks rather than acts** — it never re-issues, because
+two things issuing stops is how a farm ends up stopped twice and started once. Past a horizon it
+settles `unknown` rather than staying open or being guessed into `failed`.
+
+### 12. An idle host finally pages
+
+`MfarmHostIdleAndBilling`, built from series that already existed rather than from a new gauge:
+idleness is not a property of a host, it is a host being on *and* nothing being allocated, and a
+dedicated gauge would be a third place for that definition to drift. Two hours, not twenty minutes —
+a farm is legitimately idle between suites, and an alert that fires during a coffee break gets
+silenced. `STATUS.md` records that the absence of this cost ₹230 on 2026-09-12.
+
 ## Consequences
 
 - The top bar loses its infrastructure segments. `#/infra` gains them, with everything around them

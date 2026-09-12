@@ -189,7 +189,7 @@ function infraPayload(over: Record<string, unknown> = {}) {
       { at: new Date().toISOString(), source: 'power', severity: 'info', title: 'mfarm-lab powered on', detail: null, actor: null, target: { kind: 'host', id: 'host-1', label: 'mfarm-lab' } },
       { at: new Date(Date.now() - 60_000).toISOString(), source: 'device', severity: 'warning', title: 'cf_x86_64 quarantined (health)', detail: 'adb went away', actor: null, target: { kind: 'host', id: 'host-1', label: 'mfarm-lab' } },
     ],
-    capabilities: { drain: false, power: false, services: false },
+    capabilities: { drain: false, power: false, services: false, retire: true },
     ...over,
   };
 }
@@ -4378,7 +4378,7 @@ describe('the tunnels screen', () => {
  *   is not a move, and nothing but a test reads the markup.
  */
 describe('the infrastructure operations centre', () => {
-  const sections = ['overview', 'hosts', 'services', 'devices', 'usage', 'events'];
+  const sections = ['overview', 'hosts', 'cloud', 'services', 'devices', 'usage', 'events'];
 
   test('every section builds a tree', () => {
     for (const lens of sections) {
@@ -4992,5 +4992,161 @@ describe('what the real farm showed', () => {
     data.hosts[0].powerable = true;
     mod.state.infra.data = data;
     assert.ok(!/matches none of this farm/.test(textOf(mod.SCREENS.infra())));
+  });
+});
+
+/**
+ * The cloud estate, and retiring a machine that is not coming back.
+ *
+ * BOTH ARE ANSWERS TO "WHAT DO WE ACTUALLY HAVE". The Cloud section adds the resources that bill
+ * whether or not anything is running — the control plane, the disks, the snapshots, the reserved
+ * addresses — and Retire removes the ones that stopped existing.
+ */
+describe('the cloud estate', () => {
+  const estate = (over = {}) => ({
+    configured: true,
+    project: 'mfarm-lab',
+    fetchedAt: new Date().toISOString(),
+    error: null,
+    instances: [
+      { name: 'mfarm-cp', zone: 'asia-south1-c', status: 'RUNNING', machineType: 'e2-medium',
+        disks: ['mfarm-cp'], rateHourly: 2.7, isFleetHost: false },
+      { name: 'mfarm-lab', zone: 'asia-south1-c', status: 'TERMINATED',
+        machineType: 'n2-standard-16', disks: ['mfarm-lab'], rateHourly: 65, isFleetHost: true },
+    ],
+    disks: [
+      { name: 'mfarm-lab', zone: 'asia-south1-c', sizeGb: 150, type: 'pd-balanced',
+        attachedTo: 'mfarm-lab', costPerMonth: 1275 },
+      { name: 'mfarm-cp', zone: 'asia-south1-c', sizeGb: 30, type: 'pd-balanced',
+        attachedTo: 'mfarm-cp', costPerMonth: 255 },
+    ],
+    addresses: [
+      { name: 'mfarm-ip', address: '34.100.159.34', region: 'asia-south1', status: 'IN_USE',
+        attachedTo: 'mfarm-lab', billed: true, costPerMonth: 606 },
+      { name: 'mfarm-lab-ip', address: '34.100.138.213', region: 'asia-south1', status: 'IN_USE',
+        attachedTo: 'mfarm-cp', billed: false, costPerMonth: null },
+    ],
+    snapshots: [
+      { name: 'mfarm-cf-ready', diskSizeGb: 150, storageBytes: 10 * 1024 ** 3,
+        sourceDisk: 'mfarm-lab', createdAt: '2026-08-01T00:00:00Z', costPerMonth: 22 },
+    ],
+    cost: {
+      currency: '₹', floorPerMonth: 2158, runningPerHour: 2.7,
+      byKind: { instances: 1971, disks: 1530, addresses: 606, snapshots: 22 },
+      unpriced: [],
+    },
+    ...over,
+  });
+
+  const seedCloud = (over = {}) => {
+    seed({ name: 'infra', lens: 'cloud' });
+    mod.state.infraCloud = { data: estate(over), loaded: true, loading: false, error: null };
+  };
+
+  test('THE CONTROL PLANE IS ON THE PAGE — it never appeared anywhere in the product', () => {
+    seedCloud();
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /mfarm-cp/);
+    assert.match(text, /e2-medium/);
+    assert.match(text, /not in the fleet/, 'nothing says which machines run an agent and which do not');
+  });
+
+  test('THE FLOOR IS THE HEADLINE — what it costs with everything switched off', () => {
+    seedCloud();
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /Floor, per month/);
+    assert.match(text, /₹2,158/);
+    assert.match(text, /With every machine switched off/,
+      '"the farm costs nothing while it is off" was never true and the page has to say so');
+  });
+
+  test('a billed address says WHY, because IN_USE does not mean free', () => {
+    seedCloud();
+    const text = textOf(mod.SCREENS.infra());
+    // GCE charges for a reserved address whenever it is NOT on a running instance — so stopping a
+    // VM starts a charge rather than ending one. Nobody discovers that from a status of IN_USE.
+    assert.match(text, /BILLED — not on a running instance/);
+    assert.match(text, /free while its instance runs/);
+  });
+
+  test('an unattached disk is called out as waste', () => {
+    seedCloud({ disks: [{ name: 'orphan', zone: 'asia-south1-c', sizeGb: 20, type: 'pd-ssd',
+                          attachedTo: null, costPerMonth: 170 }] });
+    assert.match(textOf(mod.SCREENS.infra()), /NOT ATTACHED — billed for nothing/);
+  });
+
+  test('a snapshot is shown by what it STORES, not by the disk it restores', () => {
+    seedCloud();
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /10\.0 GB stored/);
+    assert.match(text, /restores 150 GB/);
+  });
+
+  test('unpriced resources are listed with their size and the missing rate is named', () => {
+    seedCloud({
+      cost: { currency: '₹', floorPerMonth: null, runningPerHour: null,
+              byKind: { instances: null, disks: null, addresses: null, snapshots: null },
+              unpriced: ['disks (CLOUD_DISK_RATE)'] },
+      disks: [{ name: 'mfarm-lab', zone: 'asia-south1-c', sizeGb: 150, type: 'pd-balanced',
+                attachedTo: 'mfarm-lab', costPerMonth: null }],
+    });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /150 GB/, 'the disk vanished with its price');
+    assert.match(text, /CLOUD_DISK_RATE/, 'the gap is mysterious rather than actionable');
+  });
+
+  test('a control plane with no cloud credential says so rather than showing an empty project', () => {
+    seed({ name: 'infra', lens: 'cloud' });
+    mod.state.infraCloud = {
+      data: { configured: false, project: null, instances: [], disks: [], addresses: [], snapshots: [] },
+      loaded: true, loading: false, error: null,
+    };
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /cannot see the cloud/);
+    assert.ok(!/Floor, per month/.test(text), 'an unconfigured page showed a floor of nothing');
+  });
+});
+
+describe('retiring a machine that is not coming back', () => {
+  const dialogText = () => textOf((globalThis as unknown as {
+    document: { getElementById(id: string): unknown };
+  }).document.getElementById('dialog'));
+
+  const withHost = (over: Record<string, unknown>) => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = infraPayload();
+    data.hosts = [{ ...data.hosts[0], ...over }];
+    mod.state.infra.data = data;
+    return data;
+  };
+
+  test('a host that is still beating is NOT offered Retire', () => {
+    withHost({ reachability: 'live' });
+    assert.ok(!findByText(mod.SCREENS.infra(), 'Retire'),
+      'retiring a live machine would bounce back on its next registration, or strand it');
+  });
+
+  test('a host nobody has heard from IS', () => {
+    withHost({ reachability: 'unavailable', power: 'unknown' });
+    assert.ok(findByText(mod.SCREENS.infra(), 'Retire'));
+  });
+
+  test('THE DIALOG SAYS NOTHING IS DELETED, which is the fear that stops people pressing it', () => {
+    withHost({ reachability: 'unavailable', power: 'unknown' });
+    findByText(mod.SCREENS.infra(), 'Retire').click();
+    const text = dialogText();
+    assert.match(text, /Retire mfarm-lab/);
+    assert.match(text, /Nothing is deleted/);
+    assert.match(text, /stay in the record/);
+    assert.match(text, /running the agent on it again brings it straight back/i);
+    mod.closeOverlays();
+  });
+
+  test('the capability is read from the server, like every other control', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = infraPayload({ capabilities: { drain: true, power: false, services: false, retire: false } });
+    data.hosts = [{ ...data.hosts[0], reachability: 'unavailable', power: 'unknown' }];
+    mod.state.infra.data = data;
+    assert.ok(!findByText(mod.SCREENS.infra(), 'Retire'));
   });
 });

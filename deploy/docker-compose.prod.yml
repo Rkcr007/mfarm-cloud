@@ -262,6 +262,36 @@ services:
       # connection says something so a proxy does not reap it. Separate timers, deliberately.
       INFRA_STREAM_TICK_MS: ${INFRA_STREAM_TICK_MS:-2000}
       INFRA_STREAM_KEEPALIVE_MS: ${INFRA_STREAM_KEEPALIVE_MS:-15000}
+      # How long a power operation may stay `accepted` before the reconciler settles it as `unknown`.
+      # A GCE stop is under two minutes and a start plus a cold boot under six; past this the machine
+      # is not on its way anywhere the operation asked for, and calling it "in progress" is the log
+      # describing a thing that is not happening.
+      INFRA_OPERATION_GIVE_UP_MS: ${INFRA_OPERATION_GIVE_UP_MS:-600000}
+
+      # ---------------------------------------------------------------- what the estate costs
+      #
+      # The Infrastructure page's Cloud section lists everything in the project — instances, disks,
+      # snapshots and reserved addresses — and prices whatever has a rate here. UNSET IS THE DEFAULT
+      # AND MEANS "no money shown", never "free": MFARM is self-hosted, what a disk costs is a fact
+      # about somebody else's bill, and a number invented in the code would be rendered as though the
+      # farm had measured it.
+      #
+      # The floor these produce is the number nobody had before: what the estate costs with EVERY
+      # MACHINE SWITCHED OFF. Disks and snapshots do not care whether a VM is running, and GCE bills
+      # a reserved address whenever it is NOT on a running instance — so stopping a host starts a
+      # charge on its address rather than ending one.
+      #
+      #   CLOUD_DISK_RATE      per GB per month
+      #   CLOUD_SNAPSHOT_RATE  per GB per month, on bytes STORED rather than on the source disk
+      #   CLOUD_ADDRESS_RATE   per hour, while the address is not on a running instance
+      #   CLOUD_INSTANCE_RATES per instance per hour — `mfarm-lab=65,mfarm-cp=2.7`. One rate for a
+      #                        control plane and a sixteen-core device host is how the control
+      #                        plane's share of the bill stayed invisible. Anything unnamed falls
+      #                        back to HOST_HOURLY_COST.
+      CLOUD_DISK_RATE: ${CLOUD_DISK_RATE:-}
+      CLOUD_SNAPSHOT_RATE: ${CLOUD_SNAPSHOT_RATE:-}
+      CLOUD_ADDRESS_RATE: ${CLOUD_ADDRESS_RATE:-}
+      CLOUD_INSTANCE_RATES: ${CLOUD_INSTANCE_RATES:-}
 
       # ---------------------------------------------------------------- knobs config.ts reads
       #

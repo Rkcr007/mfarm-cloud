@@ -391,6 +391,20 @@ const hostHeartbeat = g(
 
 const devicesTotal = g('mfarm_devices_total', 'Devices in the fleet, all states.');
 
+/**
+ * WHAT A POWERED-ON HOST COSTS PER HOUR — the rate, as a series.
+ *
+ * A gauge rather than a dashboard annotation, so that an ALERT can say what an idle host is costing
+ * rather than that one exists. `docs/STATUS.md` records the gap this closes: the console has shown
+ * the burn since ADR-0035, nothing pages about it, and on 2026-09-12 that cost ₹230 — the header
+ * read "host up 3h 1m · ~₹196" for three and a half hours and nobody was looking. The instrument
+ * worked; the absence of a pager was the gap.
+ *
+ * ABSENT WHEN UNCONFIGURED, never zero. A farm with no `HOST_HOURLY_COST` has not told us what it
+ * pays, and a zero here would make `mfarm_host_hourly_cost * hours` read as free.
+ */
+const hostRate = g('mfarm_host_hourly_cost', 'Configured cost of one powered-on host-hour.');
+
 // --- process and pool ---------------------------------------------------------------------------
 
 const buildInfo = g('mfarm_build_info', 'Always 1. Labels carry the versions.', ['version', 'node']);
@@ -735,7 +749,10 @@ export async function collectFleet(): Promise<void> {
               disk_free_bytes::text, disk_total_bytes::text, load1::text, cores::text,
               mem_available_mb::text, mem_total_mb::text,
               EXTRACT(EPOCH FROM (now() - stats_at))::text AS stats_age
-         FROM hosts`,
+         -- The CURRENT fleet (056). A retired machine has no gauges worth alerting on, and leaving
+         -- it here would keep mfarm_host_last_heartbeat_timestamp_seconds ageing forever on a
+         -- laptop somebody unplugged — an alert that can only ever fire.
+         FROM hosts WHERE retired_at IS NULL`,
     );
     const a = await client.query<AgeRow>(
       `SELECT
@@ -802,6 +819,12 @@ export async function collectFleet(): Promise<void> {
     set(hostStatsAge, r.stats_age);
   }
   for (const [state, n] of hostCounts) hosts.set({ state }, n);
+
+  // Read here rather than at module scope, so a farm that sets the rate and restarts starts
+  // exporting it — the trap every route file in this codebase documents about hoisted imports.
+  hostRate.reset();
+  const rate = Number(process.env.HOST_HOURLY_COST ?? '');
+  if (Number.isFinite(rate) && rate >= 0) hostRate.set({}, rate);
 
   cleaningAge.set({}, Number(ages.cleaning_age));
   preparingAge.set({}, Number(ages.preparing_age));
