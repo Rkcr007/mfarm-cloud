@@ -2660,3 +2660,147 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ==============================================================================================
+   Infrastructure Operations Center — ADR-0038
+
+   Six classes, and every one of them exists because an existing class could not say the thing:
+
+     `.nav-alert`   the top bar's burn segment, relocated onto a nav item. Three states, and one of
+                    them is "absent", which is the point — see `paintInfraAlert`.
+     `.healthboard` the six lights, whose whole job is to be readable from further away than a card.
+     `.gauge`       a number that must carry its own age. `.is-stale` is what stops an hour-old
+                    reading looking like a current one — migration 044's trap, in CSS.
+     `.trend`       a fortnight of powered hours. Bars, not a line: fourteen discrete days.
+     `.inhost`      a host card, which is denser than any other card in the console.
+
+   COLOUR NEVER CARRIES MEANING ALONE, which is the rule the whole palette rests on. Every state
+   below also reads as a word, and `.is-stale` additionally desaturates and dims — so a page printed
+   in greyscale still says which numbers are current.
+   ============================================================================================== */
+
+/* ------------------------------------------------------------------ the nav dot */
+
+/**
+ * A 7px dot on the Infrastructure nav item, and NOTHING when there is nothing to say.
+ *
+ * Absent, never green. A permanent indicator is one people stop seeing, and the entire value of
+ * this dot is that its appearance means something — the same reasoning the burn segment was written
+ * with before it moved here.
+ */
+.nav-alert {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-left: auto;
+  flex: none;
+  background: var(--t-label, #8A8A8A);
+}
+.nav-alert.warn { background: var(--warn, #E8A30E); }
+.nav-alert.bad  { background: var(--bad-dot, #E0505F); }
+/* The red one pulses; the amber one does not. "The farm is broken" and "the farm is costing money"
+   are different errands, and only one of them should pull the eye across the room. */
+.nav-alert.bad { animation: navpulse 2.4s ease-in-out infinite; }
+@keyframes navpulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .nav-alert.bad { animation: none; } }
+/* In the collapsed icon rail the label is gone, so the dot rides the glyph's corner instead. */
+:root[data-nav="icons"] .nav-alert { position: absolute; top: 7px; right: 7px; margin-left: 0; }
+:root[data-nav="icons"] .navitem { position: relative; }
+
+/* ------------------------------------------------------------------ the health board */
+
+.healthboard { border-left: 3px solid var(--b-row, #151517); }
+.healthboard.hb-ok   { border-left-color: var(--ok-dot, #3FB950); }
+.healthboard.hb-warn { border-left-color: var(--warn, #E8A30E); }
+.healthboard.hb-bad  { border-left-color: var(--bad-dot, #E0505F); }
+.healthboard .page-title { font-size: 19px; margin: 0; }
+
+.hb-grid {
+  display: grid;
+  gap: 1px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  margin-top: var(--mf-gap, 14px);
+  background: var(--b-row, #151517);
+  border: 1px solid var(--b-row, #151517);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.hb-item { background: var(--s-card, #0E0E10); padding: 11px 13px; min-width: 0; }
+.hb-item .caption { margin: 4px 0 0; }
+.hb-item .micro { color: var(--t-label, #8A8A8A); }
+
+/* ------------------------------------------------------------------ gauges */
+
+.gaugegrid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); }
+
+/**
+ * A STALE BLOCK IS DIMMED AND DESATURATED, not hidden.
+ *
+ * Hiding a number is its own kind of lie — "the disk was 97% full an hour ago" is worth knowing.
+ * It simply must not look like now, and a tone change alone is not enough: the bar's colour is what
+ * the eye reads first, so a stale gauge loses its colour entirely and keeps its shape.
+ */
+.gaugegrid.is-stale, .gauge.is-stale { opacity: .62; }
+.gauge.is-stale .meter > i, .gaugegrid.is-stale .meter > i { background: var(--t-label, #8A8A8A) !important; }
+.gauge .val { font: var(--ty-strong); font-variant-numeric: tabular-nums; }
+.gauge .micro { margin: 0 0 2px; }
+.gauge .caption { font-size: 11px; }
+
+.meter {
+  display: block;
+  height: 5px;
+  margin-top: 6px;
+  border-radius: 3px;
+  background: var(--s-btn, #131315);
+  overflow: hidden;
+}
+.meter > i { display: block; height: 100%; background: var(--accent-text, #5B8DEF); transition: width .25s ease; }
+.meter > i.ok   { background: var(--ok-dot, #3FB950); }
+.meter > i.warn { background: var(--warn, #E8A30E); }
+.meter > i.bad  { background: var(--bad-dot, #E0505F); }
+
+/* ------------------------------------------------------------------ host cards */
+
+.inhost { display: grid; gap: 6px; }
+.inhost .card-title { font-size: 15px; margin: 0; }
+
+/* ------------------------------------------------------------------ the cost trend */
+
+.trend { display: flex; align-items: flex-end; gap: 4px; height: 104px; }
+.trend-col {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  min-width: 0;
+}
+.trend-col > i {
+  display: block;
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: var(--accent-text, #5B8DEF);
+  opacity: .78;
+}
+.trend-col:hover > i { opacity: 1; }
+/* Today is the column somebody is actually asking about, so it is the one that is not translucent. */
+.trend-col:last-child > i { opacity: 1; background: var(--warn, #E8A30E); }
+.trend-col .micro { color: var(--t-label, #8A8A8A); font-variant-numeric: tabular-nums; }
+
+/**
+ * A bullet beside a sentence that WRAPS.
+ *
+ * `.row` is a wrapping flex container, so a long sentence next to a dot drops to the next line
+ * entirely and leaves the bullet orphaned above it. Two grid columns keep the marker on the first
+ * line of its own text, which is what a bullet is for.
+ */
+.canline {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  margin: 0 0 8px;
+}
+.canline > .dot { margin-top: 6px; }

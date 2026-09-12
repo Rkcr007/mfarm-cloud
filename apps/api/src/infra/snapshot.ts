@@ -334,6 +334,8 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
       alerts.push({
         severity: 'warning', code: 'host-slow',
         message: `Last heartbeat ${beatAge}s ago. Expected every ${BEAT_MS / 1000}s.`,
+        // Seconds, spelled out, because this alert only ever fires inside the silence window — the
+        // one place where the difference between 12 and 53 seconds is the whole message.
       });
     }
     if (machineStatus === 'unavailable' || machineStatus === 'unknown') {
@@ -618,6 +620,19 @@ export async function costSnapshot(hosts: HostSnapshot[]): Promise<CostSnapshot>
  * a word with nothing behind it teaches its reader that the word is decoration, and then the word
  * does not work on the day it turns amber. Each line below says what was measured and when.
  */
+/**
+ * A few names, and then a count.
+ *
+ * A COMPONENT DETAIL IS A SENTENCE, NOT A LIST. The first version of this joined every matching
+ * hostname, which reads fine with two hosts and turned the Hosts panel into a four-hundred-line
+ * wall of identifiers the first time it met a database with a lot of them in it. The panel's job is
+ * to say what is wrong in one glance; WHICH hosts is the Hosts section, one click away.
+ */
+function someOf(names: string[], limit = 3): string {
+  if (names.length <= limit) return names.join(', ');
+  return `${names.slice(0, limit).join(', ')} and ${names.length - limit} more`;
+}
+
 export async function healthComponents(
   hosts: HostSnapshot[],
   fleet: FleetSnapshot,
@@ -639,8 +654,8 @@ export async function healthComponents(
       ? 'No host has ever registered with this control plane.'
       : [
           `${running.length} of ${hosts.length} powered on`,
-          silent.length ? `${silent.map((h) => h.hostname).join(', ')} not answering` : null,
-          drained.length ? `${drained.map((h) => h.hostname).join(', ')} drained for maintenance` : null,
+          silent.length ? `${someOf(silent.map((h) => h.hostname))} not answering` : null,
+          drained.length ? `${someOf(drained.map((h) => h.hostname))} drained for maintenance` : null,
         ].filter(Boolean).join(' · '),
   });
 

@@ -128,7 +128,14 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
        * says, per capability, and the page renders from the answer.
        */
       capabilities: {
-        drain: true,
+        /**
+         * ALL FALSE UNTIL THE ROUTE BEHIND EACH ONE EXISTS. `quarantine_host` and
+         * `release_host_quarantine` are both in the database and neither has an endpoint yet, and
+         * "the mechanism exists" is not the same claim as "the console can invoke it". Declaring
+         * `drain: true` here on the strength of the SQL would put a button on the page that posts
+         * to a 404 — the same defect in a new costume.
+         */
+        drain: false,
         power: false,
         services: false,
       },

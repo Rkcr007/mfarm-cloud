@@ -246,15 +246,23 @@
       -->
       <span class="seg" id="fs-queue">—</span>
       <!--
-        WHAT BEING READY COSTS. Hidden unless a device host is actually powered on, because a farm
-        at rest should say nothing here — a permanent "₹0" is a number people stop reading, and the
-        whole value of this segment is that it appears.
+        NO INFRASTRUCTURE HERE ANY MORE (ADR-0038).
 
-        It exists because on 2026-09-11 the device host ran for twenty hours and forty-eight minutes
-        after a check that needed two, and this bar said "4 of 5 ready" the entire time. True, and
-        silent about the fact that ready is the expensive state. `renderChrome` writes it.
+        This is where the burn segment lived: "2 hosts up 20h · ~₹410", added because on 2026-09-11
+        the device host ran for twenty hours and forty-eight minutes after a check that needed two
+        and nothing in the product said so. It was right to add and wrong to leave here.
+
+        A bar that follows the reader around every screen can carry ONE fact about the machines, and
+        one fact is not enough to act on: you could see that something was costing money and not
+        which host, since when, whether it was being used, or how to stop it — so the next step was
+        always a terminal. **The segment is not deleted, it is the front door of a page that can
+        answer all of that**, and the alarm it carried moved with it: the Infrastructure nav item
+        badges when a host is burning or a component is degraded, for operators, who are the only
+        people who can act on either.
+
+        What stays here is the APPLICATION: how much capacity is free, who is waiting, what you
+        hold. See `renderChrome`.
       -->
-      <span class="seg warn" id="fs-burn" hidden>—</span>
       <span class="seg" id="fs-holding">Holding <b id="fs-held">—</b></span>
     </button>
 
@@ -314,6 +322,20 @@
     <button class="navitem" data-route="apps"><span class="glyph" data-icon="apps"></span><span class="txt">Apps</span><span class="sc">G A</span></button>
     <button class="navitem" data-route="runs"><span class="glyph" data-icon="runs"></span><span class="txt">Runs</span><span class="sc">G U</span></button>
     <button class="navitem" data-route="health"><span class="glyph" data-icon="health"></span><span class="txt">Health</span><span class="sc">G H</span></button>
+
+    <!--
+      INFRASTRUCTURE — hidden unless `/v1/auth/me` says this person is a fleet operator (ADR-0038).
+
+      HIDDEN RATHER THAN DISABLED, and it is the one place in this console where that is right. A
+      greyed-out item advertises a capability and then refuses it, which for most features is honest
+      — you could ask an admin for it. Fleet operator is not something a colleague can grant from
+      the console at all; it is a shell command on the control plane. So an item that could only ever
+      say "ask somebody with SSH" is noise on every other person's screen.
+
+      `renderChrome` unhides it. Nothing here is an authorization decision: every /v1/infra route
+      calls `requireOperator` regardless of what this markup does.
+    -->
+    <button class="navitem" data-route="infra" id="nav-infra" hidden><span class="glyph" data-icon="host"></span><span class="txt">Infrastructure</span><span class="nav-alert" id="nav-infra-alert" hidden></span><span class="sc">G I</span></button>
 
     <p class="navgroup">Organisation</p>
     <button class="navitem" data-route="agents"><span class="glyph" data-icon="agents"></span><span class="txt">Agents</span><span class="sc">G G</span></button>
