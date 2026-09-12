@@ -4875,15 +4875,30 @@ describe('infrastructure power controls', () => {
    * from and the control plane never marked it DOWN — pressing Stop there could be a no-op or could
    * kill a machine that is fine and merely partitioned.
    */
-  test('a host in an unknown power state is offered a disabled control that explains itself', () => {
+  /**
+   * THE DEFECT STOPPING THE REAL LAB FOUND. A stop leaves the host silent, so the card goes to
+   * `unknown` — and the first version of this offered a DISABLED control there, which meant there
+   * was no way back to a running farm from the console. A control that works in one direction only
+   * is worse than one that does not exist, because it strands whoever used it.
+   *
+   * The risk is not symmetrical: Stop and Restart on a machine that may be merely partitioned would
+   * interrupt it; Start is idempotent and answers "already running" if it is.
+   */
+  test('a host in an unknown power state IS offered Start — and only Start', () => {
     seed({ name: 'infra', lens: 'hosts' });
     const data = withPower([true]);
     data.hosts = [{ ...data.hosts[0], power: 'unknown', reachability: 'unknown', powerable: true }];
     mod.state.infra.data = data;
-    const control = findByText(mod.SCREENS.infra(), 'Power');
-    assert.ok(control, 'no control at all, so nothing explains the gap');
-    assert.equal(control.disabled, true);
-    assert.match(String(control.getAttribute('title')), /cannot tell whether the machine is running/);
+    const tree = mod.SCREENS.infra();
+
+    const start = findByText(tree, 'Start');
+    assert.ok(start, 'a host we cannot see offers no way back to a running farm');
+    assert.ok(!start.disabled, 'the one safe direction was disabled');
+    assert.match(String(start.getAttribute('title')), /Starting it is safe either way/);
+
+    assert.ok(!findByText(tree, 'Stop'),
+      'Stop on a machine that may be fine and merely partitioned would interrupt it');
+    assert.ok(!findByText(tree, 'Restart'));
   });
 
   test('STOPPING NAMES THE SESSIONS IT INTERRUPTS, because that is a decision somebody can make', () => {

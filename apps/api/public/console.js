@@ -8592,15 +8592,24 @@ function infraHostControls(host, caps) {
       controls.push(btn('Stop', 'tiny ghost danger', () => askPower(host, 'stop')));
     } else {
       /**
-       * A MACHINE WE CANNOT SEE GETS NO POWER BUTTON, and says why on hover rather than offering
-       * one that might do the opposite of what the operator expects. `power: 'unknown'` means the
-       * host has not been heard from AND the control plane never marked it DOWN — pressing Stop
-       * there could be a no-op or could kill a machine that is fine and merely partitioned.
+       * A MACHINE WE CANNOT SEE IS OFFERED START, AND ONLY START. The risk is not symmetrical and
+       * treating it as if it were left the console with a dead end.
+       *
+       * `power: 'unknown'` means the host has not been heard from and the control plane never marked
+       * it DOWN. STOP and RESTART on that are genuinely dangerous: the machine may be perfectly fine
+       * and merely partitioned, and both would interrupt whatever it is doing. START is the opposite
+       * — it is idempotent at the provider, and the operation answers "already running" and changes
+       * nothing if the machine is up.
+       *
+       * WHAT MADE THIS A DEFECT RATHER THAN A JUDGEMENT CALL. Stopping the real lab from the console
+       * on 2026-09-13 left it silent, so the card went to `unknown` — and with no Start button there
+       * was no way back to a running farm from the console. A control that works in one direction
+       * only is worse than one that does not exist, because it strands whoever used it.
        */
-      controls.push(btn('Power', 'tiny ghost', () => {}, {
-        disabled: true,
-        title: 'This control plane cannot tell whether the machine is running, so it will not '
-          + 'offer to change it. Its state appears here as soon as it is reachable again.',
+      controls.push(btn('Start', 'tiny primary', () => askPower(host, 'start'), {
+        title: 'This control plane cannot tell whether the machine is running — it has not been '
+          + 'heard from. Starting it is safe either way: an already-running machine reports that '
+          + 'and nothing changes.',
       }));
     }
   }

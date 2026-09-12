@@ -463,6 +463,34 @@ async function powerOperation(
     infraChanged();
 
     if (want.includes(after.state)) {
+      /**
+       * A CONFIRMED STOP IS THE ONE MOMENT THE CONTROL PLANE KNOWS A MACHINE IS OFF, and until this
+       * line it threw that away.
+       *
+       * Nothing else writes `hosts.state = 'DOWN'`. The reaper writes QUARANTINED for silence, which
+       * is right for a host that went quiet on its own — we cannot tell an unplugged machine from a
+       * partitioned one. But we JUST STOPPED THIS ONE and watched the provider agree, so `unknown`
+       * would be a worse answer than the one we have.
+       *
+       * IT COSTS A ROUND TRIP AND BUYS TWO THINGS. The card reads `stopped` instead of `unknown`,
+       * which is what makes a Start button appear rather than a disabled one — found by stopping the
+       * real lab from the console and then being unable to start it again. And it closes the power
+       * ledger through 054's trigger, at `last_heartbeat_at` rather than at the reaper's sweep up to
+       * ninety seconds later.
+       *
+       * ONLY ON A CONFIRMED STOP. An `accepted` stop is still moving and the reaper's inference is
+       * the honest fallback for it.
+       */
+      if (verb === 'stop') {
+        await withSystem((c) =>
+          c.query(`UPDATE hosts SET state = 'DOWN' WHERE id = $1 AND state <> 'DOWN'`, [host.id]))
+          .catch((e: Error) => {
+            // The machine IS stopped; failing the operation over bookkeeping would send somebody to
+            // press Stop again on a machine that is already off.
+            console.warn(`[infra] stopped ${host.hostname} but could not mark it DOWN: ${e.message}`);
+          });
+        infraChanged();
+      }
       return {
         result: 'succeeded',
         detail: `${host.hostname} is ${after.state}.`,

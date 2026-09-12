@@ -189,6 +189,33 @@ describe('a host says when it came up, on the path it actually comes back by', (
       'a beat after a silence is a new up period');
   });
 
+  /**
+   * A BEAT FALSIFIES `DOWN` — the half that keeps a console stop from being sticky (ADR-0038).
+   *
+   * A confirmed stop marks the host DOWN so the Infrastructure card can say `stopped` and offer
+   * Start rather than a dead end. But an agent whose capability fingerprint has not changed NEVER
+   * RE-REGISTERS — this very describe block exists because of that fact — so without a rule here a
+   * host that came back on its own would beat forever into a control plane still showing it off,
+   * and the only exit would be editing the row by hand.
+   *
+   * DRIVEN THROUGH THE REAL ROUTE, which is the whole point of putting it in this file. The first
+   * version of this test lived beside a hand-written `UPDATE hosts SET last_heartbeat_at = now()`
+   * that mirrored the route's SQL — and a copy of a statement cannot see a change to the statement.
+   * It failed for that reason, which is the best argument for where it now lives.
+   */
+  test('A BEAT LIFTS `DOWN`, with no re-registration', async () => {
+    await withSystem((c) => c.query(
+      `UPDATE hosts SET state = 'DOWN', quarantine_source = NULL, quarantined_at = NULL
+        WHERE id = $1`, [hostId]));
+
+    assert.equal((await beat(token)).statusCode, 200);
+
+    const state = await withSystem(async (c) => (await c.query(
+      'SELECT state::text AS state FROM hosts WHERE id = $1', [hostId])).rows[0].state);
+    assert.equal(state, 'UP',
+      'a stop performed from the console was sticky: the host beats and the console still shows it off');
+  });
+
   test('AN OPERATOR QUARANTINE DOES NOT RESET IT ON EVERY BEAT', async () => {
     // The trap a state-based rule would fall into. A host quarantined by a person keeps beating, and
     // keying on "state is not UP" would rewrite this to now() on every beat — reporting a machine

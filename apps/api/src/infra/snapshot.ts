@@ -296,9 +296,24 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
      * the silence window, stopped when the control plane put it DOWN, and `unknown` otherwise —
      * which is the honest answer for a machine somebody switched off in the cloud console.
      */
+    /**
+     * `DOWN` OUTRANKS A RECENT HEARTBEAT, and the other order was a real defect.
+     *
+     * Nothing writes `DOWN` except the column default — a host row before its first registration —
+     * and a STOP this control plane performed and watched the provider confirm. Both mean the
+     * machine is not running. A heartbeat cannot argue with either: a never-registered host has no
+     * heartbeat, and a stopped one's last beat is from BEFORE we stopped it.
+     *
+     * With reachability first, a host stopped from the console read `running` for the thirty seconds
+     * its last beat stayed fresh — so the card offered Stop on a machine that was already off, and
+     * then offered no way back. Found by stopping the real lab.
+     *
+     * A beat LIFTS the DOWN rather than overriding it here — see the heartbeat route, which does it
+     * the same way it lifts a silence quarantine. That is what keeps this from being sticky.
+     */
     const power: HostSnapshot['power'] =
-      reach === 'live' || reach === 'stale' ? 'running'
-        : h.state === 'DOWN' ? 'stopped'
+      h.state === 'DOWN' ? 'stopped'
+        : reach === 'live' || reach === 'stale' ? 'running'
           : 'unknown';
 
     /**
