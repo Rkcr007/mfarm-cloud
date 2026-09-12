@@ -133,10 +133,15 @@ export class TunnelRegistry {
   /**
    * Whether a host can currently be reached.
    *
-   * NOT YET READ BY THE CONSOLE, which is where it belongs: a device card that says READY while its
-   * host has no tunnel is telling a viewer the opposite of what they are about to experience. Until
-   * then the fleet-wide count is exported as `mfarm_tunnel_hosts_connected` and alerted on, so the
-   * condition is at least visible to an operator, if not to the person clicking the device.
+   * READ BY THE INFRASTRUCTURE PAGE since 2026-09-12 (`infra/snapshot.ts`), which is what this
+   * comment spent months asking for: a host that beats over plain HTTPS while its tunnel is down
+   * reads as perfectly healthy on a farm where every live view and every automation command fails.
+   * It is now the difference between `live` and `stale` there, and it raises `tunnel-down` on the
+   * host card.
+   *
+   * Still NOT read on the DEVICE card, which is the other half and a separate change: a device that
+   * says READY while its host has no tunnel is telling a viewer the opposite of what they are about
+   * to experience. The fleet-wide count remains exported as `mfarm_tunnel_hosts_connected`.
    */
   has(hostId: string): boolean {
     return this.hosts.get(hostId)?.agent.readyState === WebSocket.OPEN;

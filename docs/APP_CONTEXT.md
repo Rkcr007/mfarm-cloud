@@ -168,14 +168,16 @@ while the expensive half is off.
 
 ```
 apps/api/          Fastify + Postgres. Allocation, leases, fencing, runs, artifacts,
-                   the WebDriver hub, RLS tenancy, metrics. ~50 migrations.
+                   the WebDriver hub, RLS tenancy, metrics. 54 migrations.
+apps/api/src/infra/  The operations centre's read side: host freshness, the power ledger,
+                   cost, the health rollup, and the append-only operations log (ADR-0038).
 apps/api/public/   The console — plain JavaScript, no build step, served by the API.
 apps/cli/          @mfarm/cli and the GitHub Action.
 workers/agent/     Runs on a device host. Owns the device lifecycle, installs, resets,
                    captures evidence, heartbeats, and tunnels back to the control plane.
 packages/protocol/ The wire types shared by both sides.
 deploy/            Bring-up, deploy, and ~15 verify-*.mjs scripts that check the REAL farm.
-docs/adrs/         36 decisions, each with what was rejected and why (numbered to 0037;
+docs/adrs/         37 decisions, each with what was rejected and why (numbered to 0038;
                    there is no 0013).
 ```
 
@@ -188,6 +190,13 @@ docs/adrs/         36 decisions, each with what was rejected and why (numbered t
   its scope in the SQL, because that scope *is* the authorization.
 - **Two principals that never mix.** A tenant key acts on its org's data; a worker token acts on the
   fleet. A worker cannot read tenant data and a tenant key cannot register a host.
+- **Operating the farm is a capability, not a role** (ADR-0038). `memberships.role` is per-org and
+  the machines are not tenant data, so `/v1/infra` is gated on `users.operator` — a farm-wide grant
+  no API key can hold, re-read on every request, handed out only by `grant-operator.ts`.
+- **Four freshness values, never two.** Anything the operations centre reports is `live`, `stale`,
+  `unavailable` or `unknown`, and every reading carries its own age. A host's gauges age separately
+  from its heartbeat, because all five read green on a machine whose disk filled an hour after it
+  stopped reporting.
 - **The worker confirms; the control plane never guesses.** Install, launch and reset are queued and
   reported after the worker says they happened. There is no "running" state to show, because a worker
   reports the outcome and not the start.
@@ -263,7 +272,7 @@ written by somebody who keeps being wrong about them, which is why this one name
 ## 9. Where to start reading
 
 1. `docs/STATUS.md` — where every part stands, with its honest caveat.
-2. `docs/adrs/` — 36 decisions (numbered to 0037; there is no 0013). Each says what was rejected
+2. `docs/adrs/` — 37 decisions (numbered to 0038; there is no 0013). Each says what was rejected
    and why, which is usually the useful half.
 3. `apps/api/src/allocator.ts` — the reconciliation loop the whole product turns on.
 4. `apps/api/src/http/webdriver/capabilities.ts` — the contract a customer's suite meets.

@@ -26,7 +26,9 @@ export type Principal =
   // A logged-in person, from `users.ts`. Structurally identical to `SessionPrincipal` there and
   // restated rather than imported, because users.ts already imports this module and a cycle between
   // the two would be a worse price than one duplicated shape.
-  | { kind: 'user'; userId: string; orgId: string; role: string; sessionId: string; csrf: string };
+  | { kind: 'user'; userId: string; orgId: string; role: string; sessionId: string; csrf: string;
+      /** Fleet operator (migration 053). Orthogonal to `role`, which is per-org. */
+      operator: boolean };
 
 const KEY_PREFIX_LEN = 12;
 

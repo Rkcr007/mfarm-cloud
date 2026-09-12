@@ -18,6 +18,7 @@ import { webdriverRoutes } from './routes/webdriver.ts';
 import { appRoutes } from './routes/apps.ts';
 import { runRoutes } from './routes/runs.ts';
 import { hostRoutes } from './routes/hosts.ts';
+import { infraRoutes } from './routes/infra.ts';
 import { resultRoutes } from './routes/results.ts';
 import { shareRoutes, sharePageRoutes } from './routes/shares.ts';
 import { tunnelRoutes } from './routes/tunnels.ts';
@@ -168,6 +169,37 @@ export function requireUser(req: FastifyRequest): {
   }
   const { userId, orgId, role, sessionId } = req.principal;
   return { userId, orgId, role, sessionId };
+}
+
+/**
+ * A FLEET OPERATOR — the only principal allowed anywhere near `/v1/infra` (migration 053).
+ *
+ * WHY IT IS NOT `requireUser` PLUS A ROLE CHECK, which is what every other privileged route in this
+ * codebase does. `memberships.role` is scoped to an org and the machines are not tenant data:
+ * `hosts.org_id IS NULL` for a shared host, and `002_rls.sql` revokes the table from `mfarm_app`
+ * entirely for that reason. On today's single-tenant farm the two sets are the same people, which is
+ * exactly why this has to be written down now — the day a second tenant arrives, "org admin" would
+ * silently mean "may stop the production device host", and nobody would be looking at this line.
+ *
+ * A KEY CANNOT HOLD IT, at all. Infrastructure operations are for a person who is present and can
+ * be asked afterwards what they were doing; a credential sitting in a CI runner is the opposite of
+ * that. `requireUser` already refuses tenant and worker principals, and the operator bit only
+ * exists on the user variant, so there is no shape of API key that reaches this.
+ *
+ * THE GRANT IS RE-READ ON EVERY REQUEST, not stamped into the session — see `SessionPrincipal`.
+ */
+export function requireOperator(req: FastifyRequest): {
+  userId: string; orgId: string; role: string; sessionId: string;
+} {
+  const who = requireUser(req);
+  if (req.principal?.kind !== 'user' || !req.principal.operator) {
+    throw forbidden(
+      'Infrastructure is restricted to fleet operators. This is a farm-wide capability, separate '
+      + 'from your role in an organisation; an existing operator grants it with '
+      + '`grant-operator.ts` on the control plane.',
+    );
+  }
+  return who;
 }
 
 export function requireWorker(req: FastifyRequest): { hostId: string; region: string } {
@@ -609,6 +641,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(artifactRoutes, { prefix: '/v1' });
   await app.register(runRoutes, { prefix: '/v1' });
   await app.register(hostRoutes, { prefix: '/v1' });
+  await app.register(infraRoutes, { prefix: '/v1' });
   await app.register(resultRoutes, { prefix: '/v1' });
   await app.register(shareRoutes, { prefix: '/v1' });
   await app.register(tunnelRoutes, { prefix: '/v1' });
