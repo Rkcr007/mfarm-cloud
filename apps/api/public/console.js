@@ -8680,7 +8680,18 @@ function infraHostControls(host, caps) {
    * exactly "we have not heard from it past the reaper's threshold"; `unknown` is a host that has
    * never reported at all, which is the other shape of the same thing.
    */
-  if (caps?.retire && (host.reachability === 'unavailable' || host.reachability === 'unknown')) {
+  /**
+   * A MACHINE THE CLOUD SAYS EXISTS IS NOT GONE — it is off.
+   *
+   * `host.powerable` means this control plane can start it: it is on the allow-list, the provider
+   * knows about it, and Start is one click away on the same card. Offering Retire beside Start is a
+   * trap — retiring is for a machine that is NOT COMING BACK, and a stopped VM in your own project
+   * is the opposite of that.
+   *
+   * Found by stopping the lab from the console and watching its card grow both buttons.
+   */
+  if (caps?.retire && !host.powerable
+      && (host.reachability === 'unavailable' || host.reachability === 'unknown')) {
     controls.push(btn('Retire', 'tiny ghost', () => askRetire(host)));
   }
 
