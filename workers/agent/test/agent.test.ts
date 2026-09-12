@@ -1960,3 +1960,79 @@ describe('a beat points a tunnelled device at its proxy', () => {
     await agent.shutdown();
   });
 });
+
+/**
+ * A capability that appears AFTER the agent started has to reach the control plane — found on the
+ * lab, 2026-09-12.
+ *
+ * WHAT HAPPENED. `network-proxy` is observed at start by asking the guest for its default route,
+ * and on a four-device host cf-2 lost that race: `sys.boot_completed` comes up before the route
+ * does on this image. The device came up declaring every capability except that one, `start()` is
+ * the only thing that re-probes, and so one device of four could never again be given a tunnelled
+ * session. `register()`'s own comment claimed the agent "re-registers whenever its capability
+ * fingerprint changes" — true at start, and true nowhere else.
+ */
+describe('a capability that arrives late still gets published', () => {
+  /**
+   * Poll, because the beat does NOT await the re-registration and must not: it is a liveness
+   * signal, and a beat that waited on an HTTP call to the control plane would look like a dead host
+   * the first time that call was slow.
+   */
+  const until = async <T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 5_000): Promise<T> => {
+    const deadline = Date.now() + ms;
+    let last = await read();
+    while (Date.now() < deadline && !ok(last)) {
+      await new Promise((r) => setTimeout(r, 25));
+      last = await read();
+    }
+    return last;
+  };
+
+  const caps = (deviceId: string) => withSystem(async (c) => (await c.query(
+    'SELECT capabilities FROM devices WHERE id = $1', [deviceId])).rows[0].capabilities as string[]);
+
+  test('a device capability that appears on a running agent is re-registered', async () => {
+    const b = fakeBackend(`late-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b], `late-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    assert.ok(!(await caps(deviceId)).includes('network-proxy'), 'precondition: it did not have it');
+
+    // The repair a backend performs when it finds it can do something it could not before.
+    b.control.info.capabilities = [...b.control.info.capabilities, 'network-proxy'];
+    assert.equal((await agent.heartbeat()).ok, true);
+
+    const after = await until(() => caps(deviceId), (v) => v.includes('network-proxy'));
+    assert.ok(after.includes('network-proxy'),
+      `the control plane still has the stale list: ${JSON.stringify(after)}`);
+    await agent.shutdown();
+  });
+
+  test('a steady host does not re-register on every beat', async () => {
+    // The cost of getting this wrong is a registration every ten seconds per host, which rewrites
+    // the device list each time. The stored fingerprint is what makes the second beat a no-op.
+    const b = fakeBackend(`steady-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b], `steady-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    const stamp = async () => withSystem(async (c) => (await c.query(
+      'SELECT updated_at FROM devices WHERE id = $1', [deviceId])).rows[0].updated_at as Date);
+
+    b.control.info.capabilities = [...b.control.info.capabilities, 'network-proxy'];
+    assert.equal((await agent.heartbeat()).ok, true);
+    // Wait for the repair to LAND before measuring stability, so what follows measures the steady
+    // state rather than the tail of the change.
+    await until(() => caps(deviceId), (v) => v.includes('network-proxy'));
+    const afterRepair = await stamp();
+
+    assert.equal((await agent.heartbeat()).ok, true);
+    assert.equal((await agent.heartbeat()).ok, true);
+    await new Promise((r) => setTimeout(r, 250));
+
+    assert.deepEqual(await stamp(), afterRepair,
+      'nothing changed, so nothing should have been written');
+    await agent.shutdown();
+  });
+});

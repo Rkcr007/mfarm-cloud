@@ -1516,10 +1516,37 @@ export class CuttlefishDevice implements DeviceControl {
     const t0 = performance.now();
     try {
       await run('adb', ['-s', this.adbSerial, 'shell', 'true'], process.cwd(), 5_000);
+      // A device that answers is a chance to settle a capability the boot race may have lost.
+      // See `retryProxyCapability` — this is the only periodic per-device probe there is.
+      await this.retryProxyCapability();
       return { status: 'healthy', inputLatencyMs: performance.now() - t0 };
     } catch (e) {
       return { status: 'offline', reason: (e as Error).message };
     }
+  }
+
+  /**
+   * Ask again, but only ever to ADD — the repair for a race found on the lab, 2026-09-12.
+   *
+   * `start()` probes for a gateway once, and on a four-device host cf-2 lost that race: `getprop`
+   * answers early in boot and `ip route` does not, so the device came up declaring every capability
+   * except this one and would never again be allocated to a tunnelled session — `start()` is the
+   * only thing that re-probes, and it does not run again until the agent restarts. Three devices
+   * had it and one silently did not, which is the shape that is hard to notice on a bigger fleet.
+   *
+   * UPWARD ONLY, and that asymmetry is deliberate. A missing gateway at boot is a race and worth
+   * retrying; a missing gateway later is most often a wedged adb, and withdrawing a capability on
+   * one bad read would take a device out of the tunnelled pool for a hiccup. `start()` remains the
+   * one place that can take it away, because that is the one moment the host's wiring can change.
+   *
+   * Costs nothing once the capability is held: it returns before touching adb.
+   */
+  private async retryProxyCapability(): Promise<void> {
+    if (this.info.capabilities.includes('network-proxy' as Capability)) return;
+    const gw = await this.proxyHost().catch(() => undefined);
+    if (!gw) return;
+    this.info.capabilities = [...this.info.capabilities, 'network-proxy' as Capability];
+    console.log(`[cuttlefish] ${this.info.localId}: reachable at ${gw} after all — \`network-proxy\` restored`);
   }
 }
 

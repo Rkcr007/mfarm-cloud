@@ -764,9 +764,49 @@ export class Agent {
        * readings that is the one that fails safe.
        */
       void this.syncProxies(body.proxies ?? []);
+      // A capability that appeared AFTER this agent started still has to reach the control plane.
+      void this.republishIfChanged();
       return { ok: true, hostState: body.hostState };
     } catch {
       return { ok: false };
+    }
+  }
+
+  /**
+   * Re-register when what this host can do has changed since it last said so.
+   *
+   * `register()`'s own comment says the agent "re-registers whenever its capability fingerprint
+   * changes". That was true only at START: the comparison lived in `start()` and nowhere else, so a
+   * capability that appeared on a RUNNING agent reached the control plane on the next restart and
+   * not before. Registration is the only thing that writes the device list, so until then the
+   * scheduler was choosing from a stale one.
+   *
+   * FOUND ON THE LAB, 2026-09-12. cf-2 lost the boot race for `network-proxy` — `sys.boot_completed`
+   * comes up before the guest's default route on this image — and `retryProxyCapability` repaired it
+   * thirty seconds later, into a field nothing published. Three devices could serve a tunnelled
+   * session and one silently could not, with no way to fix it short of restarting the agent.
+   *
+   * ONLY ON A REAL DIFFERENCE, against the fingerprint stored at the last registration, so a
+   * steady host re-registers never and a changed one re-registers once. `saveState` moves the
+   * stored value, which is what makes the second beat a no-op rather than a loop.
+   *
+   * Failures are swallowed. This is opportunistic repair on a liveness signal, and a control plane
+   * that refuses a registration will be offered the same one ten seconds later.
+   */
+  private republishing = false;
+  private async republishIfChanged(): Promise<void> {
+    if (this.republishing || !this.state) return;
+    const fingerprint = this.capabilityFingerprint();
+    if (fingerprint === this.state.registered) return;
+    this.republishing = true;
+    try {
+      console.log('[agent] what this host can do has changed since it registered — re-registering');
+      this.state = await this.register(this.state.workerToken);
+      await this.saveState(this.state);
+    } catch (err) {
+      console.warn(`[agent] could not re-register after a capability change — ${(err as Error).message}`);
+    } finally {
+      this.republishing = false;
     }
   }
 

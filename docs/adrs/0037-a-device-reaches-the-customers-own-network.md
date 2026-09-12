@@ -204,6 +204,28 @@ device was allocated, released and reset through the product's own path; its `ht
 outlive the tenant that opened it, and the agent must re-apply per session — which is what the
 converging sweep does.
 
+### What the hardware pass found in the wiring itself
+
+**One device of four came up without the capability, and nothing would ever have given it back.**
+`network-proxy` is observed by asking the guest for its default route, and cf-2 lost that race:
+`sys.boot_completed` — which `waitForBoot` waits for — comes up *before* the guest's default route
+on this image, so `getprop` answers and `ip route` does not. `start()` was the only thing that
+probed, and it does not run again until the agent restarts. Three devices could serve a tunnelled
+session and one silently could not.
+
+Two repairs, because one without the other is inert:
+
+- **The probe retries on the health poll, upward only.** A missing gateway at boot is a race worth
+  retrying; a missing gateway later is usually a wedged adb, and withdrawing on one bad read would
+  take a device out of the pool for a hiccup. `start()` stays the only thing that can remove it,
+  because that is the one moment the host's wiring can change.
+- **The heartbeat re-registers when the fingerprint changes.** `register()`'s own comment claimed
+  the agent "re-registers whenever its capability fingerprint changes"; that comparison lived in
+  `start()` and nowhere else, so a capability repaired on a RUNNING agent reached the control plane
+  on the next restart and not before. Registration is the only thing that writes the device list,
+  so the scheduler was choosing from a stale one. This is not specific to this feature — it is why
+  no device capability could ever be corrected without a restart.
+
 ## What is still NOT verified
 
 **`https://` through the tunnel**, and it is unbuilt rather than untested — see the consequence
