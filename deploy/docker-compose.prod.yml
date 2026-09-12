@@ -225,6 +225,31 @@ services:
       ARTIFACT_MAX_UPLOAD_BYTES: ${ARTIFACT_MAX_UPLOAD_BYTES:-67108864}
       # Two weeks. Long enough that a flake noticed on Monday is still investigable the next Friday.
       ARTIFACT_RETENTION_HOURS: ${ARTIFACT_RETENTION_HOURS:-336}
+      # ---------------------------------------------------------------- cost reporting (ADR-0035)
+      #
+      # THE SAME TRAP THE VIDEO BLOCK BELOW DESCRIBES, WALKED INTO AGAIN ON 2026-09-11.
+      # `HOST_HOURLY_COST` was set in `deploy/.env`, the API never saw it, and the console showed a
+      # powered-on host with no money beside it — configured, no error, no effect. The warning was
+      # already written eight lines further down, in the file being edited.
+      #
+      # No default for the rate: MFARM is self-hosted, so what a host costs is a fact about somebody
+      # else's cloud bill. Unset means the console shows elapsed time with no currency.
+      HOST_HOURLY_COST: ${HOST_HOURLY_COST:-}
+      COST_CURRENCY: ${COST_CURRENCY:-₹}
+
+      # ---------------------------------------------------------------- knobs config.ts reads
+      #
+      # Declared so they can actually be turned. Each was readable by `loadConfig()` and settable
+      # nowhere — the defaults below are the ones `config.ts` already applies, so naming them here
+      # changes no behaviour and makes the .env file tell the truth.
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+      SHUTDOWN_GRACE_MS: ${SHUTDOWN_GRACE_MS:-15000}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
+      PG_SYSTEM_POOL_MAX: ${PG_SYSTEM_POOL_MAX:-5}
+      PG_CONNECT_TIMEOUT_MS: ${PG_CONNECT_TIMEOUT_MS:-10000}
+      COMMAND_RETENTION_HOURS: ${COMMAND_RETENTION_HOURS:-72}
+
       # ---------------------------------------------------------------- video evidence (ADR-0032)
       #
       # DECLARED HERE OR THE API NEVER SEES IT. `deploy/.env` is compose's env file, not the

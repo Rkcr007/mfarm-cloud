@@ -529,17 +529,55 @@ describe('the production compose file passes through what the API reads', () => 
     const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
     const compose = await readFile(join(root, 'deploy', 'docker-compose.prod.yml'), 'utf8');
 
-    for (const name of [
-      'ARTIFACT_DIR',
-      'ARTIFACT_MAX_UPLOAD_BYTES',
-      'ARTIFACT_RETENTION_HOURS',
-      // ADR-0032. Default `off`, so a farm that sets this only in .env records nothing.
-      'VIDEO_RECORDING',
-      'VIDEO_RETENTION_HOURS',
-    ]) {
-      assert.match(compose, new RegExp(`^\\s+${name}:`, 'm'),
-        `${name} is read by the API but not declared on the api service in ` +
-        'deploy/docker-compose.prod.yml — setting it in deploy/.env would do nothing');
-    }
+    /**
+     * DERIVED FROM `config.ts`, NOT LISTED HERE — and it used to be a list.
+     *
+     * The list had five names in it and passed while NINE other variables `loadConfig()` reads were
+     * settable nowhere. `HOST_HOURLY_COST` was the one that got noticed, on 2026-09-11, because the
+     * console showed a powered-on host with no money beside it: set in `.env`, read by compose for
+     * interpolation, passed to nothing, no error. That is exactly the failure the video block's own
+     * comment describes from 2026-09-07 — and a hand-kept list cannot catch the next one either,
+     * because the thing that goes wrong is forgetting.
+     */
+    const configSrc = await readFile(join(root, 'apps', 'api', 'src', 'config.ts'), 'utf8');
+    /**
+     * COMMENTS STRIPPED FIRST. `config.ts` explains its own helpers using `env.X` as a placeholder,
+     * and matching that reported a variable called "X" as undeclared — a guard's first false
+     * positive is the moment people start ignoring it, so it is worth removing the whole class
+     * rather than special-casing the name.
+     */
+    const code = configSrc
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const read = new Set([...code.matchAll(/\benv\.([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]));
+
+    /**
+     * Variables that legitimately reach the container another way, each with the way named. This is
+     * the list worth maintaining by hand: it is short, every entry is a decision, and adding to it
+     * is a deliberate act rather than an omission.
+     */
+    const ELSEWHERE: Record<string, string> = {
+      // Docker secrets, exported in the api service's command immediately before exec — see the
+      // `secrets:` block. Putting a signing key in .env would put it in every `docker inspect`.
+      SESSION_SIGNING_KEY: 'docker secret',
+      SESSION_PUBLIC_KEY: 'docker secret',
+      METRICS_TOKEN: 'docker secret',
+      TURN_SECRET: 'docker secret',
+      // Composed from POSTGRES_* on the postgres service rather than set directly.
+      POSTGRES_USER: 'postgres service',
+      POSTGRES_PASSWORD: 'postgres service',
+      POSTGRES_DB: 'postgres service',
+    };
+
+    const undeclared = [...read]
+      .filter((name) => !ELSEWHERE[name])
+      .filter((name) => !new RegExp(`^\\s+${name}:`, 'm').test(compose))
+      .sort();
+
+    assert.deepEqual(undeclared, [],
+      'these are read by loadConfig() and declared on no service in deploy/docker-compose.prod.yml. '
+      + 'deploy/.env is compose\'s env file, not the container\'s environment: an undeclared '
+      + 'variable is read for interpolation and passed to nothing, so setting it produces a farm '
+      + 'that is configured, reports no error, and does not do the thing.');
   });
 });
