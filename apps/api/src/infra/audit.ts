@@ -32,6 +32,18 @@ import { withSystem } from '../db.ts';
 /** How an operation ended. See migration 053 for what each one commits the product to saying. */
 export type OperationResult = 'succeeded' | 'failed' | 'noop' | 'unknown';
 
+/**
+ * What a step may report — the four settled outcomes, plus `accepted` meaning "still in flight".
+ *
+ * `accepted` IS NOT AN OUTCOME AND MUST NOT BE WRITTEN AS ONE. It is the state every row starts in,
+ * and a step returning it is saying that the operation was dispatched and has not finished — a GCE
+ * start that is still booting, most often. `audited` leaves such a row OPEN rather than settling it,
+ * so the log reads "in progress" instead of claiming a result nobody has. The database refuses the
+ * write independently (migration 053's trigger), which is what makes this a contract rather than a
+ * convention.
+ */
+export type StepResult = OperationResult | 'accepted';
+
 export type TargetKind = 'host' | 'service' | 'fleet';
 
 export interface OperationRequest {
@@ -149,6 +161,26 @@ export async function settle(
 }
 
 /**
+ * Record what an in-flight operation was last seen doing, WITHOUT settling it.
+ *
+ * The only update the append-only trigger permits on an unsettled row is one that settles it, so
+ * this writes the detail through a path the trigger allows: `result` is unchanged, which makes the
+ * statement a no-op as far as the immutability check is concerned. Never throws — the operation
+ * already happened, and a logging failure must not be reported to the operator as one.
+ */
+async function noteProgress(id: string, detail: string | null): Promise<void> {
+  try {
+    await withSystem((c) =>
+      c.query(
+        `UPDATE infra_operations SET detail = $2 WHERE id = $1 AND result = 'accepted'`,
+        [id, detail],
+      ));
+  } catch (e) {
+    console.error(`[infra-audit] could not record progress on operation ${id}: ${(e as Error).message}`);
+  }
+}
+
+/**
  * Run an operation with its audit row around it.
  *
  * Every route uses this rather than calling `begin`/`settle` by hand, because the hand-written
@@ -162,13 +194,23 @@ export async function settle(
 export async function audited<T>(
   req: FastifyRequest,
   op: OperationRequest,
-  body: (opId: string) => Promise<{ result: OperationResult; detail?: string; value: T }>,
+  body: (opId: string) => Promise<{ result: StepResult; detail?: string; value: T }>,
 ): Promise<T & { operationId: string }> {
   const opId = await begin(req, op);
   let settled = false;
   try {
     const out = await body(opId);
-    await settle(opId, out.result, out.detail ?? null);
+    /**
+     * `accepted` LEAVES THE ROW OPEN, deliberately and not as an oversight. See `StepResult`: the
+     * operation is genuinely still happening, and the alternative — settling it as `succeeded`
+     * because the provider took the request — would put a result in the log that nobody verified.
+     * The detail is still written, so the row says what was last seen.
+     */
+    if (out.result === 'accepted') {
+      await noteProgress(opId, out.detail ?? null);
+    } else {
+      await settle(opId, out.result, out.detail ?? null);
+    }
     settled = true;
     return { ...(out.value as T), operationId: opId };
   } catch (e) {

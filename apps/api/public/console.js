@@ -8385,7 +8385,10 @@ async function runInfraOperation(path, body, { pending }) {
     const title = out.result === 'succeeded' ? 'Done'
       : out.result === 'noop' ? 'Nothing to do'
         : out.result === 'unknown' ? 'Outcome unknown'
-          : 'Refused';
+          // A cloud start is minutes and the machine is genuinely still moving. Neutral, because it
+          // is not news — and named, because "Done" would be a lie and "Failed" a worse one.
+          : out.result === 'accepted' ? 'In progress'
+            : 'Refused';
     toast(title, out.message, tone);
   } catch (err) {
     clearToast(key);
@@ -8480,6 +8483,89 @@ function askResume(host) {
 }
 
 /**
+ * THE THREE POWER CONFIRMATIONS, and the impact each one has to state.
+ *
+ * Stopping is the expensive-to-get-wrong one and it gets the longest dialog: a device host is ~95%
+ * of this farm's bill and also the thing every running session is on. The dialog names the sessions
+ * by count, because "2 sessions will be interrupted" is a decision somebody can make and "this may
+ * affect users" is not.
+ *
+ * STARTING IS ALSO DESTRUCTIVE OF SOMETHING — money — and says so. It is the primary button rather
+ * than the red one, because red is for removing things and reusing it here is how red stops meaning
+ * anything, but the sentence is explicit about the meter starting.
+ */
+function askPower(host, verb) {
+  const rate = state.infra.data?.cost?.rate;
+  const hourly = host.cost?.perHour;
+  const money = hourly === null || hourly === undefined
+    ? null : `${rate?.currency || ''}${hourly}/hour`;
+
+  const shape = {
+    start: {
+      title: `Start ${host.hostname}?`,
+      lead: 'The machine boots, the agent registers, and its devices cold boot after that — a few '
+        + 'minutes before anything is allocatable.',
+      removes: [
+        money ? `billing starts again at ${money}, from the moment it is running` : 'billing starts again',
+        `${host.devices.total} device${host.devices.total === 1 ? '' : 's'} will cold boot`,
+      ],
+      keeps: 'Nothing is lost by starting it. Stop it again when you are done.',
+      confirm: 'Start host',
+      confirmClass: 'primary',
+    },
+    stop: {
+      title: `Stop ${host.hostname}?`,
+      lead: 'The machine is powered off at the cloud provider. This is the only operation here that '
+        + 'actually stops the bill.',
+      removes: [
+        host.sessions?.active
+          ? `${host.sessions.active} running session${host.sessions.active === 1 ? ' is' : 's are'} INTERRUPTED — whoever holds ${host.sessions.active === 1 ? 'it' : 'them'} loses the device mid-test`
+          : 'no sessions are running, so nobody is interrupted',
+        `${host.devices.total} device${host.devices.total === 1 ? '' : 's'} leave the fleet until it is started again`,
+        'anything not already captured on those devices is gone',
+      ],
+      keeps: money
+        ? `It stops costing ${money} the moment it is off.`
+        : 'It stops costing money the moment it is off.',
+      confirm: 'Stop host',
+      confirmClass: 'danger-solid',
+    },
+    restart: {
+      title: `Restart ${host.hostname}?`,
+      lead: 'The machine is reset at the cloud provider — the same as holding the power button. It '
+        + 'is not a graceful shutdown.',
+      removes: [
+        host.sessions?.active
+          ? `${host.sessions.active} running session${host.sessions.active === 1 ? ' is' : 's are'} INTERRUPTED`
+          : 'no sessions are running, so nobody is interrupted',
+        'every device on it cold boots again, which takes a few minutes',
+        'it keeps billing throughout — a restart saves nothing',
+      ],
+      keeps: null,
+      confirm: 'Restart host',
+      confirmClass: 'danger-solid',
+    },
+  }[verb];
+
+  const reason = h('input', {
+    class: 'field', type: 'text', maxlength: '200', autocomplete: 'off',
+    placeholder: 'Why, for the log',
+  });
+
+  confirmDialog({
+    ...shape,
+    removesLabel: 'What happens',
+    fields: [h('label', { class: 'stack tight' },
+      h('span', { class: 'micro', text: 'Reason (optional)' }), reason)],
+    onConfirm: () => runInfraOperation(
+      `/v1/infra/hosts/${encodeURIComponent(host.id)}/${verb}`,
+      { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
+      { pending: `Asking the cloud provider to ${verb} ${host.hostname}…` },
+    ),
+  });
+}
+
+/**
  * The controls a host card offers, which is exactly what the SERVER says this deployment can do.
  *
  * `capabilities` is read per operation rather than per page: `drain` being available says nothing
@@ -8489,6 +8575,36 @@ function askResume(host) {
  */
 function infraHostControls(host, caps) {
   const controls = [];
+
+  /**
+   * POWER, and only for a machine this control plane is actually allowed to power.
+   *
+   * TWO GATES, NOT ONE. `capabilities.power` says the deployment has a credential at all;
+   * `host.powerable` says THIS machine is on the allow-list. A page that drew from the first alone
+   * would offer Stop on every card and 403 on most, which is the same defect as offering it with no
+   * credential — a control on a premise the server has not confirmed.
+   */
+  if (caps?.power && host.powerable) {
+    if (host.power === 'stopped') {
+      controls.push(btn('Start', 'tiny primary', () => askPower(host, 'start')));
+    } else if (host.power === 'running') {
+      controls.push(btn('Restart', 'tiny ghost', () => askPower(host, 'restart')));
+      controls.push(btn('Stop', 'tiny ghost danger', () => askPower(host, 'stop')));
+    } else {
+      /**
+       * A MACHINE WE CANNOT SEE GETS NO POWER BUTTON, and says why on hover rather than offering
+       * one that might do the opposite of what the operator expects. `power: 'unknown'` means the
+       * host has not been heard from AND the control plane never marked it DOWN — pressing Stop
+       * there could be a no-op or could kill a machine that is fine and merely partitioned.
+       */
+      controls.push(btn('Power', 'tiny ghost', () => {}, {
+        disabled: true,
+        title: 'This control plane cannot tell whether the machine is running, so it will not '
+          + 'offer to change it. Its state appears here as soon as it is reachable again.',
+      }));
+    }
+  }
+
   if (caps?.drain) {
     controls.push(host.maintenance?.drained
       ? btn('Resume', 'tiny primary', () => askResume(host))

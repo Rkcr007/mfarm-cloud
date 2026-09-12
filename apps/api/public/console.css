@@ -2807,3 +2807,14 @@ kbd {
 
 /** The operations-log filter row. Wraps rather than overflowing, and never pushes the table. */
 .opsfilters { flex-wrap: wrap; gap: 6px; }
+
+/**
+ * A ghost button that is about to do something irreversible — Stop, on a host card.
+ *
+ * NOT `danger-solid`, which is reserved for the CONFIRMATION inside the dialog. The control that
+ * opens a dialog only asks a question; solid red on both would make the page look like it is
+ * shouting twice, and would spend the strongest signal the palette has on the safer of the two
+ * clicks. A red outline is enough to make the eye stop.
+ */
+.btn.ghost.danger { color: var(--bad-text, #EE7C88); border-color: var(--bad-line, rgba(224, 80, 95, .30)); }
+.btn.ghost.danger:hover { border-color: var(--bad-dot, #E0505F); background: var(--bad-bg, rgba(224, 80, 95, .07)); }

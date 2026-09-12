@@ -174,6 +174,41 @@ Three details are decisions rather than implementation:
   operation on one would not wake the streams on the other; those clients fall back to the tick, so
   the failure is latency and never staleness.
 
+### 8. Power: an allow-list in configuration, and a credential that exists only on the machine
+
+**The credential.** There is no key file, no environment variable and nothing in git. The token comes
+from the GCE metadata server, is minted for the service account attached to the instance, lasts about
+an hour, and is capped by the instance's own OAuth scopes on top of IAM. A leak of this process's
+environment, its image or its history yields nothing.
+
+**The allow-list is the security boundary, and it is not defence in depth — it is the defence.**
+`hosts.hostname` is a string a WORKER chooses for itself at registration. A driver that resolved a
+host name to an instance name would let an agent that registered as `mfarm-cp` put a Stop button for
+the control plane on somebody's console, and a *misconfigured* agent would do it by accident with no
+attacker involved. So `MFARM_POWER_INSTANCES` is configuration on the control plane, nothing outside
+it is reachable, and the control plane additionally refuses to act on the instance it is running on.
+
+**Scopes cap IAM, and that costs an outage.** Verified 2026-09-12: `mfarm-cp`'s service account holds
+only logWriter and metricWriter, and the instance's scopes contain no compute scope at all. Granting
+the role alone changes nothing; `set-service-account` requires a TERMINATED instance. `RUNBOOK.md`
+carries the commands and says why the 403 that would otherwise appear looks like an IAM problem and
+is not.
+
+**Four REST calls, hand-written.** `@google-cloud/compute` is a large dependency tree in a service
+whose production dependencies are fastify, pg and ws.
+
+**`accepted` is not an outcome.** A GCE start reaches RUNNING in tens of seconds and the devices cold
+boot for minutes after; the control plane asks, watches for a bounded window, and where the machine
+is still moving the row stays `accepted` carrying what was last seen. Settling it `succeeded` because
+the provider took the request would put a result in the log that nobody verified. Migration 055
+teaches the append-only trigger the difference — an open row may have its `detail` rewritten and
+nothing else, and may not acquire a `finished_at`.
+
+**The distinction that does the work is `answered`.** A provider that REFUSED is a failure with a
+reason; a provider that NEVER SPOKE is `unknown`, because the machine may well have stopped. A naive
+`catch` reports both as failures, and that is how somebody presses Stop a second time on a machine
+that is already stopping.
+
 ## Consequences
 
 - The top bar loses its infrastructure segments. `#/infra` gains them, with everything around them

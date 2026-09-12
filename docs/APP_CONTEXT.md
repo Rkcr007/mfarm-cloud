@@ -168,7 +168,7 @@ while the expensive half is off.
 
 ```
 apps/api/          Fastify + Postgres. Allocation, leases, fencing, runs, artifacts,
-                   the WebDriver hub, RLS tenancy, metrics. 54 migrations.
+                   the WebDriver hub, RLS tenancy, metrics. 55 migrations.
 apps/api/src/infra/  The operations centre's read side: host freshness, the power ledger,
                    cost, the health rollup, and the append-only operations log (ADR-0038).
 apps/api/public/   The console — plain JavaScript, no build step, served by the API.

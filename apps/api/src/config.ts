@@ -110,6 +110,22 @@ export interface Config {
    */
   hostHourlyCost: number | null;
   costCurrency: string;
+  /**
+   * WHICH MACHINES THIS CONTROL PLANE MAY POWER, and there is no other answer to that question.
+   *
+   * AN ALLOW-LIST AND NOT A LOOKUP, and this is the security decision in the whole power feature.
+   * The obvious implementation is to take `hosts.hostname` and hand it to the cloud API — and
+   * `hosts.hostname` is a string a WORKER chooses for itself at registration. An agent that
+   * registered as `mfarm-cp` would put a Stop button for the CONTROL PLANE on the console, and a
+   * misconfigured one would do it by accident. Nothing outside this list is powerable, so the
+   * blast radius is a configuration file on the control plane rather than a field in a request.
+   *
+   * `MFARM_POWER_INSTANCES=mfarm-lab:asia-south1-c,mfarm-lab-2:asia-south1-c`. Empty means power is
+   * not available at all, which is the default and what the console reports as `power: false`.
+   */
+  powerInstances: Map<string, { instance: string; zone: string }>;
+  /** The cloud project the instances above live in. Required when the list is not empty. */
+  gcpProject: string | null;
   videoRecording: 'off' | 'failures' | 'all';
   /**
    * How long a kept recording lives. SHORTER THAN ARTIFACTS BY DEFAULT — three days against
@@ -626,6 +642,48 @@ export function parseConfig(env: Env): Config {
   // rupees, somebody else's in dollars, and a list is a thing to be wrong about.
   const costCurrency = (env.COST_CURRENCY ?? '₹').trim() || '₹';
 
+  /**
+   * The power allow-list — `hostname:zone` pairs, comma-separated.
+   *
+   * PARSED STRICTLY AND REFUSED LOUDLY. A malformed entry is not skipped: an operator who wrote
+   * `mfarm-lab` without a zone and got silence would believe power was configured, find the button
+   * missing, and go looking in the wrong place. `config.ts` exists to turn that into a sentence at
+   * startup.
+   *
+   * The instance NAME defaults to the host name, because on this farm they are the same string and
+   * requiring both would be ceremony. `hostname=instance:zone` names them separately for a farm
+   * where they are not.
+   */
+  const powerInstances = new Map<string, { instance: string; zone: string }>();
+  const powerRaw = (env.MFARM_POWER_INSTANCES ?? '').trim();
+  if (powerRaw) {
+    for (const entry of powerRaw.split(',').map((e) => e.trim()).filter(Boolean)) {
+      const [left, zone] = entry.split(':');
+      const [host, instance] = (left ?? '').split('=');
+      if (!host || !zone) {
+        problems.push(
+          `MFARM_POWER_INSTANCES entry ${JSON.stringify(entry)} is not "<host>:<zone>" `
+          + 'or "<host>=<instance>:<zone>"');
+        continue;
+      }
+      // A name the cloud provider would reject anyway, refused here where the message can say which
+      // entry — and where it cannot reach an API call.
+      if (!/^[a-z]([-a-z0-9]*[a-z0-9])?$/.test(instance || host)) {
+        problems.push(`MFARM_POWER_INSTANCES: ${JSON.stringify(instance || host)} is not a valid instance name`);
+        continue;
+      }
+      if (!/^[a-z0-9-]+$/.test(zone)) {
+        problems.push(`MFARM_POWER_INSTANCES: ${JSON.stringify(zone)} is not a valid zone`);
+        continue;
+      }
+      powerInstances.set(host, { instance: instance || host, zone });
+    }
+  }
+  const gcpProject = (env.GCP_PROJECT ?? '').trim() || null;
+  if (powerInstances.size > 0 && !gcpProject) {
+    problems.push('MFARM_POWER_INSTANCES is set but GCP_PROJECT is not — there is no project to act in');
+  }
+
   const videoRaw = (env.VIDEO_RECORDING ?? 'off').trim().toLowerCase();
   if (!['off', 'failures', 'all'].includes(videoRaw)) {
     problems.push(`VIDEO_RECORDING must be one of off | failures | all, not ${JSON.stringify(videoRaw)}`);
@@ -721,6 +779,8 @@ export function parseConfig(env: Env): Config {
     artifactRetentionHours,
     hostHourlyCost,
     costCurrency,
+    powerInstances,
+    gcpProject,
     videoRecording,
     videoRetentionHours,
     commandRetentionHours,
@@ -784,6 +844,12 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     artifactRetentionHours: c.artifactRetentionHours,
     hostHourlyCost: c.hostHourlyCost ?? 'unset (elapsed time shown without a cost)',
     costCurrency: c.costCurrency,
+    // The NAMES, at startup, in the log. An allow-list nobody can see is an allow-list nobody
+    // audits — and this one decides which machines a browser can switch off.
+    powerInstances: c.powerInstances.size
+      ? [...c.powerInstances].map(([h, i]) => `${h}->${i.instance}@${i.zone}`).join(', ')
+      : 'none (power control disabled)',
+    gcpProject: c.gcpProject ?? 'unset',
     videoRecording: c.videoRecording,
     videoRetentionHours: c.videoRetentionHours,
     commandRetentionHours: c.commandRetentionHours,

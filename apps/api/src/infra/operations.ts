@@ -1,8 +1,12 @@
 import type { FastifyRequest } from 'fastify';
 import { withSystem } from '../db.ts';
-import { notFound } from '../http/errors.ts';
-import { audited, type OperationResult } from './audit.ts';
+import { notFound, forbidden } from '../http/errors.ts';
+import { audited, type StepResult } from './audit.ts';
 import { infraChanged } from './stream.ts';
+import {
+  CloudError, awaitState, instanceFor, instanceStatus, powerAction, thisInstanceName,
+  type PowerState,
+} from './cloud.ts';
 
 /**
  * The things an operator can actually do to this farm, from the console.
@@ -26,10 +30,8 @@ import { infraChanged } from './stream.ts';
  *
  * ---------------------------------------------------------------- what is NOT here
  *
- * Powering a machine on or off, and restarting a service on it. Both are real requirements and
- * neither is a control-plane change: power needs a cloud credential this VM does not hold, and a
- * service restart needs the agent to learn a new job kind. They arrive in their own stages, and
- * until then `capabilities` reports them false so the console does not draw a button for them.
+ * Restarting a service on a host. That needs the agent to learn a new job kind, so it arrives in
+ * its own stage; until then `capabilities.services` is false and the console draws no button.
  */
 
 /** A host, resolved and described enough to log and to answer with. */
@@ -74,7 +76,7 @@ async function loadHost(hostId: string): Promise<Host> {
 
 export interface OperationOutcome {
   operationId: string;
-  result: OperationResult;
+  result: StepResult;
   /** One sentence for the operator, in the same voice as `errors.ts`: what happened, and what next. */
   message: string;
   /** What actually moved. Absent when nothing did. */
@@ -90,11 +92,12 @@ export interface OperationOutcome {
  * visible: the OUTCOME goes to the log, the `value` goes to the operator.
  */
 interface Step {
-  result: OperationResult;
+  result: StepResult;
   /** The line that lands in `infra_operations.detail`. Terse; for reading a table. */
   detail?: string;
   value: {
-    result: OperationResult;
+    /** What the console shows. `accepted` renders as "in progress", never as a success. */
+    result: StepResult;
     message: string;
     changed?: Record<string, number | string>;
   };
@@ -286,3 +289,215 @@ export async function resumeHost(req: FastifyRequest, hostId: string): Promise<O
     };
   });
 }
+
+/* ------------------------------------------------------------------ power */
+
+/**
+ * How long to watch a machine after asking it to move, before answering the operator.
+ *
+ * A GCE stop settles in well under this; a start does NOT — the instance reaches RUNNING in tens of
+ * seconds and the devices cold boot for minutes afterwards. So this is not "wait until it is
+ * finished", it is "wait long enough that the usual case answers with the truth", and everything
+ * slower comes back as `accepted` with the state it had reached. The console keeps showing it move,
+ * because the page is a live view of the provider's own status.
+ *
+ * Overridable, and read inside the function rather than at module scope, for the reason every route
+ * file here documents: `import` is hoisted, so an env var read during module evaluation cannot be
+ * set by a test. A test asserting "a machine still booting stays `accepted`" otherwise has to wait
+ * out the real twenty-five seconds to find out.
+ */
+function settleMs(): number {
+  return Number(process.env.INFRA_POWER_SETTLE_MS ?? 25_000);
+}
+
+/** Resolve a host to the machine it is allowed to power, refusing everything not on the list. */
+async function powerTarget(host: Host) {
+  const target = instanceFor(host.hostname);
+  if (!target) {
+    throw forbidden(
+      `${host.hostname} is not on this control plane's power allow-list, so it cannot be started or `
+      + 'stopped from here. That list is configuration on the control plane (MFARM_POWER_INSTANCES) '
+      + 'and deliberately not derived from the host name a worker registers with.');
+  }
+  /**
+   * THE SECOND LOCK. The allow-list already makes this impossible, and it costs one cached metadata
+   * read to make it impossible twice. A console that can switch off the machine serving it is a
+   * console with one working button, and the failure would be unrecoverable from the console.
+   */
+  const self = await thisInstanceName();
+  if (self && self === target.instance) {
+    throw forbidden(
+      'That is the machine this control plane is running on. Stopping it from here would end the '
+      + 'session making the request, and nothing would be left to start it again.');
+  }
+  return target;
+}
+
+/** The five words the console and the log use for a machine's power. */
+const POWER_WORD: Record<PowerState, string> = {
+  running: 'running', stopped: 'stopped', starting: 'starting',
+  stopping: 'stopping', error: 'in an error state', unknown: 'in a state the provider did not name',
+};
+
+type PowerVerb = 'start' | 'stop' | 'restart';
+
+const ACTION_NAME: Record<PowerVerb, string> = {
+  start: 'start-host', stop: 'stop-host', restart: 'restart-host',
+};
+
+/**
+ * Start, stop or restart a machine.
+ *
+ * ---------------------------------------------------------------- the three answers §9 asks for
+ *
+ *   ALREADY RUNNING + start  -> `noop`, "Already running." Not an error: see the header.
+ *   ALREADY STOPPED + stop   -> `noop`, "Already stopped."
+ *   WE NEVER FOUND OUT       -> `unknown`, and the message says the operation may have happened.
+ *
+ * The third is the one that takes discipline. A timeout, a provider that stops answering, a network
+ * fault between here and Google — none of them mean the instance did not stop, and every one of
+ * them would be reported as a failure by a naive `catch`. `CloudError.answered` carries the
+ * distinction from the fetch itself: the provider REFUSED (a real failure, with a reason) or the
+ * provider NEVER SPOKE (unknown).
+ *
+ * A MACHINE ALREADY IN MOTION IS NOT ASKED AGAIN. Pressing Stop on an instance that is STOPPING is
+ * `noop`, not a second stop — the second call is harmless at the provider and the honest answer to
+ * "did anything change" is no.
+ */
+async function powerOperation(
+  req: FastifyRequest, hostId: string, verb: PowerVerb, reasonRaw: unknown,
+): Promise<OperationOutcome> {
+  const host = await loadHost(hostId);
+  const target = await powerTarget(host);
+  const reason = cleanReason(reasonRaw, `${verb} requested by an operator from the console`);
+
+  return audited(req, {
+    action: ACTION_NAME[verb],
+    targetKind: 'host',
+    targetId: host.id,
+    targetLabel: host.hostname,
+    // The instance and zone, so the log says WHICH machine in WHICH project was acted on — a
+    // hostname alone is ambiguous the moment a farm has a staging project.
+    params: { reason, instance: target.instance, zone: target.zone },
+  }, async (): Promise<Step> => {
+    let before;
+    try {
+      before = await instanceStatus(target);
+    } catch (e) {
+      const err = e as CloudError;
+      return {
+        result: err.answered ? 'failed' : 'unknown',
+        detail: err.message,
+        value: {
+          result: err.answered ? 'failed' : 'unknown',
+          message: err.answered
+            ? `${host.hostname}: ${err.message}`
+            : `Could not reach the cloud provider to find out what ${host.hostname} is doing, so `
+              + 'nothing was attempted. Its state is unchanged.',
+        },
+      };
+    }
+
+    /* ---------------------------------------------- already there, or already on the way */
+
+    const settled = (message: string): Step => ({
+      result: 'noop', detail: message,
+      value: { result: 'noop', message },
+    });
+    if (verb === 'start' && before.state === 'running') {
+      return settled(`${host.hostname} is already running. Nothing changed.`);
+    }
+    if (verb === 'stop' && before.state === 'stopped') {
+      return settled(`${host.hostname} is already stopped. Nothing changed.`);
+    }
+    if ((verb === 'start' && before.state === 'starting')
+        || (verb === 'stop' && before.state === 'stopping')) {
+      return settled(`${host.hostname} is already ${POWER_WORD[before.state]}. Nothing changed.`);
+    }
+    /**
+     * RESTARTING A STOPPED MACHINE IS A START, and saying so is better than either alternative.
+     * `reset` on a TERMINATED instance is refused by the provider with a message about instance
+     * state that means nothing to the person who pressed it, and silently starting it instead would
+     * be the console doing something other than what the button said.
+     */
+    if (verb === 'restart' && before.state === 'stopped') {
+      return {
+        result: 'failed', detail: 'Refused: the machine is stopped, so there is nothing to restart.',
+        value: {
+          result: 'failed',
+          message: `${host.hostname} is stopped, so there is nothing to restart. Start it instead.`,
+        },
+      };
+    }
+
+    /* ---------------------------------------------- do it */
+
+    const providerVerb = verb === 'restart' ? 'reset' : verb;
+    try {
+      await powerAction(target, providerVerb);
+    } catch (e) {
+      const err = e as CloudError;
+      return {
+        result: err.answered ? 'failed' : 'unknown',
+        detail: err.message,
+        value: {
+          result: err.answered ? 'failed' : 'unknown',
+          message: err.answered
+            ? `${host.hostname}: ${err.message}`
+            : `The request to ${verb} ${host.hostname} was sent and never acknowledged, so it may `
+              + 'have been carried out. Watch its state on this page rather than pressing again.',
+        },
+      };
+    }
+    infraChanged();
+
+    /* ---------------------------------------------- watch it move */
+
+    const want: PowerState[] = verb === 'stop' ? ['stopped'] : ['running'];
+    let after;
+    try {
+      after = await awaitState(target, want, settleMs());
+    } catch {
+      after = { state: 'unknown' as PowerState, raw: '' };
+    }
+    infraChanged();
+
+    if (want.includes(after.state)) {
+      return {
+        result: 'succeeded',
+        detail: `${host.hostname} is ${after.state}.`,
+        value: {
+          result: 'succeeded',
+          message: verb === 'stop'
+            ? `${host.hostname} is stopped. It costs nothing until it is started again.`
+            : `${host.hostname} is running. Its devices cold boot from here, which takes a few minutes.`,
+          changed: { state: after.state },
+        },
+      };
+    }
+
+    /**
+     * IT WAS ACCEPTED AND IT IS STILL MOVING. That is `accepted`, not `unknown` and certainly not
+     * `failed`: the provider took the request, we watched it for twenty-five seconds, and a GCE
+     * start legitimately takes longer. The row stays open so that the log says what it is — a thing
+     * in flight — rather than claiming an outcome nobody has.
+     */
+    return {
+      result: 'accepted',
+      detail: `Accepted; last seen ${after.raw || 'unknown'} after ${Math.round(settleMs() / 1000)}s.`,
+      value: {
+        result: 'accepted',
+        message: `${host.hostname} accepted the request and is ${POWER_WORD[after.state]}. `
+          + 'This page follows it from here.',
+        changed: { state: after.state },
+      },
+    };
+  });
+}
+
+export const startHost = (req: FastifyRequest, id: string, reason?: unknown) =>
+  powerOperation(req, id, 'start', reason);
+export const stopHost = (req: FastifyRequest, id: string, reason?: unknown) =>
+  powerOperation(req, id, 'stop', reason);
+export const restartHost = (req: FastifyRequest, id: string, reason?: unknown) =>
+  powerOperation(req, id, 'restart', reason);

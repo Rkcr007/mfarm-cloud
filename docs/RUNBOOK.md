@@ -177,6 +177,84 @@ worker's first heartbeat (migration 016).
 the Android image and hours of setup; rebuilding is most of a day. The two GCP snapshots
 (`mfarm-cf-ready`, `mfarm-farm-ready`) exist for a catastrophe, not for routine thrift.
 
+## Turn on Stop and Start from the console (one-time, costs a control-plane restart)
+
+ADR-0038's power control is **off until this is done**, and the console says so rather than drawing
+a button that 403s. Two things have to change on GCP, and the second one is why this is not a
+five-minute job.
+
+### 1. A custom role with exactly four permissions, bound to the device hosts only
+
+Project-wide `roles/compute.instanceAdmin.v1` would let the control plane reshape the project. This
+grants four verbs on two named machines.
+
+```bash
+PROJECT=mfarm-lab
+ZONE=asia-south1-c
+SA=mfarm-cp@mfarm-lab.iam.gserviceaccount.com
+
+gcloud iam roles create mfarmHostPower --project "$PROJECT" \
+  --title "MFARM host power" \
+  --description "Start, stop, reset and read the device hosts. Nothing else." \
+  --permissions compute.instances.get,compute.instances.start,compute.instances.stop,compute.instances.reset \
+  --stage GA
+
+# Bound PER INSTANCE, not at the project. mfarm-cp is deliberately absent from this list.
+for VM in mfarm-lab; do
+  gcloud compute instances add-iam-policy-binding "$VM" \
+    --project "$PROJECT" --zone "$ZONE" \
+    --member "serviceAccount:$SA" \
+    --role "projects/$PROJECT/roles/mfarmHostPower"
+done
+```
+
+### 2. The instance's OAuth scopes — **and this needs the control plane stopped**
+
+**Scopes cap IAM.** Verified on 2026-09-12: `mfarm-cp`'s scopes are `devstorage.read_write`,
+`logging.write`, `monitoring.write`, `service.management.readonly`, `servicecontrol` and
+`trace.append` — no compute scope at all. A token minted from the metadata server carries those
+scopes whatever the role above says, so **step 1 alone changes nothing** and the symptom is a 403
+that reads like a permissions problem while the IAM policy looks perfect.
+
+`set-service-account` only works on a TERMINATED instance, so this is a planned outage of the
+console, the API and the WebDriver hub. Minutes, not hours — but pick the moment.
+
+```bash
+gcloud compute instances stop mfarm-cp --project "$PROJECT" --zone "$ZONE"
+
+gcloud compute instances set-service-account mfarm-cp \
+  --project "$PROJECT" --zone "$ZONE" \
+  --service-account "$SA" \
+  --scopes cloud-platform
+
+gcloud compute instances start mfarm-cp --project "$PROJECT" --zone "$ZONE"
+```
+
+`cloud-platform` is the broad scope and the narrow one is done by the ROLE — which is the right way
+round: a scope is a coarse cap and IAM is where "four verbs on these two machines" is expressible.
+
+### 3. Tell the control plane which machines it may touch
+
+```bash
+# deploy/.env on mfarm-cp
+GCP_PROJECT=mfarm-lab
+MFARM_POWER_INSTANCES=mfarm-lab:asia-south1-c
+```
+
+**This list is the actual security boundary, not a convenience.** `hosts.hostname` is a string a
+worker chooses for itself at registration, so a control plane that resolved host names to instance
+names would let a misconfigured agent put a Stop button for the control plane on the console.
+Nothing outside this list is reachable, and the control plane additionally refuses to act on the
+instance it is running on.
+
+Restart the API and the Infrastructure page grows Start, Stop and Restart on the listed hosts only.
+`deploy/farm-online.sh` keeps working and is still the right tool when the console itself is down.
+
+### Turning it off again
+
+Remove `MFARM_POWER_INSTANCES` and restart. The buttons disappear and the page goes back to saying
+power is a laptop operation. The IAM binding can stay or go; with no allow-list nothing uses it.
+
 ## Ship a change
 
 ```bash
