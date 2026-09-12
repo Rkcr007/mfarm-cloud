@@ -1,6 +1,7 @@
 import { AppRefError, parseAppRef, type AppRef } from '../../appref.ts';
 import { parseRunId, RunRefError } from '../../runs.ts';
 import { invalidArgument } from './errors.ts';
+import { isValidTunnelName } from '@mfarm/protocol';
 
 /**
  * Capability negotiation for `POST /session`.
@@ -36,7 +37,7 @@ const MFARM_PREFIX = 'mfarm:';
  */
 const MFARM_KEYS = new Set([
   'region', 'tier', 'ttlMinutes', 'queueTimeoutSeconds', 'sessionId', 'appId', 'runId',
-  'runName', 'name', 'deviceClass',
+  'runName', 'name', 'deviceClass', 'tunnel',
 ]);
 
 function rejectUnknownMfarmKeys(caps: Record<string, unknown>): void {
@@ -104,6 +105,20 @@ export interface ParsedCapabilities {
    */
   deviceClass?: string | null;
   matchDeviceClass: boolean;
+  /**
+   * `mfarm:tunnel` — route this device's HTTP traffic through one of this org's tunnels, so the
+   * app under test can reach a host on the customer's own network (migration 052).
+   *
+   * A NAME, not a boolean. An org can hold several — one per developer laptop, one on a CI runner
+   * — and "use the tunnel" is ambiguous the moment there are two. Naming it also means a suite that
+   * asks for a tunnel nobody started gets a 503 saying WHICH one, instead of a session that starts
+   * fine and silently cannot reach anything.
+   *
+   * NOT AN ALLOCATION CONSTRAINT. It does not narrow which device is chosen — every device on this
+   * farm can proxy — so it is not in the list of keys that pick hardware. It is recorded on the
+   * session, and the router reads it when a device actually asks to fetch something.
+   */
+  tunnel?: string;
   /** How long to wait for capacity before giving up. 0 = fail immediately. */
   queueTimeoutSeconds: number;
   /**
@@ -302,6 +317,22 @@ function interpret(
    * different things — see `deviceClass` on `ParsedCapabilities`. `null` is "an unprofiled device,
    * specifically"; leaving the key out is "any device you can drive".
    */
+  /**
+   * `mfarm:tunnel`, validated HERE rather than at first use.
+   *
+   * A misspelled tunnel name is the caller's mistake and it is worth the whole session: the
+   * alternative is a suite that allocates a device, installs a build, runs for four minutes and
+   * then fails every request with a 503 naming a tunnel that was never going to exist. The same
+   * reasoning `mfarm:appId` is resolved before anything is allocated.
+   */
+  const tunnel = str(caps, `${MFARM_PREFIX}tunnel`);
+  if (tunnel !== undefined && !isValidTunnelName(tunnel)) {
+    throw invalidArgument(
+      `\`${MFARM_PREFIX}tunnel\` must be a tunnel name: lowercase letters, digits and dashes. `
+      + `Got "${tunnel}".`,
+    );
+  }
+
   const hasDeviceClass = `${MFARM_PREFIX}deviceClass` in caps
     && caps[`${MFARM_PREFIX}deviceClass`] !== undefined;
   const deviceClass = hasDeviceClass ? (str(caps, `${MFARM_PREFIX}deviceClass`) ?? null) : undefined;
@@ -353,6 +384,7 @@ function interpret(
     platform, region, tier, ttlMinutes, queueTimeoutSeconds, upstream, protocol, bindSessionId,
     appRef, appRefRaw, runId, runName, name,
     deviceClass, matchDeviceClass: hasDeviceClass,
+    tunnel,
   };
 }
 

@@ -3,7 +3,8 @@ import type { FastifyInstance } from 'fastify';
 import type { Duplex } from 'node:stream';
 import type { IncomingMessage } from 'node:http';
 import {
-  TUNNEL_PATH, TUNNEL_MAX_FRAME_BYTES, isTunnelFrame,
+  TUNNEL_PATH, CUSTOMER_TUNNEL_PATH, TUNNEL_MAX_FRAME_BYTES, isTunnelFrame,
+  TUNNEL_CH_CONTROL_PLANE_BASE, TUNNEL_CH_STEP,
   type TunnelChannelKind, type TunnelFrame,
 } from '@mfarm/protocol';
 import { authenticate } from '../auth.ts';
@@ -97,8 +98,37 @@ export interface ControlChannel {
   close(): void;
 }
 
+/**
+ * What the control plane does with a proxy channel an agent opened (migration 052).
+ *
+ * A CALLBACK RATHER THAN A METHOD, because routing it needs the database — the device row, its live
+ * session, that session's org and the tunnel it named — and this class has never touched a database
+ * and must not start. `server.ts` supplies the handler; this file supplies the bytes.
+ */
+export interface ProxyOpen {
+  hostId: string;
+  /** The device's `local_id`, as the agent named it. The ONLY thing the agent gets to say. */
+  localId: string;
+  send(d: string): void;
+  close(reason: string): void;
+  onInbound(fn: (d: string) => void): void;
+  onClosed(fn: (reason: string) => void): void;
+}
+
 export class TunnelRegistry {
   private readonly hosts = new Map<string, HostTunnel>();
+
+  /** Set by `attachTunnel` when a proxy router is supplied. Absent means proxy channels are refused. */
+  private onProxyOpen: ((o: ProxyOpen) => void | Promise<void>) | undefined;
+
+  /** Per-channel close callbacks for the router, kept off `ChannelSink` so its shape stays one
+   *  thing. The inbound handler is a closure per channel — see the buffer in `acceptProxy`. */
+  private readonly proxyClose = new Map<number, (reason: string) => void>();
+
+  /** Install the router. Called once, by `attachTunnel`. */
+  setProxyRouter(fn: (o: ProxyOpen) => void | Promise<void>): void {
+    this.onProxyOpen = fn;
+  }
 
   /**
    * Whether a host can currently be reached.
@@ -131,7 +161,7 @@ export class TunnelRegistry {
       this.dropHost(hostId, 'replaced by a newer tunnel');
     }
 
-    const tunnel: HostTunnel = { agent, channels: new Map(), nextCh: 1 };
+    const tunnel: HostTunnel = { agent, channels: new Map(), nextCh: TUNNEL_CH_CONTROL_PLANE_BASE };
     this.hosts.set(hostId, tunnel);
 
     agent.on('message', (raw) => this.onAgentFrame(tunnel, raw.toString()));
@@ -154,8 +184,10 @@ export class TunnelRegistry {
     if (this.countOf(tunnel, 'dp') >= MAX_CHANNELS_PER_HOST) return false;
 
     // Monotonic and never reused for the life of the tunnel, so a late frame from a channel that
-    // has closed cannot land on its replacement.
-    const ch = tunnel.nextCh++;
+    // has closed cannot land on its replacement. EVEN, because the agent now allocates odd ones for
+    // the proxy channels a device opens — see `TunnelFrame` in the protocol.
+    const ch = tunnel.nextCh;
+    tunnel.nextCh += TUNNEL_CH_STEP;
     tunnel.channels.set(ch, {
       kind: 'dp',
       deliver: (d) => { try { browser.send(d); } catch { /* the close handler cleans up */ } },
@@ -203,7 +235,10 @@ export class TunnelRegistry {
     if (!tunnel || tunnel.agent.readyState !== WebSocket.OPEN) return undefined;
     if (this.countOf(tunnel, 'automation') >= MAX_AUTOMATION_CHANNELS_PER_HOST) return undefined;
 
-    const ch = tunnel.nextCh++;
+    // Even, from the same counter as `openChannel` — one allocator per side is the whole point of
+    // the parity split, so this must NOT get a counter of its own.
+    const ch = tunnel.nextCh;
+    tunnel.nextCh += TUNNEL_CH_STEP;
     tunnel.channels.set(ch, {
       kind: 'automation',
       deliver: (d) => handlers.onData(d),
@@ -258,6 +293,30 @@ export class TunnelRegistry {
     try { frame = JSON.parse(raw); } catch { return; }
     if (!isTunnelFrame(frame)) return;
 
+    /**
+     * `open` FROM AN AGENT IS NOW A THING, and it is exactly one thing: a `proxy` channel, because
+     * a device wants to reach the customer's network (migration 052). Everything else an agent
+     * might open is still refused.
+     *
+     * This is the change that made the channel id space need a parity split — see `TunnelFrame` in
+     * the protocol. Before it, the control plane was the only allocator and an agent-sent `open`
+     * could only be a bug or a forgery.
+     */
+    if (frame.t === 'open') {
+      if (frame.kind !== 'proxy' || !this.onProxyOpen) {
+        this.sendToAgent(tunnel, { ch: frame.ch, t: 'close', reason: 'this channel kind cannot be opened by an agent' });
+        return;
+      }
+      // A repeated open on a live id would orphan the first request. Ids are allocated by one side
+      // and never reused, so this is a bug or a forgery either way.
+      if (tunnel.channels.has(frame.ch)) {
+        this.sendToAgent(tunnel, { ch: frame.ch, t: 'close', reason: 'channel already open' });
+        return;
+      }
+      this.acceptProxy(tunnel, frame.ch, frame.ref ?? '');
+      return;
+    }
+
     const sink = tunnel.channels.get(frame.ch);
     if (!sink) return;
 
@@ -265,10 +324,66 @@ export class TunnelRegistry {
       sink.deliver(frame.d);
       return;
     }
-    // 'open' from an agent is not a thing — the control plane is the only side that opens — so it
-    // falls through to the same teardown as 'close' rather than being given a meaning.
     tunnel.channels.delete(frame.ch);
-    sink.drop(frame.t === 'close' ? (frame.reason ?? 'the agent closed this channel') : 'protocol error');
+    sink.drop(frame.reason ?? 'the agent closed this channel');
+  }
+
+  /**
+   * Hand an agent-opened proxy channel to whoever knows how to route it.
+   *
+   * THE REGISTRY STILL DECIDES NOTHING. It allocates a sink, copies bytes and tears down — exactly
+   * as it does for a browser. Which org this device belongs to, which tunnel its session named and
+   * whether either exists are questions about ROWS, and they are answered by the handler this
+   * class is given rather than by this class, for the same reason every other decision in this file
+   * lives somewhere else.
+   */
+  private acceptProxy(tunnel: HostTunnel, ch: number, localId: string): void {
+    const send = (d: string) => this.sendToAgent(tunnel, { ch, t: 'data', d });
+    const close = (reason: string) => {
+      if (tunnel.channels.delete(ch)) this.sendToAgent(tunnel, { ch, t: 'close', reason });
+    };
+
+    /**
+     * FRAMES ARE BUFFERED UNTIL THE ROUTER HAS SAID WHERE THEY GO, and this is not defensive
+     * padding — without it the feature does not work at all.
+     *
+     * The agent sends `open` and then the request head IMMEDIATELY; there is nothing for it to wait
+     * for, and making it wait would add a round trip to every request a device makes. The router,
+     * meanwhile, has to ask the database which session this device is holding before it knows which
+     * tunnel to open. So the head reliably arrives before there is anywhere to put it, and dropping
+     * it produces a request that is routed correctly and then never answered — a 60-second timeout
+     * on the device with nothing wrong anywhere in the logs.
+     *
+     * Found by the end-to-end test on its first run, and the signature was diagnostic: every
+     * REFUSAL passed (those are decided before any data is needed) and every SUCCESS timed out.
+     */
+    const pending: string[] = [];
+    let deliver: ((d: string) => void) | undefined;
+
+    tunnel.channels.set(ch, {
+      kind: 'proxy',
+      deliver: (d) => { if (deliver) deliver(d); else pending.push(d); },
+      drop: (reason) => { this.proxyClose.get(ch)?.(reason); this.proxyClose.delete(ch); },
+    });
+
+    void this.onProxyOpen?.({
+      hostId: this.hostIdOf(tunnel) ?? '',
+      localId,
+      send,
+      close: (reason) => { deliver = undefined; this.proxyClose.delete(ch); close(reason); },
+      onInbound: (fn) => {
+        deliver = fn;
+        // Drained in arrival order, which is the order the head and its body chunks were sent in.
+        // Anything else would hand an HTTP parser a body before its request line.
+        for (const d of pending.splice(0)) fn(d);
+      },
+      onClosed: (fn) => this.proxyClose.set(ch, fn),
+    });
+  }
+
+  private hostIdOf(tunnel: HostTunnel): string | undefined {
+    for (const [id, t] of this.hosts) if (t === tunnel) return id;
+    return undefined;
   }
 }
 
@@ -279,7 +394,23 @@ export class TunnelRegistry {
  * which is the whole of the integration. Anything that is not one of the two paths has its socket
  * destroyed rather than being left to time out.
  */
-export function attachTunnel(app: FastifyInstance, registry: TunnelRegistry): void {
+export function attachTunnel(
+  app: FastifyInstance,
+  registry: TunnelRegistry,
+  /**
+   * The customer tunnel's upgrade handler (migration 052), if one is mounted.
+   *
+   * Passed IN rather than constructed here so this file keeps knowing nothing about the customer
+   * tunnel beyond "there may be another claimant for an upgrade". The two are different directions
+   * with different credentials and only one thing in common — Fastify's `upgrade` event, of which
+   * there is exactly one.
+   */
+  customerUpgrade?: (req: IncomingMessage, socket: Duplex, head: Buffer) => Promise<boolean>,
+  /** Where an agent-opened `proxy` channel goes. Absent means proxy channels are refused, which is
+   *  the honest answer for a control plane with no customer tunnels mounted. */
+  proxyRouter?: (o: ProxyOpen) => void | Promise<void>,
+): void {
+  if (proxyRouter) registry.setProxyRouter(proxyRouter);
   const agentWss = new WebSocketServer({ noServer: true, maxPayload: TUNNEL_MAX_FRAME_BYTES });
   const browserWss = new WebSocketServer({ noServer: true, maxPayload: TUNNEL_MAX_FRAME_BYTES });
 
@@ -362,6 +493,22 @@ export function attachTunnel(app: FastifyInstance, registry: TunnelRegistry): vo
         });
       }).catch(() => refuse(socket, '500 Internal Server Error'));
       return;
+    }
+
+    /**
+     * The CUSTOMER tunnel (migration 052) — a customer's client dialling in so a device can reach
+     * their private network. Delegated rather than handled here: it is the other direction and its
+     * own authentication story, and `customer-tunnel.ts` says why.
+     *
+     * It returns whether it took the socket, so this chain stays the single place that decides what
+     * an unrecognised upgrade path gets — which is a 404 and not a hung connection.
+     */
+    if (customerUpgrade) {
+      void customerUpgrade(req, socket, head).then((taken) => {
+        if (taken) return;
+        if (!path.startsWith('/dp/')) refuse(socket, '404 Not Found');
+      }).catch(() => refuse(socket, '500 Internal Server Error'));
+      if (path === CUSTOMER_TUNNEL_PATH) return;
     }
 
     if (path.startsWith('/dp/')) {

@@ -1,9 +1,11 @@
 #!/usr/bin/env -S node --experimental-strip-types --disable-warning=ExperimentalWarning
 import { parseArgs } from 'node:util';
 import { readFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { ControlPlaneClient, describe, sleep } from './client.ts';
 import { run, EXIT_FAILURE } from './run.ts';
 import { nodeTooOld } from './engine.ts';
+import { runTunnel, parseAllowRule } from './tunnel.ts';
 import type { AppSummary, DataPlaneCoordinates, DeviceSummary, SessionSummary } from './client.ts';
 
 /**
@@ -47,6 +49,7 @@ USAGE
   mfarm app install <app-id> --session <id>    install a build onto the device that session holds
   mfarm app launch <app-id> --session <id>     open it on that device
   mfarm app uninstall <app-id> --session <id>  remove it from that device
+  mfarm tunnel --name <n> --allow <host[:port]> let farm devices reach YOUR network
   mfarm --version | --help
 
 GLOBAL OPTIONS
@@ -63,6 +66,15 @@ RUN OPTIONS
   --wait <seconds>  how long to wait out a queue (env MFARM_WAIT, default ${DEFAULT_WAIT_SECONDS}; 0 fails immediately)
   --no-webdriver    allocate a device even if it cannot run Appium. Only for suites that speak
                     the raw data plane; MFARM_WEBDRIVER_URL will not work on such a device.
+
+TUNNEL OPTIONS
+  --name <n>        what your suite puts in mfarm:tunnel  (lowercase, digits, dashes)
+  --allow <h[:p]>   what devices may reach through it. REPEATABLE and REQUIRED — the default is
+                    deny, and the check runs here rather than on the farm, because this program is
+                    the only one inside your network. Use --allow '*' if you really mean everything.
+  --label <text>    how this machine appears in the console (default: this hostname)
+
+  Needs Node 22+. Nothing listens and no port is opened: this dials out and holds one socket.
 
 DEVICES OPTIONS
   --region <r>  --platform <android|ios>  --state <s>   filters, all optional
@@ -84,8 +96,9 @@ EXIT CODES
   75       no device became available within --wait (retryable)
   130      interrupted
 
-EXAMPLE
+EXAMPLES
   MFARM_API_KEY=mfk_… mfarm run --region us-east -- npx appium-test
+  MFARM_API_KEY=mfk_… mfarm tunnel --name staging --allow '*.acme.internal'
 `;
 
 const OPTIONS = {
@@ -102,6 +115,11 @@ const OPTIONS = {
   state: { type: 'string' },
   session: { type: 'string' },
   package: { type: 'string' },
+  name: { type: 'string' },
+  // REPEATABLE: `multiple` makes `--allow a --allow b` arrive as an array rather than as the last
+  // one silently winning, which is the shape a person writing three rules expects.
+  allow: { type: 'string', multiple: true },
+  label: { type: 'string' },
   help: { type: 'boolean', short: 'h', default: false },
   version: { type: 'boolean', short: 'v', default: false },
 } as const;
@@ -128,6 +146,10 @@ interface Flags {
   state?: string;
   session?: string;
   package?: string;
+  name?: string;
+  /** Repeatable — `multiple: true` in OPTIONS, so this is an array or absent, never a bare string. */
+  allow?: string[];
+  label?: string;
   help?: boolean;
   version?: boolean;
 }
@@ -170,6 +192,8 @@ async function main(): Promise<number> {
       return sessionCommand(flags, rest);
     case 'app':
       return appCommand(flags, rest);
+    case 'tunnel':
+      return tunnelCommand(flags);
     default:
       throw new UsageError(`Unknown command "${command}". Run "mfarm --help".`);
   }
@@ -248,6 +272,58 @@ async function runCommand(flags: Flags, childArgv: string[], hadSeparator: boole
     json: g.json,
     quiet: g.quiet,
   });
+}
+
+/**
+ * `mfarm tunnel` — hold a route open from farm devices to this machine's network.
+ *
+ * THE ONLY LONG-LIVED COMMAND IN THIS CLI. Everything else does a thing and exits; this one runs
+ * until it is stopped, which is why it prints what it is doing to stderr and why Ctrl-C is a normal
+ * way to end it rather than a failure.
+ *
+ * `--allow` IS REQUIRED AND HAS NO DEFAULT. A tunnel is a hole in somebody's network and the person
+ * running this is the only one who can say how wide it should be — see `tunnel.ts` for why the
+ * check lives on this side of the socket and not on the farm's.
+ */
+async function tunnelCommand(flags: Flags): Promise<number> {
+  const g = globals(flags);
+  const name = text(flags.name, process.env.MFARM_TUNNEL_NAME);
+  if (!name) {
+    throw new UsageError(
+      'No tunnel name. Pass --name (or set MFARM_TUNNEL_NAME) — it is what your suite puts in '
+      + '`mfarm:tunnel` to route through this machine.',
+    );
+  }
+
+  const rawAllow = (flags.allow ?? []).filter((a) => typeof a === 'string' && a !== '');
+  if (rawAllow.length === 0) {
+    throw new UsageError(
+      'No --allow rules. This refuses to start rather than opening a tunnel that could reach '
+      + 'nothing (or, worse, everything by accident). Name what devices may reach, e.g. '
+      + "--allow staging.acme.internal — or --allow '*' if you mean everything this machine can see.",
+    );
+  }
+
+  let allow;
+  try {
+    allow = rawAllow.map(parseAllowRule);
+  } catch (err) {
+    throw new UsageError((err as Error).message);
+  }
+
+  await runTunnel({
+    baseUrl: g.apiBaseUrl,
+    apiKey: g.apiKey,
+    name,
+    allow,
+    // The machine's own name by default, because the console shows this next to the tunnel and
+    // "which laptop is that" is the question a team actually asks.
+    client: text(flags.label) ?? hostname(),
+    out: g.quiet ? () => {} : (line: string) => process.stderr.write(`${line}\n`),
+  });
+  // Reached only when the farm refused the tunnel in a way retrying cannot fix; `runTunnel`
+  // otherwise runs until the process is signalled.
+  return EXIT_FAILURE;
 }
 
 async function devicesCommand(flags: Flags): Promise<number> {

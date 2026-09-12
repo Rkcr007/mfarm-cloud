@@ -589,9 +589,19 @@ export const TUNNEL_PATH = '/v1/workers/tunnel';
 /**
  * One frame on the tunnel.
  *
- * `ch` is allocated by the CONTROL PLANE, which is the only side that opens channels — a browser
- * arrives there, never at the agent. That makes the id space single-writer, so there is no
- * collision rule to get wrong and no handshake to lose.
+ * `ch` WAS allocated by the control plane alone, which made the id space single-writer and left no
+ * collision rule to get wrong. `proxy` (the customer tunnel, below) breaks that: a DEVICE decides
+ * when it wants to fetch something, so the agent is the side that opens the channel, and two
+ * allocators on one socket is exactly the race the original note was avoiding.
+ *
+ * **SO THE SPACE IS SPLIT BY PARITY.** The control plane allocates EVEN ids; the agent allocates
+ * ODD ones. That is the same trick HTTP/2 uses for stream ids and for the same reason — it keeps
+ * both sides single-writer over a disjoint range, with no handshake, no negotiation, and nothing to
+ * lose on a reconnect. See `TUNNEL_CH_CONTROL_PLANE_BASE` below.
+ *
+ * The ids are opaque to both ends, so an agent built before this reads a control plane's even ids
+ * exactly as it read its odd ones. What an OLD agent must never do is allocate — and it never did,
+ * because before `proxy` it had nothing to allocate for.
  *
  * `d` is the data-plane message verbatim: the JSON the browser sent, or the JSON the worker is
  * answering with. Deliberately a string rather than a parsed object, so that relaying cannot
@@ -599,7 +609,26 @@ export const TUNNEL_PATH = '/v1/workers/tunnel';
  * away from editing them.
  */
 export type TunnelFrame =
-  | { ch: number; t: 'open'; kind?: TunnelChannelKind }
+  | {
+      ch: number;
+      t: 'open';
+      kind?: TunnelChannelKind;
+      /**
+       * WHO IS ASKING, on an AGENT-OPENED channel only — the device's `local_id`.
+       *
+       * A `proxy` channel exists because a device wants to reach the customer's network, and the
+       * control plane has to answer "whose device, and which tunnel". It resolves that from the
+       * DEVICE: `local_id` + the host holding this socket identifies a row, the row's live session
+       * names the org, and the session's capabilities name the tunnel.
+       *
+       * **THE AGENT NAMES A DEVICE, NEVER AN ORG OR A TUNNEL.** Architecture rule 4, on the path
+       * where breaking it would be worst: a worker that could name the org would be a worker that
+       * could route one tenant's device into another tenant's private network. It names the only
+       * thing it legitimately knows — which of its own devices this came from — and every other
+       * fact is looked up from rows the control plane owns.
+       */
+      ref?: string;
+    }
   | { ch: number; t: 'data'; d: string }
   | { ch: number; t: 'close'; reason?: string };
 
@@ -612,7 +641,7 @@ export type TunnelFrame =
  * new control plane ever sends `automation` is that the device advertised a `mfarm+tunnel:`
  * endpoint — which only a new agent does. The skew resolves itself without a version check.
  */
-export type TunnelChannelKind = 'dp' | 'automation';
+export type TunnelChannelKind = 'dp' | 'automation' | 'proxy';
 
 /**
  * A frame is small: data-plane messages are input events, signalling payloads and batched log
@@ -622,6 +651,22 @@ export type TunnelChannelKind = 'dp' | 'automation';
  */
 export const TUNNEL_MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
+/**
+ * The two halves of the channel id space — see the note on `TunnelFrame`.
+ *
+ * Both sides step by two from their own base, so neither can ever mint the other's id. Stated as
+ * constants rather than as `+= 2` at two call sites in two repositories' worth of files, because
+ * the one way this goes wrong is somebody "tidying" one of them back to `++`.
+ */
+export const TUNNEL_CH_CONTROL_PLANE_BASE = 2;
+export const TUNNEL_CH_AGENT_BASE = 1;
+export const TUNNEL_CH_STEP = 2;
+
+/** Which side minted a channel id. Used only in assertions and diagnostics — the relay itself does
+ *  not care, and must not start caring. */
+export const channelOwner = (ch: number): 'control-plane' | 'agent' =>
+  (ch % 2 === 0 ? 'control-plane' : 'agent');
+
 export function isTunnelFrame(v: unknown): v is TunnelFrame {
   if (!v || typeof v !== 'object') return false;
   const f = v as Record<string, unknown>;
@@ -630,7 +675,13 @@ export function isTunnelFrame(v: unknown): v is TunnelFrame {
     // An unrecognised kind is REFUSED rather than read as `dp`. Falling back would hand a future
     // channel type to the data plane, which answers it with a five-second hello timeout instead of
     // an error anybody can read.
-    return f.kind === undefined || f.kind === 'dp' || f.kind === 'automation';
+    //
+    // `proxy` is the one kind an AGENT opens rather than receives — a device asking to reach the
+    // customer's network. The validator does not distinguish direction, deliberately: both ends
+    // parse frames with this function, and a check that depended on which end was reading would be
+    // two checks that can disagree.
+    if (f.ref !== undefined && typeof f.ref !== 'string') return false;
+    return f.kind === undefined || f.kind === 'dp' || f.kind === 'automation' || f.kind === 'proxy';
   }
   if (f.t === 'close') return true;
   return f.t === 'data' && typeof f.d === 'string';
@@ -755,6 +806,240 @@ export function isAutomationFrame(v: unknown): v is AutomationFrame {
       return false;
   }
 }
+
+/* --------------------------------------------------- the CUSTOMER tunnel (a private staging host)
+ *
+ * WHY THIS EXISTS. An app under test almost never talks to production. It talks to
+ * `staging.acme.internal`, which is on the customer's own network and has no route from a device
+ * farm — so the single most common thing a team wants to test is the one thing a farm cannot reach.
+ * LambdaTest sells this as "Local Connection"; `docs/ltcomp/mfarm-ci-session-console-analysis.md`
+ * lists it as the P1 gap, and it is the biggest one left.
+ *
+ * THE DIRECTION IS THE SAME AS EVERY OTHER TUNNEL IN THIS REPO, and for the same reason: the side
+ * with the private network DIALS OUT. A customer cannot open a port for us any more than a laptop
+ * behind NAT can, and asking them to is asking them to do the one thing their security team exists
+ * to prevent. So `npx @mfarm/cli tunnel` holds a socket open and the control plane multiplexes
+ * requests onto it — structurally identical to the agent tunnel above, pointed the other way.
+ *
+ * WHAT IS ON EACH SIDE, because the asymmetry matters:
+ *
+ *   The AGENT tunnel carries requests FROM the control plane TO a machine holding devices.
+ *   The CUSTOMER tunnel carries requests FROM a device TO a machine on the customer's network.
+ *
+ * A device's HTTP traffic reaches the control plane through the agent tunnel it already has, and
+ * leaves through the customer tunnel. The control plane is a switch between two sockets it dialled
+ * neither of; it copies bytes and routes by ORG, and it is not an authorization boundary — the
+ * customer's client decides what it is willing to fetch, which is the only place that decision can
+ * honestly live.
+ *
+ * WHAT THE CUSTOMER'S CLIENT REFUSES is therefore part of the protocol's purpose rather than a
+ * detail of one implementation: a tunnel is a hole in a network, and the thing holding it open must
+ * be the thing that bounds it. See `TunnelAllowRule`.
+ */
+
+/* --- VENDORED REGION START: apps/cli/src/wire.ts ---------------------------------------------
+ *
+ * EVERYTHING BETWEEN THESE MARKERS IS COPIED INTO THE CLI at build time by
+ * `apps/cli/scripts/vendor-wire.mjs`, and `apps/cli/test/wire.test.ts` fails when the copy drifts.
+ *
+ * WHY A COPY EXISTS AT ALL, given that this file says an allow-list implemented twice is one that
+ * will eventually disagree with itself. `@mfarm/cli` is PUBLISHED and this package is not: it is
+ * `private: true` and exports raw TypeScript, so a tarball that imported it would fail to resolve on
+ * a customer's machine — which is exactly what CI caught. The CLI also ships ZERO runtime
+ * dependencies on purpose, because it is a program a customer runs inside their own network and
+ * every dependency is one their security review has to read.
+ *
+ * So the choice was a published dependency, a build-time bundler, or a generated-and-committed copy
+ * with a drift test. The third is what `public/icons.js` already does in this repo and it is the
+ * only one that costs nothing at install time. There is still ONE source — this one — and the test
+ * is what makes "copied" mean "checked" rather than "diverging".
+ *
+ * Keep this region free of imports. The generator copies text, and a copy that reached for
+ * something outside the markers would resolve here and not there.
+ */
+
+/** Where a customer's tunnel client dials. One socket per tunnel, re-dialled with backoff. */
+export const CUSTOMER_TUNNEL_PATH = '/v1/tunnel';
+
+/**
+ * What a tunnel is called, and the rules are tighter than they look because this is a ROUTING KEY.
+ *
+ * A suite names it in a capability (`mfarm:tunnel`), a person reads it in the console, and two
+ * tunnels in one org must never be ambiguous. Lowercase with dashes is the same shape as an org
+ * slug and a region code, which is what the rest of this system already uses for a name a human
+ * types into a config file.
+ */
+export const TUNNEL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/;
+
+export function isValidTunnelName(v: unknown): v is string {
+  return typeof v === 'string' && TUNNEL_NAME_RE.test(v);
+}
+
+/**
+ * What the client will fetch on the customer's behalf.
+ *
+ * DEFAULT-DENY, AND THE CLIENT ENFORCES IT — not the control plane. The control plane is a switch;
+ * it cannot know that `10.0.0.7` is a database and `staging.acme.internal` is the thing under test,
+ * and a rule it enforced would be a rule the customer had to trust us about. The client runs inside
+ * their network, was started by them, and is the only party that can refuse from a position of
+ * knowledge.
+ *
+ * A host pattern, optionally a port. `*.acme.internal` matches one label or many, because a staging
+ * environment that spreads across `api.`, `web.` and `cdn.` subdomains is the ordinary case and a
+ * customer forced to list them will pass `*` instead — a rule people route around is worse than a
+ * rule that fits.
+ */
+export interface TunnelAllowRule {
+  /** `staging.acme.internal`, `*.acme.internal`, `localhost`, or `*` for everything. */
+  host: string;
+  /** Absent means any port. */
+  port?: number;
+}
+
+/**
+ * Whether a rule set permits one host:port.
+ *
+ * EXPORTED FROM THE PROTOCOL so the client, the console's explanation of what a tunnel can reach,
+ * and the tests all agree by construction. An allow-list that is implemented twice is an allow-list
+ * that will eventually disagree with itself, and the half that is wrong is the half that lets
+ * something through.
+ */
+export function tunnelAllows(rules: TunnelAllowRule[], host: string, port: number): boolean {
+  const h = host.toLowerCase();
+  return rules.some((r) => {
+    if (r.port !== undefined && r.port !== port) return false;
+    const pattern = r.host.toLowerCase();
+    if (pattern === '*') return true;
+    if (pattern.startsWith('*.')) {
+      const suffix = pattern.slice(1); // ".acme.internal"
+      /**
+       * `*.acme.internal` matches `api.acme.internal` AND `acme.internal` itself. A customer who
+       * writes the wildcard means "this environment"; making them write the bare domain as a second
+       * rule is the kind of papercut that ends with somebody writing `*`.
+       */
+      return h.endsWith(suffix) || h === suffix.slice(1);
+    }
+    return h === pattern;
+  });
+}
+
+/**
+ * One message on a `proxy` channel.
+ *
+ * DELIBERATELY THE SAME SHAPE AS `AutomationFrame` — head, chunks, end — because it is the same
+ * problem: an HTTP exchange streamed over a frame-capped socket. Reusing the shape means one
+ * chunking bug to find rather than two, and a reader who understands one understands the other.
+ *
+ * `req` carries an ABSOLUTE url rather than a path, which is the one real difference. An automation
+ * request is replayed against a gateway the agent already knows the address of; a proxy request has
+ * no such default — the destination IS the message, and it is what the client checks against its
+ * allow rules before it dials anything.
+ */
+export type ProxyFrame =
+  | { k: 'req'; method: string; url: string; headers: Record<string, string> }
+  | { k: 'res'; status: number; headers: Record<string, string> }
+  | { k: 'd'; b: string }
+  | { k: 'end' }
+  | { k: 'err'; message: string; code?: ProxyErrorCode };
+
+/**
+ * Why a proxied request did not happen, as a value rather than as prose.
+ *
+ * The device gets an HTTP status and a short body, and a person reading "502" learns nothing. These
+ * separate the four cases that need different actions: fix your allow rules, start your tunnel,
+ * check the host is up, or look at the size of what you sent.
+ */
+export type ProxyErrorCode = 'not_allowed' | 'no_tunnel' | 'unreachable' | 'too_large';
+
+export function isProxyFrame(v: unknown): v is ProxyFrame {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as Record<string, unknown>;
+  switch (f.k) {
+    case 'req':
+      return typeof f.method === 'string' && typeof f.url === 'string'
+        && typeof f.headers === 'object' && f.headers !== null;
+    case 'res':
+      return typeof f.status === 'number' && Number.isInteger(f.status)
+        && typeof f.headers === 'object' && f.headers !== null;
+    case 'd':
+      return typeof f.b === 'string';
+    case 'end':
+      return true;
+    case 'err':
+      return typeof f.message === 'string';
+    default:
+      return false;
+  }
+}
+
+/**
+ * What the client says when it arrives, and what it is told back.
+ *
+ * The client names the tunnel and declares what it will reach; the control plane answers with what
+ * it recorded. It ECHOES THE RULES rather than acknowledging silently, so the console and the
+ * person who started the client are looking at the same list — a tunnel whose owner believes it is
+ * narrower than it is, is the failure this exists to prevent.
+ */
+export interface TunnelHello {
+  t: 'hello';
+  /**
+   * THE CREDENTIAL IS IN THE HELLO, not in an `Authorization` header, and that is forced rather
+   * than chosen: Node's built-in `WebSocket` cannot set request headers, and the client is a
+   * zero-dependency program a customer runs on their own machine. Putting it in the query string
+   * was the other option and is worse — a URL is logged by every proxy between here and there.
+   *
+   * It is also the idiom this repo already uses. `/dp/*` authenticates in its `hello` frame for the
+   * same reason (ADR-0008), so a socket that has connected but not yet said who it is, is an
+   * existing state with an existing bound: a five-second timeout and nothing allocated until it
+   * speaks.
+   *
+   * A tenant API key (`mfk_`). The org it belongs to is the org whose devices may route here, and
+   * the client never names an org itself — architecture rule 4, on the path where getting it wrong
+   * would let one tenant reach another's network.
+   */
+  key: string;
+  name: string;
+  allow: TunnelAllowRule[];
+  /** For the console, so a person can tell two machines apart. Free text, never a credential. */
+  client?: string;
+}
+
+export interface TunnelReady {
+  t: 'ready';
+  name: string;
+  allow: TunnelAllowRule[];
+}
+
+/** The client's keepalive is the socket's own ping; this is the one message it may send unbidden. */
+export interface TunnelBye {
+  t: 'bye';
+  reason?: string;
+}
+
+export type TunnelControlFrame = TunnelHello | TunnelReady | TunnelBye;
+
+/* --- VENDORED REGION END ---------------------------------------------------------------------
+ *
+ * Everything BELOW is control-plane only. `TUNNEL_CAPABILITY` and `PROXY_CHUNK_BYTES` are read by
+ * the API and the agent and never by the customer's client, so copying them would put definitions
+ * in a published package that nothing there uses.
+ */
+
+/**
+ * The capability a suite sets to route its device's traffic through a tunnel.
+ *
+ * A NAME, not a boolean. An org can hold several tunnels — one per developer laptop, one on a CI
+ * runner — and "use the tunnel" is ambiguous the moment there are two. Naming it also means a suite
+ * that asks for a tunnel nobody started gets an error saying which one, instead of a session that
+ * silently cannot reach anything.
+ */
+export const TUNNEL_CAPABILITY = 'mfarm:tunnel';
+
+/**
+ * Raw bytes per proxied body chunk before base64 — the same number and the same reasoning as
+ * `AUTOMATION_CHUNK_BYTES`, stated separately so changing one does not silently change the other.
+ */
+export const PROXY_CHUNK_BYTES = 512 * 1024;
 
 /* --------------------------------------------------------------- why something failed (spec §18)
  *

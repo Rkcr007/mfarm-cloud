@@ -1,5 +1,9 @@
 import { WebSocket } from 'ws';
-import { TUNNEL_PATH, TUNNEL_MAX_FRAME_BYTES, isTunnelFrame, type TunnelFrame } from '@mfarm/protocol';
+import {
+  TUNNEL_PATH, TUNNEL_MAX_FRAME_BYTES, isTunnelFrame,
+  TUNNEL_CH_AGENT_BASE, TUNNEL_CH_STEP, isProxyFrame,
+  type TunnelFrame, type ProxyFrame,
+} from '@mfarm/protocol';
 import type { Agent } from './agent.ts';
 import type { DataPlane, DataPlaneSocket } from './dataplane.ts';
 import { AutomationChannel } from './automation-tunnel.ts';
@@ -44,6 +48,15 @@ export interface TunnelOptions {
    */
   automationTarget?: { host: string; port: number };
 }
+
+/**
+ * Cap on proxied requests in flight from this host.
+ *
+ * A device loading a page makes dozens, and four devices doing it at once is normal. This is a
+ * backstop against a leak in this file rather than a scheduling limit — a host with 512 genuinely
+ * concurrent proxied requests has a different problem, and the control plane caps per tunnel too.
+ */
+const MAX_PROXY_CHANNELS = 512;
 
 /**
  * One browser, as the data plane sees it.
@@ -112,6 +125,18 @@ export class AgentTunnel {
    * reports as live viewers — counting only the first is the reason this is not one map.
    */
   private readonly automation = new Map<number, AutomationChannel>();
+
+  /**
+   * Proxy channels THIS agent opened, so a device can reach the customer's network (migration 052).
+   *
+   * A third map rather than a union in the first two, because these are the only channels the agent
+   * allocates and their id space is disjoint from the other two by parity. Keeping them apart is
+   * what makes "did we open this?" a lookup rather than a rule about numbers.
+   */
+  private readonly proxies = new Map<number, { onFrame(f: ProxyFrame): void; onClose(reason: string): void }>();
+
+  /** The agent's half of the split id space — odd, stepping by two. Never `++`. */
+  private nextProxyCh = TUNNEL_CH_AGENT_BASE;
   private stopped = false;
   private backoff: number;
   private timer?: NodeJS.Timeout;
@@ -267,7 +292,39 @@ export class AgentTunnel {
     // request it is holding open keeps that device's Appium busy. Aborting is what frees it.
     for (const ch of this.automation.values()) ch.abort();
     this.automation.clear();
+    // A device waiting on a proxied request whose tunnel just died must be TOLD, not left. Its
+    // request is an app on a phone holding a socket open, and Android's own timeout is minutes.
+    for (const sink of this.proxies.values()) sink.onClose(reason || 'the tunnel closed');
+    this.proxies.clear();
     if (reason) this.log('data-plane channels dropped', { reason });
+  }
+
+  /**
+   * Open a `proxy` channel so a device can reach the customer's network (migration 052).
+   *
+   * THE AGENT IS THE ALLOCATOR HERE, which is the one place in this protocol where it is. A device
+   * decides when it wants to fetch something, so the control plane cannot open the channel — and
+   * two allocators on one socket is a collision waiting to happen, which is why the id space is
+   * split by parity. The agent takes the ODD half and steps by two; it must never `++`.
+   *
+   * `ref` is the DEVICE, and it is the only thing named. The control plane resolves the org and the
+   * tunnel from rows it owns — architecture rule 4, on the path where a worker naming its own org
+   * would mean routing one tenant's device into another tenant's network.
+   */
+  openProxy(localId: string, sink: { onFrame(f: ProxyFrame): void; onClose(reason: string): void }):
+    { send(f: ProxyFrame): void; close(): void } | undefined {
+    if (this.ws?.readyState !== WebSocket.OPEN) return undefined;
+    if (this.proxies.size >= MAX_PROXY_CHANNELS) return undefined;
+
+    const ch = this.nextProxyCh;
+    this.nextProxyCh += TUNNEL_CH_STEP;
+    this.proxies.set(ch, sink);
+    this.sendFrame({ ch, t: 'open', kind: 'proxy', ref: localId });
+
+    return {
+      send: (f) => this.sendFrame({ ch, t: 'data', d: JSON.stringify(f) }),
+      close: () => { if (this.proxies.delete(ch)) this.sendFrame({ ch, t: 'close' }); },
+    };
   }
 
   private sendFrame(f: TunnelFrame): void {
@@ -293,6 +350,26 @@ export class AgentTunnel {
       const channel = new TunnelChannel(frame.ch, (f) => this.sendFrame(f));
       this.channels.set(frame.ch, channel);
       this.opts.dataPlane.accept(channel);
+      return;
+    }
+
+    /**
+     * A frame for a channel THIS side opened. Checked before the two control-plane-opened maps
+     * because the id spaces are disjoint by parity — a lookup that found something here can never
+     * also be an automation or data-plane channel, so order is about cost rather than correctness.
+     */
+    const proxy = this.proxies.get(frame.ch);
+    if (proxy) {
+      if (frame.t === 'data') {
+        let inner: unknown;
+        try { inner = JSON.parse(frame.d); } catch { return; }
+        // Validated rather than relayed: the far end of this channel is an HTTP response being
+        // written to a device, in this process. There is nothing to relay it to verbatim.
+        if (isProxyFrame(inner)) proxy.onFrame(inner);
+        return;
+      }
+      this.proxies.delete(frame.ch);
+      proxy.onClose(frame.t === 'close' ? (frame.reason ?? 'the farm closed this request') : 'protocol error');
       return;
     }
 

@@ -346,6 +346,19 @@ export async function webdriverRoutes(app: FastifyInstance) {
         // `app-install` joins it when there is a build to put on the device, for the same reason:
         // allocating a device that cannot install, then failing, wastes a lease and a reset.
         requireCapabilities: build ? ['webdriver', 'app-install'] : ['webdriver'],
+        /**
+         * WHAT THE SUITE ASKED FOR THAT IS NOT AN ALLOCATION CONSTRAINT (migration 052).
+         *
+         * `mfarm:tunnel` does not narrow which device is chosen — every device can proxy — so it
+         * has no business in the fields above. It has to reach the session ROW, because that is
+         * what `proxy-router.ts` reads when a device later asks to fetch something, and the router
+         * deliberately takes the org and the tunnel from rows rather than from anything a worker
+         * says.
+         *
+         * Written only when there is one, so a session that asked for no tunnel has an empty
+         * `requested` rather than a key with `undefined` in it.
+         */
+        requested: caps.tunnel ? { 'mfarm:tunnel': caps.tunnel } : undefined,
       });
       sessionId = alloc.sessionId;
       deviceId = alloc.deviceId;

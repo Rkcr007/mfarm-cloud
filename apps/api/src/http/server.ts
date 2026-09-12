@@ -20,6 +20,7 @@ import { runRoutes } from './routes/runs.ts';
 import { hostRoutes } from './routes/hosts.ts';
 import { resultRoutes } from './routes/results.ts';
 import { shareRoutes, sharePageRoutes } from './routes/shares.ts';
+import { tunnelRoutes } from './routes/tunnels.ts';
 import { reap } from '../allocator.ts';
 import {
   httpDuration,
@@ -34,6 +35,8 @@ import { appPool, systemPool, withSystem } from '../db.ts';
 import { GIT_SHA, BUILT_AT, shortSha } from '../version.ts';
 import type { Pool } from 'pg';
 import { TunnelRegistry, attachTunnel } from './tunnel.ts';
+import { CustomerTunnelRegistry, mountCustomerTunnel } from './customer-tunnel.ts';
+import { makeProxyRouter } from './proxy-router.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -42,6 +45,8 @@ declare module 'fastify' {
   interface FastifyInstance {
     signingKey: Keypair;
     tunnels: TunnelRegistry;
+    /** The customer tunnels this process is holding — migration 052, `customer-tunnel.ts`. */
+    customerTunnels: CustomerTunnelRegistry;
     /** Whether to mark the session cookie `Secure`. See ServerOptions.secureCookies. */
     secureCookies: boolean;
   }
@@ -295,7 +300,24 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
    * fleet — the same reason the reaper is opt-in per server.
    */
   app.decorate('tunnels', new TunnelRegistry());
-  attachTunnel(app, app.tunnels);
+  /**
+   * The CUSTOMER tunnels (migration 052), one per connected client.
+   *
+   * A second registry rather than a mode on the first, because they are opposite directions with
+   * opposite credentials: an agent tunnel carries requests OUT to a machine holding devices, and a
+   * customer tunnel carries requests OUT to a machine on somebody's private network. Sharing a
+   * class would mean every method growing a branch on which kind it was holding.
+   *
+   * Decorated for the same reason `tunnels` is: two servers in one test must not share a fleet.
+   */
+  app.decorate('customerTunnels', new CustomerTunnelRegistry());
+  attachTunnel(
+    app,
+    app.tunnels,
+    mountCustomerTunnel(app, app.customerTunnels),
+    makeProxyRouter(app, app.customerTunnels),
+  );
+  app.addHook('onClose', async () => { app.customerTunnels.closeAll(); });
   app.decorate('secureCookies', opts.secureCookies ?? false);
 
   // Fastify's default JSON parser throws on an empty body when content-type is application/json,
@@ -589,6 +611,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(hostRoutes, { prefix: '/v1' });
   await app.register(resultRoutes, { prefix: '/v1' });
   await app.register(shareRoutes, { prefix: '/v1' });
+  await app.register(tunnelRoutes, { prefix: '/v1' });
   // Outside `/v1`: this one serves a page to a person, not JSON to a client, and its path is what
   // gets pasted into a chat window. See `sharePageRoutes`.
   await app.register(sharePageRoutes);
