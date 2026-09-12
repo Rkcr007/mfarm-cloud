@@ -330,14 +330,36 @@ describe('the happy paths', () => {
     await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
   });
 
-  test('an ACCEPTED stop does NOT mark it down — it is still moving', async () => {
+  /**
+   * THE BRANCH THE REAL FARM ACTUALLY TAKES, and the reason the test above is not enough.
+   *
+   * Measured 2026-09-13, twice: a GCE stop takes longer than the settle window, so both
+   * console-initiated stops came back `accepted` with "last seen STOPPING" and the `succeeded`
+   * branch never ran. The card kept reading `running` for a machine on its way off.
+   *
+   * STOPPING is one-way — there is no path back to RUNNING without a start — so DOWN is a record
+   * rather than a prediction, and a heartbeat lifts it if it somehow were.
+   */
+  test('A STOP THAT IS STILL STOPPING ALSO MARKS IT DOWN', async () => {
     fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
     const res = await post(`/v1/infra/hosts/${labA}/stop`);
     assert.equal(res.json().result, 'accepted');
+
     const [row] = await q<{ state: string }>(
       'SELECT state::text AS state FROM hosts WHERE id = $1', [labA]);
-    assert.notEqual(row.state, 'DOWN',
-      'a machine that had not finished stopping was recorded as stopped');
+    assert.equal(row.state, 'DOWN',
+      'the card would read `running` for a machine the provider says is stopping');
+
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  test('a STARTING machine is NOT marked down — that is the other direction', async () => {
+    fakeCloud({ status: 'TERMINATED', statusAfter: 'STAGING' });
+    const res = await post(`/v1/infra/hosts/${labA}/start`);
+    assert.equal(res.json().result, 'accepted');
+    const [row] = await q<{ state: string }>(
+      'SELECT state::text AS state FROM hosts WHERE id = $1', [labA]);
+    assert.notEqual(row.state, 'DOWN', 'a machine that is booting was recorded as stopped');
   });
 
   test('a start that settles warns that the devices are not ready yet', async () => {
