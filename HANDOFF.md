@@ -4465,3 +4465,53 @@ when the feature is broken. See issues 37 and 38.
     `-v year -v UTC`, so the console cannot time-align a captured log to a failure on this farm. The
     lab was stopped during this work, so that waits for its next start — which is also when
     `up_since` first gets stamped and the cost display lights up.
+
+87. **BROUGHT THE LAB UP TO VERIFY, AND THE VERIFICATION FOUND TWO MORE DEFECTS IN THE SAME
+    FEATURE.** 2026-09-11, `0ffa7cb`.
+
+    Two things were waiting on hardware: the worker's logcat format, and whether ADR-0035's cost
+    display actually worked. The first was fine. The second was **dead on arrival, twice over**, and
+    only starting the machine could show it.
+
+    **The device host's checkout was fast-forwarded from `0bf19f1` to `dcf7919` and the worker
+    restarted onto it**, done while devices were still cold-booting so they came up once. Verified by
+    capturing a logcat: `2026-09-11 23:41:17.991 +0000` — year present, UTC explicit. Before it, that
+    line had no year and was in the device's local zone, so the console could not align a log to a
+    failure's timestamp and silently declined to try.
+
+    **D44: `up_since` never got stamped.** Migration 050 wrote it in the registration upsert only. The
+    farm came back and recorded **twelve heartbeats and zero registrations** — and
+    `/workers/heartbeat`'s own comment says registration is something *"a healthy agent never
+    performs, because its stored capability fingerprint has not changed"*. I had read that file to
+    write the feature and had not read that sentence. Fourteen tests covered the column, every one
+    seeding it directly, so all fourteen were about what it MEANS and none about whether anything
+    writes it.
+
+    The fix keys on a **gap in beats**, not on the state column: an operator-quarantined host keeps
+    beating, so "state is not UP" would rewrite `up_since` to `now()` on every beat and report a
+    machine that had been on a week as up for five seconds.
+
+    **D45: nine settings could be configured and did nothing.** `HOST_HOURLY_COST` went into
+    `deploy/.env`, the API never saw it, and the console showed a powered-on host with no money
+    beside it. `deploy/.env` is COMPOSE'S env file — a variable not named on the service is read for
+    interpolation and passed to nothing. **The warning was in the block directly below the one I was
+    editing**, describing D29 from 2026-09-07 in the same words. Eight other knobs were in the same
+    state.
+
+    The guard that should have caught it was a hand-kept list of five names. It derives every `env.X`
+    from `config.ts` now and allows only an explicit set arriving by docker secret, each with its
+    route named.
+
+    **All of it then verified on the farm**: header reads `host up 23m · ~₹25`, and the Machines card
+    `up 23m · ~₹25 so far` beside `disk 27% used · load 0.06 · mem 25% used · as of 9s ago`.
+
+    **THE PATTERN ACROSS D41, D42, D44 AND D45 IS ONE PATTERN.** Every one shipped green, and every
+    one was found by doing the thing rather than by testing it: opening the screen, asking the
+    browser for a computed style, starting the machine, setting the variable. Each also had a written
+    warning nearby that I had not read — a shim guard, a token naming convention, a comment about
+    registration, a comment about compose. **The repo knew. The tests could not.**
+
+    One caveat recorded rather than smoothed: `up_since` is now the first beat under the new code
+    (00:00:24), not the actual VM boot (~23:39), so this one reading understates uptime by twenty
+    minutes. It is right from the next boot onward, and the column's contract is "used at or after",
+    not "exactly".
