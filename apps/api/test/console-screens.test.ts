@@ -103,8 +103,90 @@ after(async () => {
   if (SHIMMED) await rm(dirname(SHIMMED), { recursive: true, force: true });
 });
 
+/**
+ * A believable `GET /v1/infra/overview` answer.
+ *
+ * TWO HOSTS THAT DISAGREE, on purpose. One is live, powered on and healthy; the other beats
+ * perfectly while its stats collector died an hour ago and its tunnel is gone. That second host is
+ * the whole reason the page has four freshness values instead of two, so it is in the default
+ * fixture rather than in one test — a screen that only ever renders the happy shape is a screen
+ * whose unhappy shape rots.
+ */
+function infraPayload(over: Record<string, unknown> = {}) {
+  const host = (o: Record<string, unknown> = {}) => ({
+    id: 'host-1', hostname: 'mfarm-lab', region: 'lab', state: 'UP',
+    power: 'running', reachability: 'live', tunnelConnected: true,
+    upSince: new Date(Date.now() - 3 * 3600_000).toISOString(),
+    uptimeSeconds: 3 * 3600, lastHeartbeatAt: new Date().toISOString(), heartbeatAgeSeconds: 4,
+    protocolVersion: 2, specs: { cores: 16, memoryMb: 65536 },
+    machine: {
+      at: new Date().toISOString(), ageSeconds: 8, status: 'live',
+      diskUsedPct: 61, diskFreeBytes: 190_000_000_000, diskTotalBytes: 500_000_000_000,
+      load1: 3.2, loadPerCore: 0.2, memUsedPct: 44, memAvailableMb: 36000, memTotalMb: 65536,
+    },
+    devices: { total: 4, ready: 3, allocated: 1, quarantined: 0, offline: 0 },
+    maintenance: { drained: false, since: null, reason: null, source: null },
+    cost: { perHour: 65, sinceUp: 195, today: 260, monthToDate: 3100 },
+    utilisationPct: 22, alerts: [],
+    ...o,
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    controlPlane: { sha: 'abc1234def', shortSha: 'abc1234', builtAt: null, uptimeSeconds: 86_400, dbLatencyMs: 3 },
+    health: {
+      overall: 'degraded',
+      components: [
+        { id: 'hosts', label: 'Hosts', status: 'healthy', detail: '2 of 2 powered on' },
+        { id: 'agents', label: 'Worker agents', status: 'degraded', detail: '1 of 2 beating; 1 with no tunnel' },
+        { id: 'database', label: 'Database', status: 'healthy', detail: 'Answering in 3ms.' },
+        { id: 'devices', label: 'Device farm', status: 'healthy', detail: '3 ready, 1 in use of 4' },
+        { id: 'network', label: 'Network', status: 'degraded', detail: '1 of 2 agent tunnels connected.' },
+        { id: 'storage', label: 'Storage', status: 'healthy', detail: 'control plane disk 40% used · newest backup 2h old' },
+      ],
+    },
+    fleet: {
+      devices: { total: 4, ready: 3, allocated: 1, quarantined: 0, offline: 0, preparing: 0, cleaning: 0 },
+      sessions: { active: 1, queued: 0, oldestQueuedSeconds: null },
+      loadPct: 25,
+    },
+    hosts: [
+      host(),
+      host({
+        id: 'host-2', hostname: 'mfarm-lab-2', reachability: 'live', tunnelConnected: false,
+        machine: {
+          at: new Date(Date.now() - 4000_000).toISOString(), ageSeconds: 4000, status: 'unavailable',
+          diskUsedPct: 97, diskFreeBytes: 15_000_000_000, diskTotalBytes: 500_000_000_000,
+          load1: 0.4, loadPerCore: 0.02, memUsedPct: 30, memAvailableMb: 46000, memTotalMb: 65536,
+        },
+        cost: { perHour: 65, sinceUp: 1300, today: 1300, monthToDate: 4200 },
+        utilisationPct: 1,
+        alerts: [
+          { severity: 'warning', code: 'machine-stats-stale', message: 'Disk, load and memory were last measured 66 minutes ago, so the figures below are not current.' },
+          { severity: 'warning', code: 'tunnel-down', message: 'The agent is beating but its tunnel is not connected. Live view and automation cannot reach this host.' },
+        ],
+      }),
+    ],
+    cost: {
+      rate: { hourly: 65, currency: '₹' },
+      runningPerHour: 130, today: 1560, monthToDate: 7300,
+      estimatedMonth: { value: 41_000, basis: 'Assumes the 2 hosts that are powered on now stay on for the rest of the month.' },
+      trend: Array.from({ length: 14 }, (_, i) => ({
+        date: new Date(Date.now() - (13 - i) * 86_400_000).toISOString().slice(0, 10),
+        poweredHours: i === 13 ? 6 : i % 3, cost: (i === 13 ? 6 : i % 3) * 65,
+      })),
+      idle: [{ hostId: 'host-2', hostname: 'mfarm-lab-2', poweredHours: 20, utilisationPct: 1, wastedCost: 1287 }],
+    },
+    events: [
+      { at: new Date().toISOString(), source: 'power', severity: 'info', title: 'mfarm-lab powered on', detail: null, actor: null, target: { kind: 'host', id: 'host-1', label: 'mfarm-lab' } },
+      { at: new Date(Date.now() - 60_000).toISOString(), source: 'device', severity: 'warning', title: 'cf_x86_64 quarantined (health)', detail: 'adb went away', actor: null, target: { kind: 'host', id: 'host-1', label: 'mfarm-lab' } },
+    ],
+    capabilities: { drain: false, power: false, services: false },
+    ...over,
+  };
+}
+
 /** Enough state for a screen to have something to draw. */
-function seed(route: { name: string; id?: string | null }) {
+function seed(route: { name: string; id?: string | null; lens?: string }) {
   const device = {
     id: 'dev-1', region: 'lab', platform: 'android', tier: 'cuttlefish',
     model: 'cf_x86_64', osVersion: '17', state: 'READY', dedicated: false,
@@ -131,7 +213,7 @@ function seed(route: { name: string; id?: string | null }) {
     tests: { total: 8, passed: 6, failed: 1, skipped: 1, sessionsReporting: 3 },
   };
   Object.assign(mod.state, {
-    me: { user: { id: 'u1', email: 'someone@mfarm.local' }, org: { id: 'o1', name: 'Farm', slug: 'farm', maxConcurrent: 5 }, role: 'admin' },
+    me: { user: { id: 'u1', email: 'someone@mfarm.local' }, org: { id: 'o1', name: 'Farm', slug: 'farm', maxConcurrent: 5 }, role: 'admin', operator: true },
     devices: [device],
     available: 1,
     sessions: [session],
@@ -165,6 +247,14 @@ function seed(route: { name: string; id?: string | null }) {
       }],
     },
     route: { name: route.name, id: route.id ?? null },
+    /**
+     * The operations payload, LOADED. Without it `screenInfra` renders its loading skeleton and
+     * fires a fetch with no server behind it — and every assertion about the page would then pass
+     * against the word "Loading". Same trap the `pair` fixture above documents.
+     */
+    infra: {
+      data: infraPayload(), loaded: true, error: null, fetchedAt: Date.now(), loading: false,
+    },
     // Explicitly cleared, not left over. Both are fetched on navigation rather than by the poll, so
     // a test that does not set them would otherwise inherit whichever device the PREVIOUS test
     // opened — and the device screen merges the detail read over the poll row, which is exactly the
@@ -178,7 +268,7 @@ function seed(route: { name: string; id?: string | null }) {
      * shape as `deviceDetail` above: view state that navigation owns has to be reset by the fixture
      * that skips navigation.
      */
-    lens: 'capacity',
+    lens: route.lens ?? 'capacity',
     error: null,
   });
   return { device, session };
@@ -199,6 +289,7 @@ describe('every screen renders', () => {
     { name: 'cockpit', id: 'sess-1' },
     { name: 'queue' },
     { name: 'health' },
+    { name: 'infra' },
     { name: 'agents' },
     { name: 'team' },
     { name: 'settings' },
@@ -231,7 +322,7 @@ describe('every screen renders', () => {
 describe('screens survive an empty farm', () => {
   // The state a new install is in, and the one every "no devices yet" message exists for. A screen
   // that only works once data has arrived fails on the first morning somebody tries this.
-  for (const name of ['launch', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'agents', 'team', 'settings']) {
+  for (const name of ['launch', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'infra', 'agents', 'team', 'settings']) {
     test(`${name} renders with nothing in it`, () => {
       seed({ name });
       Object.assign(mod.state, { devices: [], available: 0, sessions: [], apps: [], actions: [], runs: [], runDetail: null, detail: null, held: null });
@@ -4259,5 +4350,280 @@ describe('the tunnels screen', () => {
     const text = textOf(mod.SCREENS.tunnels());
     assert.match(text, /staging/, 'a member can still see what is routing');
     assert.ok(!/Forget/.test(text), 'removing one is an owner or admin decision');
+  });
+});
+
+/**
+ * The Infrastructure Operations Center — ADR-0038.
+ *
+ * WHAT THESE TESTS ARE FOR. Not layout, and not copy for its own sake. Three properties, each of
+ * which has shipped broken in this repo before:
+ *
+ *   A STALE NUMBER MUST NOT LOOK CURRENT. Migration 044 needed a paragraph explaining that all five
+ *   host gauges read green on a machine whose disk filled an hour after it stopped reporting.
+ *
+ *   A CONTROL MUST NOT BE OFFERED ON A FALSE PREMISE. Seven defects of one shape. The server sends
+ *   a `capabilities` block; the page must render from it and must not invent a button.
+ *
+ *   THE TOP BAR MUST ACTUALLY LOSE THE INFRASTRUCTURE. A "move" that leaves the original in place
+ *   is not a move, and nothing but a test reads the markup.
+ */
+describe('the infrastructure operations centre', () => {
+  const sections = ['overview', 'hosts', 'services', 'devices', 'usage', 'events'];
+
+  test('every section builds a tree', () => {
+    for (const lens of sections) {
+      seed({ name: 'infra', lens });
+      assert.ok(countElements(mod.SCREENS.infra()) > 0, `#/infra/${lens} produced no elements`);
+    }
+  });
+
+  test('an unknown section falls back to the overview rather than to a blank page', () => {
+    assert.equal(mod.parseHash('#/infra/nonsense').lens, 'overview');
+    assert.equal(mod.parseHash('#/infra').lens, 'overview');
+    assert.equal(mod.parseHash('#/infra/usage').lens, 'usage');
+  });
+
+  /* ---------------------------------------------------------------- the top bar actually lost it */
+
+  test('THE TOP BAR NO LONGER CARRIES ANY INFRASTRUCTURE', async () => {
+    const html = await readFile(join(PUBLIC, 'index.html'), 'utf8');
+    // Sliced from the topbar FORWARD. `indexOf('</header>')` alone finds the sign-in page's header,
+    // which closes earlier in the document, and the slice came back empty — a test asserting
+    // "nothing about hosts appears" against an empty string passes for the wrong reason.
+    const from = html.indexOf('<header class="topbar"');
+    const bar = html.slice(from, html.indexOf('</header>', from));
+    assert.ok(bar.length > 200, 'the top bar could not be located in index.html');
+    assert.ok(!/id="fs-burn"/.test(bar), 'the burn segment is still in the top bar');
+    assert.ok(!/₹|cost|Host up|hosts up/i.test(bar.replace(/<!--[\s\S]*?-->/g, '')),
+      'something in the top bar still talks about hosts or money');
+    // What the bar KEEPS is the application: capacity, the queue, what you hold.
+    assert.match(bar, /id="fs-devices"/);
+    assert.match(bar, /id="fs-queue"/);
+    assert.match(bar, /id="fs-held"/);
+  });
+
+  test('the console no longer paints a burn segment anywhere', async () => {
+    const js = await readFile(join(PUBLIC, 'console.js'), 'utf8');
+    assert.ok(!/\$\('fs-burn'\)/.test(js), 'console.js still writes the burn segment');
+  });
+
+  /* ---------------------------------------------------------------- freshness */
+
+  test('a host whose gauges are stale is marked stale and keeps its numbers', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const tree = mod.SCREENS.infra();
+    const text = textOf(tree);
+
+    // The number is still there. Hiding it would be its own kind of lie — "the disk was 97% full an
+    // hour ago" is worth knowing.
+    assert.match(text, /97%/);
+    // ...and it says how old it is, in the gauge itself rather than in a tooltip.
+    assert.match(text, /as of/);
+    // ...and the block carries the class that greys and desaturates it.
+    assert.ok(findByClass(tree, 'is-stale'), 'nothing on the page is marked stale');
+  });
+
+  test('a host that has never reported gauges says so instead of drawing zeros', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({
+      hosts: [{
+        ...infraPayload().hosts[0],
+        reachability: 'unknown', power: 'unknown', uptimeSeconds: null,
+        lastHeartbeatAt: null, heartbeatAgeSeconds: null,
+        machine: { at: null, ageSeconds: null, status: 'unknown', diskUsedPct: null, diskFreeBytes: null, diskTotalBytes: null, load1: null, loadPerCore: null, memUsedPct: null, memAvailableMb: null, memTotalMb: null },
+        cost: { perHour: 65, sinceUp: null, today: null, monthToDate: null },
+        utilisationPct: null,
+      }],
+    });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /never reported disk, load or memory/);
+    assert.match(text, /never beat/);
+    assert.ok(!/\b0%/.test(text), 'an unmeasured gauge was drawn as 0%');
+  });
+
+  test('the tunnel failure that reads healthiest is on the page in words', () => {
+    seed({ name: 'infra', lens: 'services' });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /Agent tunnel/);
+    assert.match(text, /cannot reach this host, even though it is beating/);
+  });
+
+  /* ---------------------------------------------------------------- controls */
+
+  test('NO OPERATION IS OFFERED WHILE THE SERVER SAYS IT CANNOT DO IT', () => {
+    for (const lens of sections) {
+      seed({ name: 'infra', lens });
+      const text = textOf(mod.SCREENS.infra());
+      for (const verb of [/\bStop VM\b/, /\bStart VM\b/, /\bRestart host\b/, /\bDrain\b/, /Enable maintenance/]) {
+        assert.ok(!verb.test(text), `#/infra/${lens} offers ${verb} while capabilities say it cannot`);
+      }
+    }
+  });
+
+  test('the page says plainly what it cannot do, rather than staying quiet about it', () => {
+    seed({ name: 'infra', lens: 'overview' });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /Draining a host is not wired up yet/);
+    assert.match(text, /Power is still deploy\/farm-online\.sh/);
+    assert.match(text, /no terminal here and there never will be/);
+  });
+
+  test('a capability the server grants is reflected without touching this file', () => {
+    seed({ name: 'infra', lens: 'overview' });
+    mod.state.infra.data = infraPayload({ capabilities: { drain: true, power: true, services: true } });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /Drain a host for maintenance/);
+    assert.match(text, /Start and stop device hosts/);
+    assert.ok(!/Power is still deploy/.test(text), 'the page still claims power is manual');
+  });
+
+  /* ---------------------------------------------------------------- cost */
+
+  test('the projection states its assumption where the number is', () => {
+    seed({ name: 'infra', lens: 'usage' });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /stay on for the rest of the month/);
+  });
+
+  test('a host that is on and unused is named, with what that is costing', () => {
+    seed({ name: 'infra', lens: 'usage' });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /Powered on and barely used/);
+    assert.match(text, /mfarm-lab-2/);
+    assert.match(text, /20h powered, 1% of its device time used/);
+  });
+
+  test('with no rate configured it shows time and refuses to invent a currency', () => {
+    seed({ name: 'infra', lens: 'usage' });
+    mod.state.infra.data = infraPayload({
+      cost: { rate: null, runningPerHour: null, today: null, monthToDate: null,
+              estimatedMonth: { value: null, basis: '' }, trend: [], idle: [] },
+    });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /No hourly rate is configured/);
+    assert.ok(!/₹/.test(text), 'a currency appeared with no rate behind it');
+  });
+
+  /* ---------------------------------------------------------------- honesty about itself */
+
+  test('a failed load keeps the old numbers and says they are not current', () => {
+    seed({ name: 'infra', lens: 'overview' });
+    mod.state.infra.error = 'fetch failed';
+    mod.state.infra.fetchedAt = Date.now() - 120_000;
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /These numbers are not current/);
+    assert.match(text, /fetch failed/);
+    // The page is still useful: the hosts are still drawn, under the banner.
+    assert.match(text, /mfarm-lab/);
+  });
+
+  test('every health component shows its evidence, including the green ones', () => {
+    seed({ name: 'infra', lens: 'overview' });
+    const text = textOf(mod.SCREENS.infra());
+    for (const label of ['Hosts', 'Worker agents', 'Database', 'Device farm', 'Network', 'Storage']) {
+      assert.match(text, new RegExp(label));
+    }
+    assert.match(text, /Answering in 3ms/, 'a healthy component with no evidence behind it');
+  });
+
+  test('an empty farm explains itself instead of drawing an empty table', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({ hosts: [] });
+    assert.match(textOf(mod.SCREENS.infra()), /No host has ever registered/);
+  });
+
+  /* ---------------------------------------------------------------- who sees it */
+
+  test('the nav item and the palette entries are operator-only', () => {
+    seed({ name: 'infra' });
+    mod.state.me.operator = false;
+    assert.ok(!mod.commands().some((c: { label: string }) => /Infrastructure/.test(c.label)),
+      'a non-operator is offered Infrastructure in the palette');
+    mod.state.me.operator = true;
+    assert.ok(mod.commands().some((c: { label: string }) => /Open Infrastructure/.test(c.label)));
+  });
+
+  test('the markup hides the nav item until the chrome unhides it', async () => {
+    const html = await readFile(join(PUBLIC, 'index.html'), 'utf8');
+    const item = html.slice(html.indexOf('id="nav-infra"') - 200, html.indexOf('id="nav-infra"') + 260);
+    assert.match(item, /hidden/, 'the Infrastructure nav item ships visible to everybody');
+  });
+});
+
+/**
+ * The loading branch, which pinned a browser tab at 100% CPU the first time this page was opened.
+ *
+ * `refreshInfra` returns an ALREADY-RESOLVED promise when a fetch is in flight, so
+ * `refreshInfra().then(render)` re-entered `render` synchronously, which reached the same branch,
+ * which fired again. Nothing yielded and the console never painted.
+ *
+ * IT IS NOT CAUGHT BY THE SCREEN TESTS ABOVE and could not be: they call screen functions and never
+ * call `render()`, so the cycle has no second half. What IS assertable here is the property that
+ * removes it — the screen must not start a fetch while one is running — and that is what this
+ * checks, by counting the fetches a render-shaped sequence would produce.
+ */
+describe('the infrastructure page does not chase its own tail', () => {
+  /**
+   * DRIVEN THROUGH `render`, NOT THROUGH `SCREENS.infra`, and that is the whole point.
+   *
+   * A first attempt at this test counted FETCHES and passed against the bug: `refreshInfra` guards
+   * itself, so the fetch count is 1 either way. The loop is in the MICROTASK CHAIN — an
+   * already-resolved promise whose `.then(render)` lands back on the same branch — and counting the
+   * wrong thing is how a test agrees with a broken page.
+   *
+   * So this counts RENDERS, with a fetch that never settles, which is exactly the window the loop
+   * lived in. Two is generous; the bug produced thousands before the drain finished.
+   */
+  test('a paint that is waiting for data does not re-render forever', async () => {
+    seed({ name: 'infra' });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() => new Promise(() => {})) as typeof fetch;
+
+    const main = (globalThis as unknown as { document: { getElementById(id: string): { replaceChildren(): void } } })
+      .document.getElementById('main');
+    const realReplace = main.replaceChildren.bind(main);
+    let renders = 0;
+    /**
+     * THE COUNTER ALSO BREAKS THE LOOP, and it has to.
+     *
+     * With the bug present the chain is microtasks all the way down: `await` never gets a turn, the
+     * outstanding fetch can never settle, and the test does not fail — it HANGS, and CI reports a
+     * job timeout instead of a line number. Flipping `loaded` after a few renders ends the chain so
+     * the assertion below is what reports, in words, with the count.
+     */
+    main.replaceChildren = () => {
+      renders++;
+      if (renders > 8) mod.state.infra.loaded = true;
+      realReplace();
+    };
+
+    try {
+      /**
+       * A FETCH IS ALREADY IN FLIGHT — `loading: true` — which is the ONLY state the loop lives in
+       * and the one a first attempt at this test missed.
+       *
+       * It is the ordinary state on arrival: `loadForRoute` fires the request when the hash changes,
+       * and the first `render` happens before it settles. With a fetch outstanding, `refreshInfra`
+       * returns an ALREADY-RESOLVED promise, so the unguarded `.then(render)` comes straight back
+       * here — a microtask chain that never yields, so the outstanding fetch can never complete and
+       * break it. Starting from `loading: false` instead takes the other branch, where the pending
+       * fetch holds the promise open and nothing loops.
+       */
+      mod.state.infra = { data: null, loaded: false, error: null, fetchedAt: 0, loading: true };
+      mod.render();
+      // Drain generously. The loop is microtask-driven, so it never reaches a macrotask boundary —
+      // every one of these turns would have carried hundreds more renders with it.
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+
+      assert.ok(renders <= 2,
+        `the loading branch rendered ${renders} times while one fetch was outstanding — `
+        + 'this is the loop that pinned a browser tab at 100% CPU');
+    } finally {
+      main.replaceChildren = realReplace;
+      globalThis.fetch = originalFetch;
+      mod.state.infra = { data: infraPayload(), loaded: true, error: null, fetchedAt: Date.now(), loading: false };
+    }
   });
 });

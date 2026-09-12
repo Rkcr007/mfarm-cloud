@@ -74,8 +74,21 @@ before(async () => {
 });
 
 after(async () => {
-  await q(`DELETE FROM infra_operations WHERE target_id IN
-             (SELECT id::text FROM hosts WHERE region = $1)`, [REGION]);
+  /**
+   * THE ONLY WAY TO CLEAN AN APPEND-ONLY TABLE, and the fact that it takes this much is the feature.
+   *
+   * Migration 053's trigger refuses every DELETE, including one issued by the owner the API connects
+   * as, and names the two ways past it: `DISABLE TRIGGER` and `session_replication_role`. Both are
+   * deliberate acts by somebody with a prompt rather than something a bug in a route can do by
+   * accident — so a fixture cleanup is exactly the shape that SHOULD have to opt in, in writing.
+   *
+   * BY ACTOR, not by target: these rows are written against random target ids on purpose (each has
+   * to be a fresh row), so a cleanup keyed on this region's hosts left every one of them behind —
+   * they turned up in the console's own events feed.
+   */
+  await q(`ALTER TABLE infra_operations DISABLE TRIGGER infra_operations_append_only`);
+  await q(`DELETE FROM infra_operations WHERE actor_email = 'someone@example.test'`);
+  await q(`ALTER TABLE infra_operations ENABLE TRIGGER infra_operations_append_only`);
   await q('DELETE FROM hosts WHERE region = $1', [REGION]);
   await q('DELETE FROM regions WHERE code = $1', [REGION]);
   await closePools();

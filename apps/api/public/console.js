@@ -122,6 +122,22 @@ export const state = {
    * cope with an empty list rather than with a permission error.
    */
   hosts: { list: [], rate: null, loaded: false },
+  /**
+   * The Infrastructure Operations Center's payload (ADR-0038, `GET /v1/infra/overview`).
+   *
+   * ONE OBJECT FOR THE WHOLE PAGE, because the server assembles it in one request on purpose: the
+   * health rollup is computed FROM the host and fleet snapshots, so fetching them separately would
+   * eventually paint a green "Healthy" beside a host card that says unreachable. `generatedAt` is
+   * the age of ALL of it, together.
+   *
+   * OPERATOR ONLY, so a non-operator's console never fills this and every surface reading it copes
+   * with `null` rather than with a permission error.
+   *
+   * `error` is kept rather than swallowed. This page is the one somebody opens when they suspect
+   * the farm is broken, and a blank screen is the least useful thing it could do at that moment —
+   * so a failed load says so, in words, with when the numbers on screen were last true.
+   */
+  infra: { data: null, loaded: false, error: null, fetchedAt: 0, loading: false },
   /** Metered consumption, fetched when Health is opened rather than on the 5s poll — see `loadUsage`. */
   usage: { byDay: [], total: null, window: null, loaded: false },
   /** `GET /runs/:id` for the run detail screen: the rollup plus every session in it. */
@@ -1326,6 +1342,46 @@ async function refreshHosts() {
 }
 
 /**
+ * The Infrastructure Operations Center's payload.
+ *
+ * ON THE POLL, BUT ONLY WHILE THE PAGE IS OPEN. `GET /v1/infra/overview` runs a health probe, five
+ * grouped queries and a fortnight of interval arithmetic; a console left open on the Fleet screen
+ * has no business paying for that twelve times a minute. `startPoll` calls this only on `#/infra`,
+ * which is also where its freshness matters — an operations page whose numbers are five seconds old
+ * is the reason the page exists, and one whose numbers are five seconds old on a screen nobody is
+ * looking at is waste.
+ *
+ * THE ERROR IS KEPT, NOT SWALLOWED. `refreshHosts` fails quietly on purpose, because a member who
+ * cannot read `/v1/hosts` must not see an error for a request they did not make. This is the
+ * opposite case: an operator opened this page deliberately, usually because they suspect something
+ * is wrong, and "the page is blank" is the least useful answer available. A failure says so and the
+ * previous numbers stay on screen, marked with when they were true.
+ */
+async function refreshInfra() {
+  /**
+   * ONE FETCH AT A TIME, and the early return is a TRAP unless every caller knows about it.
+   *
+   * It returns an already-resolved promise, so `refreshInfra().then(render)` re-enters `render`
+   * SYNCHRONOUSLY while the real request is still in flight. `screenInfra` did exactly that on its
+   * loading branch, and the result was not a slow page: it was a browser tab pinned at 100% CPU
+   * with the console never painting, because render → refreshInfra → then → render never yielded.
+   *
+   * Found by opening the page, not by a test — `console-screens.test.ts` calls the screen functions
+   * and never calls `render()`, so the cycle does not exist there. The guard is now on the CALLER
+   * as well, where the re-entry actually happens.
+   */
+  if (state.infra.loading) return;
+  state.infra.loading = true;
+  try {
+    const data = await api('/v1/infra/overview');
+    state.infra = { data, loaded: true, error: null, fetchedAt: Date.now(), loading: false };
+  } catch (e) {
+    // `data` is deliberately left alone. Stale numbers with an honest banner beat an empty page.
+    state.infra = { ...state.infra, loaded: true, error: e.message || String(e), loading: false };
+  }
+}
+
+/**
  * What this org actually consumed.
  *
  * NOT ON THE POLL. This is a thirty-day aggregate over an append-only table; it does not change
@@ -1523,6 +1579,69 @@ async function refreshAll() {
 }
 
 /**
+ * Whether this person may operate the fleet (migration 053, ADR-0038).
+ *
+ * SEPARATE FROM `isOrgAdmin`, and deliberately not built on it. They are the same three people on
+ * this farm today and they are different questions: a role is per-org, and operating the machines
+ * is farm-wide. Folding one into the other here is precisely the mistake the server refuses to
+ * make — see `requireOperator`.
+ *
+ * A RENDERING DECISION ONLY. Every `/v1/infra` route re-checks, so nothing here grants anything.
+ */
+function isOperator() { return state.me?.operator === true; }
+
+/**
+ * The Infrastructure nav item, and the dot on it.
+ *
+ * THE DOT IS THE TOP BAR'S BURN SEGMENT, RELOCATED — see `renderChrome`. It appears for exactly two
+ * conditions, and both are things somebody should walk over to a keyboard about:
+ *
+ *   a host is powered on. Not "a host is expensive" — POWERED ON, because on this farm ready is the
+ *   expensive state and the whole lesson of 2026-09-11 is that a healthy-looking fleet is what
+ *   twenty idle hours look like. Amber, because a running farm is normal and this is a reminder;
+ *
+ *   something is degraded or down. Red, and it wins over amber, because "the farm is broken" and
+ *   "the farm is costing money" are not the same errand.
+ *
+ * NOTHING IS SHOWN WHILE THE PAGE HAS NEVER LOADED. An absent dot must mean "nothing to report",
+ * so a console that has not yet fetched the payload shows no dot rather than a green one — the same
+ * rule the four freshness values follow on the page itself.
+ */
+function paintInfraAlert() {
+  const item = $('nav-infra');
+  if (!item) return;
+  item.hidden = !isOperator();
+  const dot = $('nav-infra-alert');
+  if (!dot) return;
+
+  const data = state.infra.data;
+  if (!isOperator() || !data) { dot.hidden = true; return; }
+
+  const health = data.health?.overall;
+  const burning = (data.hosts || []).filter((h) => h.power === 'running').length;
+
+  if (health === 'down' || health === 'degraded') {
+    dot.className = 'nav-alert bad';
+    dot.title = `Infrastructure ${health}. ${(data.health.components || [])
+      .filter((c) => c.status === 'down' || c.status === 'degraded')
+      .map((c) => `${c.label}: ${c.detail}`).join(' · ')}`;
+    dot.hidden = false;
+    return;
+  }
+  if (burning > 0) {
+    const cost = data.cost?.runningPerHour;
+    const cur = data.cost?.rate?.currency || '';
+    dot.className = 'nav-alert warn';
+    dot.title = `${burning} host${burning === 1 ? '' : 's'} powered on`
+      + (cost === null || cost === undefined ? '' : `, burning ~${cur}${cost}/hour`)
+      + ' whether or not anything is allocated.';
+    dot.hidden = false;
+    return;
+  }
+  dot.hidden = true;
+}
+
+/**
  * Tell the chrome when content has scrolled under it.
  *
  * BOUND ONCE, TO THE PANE, not re-bound on every render — `render()` replaces the contents of
@@ -1548,7 +1667,7 @@ function watchScrollShadow() {
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'tunnels', 'team', 'settings']);
+const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'tunnels', 'team', 'settings', 'infra']);
 
 /**
  * THE OLD ROUTES ARE NOT DELETED, THEY ARE LENSES.
@@ -1587,6 +1706,16 @@ export function parseHash(hash = location.hash) {
   if (name === 'sessions' && id) return { name: 'cockpit', id, intent };
   // `#/fleet/<lens>`; a bare `#/fleet` is capacity.
   if (name === 'fleet') return { name: 'fleet', id: null, lens: LENSES.some(([k]) => k === id) ? id : 'capacity' };
+  /**
+   * `#/infra/<section>`; a bare `#/infra` is the overview.
+   *
+   * THE SECTION IS IN THE URL rather than in component state, for the reason the Fleet lenses are:
+   * a section you cannot link to is a tab, not a route. An operator pasting "the cost page" into a
+   * message during an incident is the whole point.
+   */
+  if (name === 'infra') {
+    return { name: 'infra', id: null, lens: INFRA_SECTIONS.some(([k]) => k === id) ? id : 'overview' };
+  }
   // The three merged routes, each arriving on the lens it used to be.
   if (LENS_FOR_ROUTE[name] && !id) return { name: 'fleet', id: null, lens: LENS_FOR_ROUTE[name] };
   // `#/runs/<id>` takes either half of a run's identity — the uuid, or the name the suite gave it.
@@ -1675,6 +1804,16 @@ export function loadForRoute() {
    * device screen — see `a route fetches what its screen needs` in `console-screens.test.ts`.
    */
   if (name === 'tunnels') return loadTunnels();
+  /**
+   * Infrastructure, on arrival as well as on the poll — and here for the reason the tunnels line
+   * above spells out: `hashchange` is not the only way to arrive. `boot()` calls this too, so
+   * somebody who bookmarked `#/infra/usage` or refreshed during an incident gets the page rather
+   * than a skeleton that only fills on the next poll tick.
+   *
+   * The screen fetches too, on its first paint. Both exist deliberately: this one covers arrival,
+   * that one covers a render that happens before this promise settles.
+   */
+  if (name === 'infra') return refreshInfra();
   return Promise.resolve();
 }
 
@@ -1733,7 +1872,17 @@ function compactDuration(seconds) {
   const m = Math.floor((seconds % 3600) / 60);
   if (d) return h ? `${d}d ${h}h` : `${d}d`;
   if (h) return m ? `${h}h ${m}m` : `${h}h`;
-  return `${m}m`;
+  /**
+   * SECONDS UNDER A MINUTE, rather than "0m".
+   *
+   * This was minute-resolution because its first caller was the header's burn segment, where a host
+   * that has been on for twenty hours does not need seconds. The Infrastructure page put it next to
+   * a HEARTBEAT AGE, where the whole question is whether a beat landed in the last few seconds —
+   * and "beat 0m ago" beside an alert reading "Last heartbeat 53s ago" is the page contradicting
+   * itself on the one number it exists to be trusted about.
+   */
+  if (m) return `${m}m`;
+  return `${Math.round(seconds)}s`;
 }
 
 function renderChrome() {
@@ -1758,38 +1907,22 @@ function renderChrome() {
       : `${waiting} waiting`;
 
   /**
-   * WHAT BEING READY IS COSTING, and only when something is actually powered on.
+   * WHERE THE BURN SEGMENT WAS, and where its alarm went (ADR-0038).
    *
-   * The sentence this farm needed on 2026-09-11 and did not have. The bar read "4 of 5 ready" for
-   * twenty hours and forty-eight minutes after a check that took two minutes, which was true and
-   * useless: ready is the expensive state, and nothing in the product said so.
+   * This bar used to read "2 hosts up 20h · ~₹410", added because on 2026-09-11 the device host ran
+   * for twenty hours and forty-eight minutes after a check that needed two, and nothing in the
+   * product said so. It was the right alarm in the wrong place: one fact about the machines, on a
+   * bar that follows the reader around every screen, with no way to act on it — so every reading of
+   * it ended in a terminal.
    *
-   * TIME FIRST, MONEY SECOND AND ONLY IF CONFIGURED. "up 20h" is the alarming half and it needs no
-   * rate; a farm whose operator never set `HOST_HOURLY_COST` still gets the warning. Showing an
-   * invented currency figure would be worse than showing none.
+   * THE ALARM IS NOT DELETED. It moved onto the Infrastructure nav item, as a dot, for the people
+   * who can do something about it. `paintInfraAlert` below decides when it appears, and the page
+   * behind it can say which host, since when, whether anything is using it, and offer the stop.
    *
-   * HIDDEN ENTIRELY WHEN NOTHING IS UP, rather than reading zero. A permanent "₹0" is a number
-   * people stop seeing, and the whole value of this segment is that its appearance means something.
+   * A NON-OPERATOR LOSES NOTHING HERE, because they never had anything: `/v1/hosts` is admin-only
+   * and a member's burn segment was always hidden.
    */
-  const burning = state.hosts.list.filter((h) => h.uptimeSeconds !== null);
-  const burnEl = $('fs-burn');
-  if (!burning.length) {
-    burnEl.hidden = true;
-  } else {
-    const seconds = Math.max(...burning.map((h) => h.uptimeSeconds));
-    const money = state.hosts.rate
-      ? burning.reduce((sum, h) => sum + (h.costSinceUp ?? 0), 0)
-      : null;
-    const label = burning.length === 1 ? 'host up' : `${burning.length} hosts up`;
-    burnEl.textContent = money === null
-      ? `${label} ${compactDuration(seconds)}`
-      : `${label} ${compactDuration(seconds)} · ~${state.hosts.rate.currency}${Math.round(money).toLocaleString()}`;
-    burnEl.title = state.hosts.rate
-      ? `Billing at ${state.hosts.rate.currency}${state.hosts.rate.hourly}/hour while powered on, `
-        + 'whether or not any device is allocated. Stop the device host when you are done with it.'
-      : 'A device host is powered on. Set HOST_HOURLY_COST to see what that costs.';
-    burnEl.hidden = false;
-  }
+  paintInfraAlert();
 
   // The one place that already resolved the name correctly, now through the shared helper so it
   // cannot drift from the six that did not.
@@ -2367,6 +2500,25 @@ const LENSES = [
   ['catalogue', 'Catalogue'],
   ['live', 'Live'],
   ['waiting', 'Waiting'],
+];
+
+/**
+ * The Infrastructure sections (ADR-0038).
+ *
+ * SIX, and each answers one of the questions the page exists for: what do we have and is it healthy
+ * (Overview), what is each machine doing (Hosts), what is running on them (Services), what capacity
+ * do they carry (Devices), what is it costing (Usage & Cost), and what happened (Events).
+ *
+ * Ordered by how often they are opened, not by hierarchy. Overview is where an incident starts and
+ * Events is where it is reconstructed afterwards.
+ */
+const INFRA_SECTIONS = [
+  ['overview', 'Overview'],
+  ['hosts', 'Hosts'],
+  ['services', 'Services'],
+  ['devices', 'Devices'],
+  ['usage', 'Usage & Cost'],
+  ['events', 'Events'],
 ];
 
 /**
@@ -8117,6 +8269,694 @@ function usageCard() {
   );
 }
 
+/* ---------------------------------------------------------------------------- infrastructure */
+
+/**
+ * The Infrastructure Operations Center — ADR-0038.
+ *
+ * ---------------------------------------------------------------- what this screen is NOT
+ *
+ * It is not the top bar moved to a new URL. The segment it replaces said "2 hosts up 20h · ~₹410",
+ * which is one fact about the machines: you could learn that something was costing money and not
+ * which host, since when, whether anything was using it, or how to stop it. Every reading of it
+ * ended in a terminal.
+ *
+ * ---------------------------------------------------------------- the rule every panel obeys
+ *
+ * **NOTHING HERE SAYS "HEALTHY" WHEN IT MEANS "WE HAVE NOT HEARD."**
+ *
+ * The server sends four values — live, stale, unavailable, unknown — and this screen renders four,
+ * never two. A stale number is SHOWN, greyed, with how old it is; a missing one says so in words.
+ * Migration 044 needed a paragraph to explain that all five host gauges read green on a machine
+ * whose disk filled an hour after it stopped reporting, and this is where that paragraph becomes
+ * pixels.
+ *
+ * The same rule governs the controls: the server sends a `capabilities` block and this file draws
+ * from it. A Stop button on a deployment with no cloud driver would be a control on a false
+ * premise, which is the shape this repo has shipped seven times.
+ */
+
+/** The four freshness values, as a tone and a word. `unknown` is never green. */
+const FRESHNESS = {
+  live:        { tone: 'ok',   label: 'live',        note: 'measured within the last few seconds' },
+  stale:       { tone: 'warn', label: 'stale',       note: 'real, and older than it should be' },
+  unavailable: { tone: 'bad',  label: 'unavailable', note: 'we asked and could not reach it' },
+  unknown:     { tone: '',     label: 'unknown',     note: 'it has never reported this' },
+};
+
+const HEALTH_TONE = { healthy: 'ok', degraded: 'warn', down: 'bad', unknown: '' };
+
+/** Money, with the farm's own currency and no decimals. Null renders as a dash, never as zero. */
+function cost(value, rate) {
+  if (value === null || value === undefined) return '—';
+  return `${rate?.currency || ''}${Math.round(value).toLocaleString()}`;
+}
+
+/** A percentage bar. `null` draws an empty track and says so, rather than drawing 0%. */
+function meter(pct, tone) {
+  return h('span', { class: 'meter', title: pct === null ? 'not measured' : `${pct}%` },
+    // An OBJECT, never a style string. The CSP is `style-src 'self'` with no `'unsafe-inline'`, so
+    // `setAttribute('style', …)` parses and computes to nothing — silently. `h()` refuses the string
+    // form for that reason; see its comment.
+    h('i', { class: tone || '', style: { width: `${pct === null ? 0 : Math.min(100, Math.max(0, pct))}%` } }));
+}
+
+/**
+ * A gauge with its number, its bar, and — where the reading is not current — its age.
+ *
+ * THE AGE IS PART OF THE VALUE, not a tooltip. A disk reading with no "as of" is indistinguishable
+ * from a current one, which is the whole defect migration 044 documented.
+ */
+function gauge(label, pct, text, status, ageSeconds) {
+  const stale = status !== 'live';
+  const tone = pct === null ? '' : pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : 'ok';
+  return h('div', { class: `gauge${stale ? ' is-stale' : ''}` },
+    h('p', { class: 'micro', text: label }),
+    h('p', { class: 'row tight' },
+      h('span', { class: 'val', text: text }),
+      stale && status !== 'unknown' && ageSeconds !== null
+        ? h('span', { class: 'caption', text: `as of ${compactDuration(ageSeconds)} ago` })
+        : stale ? h('span', { class: 'caption', text: FRESHNESS[status]?.label || 'unknown' }) : null),
+    meter(pct, stale ? '' : tone),
+  );
+}
+
+/** The one-line answer at the top of the page, worst true thing first. */
+function infraHeadline(data) {
+  if (!data) return 'Loading the machines…';
+  const running = (data.hosts || []).filter((h) => h.power === 'running');
+  const bad = (data.health?.components || []).filter((c) => c.status === 'down' || c.status === 'degraded');
+  const money = data.cost?.runningPerHour;
+  const spend = running.length && money !== null && money !== undefined
+    ? `, burning ~${cost(money, data.cost.rate)}/hour`
+    : '';
+  if (bad.length) {
+    /**
+     * "A, B and C", not "A and B and C". Three degraded components is exactly when somebody is
+     * reading this line under pressure, and that is the worst moment to make them parse a sentence
+     * that reads like a child wrote it.
+     */
+    const names = bad.map((c) => c.label);
+    const list = names.length === 1 ? names[0]
+      : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+    return `${list} ${bad.length === 1 ? 'is' : 'are'} ${data.health.overall}. `
+      + `${running.length} of ${data.hosts.length} hosts powered on${spend}.`;
+  }
+  if (!running.length) return `Nothing is powered on. ${data.hosts.length} hosts known to the farm.`;
+  return `${running.length} of ${data.hosts.length} hosts powered on${spend}. Everything reporting.`;
+}
+
+/**
+ * The banner that appears when the page cannot trust itself.
+ *
+ * TWO DIFFERENT FAILURES, SAID DIFFERENTLY. A failed fetch means the numbers below are the last ones
+ * we had; a payload that is simply old means the poll is behind. Collapsing them would leave an
+ * operator unable to tell "the control plane is not answering" from "my tab was asleep".
+ */
+function infraStaleness() {
+  const { error, fetchedAt, data } = state.infra;
+  if (error) {
+    return card(null, { class: 'gate' },
+      h('p', { class: 'card-title', text: 'These numbers are not current' }),
+      h('p', { class: 'help', text: data
+        ? `The control plane did not answer: ${error}. Everything below was last true ${ago(new Date(fetchedAt).toISOString())}.`
+        : `The control plane did not answer: ${error}.` }),
+    );
+  }
+  if (!data) return null;
+  const age = (Date.now() - new Date(data.generatedAt).getTime()) / 1000;
+  if (age < 30) return null;
+  return card(null, { class: 'gate waiting' },
+    h('p', { class: 'card-title', text: 'This page has stopped refreshing' }),
+    h('p', { class: 'help', text: `The last answer was ${compactDuration(Math.round(age))} ago. `
+      + 'A background tab stops polling on purpose; bring this one to the front and it resumes.' }),
+  );
+}
+
+/* ------------------------------------------------------------------ overview */
+
+/**
+ * The six lights, each with the sentence that earned it.
+ *
+ * EVERY COMPONENT SHOWS ITS EVIDENCE, INCLUDING THE GREEN ONES. A dashboard whose healthy state is
+ * a word with nothing behind it teaches its reader that the word is decoration — and then the word
+ * does not work on the day it turns amber. The server sends a `detail` for every status and this
+ * renders all of them.
+ */
+function infraHealthBoard(data) {
+  const overall = data.health?.overall || 'unknown';
+  const comps = data.health?.components || [];
+  return card(null, { class: `healthboard ${HEALTH_TONE[overall] ? `hb-${HEALTH_TONE[overall]}` : ''}` },
+    h('div', { class: 'row tight' },
+      h('span', { class: `dot ${HEALTH_TONE[overall]} live`.trim() }),
+      h('h2', { class: 'page-title', text: `Infrastructure ${overall}` }),
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'caption', text: `as of ${ago(data.generatedAt)}` }),
+    ),
+    h('div', { class: 'hb-grid' }, comps.map((c) =>
+      h('div', { class: `hb-item ${HEALTH_TONE[c.status] || ''}`.trim() },
+        h('p', { class: 'row tight' },
+          h('span', { class: `dot ${HEALTH_TONE[c.status] || ''}`.trim() }),
+          h('strong', { text: c.label }),
+          h('span', { class: 'spacer' }),
+          h('span', { class: 'micro', text: c.status }),
+        ),
+        h('p', { class: 'caption', text: c.detail }),
+      ))),
+  );
+}
+
+/** Everything a host is currently complaining about, fleet-wide, worst first. */
+function infraAlerts(data) {
+  const rows = [];
+  for (const host of data.hosts || []) {
+    for (const a of host.alerts || []) rows.push({ host, ...a });
+  }
+  rows.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'critical' ? -1 : 1));
+  if (!rows.length) {
+    return card('Alerts', {},
+      empty('Nothing is complaining.', 'Every host is beating, reporting and within its thresholds.'));
+  }
+  return card('Alerts', {},
+    h('div', { class: 'stack mt-md' }, rows.map((r) =>
+      h('div', { class: 'inset stack tight' },
+        h('p', { class: 'row tight' },
+          pill(r.severity, r.severity === 'critical' ? 'bad' : 'warn', { dot: true }),
+          h('button', {
+            class: 'link', type: 'button', text: r.host.hostname,
+            onclick: () => go('#/infra/hosts'),
+          }),
+        ),
+        h('p', { class: 'caption', text: r.message }),
+      ))));
+}
+
+function infraOverview(data) {
+  const running = (data.hosts || []).filter((h) => h.power === 'running');
+  const f = data.fleet || {};
+  const c = data.cost || {};
+
+  /** A stat tile. The bad-news border only when the news is actually bad — see `screenHealth`. */
+  const stat = (label, value, tone, note) => card(null, {
+    class: `stat stack tight${tone === 'bad' ? ' stat-bad' : ''}`,
+  },
+    h('p', { class: 'micro', text: label }),
+    h('p', { class: 'row tight' }, h('span', { class: `dot ${tone || ''}`.trim() }), h('span', { class: 'val', text: value })),
+    h('p', { class: 'caption', text: note }),
+  );
+
+  return [
+    infraHealthBoard(data),
+    h('div', { class: 'statgrid mb-gap mt-md' },
+      stat('Hosts powered on', `${running.length}/${(data.hosts || []).length}`,
+        running.length ? 'warn' : 'ok',
+        running.length ? 'Billed while on, allocated or not' : 'Nothing is costing money'),
+      stat('Devices available', `${f.devices?.ready ?? 0}/${f.devices?.total ?? 0}`,
+        f.devices?.ready ? 'ok' : 'bad', `${f.devices?.allocated ?? 0} in use`),
+      stat('Sessions active', String(f.sessions?.active ?? 0), f.sessions?.active ? 'accent' : '',
+        f.sessions?.queued ? `${f.sessions.queued} waiting` : 'Nobody waiting'),
+      stat('Infrastructure load', f.loadPct === null || f.loadPct === undefined ? '—' : `${f.loadPct}%`,
+        (f.loadPct ?? 0) > 85 ? 'warn' : '', 'Allocated over usable capacity'),
+      stat('Today', cost(c.today, c.rate), '', 'Powered time, every host'),
+      stat('This month', cost(c.monthToDate, c.rate), '',
+        `~${cost(c.estimatedMonth?.value, c.rate)} projected`),
+    ),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' }, infraAlerts(data), infraEventList((data.events || []).slice(0, 12), 'Recent events')),
+      h('div', { class: 'rail' },
+        card('The control plane', {},
+          h('p', { class: 'caption' },
+            'This console and the API you are reading it through. It is infrastructure too, and it '
+            + 'is the one machine the page cannot report as stopped — if it were, nothing would be '
+            + 'answering.'),
+          kv([
+            ['Build', data.controlPlane?.shortSha || '—', true],
+            ['Up', data.controlPlane?.uptimeSeconds ? compactDuration(data.controlPlane.uptimeSeconds) : '—'],
+            ['Database', data.controlPlane?.dbLatencyMs === null ? 'not answering' : `${data.controlPlane.dbLatencyMs}ms`],
+          ]),
+        ),
+        infraCapabilityCard(data),
+      ),
+    ),
+  ];
+}
+
+/**
+ * WHAT THIS CONSOLE CAN AND CANNOT DO TO THE FARM, in words, from the server's own answer.
+ *
+ * The design's instinct is to hide this. It is here because the alternative is an operator
+ * discovering the boundary by pressing something during an incident, and because a page that claims
+ * to be an operations centre owes its reader an honest account of where it stops.
+ */
+function infraCapabilityCard(data) {
+  const caps = data.capabilities || {};
+  /**
+   * A GRID, NOT A `.row`. These sentences wrap, and `.row` is a wrapping flex container — so the
+   * dot stayed on one line and the whole sentence dropped to the next, leaving an orphaned bullet
+   * above every paragraph. Two columns keeps the marker beside the first line of its own text.
+   */
+  const line = (ok, yes, no) => h('p', { class: 'canline' },
+    h('span', { class: `dot ${ok ? 'ok' : ''}`.trim() }),
+    h('span', { class: 'caption', text: ok ? yes : no }));
+  return card('What this page can do', {},
+    line(caps.drain,
+      'Drain a host for maintenance, and resume it.',
+      'Draining a host is not wired up yet — the database has both halves and no endpoint reaches them.'),
+    line(caps.services,
+      'Restart the worker agent and its services.',
+      'Restarting a service still needs SSH.'),
+    line(caps.power,
+      'Start and stop device hosts.',
+      'Power is still deploy/farm-online.sh from a laptop: the control plane VM holds no compute permission and its OAuth scopes carry none either.'),
+    h('p', { class: 'caption mt-md' },
+      'There is deliberately no terminal here and there never will be. Operations are named, '
+      + 'validated on the server, and written to the log before they are attempted.'),
+  );
+}
+
+/* ------------------------------------------------------------------ hosts */
+
+function infraHostCard(host, rate) {
+  const fresh = FRESHNESS[host.reachability] || FRESHNESS.unknown;
+  const m = host.machine || {};
+  const powerTone = host.power === 'running' ? 'warn' : host.power === 'stopped' ? '' : 'bad';
+
+  return card(null, { class: 'inhost' },
+    h('div', { class: 'row tight' },
+      h('span', { class: `dot ${fresh.tone} ${host.reachability === 'live' ? 'live' : ''}`.trim() }),
+      h('h2', { class: 'card-title', text: host.hostname }),
+      pill(host.power, powerTone, { dot: false }),
+      // The control plane's own state machine, beside the derived one. They disagree usefully: a
+      // drained host is RUNNING and QUARANTINED at the same time, and hiding either half would hide
+      // the expensive one.
+      host.state !== 'UP' ? pill(host.state.toLowerCase(), host.state === 'QUARANTINED' ? 'warn' : '', { dot: false }) : null,
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'caption', text: host.region }),
+    ),
+
+    h('p', { class: 'caption' }, [
+      host.uptimeSeconds !== null ? `up ${compactDuration(host.uptimeSeconds)}` : null,
+      host.heartbeatAgeSeconds === null ? 'never beat'
+        : `beat ${compactDuration(host.heartbeatAgeSeconds)} ago`,
+      host.tunnelConnected ? 'tunnel connected' : 'no tunnel',
+      host.specs?.cores ? `${host.specs.cores} cores` : null,
+      host.specs?.memoryMb ? `${Math.round(host.specs.memoryMb / 1024)} GB` : null,
+      `protocol v${host.protocolVersion}`,
+    ].filter(Boolean).join(' · ')),
+
+    /**
+     * THE GAUGES, AND THE ONE SENTENCE THAT MAKES THEM SAFE TO READ.
+     *
+     * When the collector is stale the whole block is greyed and each number carries its age. It is
+     * not hidden: hiding a number is its own kind of lie, and "the disk was 97% full an hour ago"
+     * is worth knowing. It simply must not look like now.
+     */
+    m.status === 'unknown'
+      ? h('p', { class: 'caption mt-md', text: 'This host has never reported disk, load or memory.' })
+      : h('div', { class: `gaugegrid mt-md${m.status !== 'live' ? ' is-stale' : ''}` },
+          gauge('Disk', m.diskUsedPct,
+            m.diskUsedPct === null ? '—' : `${m.diskUsedPct}%`, m.status, m.ageSeconds),
+          gauge('Memory', m.memUsedPct,
+            m.memUsedPct === null ? '—' : `${m.memUsedPct}%`, m.status, m.ageSeconds),
+          gauge('Load', m.loadPerCore === null ? null : Math.min(100, m.loadPerCore * 50),
+            m.load1 === null ? '—' : `${m.load1.toFixed(2)}${m.loadPerCore ? ` (${m.loadPerCore}/core)` : ''}`,
+            m.status, m.ageSeconds),
+          gauge('Devices in use', host.devices.total
+            ? Math.round((host.devices.allocated / host.devices.total) * 100) : null,
+            `${host.devices.allocated}/${host.devices.total}`, 'live', null),
+        ),
+
+    h('div', { class: 'row tight mt-md' },
+      h('span', { class: 'caption', text: 'Cost' }),
+      h('span', { class: 'caption', text: `${cost(host.cost?.sinceUp, rate)} since it came up` }),
+      h('span', { class: 'caption', text: `${cost(host.cost?.today, rate)} today` }),
+      h('span', { class: 'caption', text: `${cost(host.cost?.monthToDate, rate)} this month` }),
+      host.utilisationPct !== null
+        ? h('span', { class: `caption${host.utilisationPct < 5 ? ' warn-text' : ''}`, text: `${host.utilisationPct}% used` })
+        : null,
+    ),
+
+    host.maintenance?.drained
+      ? h('p', { class: 'caption warn-text mt-md', text:
+          `Drained ${ago(host.maintenance.since)}${host.maintenance.reason ? ` — ${host.maintenance.reason}` : ''}. `
+          + 'It is powered on and no new session will be placed on it.' })
+      : null,
+
+    (host.alerts || []).length
+      ? h('div', { class: 'stack tight mt-md' }, host.alerts.map((a) =>
+          h('p', { class: `caption ${a.severity === 'critical' ? 'bad-text' : 'warn-text'}`, text: a.message })))
+      : null,
+  );
+}
+
+function infraHosts(data) {
+  if (!(data.hosts || []).length) {
+    return [empty('No host has ever registered with this control plane.',
+      'Start a worker agent and it appears within a heartbeat.')];
+  }
+  return [
+    h('p', { class: 'page-sub mb-gap', text:
+      'Every machine this farm runs on. A host is billed while it is POWERED ON, whether or not '
+      + 'anything is allocated on it — which is a different question from what a tenant consumed.' }),
+    h('div', { class: 'stack' }, data.hosts.map((host) => infraHostCard(host, data.cost?.rate))),
+  ];
+}
+
+/* ------------------------------------------------------------------ services */
+
+/**
+ * What is RUNNING on the machines, as opposed to what the machines are.
+ *
+ * ONLY WHAT THE CONTROL PLANE CAN ACTUALLY OBSERVE. A services page listing Caddy, coturn, Appium
+ * and Docker because they are in the deploy scripts would be listing intentions: nothing reports
+ * their state to this process, so every row would read "unknown" forever, or worse, "running"
+ * because somebody assumed. Three things do report:
+ *
+ *   the API itself, which is answering this request;
+ *   Postgres, which just answered a probe;
+ *   each host's worker agent — twice over, and the two halves fail independently. A beat says the
+ *   agent process is alive and can reach the control plane over HTTPS; the tunnel says automation
+ *   and live view can reach the DEVICES. A farm where every agent beats and no tunnel is connected
+ *   reads perfectly healthy and cannot run a single test.
+ *
+ * The rest is named as a gap rather than invented, and the gap closes when the agent reports it —
+ * not when this file guesses.
+ */
+function infraServices(data) {
+  const cp = data.controlPlane || {};
+  const row = (name, where, status, detail) => h('div', { class: 'buildrow' },
+    h('span', { class: 'row tight idc' },
+      h('span', { class: `dot ${HEALTH_TONE[status] || ''} ${status === 'healthy' ? 'live' : ''}`.trim() }),
+      h('span', { class: 'secondary', text: name }),
+      h('code', { class: 'caption', text: where })),
+    h('span', { class: 'caption', text: detail }),
+    h('span', { class: 'spacer' }),
+    pill(status, HEALTH_TONE[status] || '', { dot: false }),
+  );
+
+  const rows = [
+    row('Control plane API', 'mfarm-cp', 'healthy',
+      `Answering this request · build ${cp.shortSha || '—'} · up ${cp.uptimeSeconds ? compactDuration(cp.uptimeSeconds) : '—'}`),
+    row('PostgreSQL', 'mfarm-cp', cp.dbLatencyMs === null ? 'down' : cp.dbLatencyMs > 1000 ? 'degraded' : 'healthy',
+      cp.dbLatencyMs === null ? 'Did not answer a probe' : `Answered a probe in ${cp.dbLatencyMs}ms`),
+  ];
+
+  for (const host of data.hosts || []) {
+    const beating = host.reachability === 'live';
+    rows.push(row('Worker agent', host.hostname,
+      beating ? 'healthy' : host.reachability === 'stale' ? 'degraded' : host.reachability === 'unknown' ? 'unknown' : 'down',
+      host.heartbeatAgeSeconds === null ? 'Has never sent a heartbeat'
+        : `Last heartbeat ${compactDuration(host.heartbeatAgeSeconds)} ago · expected every 10s`));
+    rows.push(row('Agent tunnel', host.hostname,
+      host.tunnelConnected ? 'healthy' : host.power === 'running' ? 'down' : 'unknown',
+      host.tunnelConnected
+        ? 'Connected — live view and automation can reach this host'
+        : host.power === 'running'
+          ? 'Not connected — live view and automation cannot reach this host, even though it is beating'
+          : 'The host is not powered on, so no tunnel is expected'));
+  }
+
+  return [
+    h('p', { class: 'page-sub mb-gap', text:
+      'The processes this control plane can actually see. Each row is something that reports its '
+      + 'own state; nothing here is inferred from a deploy script.' }),
+    card(null, { class: 'flush' }, h('div', null, rows)),
+    card('What is NOT on this list', { class: 'gate' },
+      h('p', { class: 'help', text:
+        'Caddy, coturn, Appium, Docker and the cvd instances all run on these machines and none of '
+        + 'them reports its state to the control plane, so they are absent rather than listed as '
+        + '"unknown" forever. Restarting any of them is still an SSH session. When the agent '
+        + 'reports a service, it appears here — and not before.' }),
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------------ devices */
+
+function infraDevices(data) {
+  const f = data.fleet || {};
+  const d = f.devices || {};
+  const stateRow = (label, n, tone, note) => h('div', { class: 'buildrow' },
+    h('span', { class: 'row tight idc' },
+      h('span', { class: `dot ${tone || ''}`.trim() }),
+      h('span', { class: 'secondary', text: label })),
+    h('span', { class: 'caption', text: note }),
+    h('span', { class: 'spacer' }),
+    h('span', { class: 'val', text: String(n ?? 0) }),
+  );
+
+  return [
+    h('p', { class: 'page-sub mb-gap', text:
+      'Capacity, by the machine it sits on. This is the same fleet the Fleet screen shows, counted '
+      + 'the way an operator sizes a farm rather than the way a tester picks a device.' }),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' },
+        card('Capacity by host', { class: 'flush' },
+          h('div', null, (data.hosts || []).map((host) => h('div', { class: 'buildrow' },
+            h('span', { class: 'row tight idc' },
+              h('span', { class: `dot ${host.devices.ready ? 'ok' : 'warn'}` }),
+              h('span', { class: 'secondary', text: host.hostname }),
+              h('code', { class: 'caption', text: host.region })),
+            h('span', { class: 'caption', text:
+              `${host.devices.ready} ready · ${host.devices.allocated} in use`
+              + (host.devices.quarantined ? ` · ${host.devices.quarantined} quarantined` : '')
+              + (host.devices.offline ? ` · ${host.devices.offline} offline` : '') }),
+            h('span', { class: 'spacer' }),
+            h('span', { class: 'val', text: String(host.devices.total) }),
+          )))),
+        card('Every device, by state', { class: 'flush' },
+          h('div', null,
+            stateRow('Ready', d.ready, 'ok', 'Allocatable right now'),
+            stateRow('In use', d.allocated, 'accent', 'Reserved or running a session'),
+            stateRow('Cleaning', d.cleaning, '', 'Being reset between tenants'),
+            stateRow('Preparing', d.preparing, '', 'Recovering from quarantine'),
+            stateRow('Quarantined', d.quarantined, d.quarantined ? 'bad' : '', 'Withdrawn from the pool'),
+            stateRow('Offline', d.offline, d.offline ? 'warn' : '', 'Known, not answering'),
+          )),
+      ),
+      h('div', { class: 'rail' },
+        card('Demand', {},
+          kv([
+            ['Sessions active', String(f.sessions?.active ?? 0)],
+            ['Waiting', String(f.sessions?.queued ?? 0)],
+            ['Longest wait', f.sessions?.oldestQueuedSeconds
+              ? compactDuration(f.sessions.oldestQueuedSeconds) : 'nobody waiting'],
+            ['Load', f.loadPct === null || f.loadPct === undefined ? '—' : `${f.loadPct}%`],
+          ]),
+          h('p', { class: 'caption mt-md', text:
+            'Load is allocated devices over USABLE ones — ready plus already allocated. A '
+            + 'quarantined device is not idle capacity going to waste, it is capacity that is gone, '
+            + 'and counting it would make a farm with one broken device look permanently underloaded.' }),
+        ),
+        card('Open the fleet', {},
+          h('p', { class: 'caption', text:
+            'Per-device detail, live view, quarantine and recovery all live on the Fleet screen. '
+            + 'This page is about the machines underneath them.' }),
+          h('div', { class: 'mt-md' }, btn('Open Fleet', 'ghost', () => go('#/fleet'))),
+        ),
+      ),
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------------ usage & cost */
+
+/**
+ * The trend, drawn as bars from `host_power_intervals` (migration 054).
+ *
+ * FOURTEEN DAYS WITH NO GAPS, because the server fills empty days with zeros rather than omitting
+ * them — a trend line that silently skips its cheapest days slopes the wrong way.
+ */
+function infraTrend(trend, rate) {
+  const max = Math.max(1, ...trend.map((t) => t.poweredHours));
+  return card('Cost trend', {},
+    h('p', { class: 'caption', text: 'Powered hours per day, across every host, for the last fortnight.' }),
+    h('div', { class: 'trend mt-md' }, trend.map((t) => h('div', {
+      class: 'trend-col',
+      title: `${t.date}: ${t.poweredHours}h${t.cost === null ? '' : ` · ${cost(t.cost, rate)}`}`,
+    },
+      h('i', { style: { height: `${Math.max(2, (t.poweredHours / max) * 100)}%` } }),
+      h('span', { class: 'micro', text: t.date.slice(8) }),
+    ))),
+  );
+}
+
+function infraUsage(data) {
+  const c = data.cost || {};
+  if (!c.rate) {
+    // An elapsed-hours page with no currency is still useful, and inventing a rate is not. Same
+    // rule `/v1/hosts` follows: a measurement or nothing, never a plausible number.
+    return [
+      card(null, { class: 'gate' },
+        h('p', { class: 'card-title', text: 'No hourly rate is configured' }),
+        h('p', { class: 'help', text:
+          'Set HOST_HOURLY_COST and COST_CURRENCY on the control plane and every figure below gains '
+          + 'a currency. Until then this page shows powered TIME, which needs no rate and is the '
+          + 'alarming half anyway.' })),
+      infraTrend(c.trend || [], null),
+    ];
+  }
+
+  const stat = (label, value, note, tone) => card(null, { class: `stat stack tight${tone === 'bad' ? ' stat-bad' : ''}` },
+    h('p', { class: 'micro', text: label }),
+    h('p', { class: 'row tight' }, h('span', { class: `dot ${tone || ''}`.trim() }), h('span', { class: 'val', text: value })),
+    h('p', { class: 'caption', text: note }),
+  );
+
+  return [
+    h('div', { class: 'statgrid mb-gap' },
+      stat('Running now', c.runningPerHour === null ? '—' : `${cost(c.runningPerHour, c.rate)}/h`,
+        `at ${cost(c.rate.hourly, c.rate)}/hour per host`, c.runningPerHour ? 'warn' : ''),
+      stat('Today', cost(c.today, c.rate), 'Since midnight'),
+      stat('This month', cost(c.monthToDate, c.rate), 'Month to date'),
+      stat('Projected', cost(c.estimatedMonth?.value, c.rate), c.estimatedMonth?.basis || ''),
+    ),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' },
+        infraTrend(c.trend || [], c.rate),
+        /**
+         * THE TRAILING FIGURE IS TODAY'S, not "since it came up".
+         *
+         * `sinceUp` is null for a host that is not running — correctly, since a stopped machine has
+         * no current power-on to measure from — and this column has no header, so a stopped host
+         * put a bare em-dash in the one place the eye goes for the number. Today's cost is defined
+         * for every host in the list, including the ones that were on this morning and are off now,
+         * which is exactly the row somebody is scanning for.
+         */
+        card('Cost by host', { class: 'flush' },
+          h('div', null, (data.hosts || []).map((host) => h('div', { class: 'buildrow' },
+            h('span', { class: 'row tight idc' },
+              h('span', { class: `dot ${host.power === 'running' ? 'warn' : ''}`.trim() }),
+              h('span', { class: 'secondary', text: host.hostname })),
+            h('span', { class: 'caption', text: [
+              `${cost(host.cost?.monthToDate, c.rate)} this month`,
+              host.cost?.sinceUp === null ? 'not running' : `${cost(host.cost.sinceUp, c.rate)} this power-on`,
+              host.utilisationPct === null ? null : `${host.utilisationPct}% used`,
+            ].filter(Boolean).join(' · ') }),
+            h('span', { class: 'spacer' }),
+            h('span', { class: 'val', text: cost(host.cost?.today, c.rate), title: 'today' }),
+          )))),
+      ),
+      h('div', { class: 'rail' },
+        (c.idle || []).length
+          ? card('Powered on and barely used', {},
+              h('p', { class: 'caption', text:
+                'Hosts that have been on for hours today with almost nothing running on them. This '
+                + 'is the shape of the 2026-09-11 incident: twenty hours of "4 of 5 ready", two '
+                + 'minutes of actual device time.' }),
+              h('div', { class: 'stack mt-md' }, c.idle.map((i) => h('div', { class: 'inset stack tight' },
+                h('p', { class: 'row tight' },
+                  h('strong', { text: i.hostname }),
+                  h('span', { class: 'spacer' }),
+                  h('span', { class: 'val warn-text', text: cost(i.wastedCost, c.rate) })),
+                h('p', { class: 'caption', text:
+                  `${i.poweredHours}h powered, ${i.utilisationPct}% of its device time used.` })))))
+          : card('Nothing is idling', {},
+              h('p', { class: 'caption', text:
+                'Every host that has been on for more than two hours today is being used. A host '
+                + 'that was off contributes nothing here — "nothing ran because the machine was '
+                + 'off" is not underuse.' })),
+        card('What this measures', {},
+          h('p', { class: 'caption', text:
+            'POWERED TIME, not tenant consumption. The two disagree on purpose: a host that ran all '
+            + 'night with idle devices costs a full night and meters almost nothing. Per-tenant '
+            + 'usage lives on Settings.' }),
+          h('p', { class: 'caption mt-md', text:
+            'History begins when this page shipped. Currently-running hosts were backfilled from '
+            + 'when they came up; nothing earlier was invented.' }),
+        ),
+      ),
+    ),
+  ];
+}
+
+/* ------------------------------------------------------------------ events */
+
+const EVENT_TONE = { info: '', warning: 'warn', critical: 'bad' };
+
+function infraEventList(events, title) {
+  if (!events.length) {
+    return card(title, {}, empty('Nothing has happened.', 'No operation, device change or power event in this window.'));
+  }
+  return card(title, { class: 'flush' },
+    h('div', null, events.map((e) => h('div', { class: 'buildrow' },
+      h('span', { class: 'row tight idc' },
+        h('span', { class: `dot ${EVENT_TONE[e.severity] || ''}`.trim() }),
+        h('span', { class: 'secondary', text: e.title })),
+      h('span', { class: 'caption', text: e.detail || '' }),
+      h('span', { class: 'spacer' }),
+      e.actor ? h('span', { class: 'caption', text: e.actor }) : null,
+      h('span', { class: 'caption', text: ago(e.at) }),
+    ))));
+}
+
+function infraEvents(data) {
+  return [
+    h('p', { class: 'page-sub mb-gap', text:
+      'What has happened to this farm. Operators’ actions, every device quarantine and recovery, '
+      + 'and every machine coming up or going away — read from the three records that already hold '
+      + 'them rather than from a fourth copy that could fall behind.' }),
+    infraEventList(data.events || [], 'The last week'),
+  ];
+}
+
+/* ------------------------------------------------------------------ the screen */
+
+function screenInfra() {
+  /**
+   * `state.lens`, NOT `state.route.lens`, and the difference is not cosmetic.
+   *
+   * `setRoute` assigns both from one parse precisely so they cannot drift, and every other screen
+   * reads the flat one — `screenFleet` does. Reading the nested copy here would work in the browser
+   * and silently render the overview under every section in a test that seeds state directly, which
+   * is the shape that made a fleet test assert against the catalogue while believing it was looking
+   * at the capacity table.
+   */
+  const section = state.lens || 'overview';
+  const { data, loaded } = state.infra;
+
+  /**
+   * FIRST PAINT FETCHES AND RENDERS A SKELETON, rather than awaiting before rendering — the same
+   * shape `orgGate` uses. Awaiting would leave the person looking at the previous screen while a
+   * request is in flight, which reads as a dead click.
+   */
+  if (!loaded) {
+    // NOT WHILE ONE IS ALREADY IN FLIGHT. `refreshInfra` returns immediately in that case, and
+    // `.then(render)` would come straight back here — see its comment for the tab-pinning loop that
+    // produced.
+    if (!state.infra.loading) void refreshInfra().then(render);
+    return [
+      pageHead([{ label: 'Operations' }], 'Infrastructure', 'Reading the machines…'),
+      h('p', { class: 'empty' }, h('strong', { text: 'Loading…' })),
+    ];
+  }
+
+  return [
+    pageHead([{ label: 'Operations' }], 'Infrastructure', infraHeadline(data)),
+
+    h('div', { class: 'row tight mb-gap lensrow' }, INFRA_SECTIONS.map(([key, label]) => h('button', {
+      class: `lens${section === key ? ' on' : ''}`,
+      onclick: () => go(`#/infra/${key}`),
+    },
+      label,
+      // A count only where it is the thing somebody is looking for. "Overview 6" would be noise;
+      // "Hosts 2" and an alert count are not.
+      key === 'hosts' && data ? h('span', { class: 'lens-n', text: String((data.hosts || []).length) }) : null,
+    ))),
+
+    infraStaleness(),
+
+    !data ? empty('The control plane did not answer.',
+      'Nothing below can be shown until it does. The banner above says what it said.')
+      : section === 'hosts' ? infraHosts(data)
+        : section === 'services' ? infraServices(data)
+          : section === 'devices' ? infraDevices(data)
+            : section === 'usage' ? infraUsage(data)
+              : section === 'events' ? infraEvents(data)
+                : infraOverview(data),
+  ];
+}
+
 function screenHealth() {
   const byState = {};
   for (const d of state.devices) byState[d.state] = (byState[d.state] || 0) + 1;
@@ -8301,7 +9141,14 @@ function screenHealth() {
  * "Open Devices" sits between "Start a device" and "Release your device" makes Enter a keystroke
  * you have to read before pressing. `group` is what `renderPalette` sorts on.
  */
-function commands() {
+/**
+ * EXPORTED so a test can ask what the palette would offer.
+ *
+ * The list is conditional in several places — a held session, a device's capabilities, and now the
+ * fleet operator grant — and every one of those conditions is a promise that the palette never
+ * offers something the caller cannot do. A promise nothing can check is one somebody tidies away.
+ */
+export function commands() {
   const held = heldSession();
   const list = [
     { icon: 'launch',   label: 'Launch a device', group: 'Go to', run: () => go('#/launch') },
@@ -8312,6 +9159,16 @@ function commands() {
     { icon: 'queue',    label: 'Open Queue', group: 'Go to', run: () => go('#/queue') },
     { icon: 'health',   label: 'Open Farm health', group: 'Go to', run: () => go('#/health') },
   ];
+  /**
+   * OFFERED ONLY TO AN OPERATOR, which is the same rule every other conditional entry in this list
+   * follows: a palette entry for a capability the caller does not have is the same lie as a button
+   * for one the device lacks.
+   */
+  if (isOperator()) {
+    list.push({ icon: 'host', label: 'Open Infrastructure', group: 'Go to', run: () => go('#/infra') });
+    list.push({ icon: 'host', label: 'Infrastructure: hosts and what they cost', group: 'Go to', run: () => go('#/infra/usage') });
+    list.push({ icon: 'host', label: 'Infrastructure: what happened recently', group: 'Go to', run: () => go('#/infra/events') });
+  }
   if (held) {
     list.unshift({ icon: 'sessions', label: 'Open your session cockpit', group: 'Go to', run: () => go(`#/sessions/${held.id}`) });
     list.push({ icon: 'power', label: 'Release your device', group: 'Do', run: () => askRelease(held) });
@@ -8474,7 +9331,7 @@ let gPending = 0;
  * through `parseHash`, onto the Fleet lens that used to be that page. A shortcut somebody has in
  * their fingers is not a thing to reclaim for tidiness.
  */
-const G_ROUTES = { f: 'fleet', d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', n: 'tunnels', t: 'team', s: 'settings' };
+const G_ROUTES = { f: 'fleet', d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', n: 'tunnels', t: 'team', s: 'settings', i: 'infra' };
 
 /**
  * Is this keystroke meant for something that takes typing, rather than for the console?
@@ -9255,6 +10112,7 @@ export const SCREENS = {
   cockpit: () => screenCockpit(state.route.id),
   queue: () => screenQueue(),
   health: () => screenHealth(),
+  infra: () => screenInfra(),
   agents: () => screenAgents(),
   tunnels: () => screenTunnels(),
   team: () => screenTeam(),
@@ -9279,7 +10137,15 @@ for (const ev of ['pointerup', 'pointercancel']) {
   });
 }
 
-function render() {
+/**
+ * EXPORTED so a test can drive the real loop.
+ *
+ * Every screen function is already reachable through `SCREENS`, and that is not enough for one
+ * class of defect: a screen whose loading branch schedules another render. The cycle only exists
+ * when `render` is on both ends of it, so a test that calls screen functions cannot see it — which
+ * is exactly how a tab-pinning loop shipped in `screenInfra` and was found by opening the page.
+ */
+export function render() {
   if (!state.me) return;
   if (pointerDown) { renderQueued = true; return; }
   renderChrome();
@@ -9395,6 +10261,22 @@ function pollSignature() {
     burn: state.hosts.list
       .map((h) => `${h.id}:${h.uptimeSeconds === null ? '-' : Math.floor(h.uptimeSeconds / 60)}`)
       .join(','),
+    /**
+     * The infrastructure page's own signature, at the resolution it DISPLAYS.
+     *
+     * Not `generatedAt`, which differs on every single poll and would re-render the whole screen
+     * every five seconds — the exact thing `pollSignature` exists to avoid, and worse here than
+     * anywhere because this page is read while somebody hovers a host card. Health, power, freshness
+     * and the alert set are what change the pixels; uptime is rounded to the minute like the burn
+     * segment above it, and the money follows from it.
+     */
+    infra: state.infra.data ? [
+      state.infra.data.health?.overall,
+      state.infra.error || '',
+      ...(state.infra.data.hosts || []).map((h) => `${h.id}:${h.power}:${h.reachability}:`
+        + `${h.machine?.status}:${h.uptimeSeconds === null ? '-' : Math.floor(h.uptimeSeconds / 60)}:`
+        + `${(h.alerts || []).map((a) => a.code).join('|')}`),
+    ].join(',') : '',
   });
 }
 
@@ -9408,6 +10290,17 @@ function startPoll() {
       // it, which is the entire point of a number that is supposed to make them act.
       await Promise.all([refreshDevices(), refreshSessions(), refreshActions(), refreshHosts()]);
       if (state.route.name === 'apps') await refreshApps();
+      /**
+       * The operations payload, ONLY while somebody is looking at it.
+       *
+       * `GET /v1/infra/overview` runs a database probe, five grouped queries and a fortnight of
+       * interval arithmetic. That is the right price for a page an operator is watching during an
+       * incident and the wrong one to pay twelve times a minute on a console parked on Fleet.
+       *
+       * `refreshHosts` above still rides every poll, because the nav badge is drawn from `state.infra`
+       * only once it exists — and the dot must not be the reason this runs.
+       */
+      if (state.route.name === 'infra') await refreshInfra();
       await refreshHeld();
       if (state.route.name === 'cockpit' && state.detail?.id === state.route.id
           && Date.now() - (state.detail.fetchedAt || 0) > 10_000) {

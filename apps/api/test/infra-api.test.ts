@@ -114,8 +114,14 @@ after(async () => {
   // Named region, so this cannot take another test's fixtures with it. `host_power_intervals`
   // cascades from `hosts`; `infra_operations` has no host FK and is cleaned by target id.
   await withSystem(async (c) => {
+    // `infra_operations` refuses DELETE — migration 053's trigger applies to the owner too — so the
+    // guard is lifted explicitly, which is the only shape that works and the right amount of
+    // ceremony for erasing an audit trail. This suite writes no operations today; the line is here
+    // so the stage that adds write routes does not discover the refusal in CI.
+    await c.query('ALTER TABLE infra_operations DISABLE TRIGGER infra_operations_append_only');
     await c.query(`DELETE FROM infra_operations WHERE target_id IN
                      (SELECT id::text FROM hosts WHERE region = $1)`, [REGION]);
+    await c.query('ALTER TABLE infra_operations ENABLE TRIGGER infra_operations_append_only');
     await c.query('DELETE FROM hosts WHERE region = $1', [REGION]);
     await c.query('DELETE FROM regions WHERE code = $1', [REGION]);
   });
