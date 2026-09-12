@@ -345,7 +345,17 @@ export async function webdriverRoutes(app: FastifyInstance) {
         // front is the difference between "no capacity" and allocating, failing, and trying again.
         // `app-install` joins it when there is a build to put on the device, for the same reason:
         // allocating a device that cannot install, then failing, wastes a lease and a reset.
-        requireCapabilities: build ? ['webdriver', 'app-install'] : ['webdriver'],
+        // `network-proxy` joins them when the suite named a tunnel (ADR-0037). The ADR argued that
+        // `mfarm:tunnel` constrains no device because "every device can proxy", and that held only
+        // while NO device could — nothing applied the guest's proxy setting at all. Now that some
+        // backends do and some cannot, the choice is between refusing up front and handing back a
+        // device that installs, runs for four minutes and reaches nothing. It still does not narrow
+        // by device CLASS, which is what that reasoning was protecting.
+        requireCapabilities: [
+          'webdriver',
+          ...(build ? ['app-install'] : []),
+          ...(caps.tunnel ? ['network-proxy'] : []),
+        ],
         /**
          * WHAT THE SUITE ASKED FOR THAT IS NOT AN ALLOCATION CONSTRAINT (migration 052).
          *

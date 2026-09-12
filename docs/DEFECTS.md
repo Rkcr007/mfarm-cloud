@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Two, as of 2026-09-11** — forty-six recorded, forty-four closed. The two left are the CSP
+**Two, as of 2026-09-12** — forty-seven recorded, forty-five closed. The two left are the CSP
 `webrtc` warning, which is deliberate, and app network capture, which is an unbuilt feature needing
 its own privacy decision rather than a defect. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
@@ -724,6 +724,26 @@ about splitting documents by rate of change so they stop dragging each other out
 `DEFECTS.md` carries two entries where the register was wrong about itself; the HANDOFF summaries
 have been audited for false claims twice. Every one of those corrections was a person re-reading and
 noticing. The countable part of that job is now CI's.
+
+## Found by trying to verify the last hop on hardware, 2026-09-12
+
+| id | what | status |
+|---|---|---|
+| D47 | **ADR-0037's first hop had no code behind it, and both the ADR and `STATUS.md` described it as one `adb` command away from verified.** `DeviceProxy` — the listener a device points at — had exactly one caller in the repo, its own test. Nothing in `workers/agent` ever constructed one, so no farm had a listener; nothing anywhere ran `settings put global http_proxy`, so no guest was ever pointed at one. `mfarm:tunnel` allocated a device, validated the name, recorded it on the session and then did nothing at all. **Found by going to the lab to run the one command the documents said was outstanding, and looking for the port to run it against.** | Fixed 2026-09-12. The beat now carries the devices whose live session named a tunnel; the agent converges on that set, binding one listener per device and pointing the guest at it. **Verified RED twice** — deleting the heartbeat's one call fails two tests in `agent.test.ts`, and widening the control plane's session filter fails the teardown test. Verified on the lab against real guests. |
+
+**THE SHAPE IS D44'S AND D29'S, AND IT IS THE THIRD TIME.** Every piece tested, no piece joined —
+and the test that gave the most confidence is the one that hid it. `tunnel-end-to-end.test.ts`
+stands a real `DeviceProxy` up *itself* and points an HTTP client at it, which is a faithful model
+of what an Android guest does **once the setting is in place** — so it proves every link except the
+one that puts it there. The suite could not have gone red for this, because what was missing was a
+caller, and a test that supplies its own caller cannot notice the absence of the real one.
+
+**The documents were confidently specific about the wrong thing.** "What has not been run is that
+one command against a live Cuttlefish guest" is a sentence that sounds like it was written by
+somebody who had checked. It was written by somebody who had checked everything downstream of it.
+The reusable half: when a document says one small step remains, the step to check first is whether
+anything CALLS the thing the step is meant to complete — `grep` for the class name outside its own
+test, which is ten seconds and would have said so.
 
 ## Suite health
 

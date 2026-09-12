@@ -18,6 +18,7 @@ import {
 import { derivePort } from './appium.ts';
 import { readHostStats } from './hoststats.ts';
 import type { DeviceBackend, DeviceHealth } from './device.ts';
+import { DeviceProxy, type ProxyTransport } from './device-proxy.ts';
 import { InstallBlockedError } from './devices/physical.ts';
 
 /**
@@ -754,6 +755,15 @@ export class Agent {
       // which is minutes, not seconds. The in-flight guard is what makes re-offering it every beat
       // harmless in the meantime.
       void this.runRequestedActions(body.actions ?? []);
+      /**
+       * Not awaited, for the reason the two above are not: this makes adb calls, and a beat that
+       * waited for a wedged guest would look like a dead host and quarantine the whole machine.
+       *
+       * ABSENT MEANS NONE, which turns proxies OFF. A control plane too old to send the field is
+       * indistinguishable from one saying no device should reach a private network, and of the two
+       * readings that is the one that fails safe.
+       */
+      void this.syncProxies(body.proxies ?? []);
       return { ok: true, hostState: body.hostState };
     } catch {
       return { ok: false };
@@ -1645,6 +1655,131 @@ export class Agent {
   }
 
   /** uuid -> backend, via the localId->uuid map registration returned. */
+  // ---------------------------------------------------------------- the device proxy (ADR-0037)
+
+  /**
+   * Where a device can reach the customer's network, for the devices that currently may.
+   *
+   * Keyed by local id, because that is the name the whole proxy path uses: the agent tells the
+   * control plane which DEVICE a request came from and nothing more.
+   */
+  private readonly proxies = new Map<string, { proxy: DeviceProxy; host: string; port: number }>();
+
+  /** Guards `syncProxies` against re-entry — a beat every 10s against an adb call that takes one. */
+  private proxySweepRunning = false;
+
+  /**
+   * The tunnel a proxied request travels up, installed by `index.ts` once it exists.
+   *
+   * SET AFTER CONSTRUCTION because the tunnel is built from the agent — `AgentTunnel` takes the
+   * agent so it can answer for this host — and the two cannot both be first. A proxy started before
+   * this arrives would answer every request 503, which is why `syncProxies` does nothing at all
+   * until it is here rather than opening listeners that cannot work.
+   */
+  private proxyTransport?: ProxyTransport;
+
+  attachProxyTransport(t: ProxyTransport): void { this.proxyTransport = t; }
+
+  /** What is proxied right now, as `localId -> host:port`. For the window, and for tests. */
+  proxiedDevices(): Record<string, string> {
+    return Object.fromEntries([...this.proxies].map(([k, v]) => [k, `${v.host}:${v.port}`]));
+  }
+
+  /**
+   * Make this host's devices match the control plane's picture of which may reach a private network.
+   *
+   * A SWEEP OVER THE DESIRED SET, not a handler for an event. `proxies` on the beat is the full
+   * list every time, so this turns proxies on for devices that appear and off for devices that stop
+   * appearing — and a session ending is exactly "it stops appearing". There is no teardown message
+   * to lose, which matters more here than anywhere else in this file: the thing that leaks if a
+   * teardown is missed is a live route from a device into somebody's private network, and the
+   * device is about to be handed to a different tenant.
+   *
+   * OFF IS THE FAILING-SAFE DIRECTION, and every uncertainty resolves that way. A beat that does
+   * not arrive changes nothing; a beat from a control plane too old to send the field sends none,
+   * which reads as "nobody", which turns proxies off.
+   *
+   * Errors are swallowed PER DEVICE. One guest with a wedged adb must not stop the sweep before it
+   * reaches the device whose proxy needs turning off.
+   */
+  async syncProxies(wanted: Array<{ deviceId: string; localId: string }>): Promise<void> {
+    if (this.proxySweepRunning) return;
+    this.proxySweepRunning = true;
+    try {
+      const transport = this.proxyTransport;
+      // Without a tunnel there is nothing to carry a request, so the honest state is no listener.
+      const want = new Set(transport ? wanted.map((w) => w.localId) : []);
+
+      for (const localId of [...this.proxies.keys()]) {
+        if (!want.has(localId)) await this.stopProxy(localId);
+      }
+      if (!transport) return;
+
+      for (const localId of want) {
+        if (this.proxies.has(localId)) continue;
+        await this.startProxy(localId, transport);
+      }
+    } finally {
+      this.proxySweepRunning = false;
+    }
+  }
+
+  private async startProxy(localId: string, transport: ProxyTransport): Promise<void> {
+    const control = this.opts.devices.find((b) => b.control.info.localId === localId)?.control;
+    // TWO DIFFERENT FAULTS, said differently, because they send somebody to different places. A
+    // device this host does not have means the control plane and this agent disagree about the
+    // fleet; a device that cannot be pointed anywhere means `network-proxy` was not what decided
+    // the allocation. Neither is actionable here — the capability is what stops such a device being
+    // given to a tunnelled session — and both are worth more than a listener nothing will reach.
+    if (!control) {
+      console.warn(`[agent] ${localId}: asked to proxy a device this host does not have`);
+      return;
+    }
+    if (!control.setHttpProxy || !control.proxyHost) {
+      console.warn(`[agent] ${localId}: asked to proxy a device that cannot be pointed at one`);
+      return;
+    }
+
+    let started: { proxy: DeviceProxy; host: string; port: number } | undefined;
+    try {
+      const host = await control.proxyHost();
+      if (!host) {
+        console.warn(`[agent] ${localId}: no address this device can reach this host on; not proxying`);
+        return;
+      }
+      const proxy = new DeviceProxy({ localId, transport, host, port: 0 });
+      const addr = await proxy.start();
+      started = { proxy, host: addr.host, port: addr.port };
+      // THE LISTENER FIRST, THE SETTING SECOND, and never the other way round. A guest told to use
+      // a proxy that is not listening yet fails its requests outright; one whose proxy is listening
+      // and not yet pointed at simply has not started using it.
+      await control.setHttpProxy(`${addr.host}:${addr.port}`);
+      this.proxies.set(localId, started);
+      console.log(`[agent] ${localId}: proxying to the farm via ${addr.host}:${addr.port}`);
+    } catch (err) {
+      // Leave nothing half-built. A listener with no device pointed at it is harmless but it holds
+      // a port, and the next beat will try again from a clean state.
+      await started?.proxy.stop().catch(() => {});
+      this.proxies.delete(localId);
+      console.warn(`[agent] ${localId}: could not start its proxy — ${(err as Error).message}`);
+    }
+  }
+
+  private async stopProxy(localId: string): Promise<void> {
+    const live = this.proxies.get(localId);
+    // Dropped from the map FIRST, so a sweep that overlaps a failure cannot see it twice.
+    this.proxies.delete(localId);
+    const control = this.opts.devices.find((b) => b.control.info.localId === localId)?.control;
+    // THE SETTING IS CLEARED BEFORE THE LISTENER CLOSES. Closing first leaves a window where the
+    // guest is still pointed at a dead port, which surfaces in an app as a connection refused
+    // rather than as ordinary traffic.
+    try { await control?.setHttpProxy?.(null); } catch (err) {
+      console.warn(`[agent] ${localId}: could not clear its proxy setting — ${(err as Error).message}`);
+    }
+    await live?.proxy.stop().catch(() => {});
+    if (live) console.log(`[agent] ${localId}: no longer proxying`);
+  }
+
   private backendForDeviceId(deviceId: string): DeviceBackend | undefined {
     const ids = this.state?.deviceIds ?? {};
     const localId = Object.keys(ids).find((k) => ids[k] === deviceId);
@@ -1697,6 +1832,10 @@ export class Agent {
     this.stopMetering();
     this.stopHealthMonitor();
     for (const id of [...this.active.keys()]) this.endSession(id);
+    // Every proxy off on the way down. The listener dies with the process either way; the SETTING
+    // does not — it is on the guest, and a device left pointed at a dead port after an agent
+    // restart fails every request in the app rather than falling back to the network it has.
+    for (const localId of [...this.proxies.keys()]) await this.stopProxy(localId);
     // The final flush carries any incident recorded on the way down — including the one explaining
     // why the agent is shutting down at all, which is the one somebody will come looking for.
     await this.flush();

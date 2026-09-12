@@ -1845,3 +1845,118 @@ describe('a recorder does not outlive the device that was recording', () => {
     assert.ok(b.control.reconciled[0].maxAgeMs > 0);
   });
 });
+
+/**
+ * The beat actually points a guest at a proxy — ADR-0037's last hop, joined end to end.
+ *
+ * WHY HERE AND NOT IN `device-proxy-sweep.test.ts`. That file drives `syncProxies` directly, which
+ * proves the sweep converges and proves nothing about whether anything CALLS it. This is the exact
+ * shape of the defect ADR-0037 shipped: every piece tested, no piece joined — `DeviceProxy` had a
+ * test and no caller. So this test starts at a row in the control plane's database and ends at an
+ * adb call on a device, and touches nothing in between.
+ */
+describe('a beat points a tunnelled device at its proxy', () => {
+  /** A device that can be pointed at a proxy, and remembers every value it was pointed at. */
+  class ProxyableDevice extends FakeDevice {
+    readonly proxySet: Array<string | null> = [];
+    async proxyHost() { return '127.0.0.1'; }
+    async setHttpProxy(v: string | null) { this.proxySet.push(v); }
+  }
+
+  function proxyableBackend(localId: string) {
+    const control = new ProxyableDevice(localId);
+    control.info.capabilities = [...control.info.capabilities, 'network-proxy'];
+    return {
+      control,
+      media: { async endpoint() { return { url: 'https://cf.example/?d=1', kind: 'webrtc' as const }; } },
+    };
+  }
+
+  /** Stands in for the agent tunnel. `syncProxies` opens no listener without one. */
+  const fakeTransport = () => ({ open: () => ({ send() {}, close() {} }) });
+
+  const waitFor = async (probe: () => boolean, ms = 5_000) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline && !probe()) await new Promise((r) => setTimeout(r, 25));
+    return probe();
+  };
+
+  test('a live session that named a tunnel reaches the guest as a proxy setting', async () => {
+    const b = proxyableBackend(`px-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b as unknown as DeviceBackend], `px-${randomUUID().slice(0, 8)}`);
+    agent.attachProxyTransport(fakeTransport());
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    // The row the whole path hangs off: an ACTIVE session on this device that asked for a tunnel.
+    await withSystem((c) => c.query(
+      `INSERT INTO sessions (org_id, device_id, state, region, fence, started_at, requested)
+       VALUES ($1,$2,'ACTIVE',$3,1, now(), '{"mfarm:tunnel":"staging"}'::jsonb)`,
+      [orgId, deviceId, REGION],
+    ));
+
+    assert.equal((await agent.heartbeat()).ok, true);
+
+    assert.ok(await waitFor(() => b.control.proxySet.length > 0),
+      'the beat must point the guest at the listener — nothing else in the product will');
+    // The address the DEVICE named, and a port the OS assigned, which is what the guest must reach.
+    const [host, port] = String(b.control.proxySet[0]).split(':');
+    assert.equal(host, '127.0.0.1');
+    assert.ok(Number(port) > 0, `expected a real port, got ${b.control.proxySet[0]}`);
+    assert.equal(agent.proxiedDevices()[b.control.info.localId], `${host}:${port}`);
+
+    await agent.shutdown();
+    assert.equal(b.control.proxySet.at(-1), null, 'and the guest is un-pointed on the way down');
+  });
+
+  test('a session that named no tunnel leaves the guest alone', async () => {
+    const b = proxyableBackend(`pxn-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b as unknown as DeviceBackend], `pxn-${randomUUID().slice(0, 8)}`);
+    agent.attachProxyTransport(fakeTransport());
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    await withSystem((c) => c.query(
+      `INSERT INTO sessions (org_id, device_id, state, region, fence, started_at)
+       VALUES ($1,$2,'ACTIVE',$3,1, now())`,
+      [orgId, deviceId, REGION],
+    ));
+
+    assert.equal((await agent.heartbeat()).ok, true);
+    // Nothing to wait for, so give the un-awaited sweep a moment to be wrong in.
+    await new Promise((r) => setTimeout(r, 250));
+
+    assert.deepEqual(b.control.proxySet, [],
+      'an ordinary session must not have its HTTP diverted through the farm');
+    await agent.shutdown();
+  });
+
+  test('the session ending takes the proxy away again', async () => {
+    const b = proxyableBackend(`pxe-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b as unknown as DeviceBackend], `pxe-${randomUUID().slice(0, 8)}`);
+    agent.attachProxyTransport(fakeTransport());
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId]!;
+
+    const sessionId = await withSystem(async (c) => (await c.query(
+      `INSERT INTO sessions (org_id, device_id, state, region, fence, started_at, requested)
+       VALUES ($1,$2,'ACTIVE',$3,1, now(), '{"mfarm:tunnel":"staging"}'::jsonb) RETURNING id`,
+      [orgId, deviceId, REGION],
+    )).rows[0].id as string);
+
+    assert.equal((await agent.heartbeat()).ok, true);
+    assert.ok(await waitFor(() => b.control.proxySet.length > 0), 'precondition: it was pointed');
+
+    // The session ends. No message says "turn the proxy off" — the device simply stops being
+    // offered, and the next beat is what closes the route into the customer's network.
+    await withSystem((c) => c.query(
+      `UPDATE sessions SET state = 'ENDED', ended_at = now() WHERE id = $1`, [sessionId]));
+
+    assert.equal((await agent.heartbeat()).ok, true);
+
+    assert.ok(await waitFor(() => b.control.proxySet.at(-1) === null),
+      `the guest must be un-pointed when its session ends; saw ${JSON.stringify(b.control.proxySet)}`);
+    assert.deepEqual(agent.proxiedDevices(), {});
+    await agent.shutdown();
+  });
+});

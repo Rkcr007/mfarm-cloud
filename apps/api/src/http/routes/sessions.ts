@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { withTenant, withSystem } from '../../db.ts';
 import { allocate, release, queueStanding, type QueueStanding } from '../../allocator.ts';
+import { TUNNEL_CAPABILITY } from '@mfarm/protocol';
 
 /**
  * The queue standing, as JSON.
@@ -166,6 +167,19 @@ function hostForDevice(deviceId: string): Promise<HostRow | undefined> {
   });
 }
 
+/**
+ * Did this caller ask for a tunnel? Both spellings, matching `pickTunnel` in `proxy-router.ts`.
+ *
+ * The two must agree: this one decides which devices may be allocated and that one decides whether
+ * a request is routed, and a session allocated on one reading and refused on the other is a device
+ * that installs, runs and reaches nothing.
+ */
+function tunnelRequested(bag: Record<string, unknown> | undefined): boolean {
+  if (!bag || typeof bag !== 'object') return false;
+  const v = bag[TUNNEL_CAPABILITY] ?? bag.tunnel;
+  return typeof v === 'string' && v.length > 0;
+}
+
 export async function sessionRoutes(app: FastifyInstance) {
   /**
    * Allocate a device and return the DATA PLANE coordinates.
@@ -209,7 +223,17 @@ export async function sessionRoutes(app: FastifyInstance) {
       tier: req.body.tier ?? null,
       ttlMinutes: req.body.ttlMinutes,
       requested: req.body.requested,
-      requireCapabilities: req.body.requireCapabilities,
+      /**
+       * A session that named a tunnel needs a device that can actually be pointed at one (ADR-0037).
+       *
+       * DERIVED HERE RATHER THAN DEMANDED OF THE CALLER, and the hub does the same thing on its own
+       * path. `mfarm:tunnel` is the request; `network-proxy` is what serving it requires, and a
+       * client should not have to know the second name to get the first thing. Added rather than
+       * replacing, so a caller that asked for other capabilities still gets them.
+       */
+      requireCapabilities: tunnelRequested(req.body.requested)
+        ? [...new Set([...(req.body.requireCapabilities ?? []), 'network-proxy'])]
+        : req.body.requireCapabilities,
       profile: req.body.profile ?? null,
       matchProfile: req.body.matchProfile ?? false,
     });

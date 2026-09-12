@@ -996,6 +996,22 @@ async function main(): Promise<void> {
     log: (msg, meta) => console.log(`[agent] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
   });
   tunnel?.start();
+  /**
+   * The agent can only proxy a device once there is a tunnel to carry the request (ADR-0037).
+   *
+   * INSTALLED HERE rather than passed to the constructor because the tunnel takes the agent: the
+   * two cannot both be built first. Until this line runs, `syncProxies` opens no listener at all
+   * — which is the honest state, since a listener with nowhere to send a request would answer every
+   * one of them 503.
+   *
+   * A host with `MFARM_TUNNEL=0` never gets one, and its devices are never proxied. That is the
+   * same fact from the other direction: the path to a customer's network is the agent's tunnel.
+   */
+  //
+  // ADAPTED RATHER THAN PASSED: the tunnel carries three kinds of channel and names this one
+  // `openProxy`, while `DeviceProxy` wants the single narrow `open` — which is exactly the seam
+  // that lets its test drive it with no socket.
+  if (tunnel) agent.attachProxyTransport({ open: (localId, sink) => tunnel.openProxy(localId, sink) });
 
   agent.startHeartbeat();
   agent.startMetering();

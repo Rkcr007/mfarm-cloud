@@ -301,6 +301,37 @@ export interface DeviceControl {
     },
   ): Promise<{ stopped: boolean; deleted: number }>;
 
+  /**
+   * Point this device's HTTP traffic at `value` (`host:port`), or clear it with `null`.
+   *
+   * THE LAST HOP OF ADR-0037, and the one the ADR shipped without: every other link in the path
+   * from a device to the customer's network was tested over real sockets, while nothing ever told a
+   * guest to use the proxy at all. `DeviceProxy` had no caller outside its own test.
+   *
+   * OPTIONAL, like every other capability on this interface, and its absence is honest: an iOS
+   * simulator has no `settings` to put. A backend that implements it declares `network-proxy`, and
+   * a session naming `mfarm:tunnel` requires that capability — so a device that cannot be pointed
+   * anywhere is never allocated to a suite that needs it to be.
+   *
+   * MUST BE IDEMPOTENT. The control plane re-sends the desired set on every beat and the agent
+   * converges on it, so this is called with the same value repeatedly and must cost nothing the
+   * second time.
+   */
+  setHttpProxy?(value: string | null): Promise<void>;
+
+  /**
+   * The address on THIS host that THIS device can reach it on — where `DeviceProxy` must listen.
+   *
+   * ASKED, NOT COMPUTED. On Cuttlefish every guest sits on its own /30 with the host at the other
+   * end, so the answer is the guest's own default gateway and it is read from the guest rather
+   * than derived from an instance number — the arithmetic is right until cvd renumbers, and a
+   * listener bound to a wrong-but-plausible address fails as a timeout rather than as an error.
+   *
+   * Binding it, rather than a host-wide address, is what makes attribution a fact: a request
+   * arriving on this listener came from this device's subnet, by construction. See `device-proxy.ts`.
+   */
+  proxyHost?(): Promise<string | undefined>;
+
   tap(x: number, y: number): Promise<void>;
   swipe(x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
   key(name: KeyName): Promise<void>;
