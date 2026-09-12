@@ -378,8 +378,11 @@ export async function reap(): Promise<{
     if (dueForSweep) lastHostSweepAt = Date.now();
     const q = dueForSweep
       ? await c.query<{ id: string; hostname: string }>(
+          // A RETIRED HOST IS NOT SWEPT (056). There is nothing to withdraw — its devices went when
+          // it was retired — and quarantining it again would rewrite `quarantined_at` on every sweep
+          // for a machine somebody has already said is not coming back.
           `SELECT id, hostname FROM hosts
-            WHERE state = 'UP'
+            WHERE state = 'UP' AND retired_at IS NULL
               AND (last_heartbeat_at IS NULL OR last_heartbeat_at < now() - make_interval(secs => $1))`,
           [hostSilenceMs() / 1000],
         )

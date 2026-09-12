@@ -111,6 +111,10 @@ after(async () => {
     await c.query(`DELETE FROM infra_operations WHERE target_id IN
                      (SELECT id::text FROM hosts WHERE region = $1)`, [REGION]);
     await c.query('ALTER TABLE infra_operations ENABLE TRIGGER infra_operations_append_only');
+    // Sessions first: `sessions.region` references `regions`, and one of the retire tests creates a
+    // session to prove a tenant cannot be retired out from under. Deleting the region before them
+    // fails the whole file's teardown on a foreign key.
+    await c.query('DELETE FROM sessions WHERE region = $1', [REGION]);
     await c.query('DELETE FROM hosts WHERE region = $1', [REGION]);
     await c.query('DELETE FROM regions WHERE code = $1', [REGION]);
   });
@@ -256,6 +260,98 @@ describe('resuming a host', () => {
     assert.equal(res.json().result, 'failed');
     assert.match(res.json().message, /would not make one arrive/);
     assert.equal((await hostRow(host)).state, 'QUARANTINED');
+  });
+});
+
+describe('retiring a host', () => {
+  /**
+   * THE CASE THIS EXISTS FOR. A laptop ran an agent once on 2026-08-29 and has not beaten since. A
+   * fortnight later it was still a CRITICAL alert, still the reason the health rollup could never
+   * read healthy, and still counted in "1 of 2 hosts powered on".
+   *
+   * A rollup that is always amber is one people stop reading, which is the one thing the health
+   * board must not become.
+   */
+  const silentHost = async (name: string, minutesAgo: number) => {
+    const id = await seedHost(name, { beatSecondsAgo: minutesAgo * 60 });
+    return id;
+  };
+
+  test('a machine that has gone quiet leaves the fleet, and its devices go with it', async () => {
+    const host = await silentHost('gone', 60);
+    const ready = await seedDevice(host, 'READY');
+
+    const res = await post(`/v1/infra/hosts/${host}/retire`, { reason: 'was a test laptop' });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().result, 'succeeded');
+    assert.match(res.json().message, /no longer part of the fleet/);
+
+    const [row] = await q<{ retired_at: Date | null; retired_reason: string | null }>(
+      'SELECT retired_at, retired_reason FROM hosts WHERE id = $1', [host]);
+    assert.ok(row.retired_at);
+    assert.equal(row.retired_reason, 'was a test laptop');
+
+    const [device] = await q<{ state: string }>(
+      'SELECT state::text AS state FROM devices WHERE id = $1', [ready]);
+    assert.equal(device.state, 'QUARANTINED', 'a retired host left allocatable devices behind');
+  });
+
+  test('IT DISAPPEARS FROM THE FLEET, which is the whole point', async () => {
+    const host = await silentHost('vanishing', 60);
+    const before = await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie: operatorCookie } });
+    assert.ok(before.json().hosts.some((h: { id: string }) => h.id === host));
+
+    await post(`/v1/infra/hosts/${host}/retire`, {});
+
+    const after = await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie: operatorCookie } });
+    assert.ok(!after.json().hosts.some((h: { id: string }) => h.id === host),
+      'a retired machine is still being counted, alerted on and shown');
+  });
+
+  test('NOTHING IS DELETED — the record survives', async () => {
+    const host = await silentHost('remembered', 60);
+    await post(`/v1/infra/hosts/${host}/retire`, {});
+
+    // The row, its power history and the operation against it all still resolve. That is the whole
+    // reason this is a timestamp and not a DELETE.
+    const [row] = await q<{ hostname: string }>('SELECT hostname FROM hosts WHERE id = $1', [host]);
+    assert.ok(row, 'the host row was deleted, taking its cost history with it');
+    const ops = await opsFor(host);
+    assert.ok(ops.length >= 1);
+    assert.equal(ops.at(-1)!.action, 'retire-host');
+  });
+
+  test('a machine that is still reporting is REFUSED, and told to drain instead', async () => {
+    const host = await seedHost('still-here', { beatSecondsAgo: 5 });
+    const res = await post(`/v1/infra/hosts/${host}/retire`, {});
+    assert.equal(res.json().result, 'failed');
+    assert.match(res.json().message, /still reporting/);
+    assert.match(res.json().message, /drain it/,
+      'a refusal that does not say what to do instead sends somebody to SSH');
+
+    const [row] = await q<{ retired_at: Date | null }>(
+      'SELECT retired_at FROM hosts WHERE id = $1', [host]);
+    assert.equal(row.retired_at, null);
+  });
+
+  test('a machine with a tenant on it is REFUSED', async () => {
+    const host = await silentHost('busy-but-quiet', 60);
+    const device = await seedDevice(host, 'SESSION_ACTIVE');
+    await q(
+      `INSERT INTO sessions (org_id, device_id, state, requested, constraints, region)
+       VALUES ($1, $2, 'ACTIVE', '{}'::jsonb, '{}'::jsonb, $3)`, [orgId, device, REGION]);
+
+    const res = await post(`/v1/infra/hosts/${host}/retire`, {});
+    assert.equal(res.json().result, 'failed');
+    assert.match(res.json().message, /must not be a way to take a device out from under somebody/);
+  });
+
+  test('RETIRING TWICE IS A NOOP', async () => {
+    const host = await silentHost('twice-retired', 60);
+    await post(`/v1/infra/hosts/${host}/retire`, {});
+    const res = await post(`/v1/infra/hosts/${host}/retire`, {});
+    assert.equal(res.json().result, 'noop');
+    assert.match(res.json().message, /already retired/);
   });
 });
 

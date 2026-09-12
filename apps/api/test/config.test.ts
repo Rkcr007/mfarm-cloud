@@ -581,3 +581,70 @@ describe('the production compose file passes through what the API reads', () => 
       + 'that is configured, reports no error, and does not do the thing.');
   });
 });
+
+/**
+ * The cloud estate's rates — ADR-0038.
+ *
+ * Asserted HERE rather than in `infra-inventory.test.ts` because `loadConfig()` memoises: a test
+ * that deletes an environment variable at runtime is testing the memo. `parseConfig` takes its
+ * environment as an argument, which is the seam this whole file is built on.
+ */
+describe('cloud rates and the power allow-list', () => {
+  test('every rate is UNSET by default — a self-hosted farm has not told us what it pays', () => {
+    const c = parseConfig({});
+    assert.equal(c.cloudDiskRatePerGbMonth, null);
+    assert.equal(c.cloudSnapshotRatePerGbMonth, null);
+    assert.equal(c.cloudAddressRatePerHour, null);
+    assert.equal(c.cloudInstanceRates.size, 0);
+    // A number invented here would be rendered as though the farm had measured it — the same rule
+    // `hostHourlyCost` follows, and the reason an unpriced resource is shown with its size instead.
+    assert.equal(c.hostHourlyCost, null);
+  });
+
+  test('rates parse, and a per-instance rate overrides the fleet-wide one', () => {
+    const c = parseConfig({
+      CLOUD_DISK_RATE: '8.5',
+      CLOUD_SNAPSHOT_RATE: '2.2',
+      CLOUD_ADDRESS_RATE: '0.83',
+      CLOUD_INSTANCE_RATES: 'mfarm-lab=65,mfarm-cp=2.7',
+    });
+    assert.equal(c.cloudDiskRatePerGbMonth, 8.5);
+    assert.equal(c.cloudSnapshotRatePerGbMonth, 2.2);
+    assert.equal(c.cloudAddressRatePerHour, 0.83);
+    assert.equal(c.cloudInstanceRates.get('mfarm-lab'), 65);
+    // The control plane and a sixteen-core device host do not cost the same, and one rate for both
+    // is how the control plane's share stayed invisible.
+    assert.equal(c.cloudInstanceRates.get('mfarm-cp'), 2.7);
+  });
+
+  test('a rate that is not a number is REFUSED, not silently dropped', () => {
+    // An operator who set a rate and got silence would believe the page was pricing their estate,
+    // and every figure on it would be missing the thing they configured it for.
+    assert.ok(mentions(refusal(prod({ CLOUD_DISK_RATE: 'about eight' })), 'CLOUD_DISK_RATE'));
+    assert.ok(mentions(refusal(prod({ CLOUD_SNAPSHOT_RATE: '-1' })), 'non-negative'));
+  });
+
+  test('a malformed allow-list entry is refused, naming the entry', () => {
+    assert.ok(mentions(
+      refusal(prod({ MFARM_POWER_INSTANCES: 'mfarm-lab', GCP_PROJECT: 'p' })), 'mfarm-lab'));
+    assert.ok(mentions(
+      refusal(prod({ MFARM_POWER_INSTANCES: 'Mfarm-Lab:zone', GCP_PROJECT: 'p' })),
+      'valid instance name'));
+  });
+
+  test('an allow-list with no project is refused — there is nothing to act in', () => {
+    assert.ok(mentions(
+      refusal(prod({ MFARM_POWER_INSTANCES: 'mfarm-lab:asia-south1-c' })), 'GCP_PROJECT'));
+  });
+
+  test('the FQDN form maps a registered hostname onto an instance name', () => {
+    // The defect the real farm found: a worker registers under its internal FQDN on GCE, so an
+    // allow-list written from the instance name matches nothing and fails silently.
+    const c = parseConfig({
+      GCP_PROJECT: 'mfarm-lab',
+      MFARM_POWER_INSTANCES: 'mfarm-lab.asia-south1-c.c.mfarm-lab.internal=mfarm-lab:asia-south1-c',
+    });
+    assert.deepEqual(c.powerInstances.get('mfarm-lab.asia-south1-c.c.mfarm-lab.internal'),
+      { instance: 'mfarm-lab', zone: 'asia-south1-c' });
+  });
+});

@@ -571,3 +571,67 @@ tests:
               summary: 'small is CPU saturated'
               description: >-
                 Load average is more than four times the core count, sustained. On this farm the host's CPU is the binding constraint on rendering — a saturated host reaches a tenant as slow frames and flaky timing assertions, not as a failure anyone can see.
+
+  # -------------------------------------------------------------------------------------------
+  # IDLE AND BILLING — and the neighbouring case that must stay quiet.
+  #
+  # This is the alert `STATUS.md` records as already having cost ₹230: the console has shown a
+  # powered-on host since ADR-0035 and nothing ever paged about one. Both directions are asserted,
+  # because the failure mode of this particular rule is the expensive one — a rule that cannot fire
+  # is indistinguishable from a farm nobody left running.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a host that is on with nothing allocated eventually pages
+    input_series:
+      - series: 'mfarm_hosts{state="UP"}'
+        values: '1x240'
+      - series: 'mfarm_devices{state="READY",region="asia-south1",platform="android",tier="cuttlefish"}'
+        values: '4x240'
+      - series: 'mfarm_devices{state="RESERVED",region="asia-south1",platform="android",tier="cuttlefish"}'
+        values: '0x240'
+      - series: 'mfarm_devices{state="SESSION_ACTIVE",region="asia-south1",platform="android",tier="cuttlefish"}'
+        values: '0x240'
+    alert_rule_test:
+      # Not yet: a farm is legitimately on and idle between two suites, and a rule that fires during
+      # a coffee break is one that gets silenced.
+      - eval_time: 1h
+        alertname: MfarmHostIdleAndBilling
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: MfarmHostIdleAndBilling
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: A device host has been powered on and unused for two hours
+              description: >-
+                Every host is on and not one device is allocated. A host is billed while it is POWERED ON, whether or not anything is running on it — that is the whole shape of the 2026-09-11 incident, where the farm ran for twenty hours and forty-eight minutes after a check that needed two. Stop it from the Infrastructure page, or drain it if you are keeping it for something.
+              runbook: https://farm.mfarm.dev/#/infra/hosts
+
+  # -------------------------------------------------------------------------------------------
+  # A BUSY FARM MUST NOT PAGE, and neither must one that is switched off. Both are the states this
+  # rule spends most of its life in, and either firing would teach somebody to ignore it.
+  # -------------------------------------------------------------------------------------------
+  - interval: 1m
+    name: a farm that is being used, and a farm that is off, stay quiet
+    input_series:
+      - series: 'mfarm_hosts{state="UP"}'
+        values: '1x240'
+      - series: 'mfarm_devices{state="SESSION_ACTIVE",region="asia-south1",platform="android",tier="cuttlefish"}'
+        values: '1x240'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: MfarmHostIdleAndBilling
+        exp_alerts: []
+
+  - interval: 1m
+    name: a farm with nothing powered on stays quiet
+    input_series:
+      - series: 'mfarm_hosts{state="UP"}'
+        values: '0x240'
+      - series: 'mfarm_devices{state="RESERVED",region="asia-south1",platform="android",tier="cuttlefish"}'
+        values: '0x240'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: MfarmHostIdleAndBilling
+        exp_alerts: []

@@ -1,6 +1,7 @@
 import type { FastifyRequest } from 'fastify';
 import { withSystem } from '../db.ts';
 import { notFound, forbidden } from '../http/errors.ts';
+import { requireUser } from '../http/server.ts';
 import { audited, type StepResult } from './audit.ts';
 import { infraChanged } from './stream.ts';
 import {
@@ -41,6 +42,8 @@ interface Host {
   state: string;
   quarantineSource: string | null;
   quarantineReason: string | null;
+  retiredAt: Date | null;
+  lastHeartbeatAt: Date | null;
   activeSessions: number;
   idleDevices: number;
 }
@@ -49,7 +52,7 @@ async function loadHost(hostId: string): Promise<Host> {
   const rows = await withSystem(async (c) => {
     const { rows } = await c.query(
       `SELECT h.id, h.hostname, h.state::text AS state,
-              h.quarantine_source, h.quarantine_reason,
+              h.quarantine_source, h.quarantine_reason, h.retired_at, h.last_heartbeat_at,
               (SELECT count(*) FROM sessions s JOIN devices d ON d.id = s.device_id
                 WHERE d.host_id = h.id AND s.state IN ('ACTIVE','ALLOCATING')) AS active_sessions,
               -- Exactly what "quarantine_host" withdraws, counted with the same predicate so the
@@ -69,6 +72,8 @@ async function loadHost(hostId: string): Promise<Host> {
     state: r.state,
     quarantineSource: r.quarantine_source,
     quarantineReason: r.quarantine_reason,
+    retiredAt: r.retired_at,
+    lastHeartbeatAt: r.last_heartbeat_at,
     activeSessions: Number(r.active_sessions ?? 0),
     idleDevices: Number(r.idle_devices ?? 0),
   };
@@ -558,3 +563,128 @@ export const stopHost = (req: FastifyRequest, id: string, reason?: unknown) =>
   powerOperation(req, id, 'stop', reason);
 export const restartHost = (req: FastifyRequest, id: string, reason?: unknown) =>
   powerOperation(req, id, 'restart', reason);
+
+/* ------------------------------------------------------------------ retire */
+
+/**
+ * How long a machine must have been silent before it can be retired.
+ *
+ * TEN MINUTES, which is far past the reaper's ninety seconds and far short of "obviously dead". The
+ * point is not to guess whether a machine is coming back — a person is making that judgement — it is
+ * to stop somebody retiring a host that is merely mid-reboot and then wondering why it reappeared.
+ */
+const RETIRE_SILENCE_MS = 10 * 60_000;
+
+/**
+ * RETIRE — take a machine out of the fleet for good.
+ *
+ * ---------------------------------------------------------------- what this is for
+ *
+ * A laptop ran an agent once and has not beaten in a fortnight. There was no way to say so, and the
+ * consequence was not cosmetic: it was a permanent CRITICAL alert, a health rollup that could never
+ * read healthy, and a headline that counted a machine nobody would ever allocate. **A rollup that is
+ * always amber is one people stop reading**, which is the one thing the health board must not become.
+ *
+ * ---------------------------------------------------------------- what it is not
+ *
+ * NOT A DELETE. `hosts` cascades to devices and to the power ledger, and `infra_operations` rows
+ * point at a host id — deleting throws away what the machine cost and what its devices did, which is
+ * the history this page exists to keep. Migration 056 is a timestamp; every read that describes the
+ * CURRENT fleet filters on it and every read that describes the past does not.
+ *
+ * NOT PERMANENT. Registering the agent again clears it — see `routes/workers.ts`. That is the same
+ * rule a heartbeat follows against a silence quarantine and against `DOWN`: the claim is "this
+ * machine is not part of the fleet", and the machine setting itself up again falsifies it.
+ *
+ * NOT A WAY TO EVICT ANYBODY. The devices are withdrawn through `quarantine_host`, which is the one
+ * function that knows how to do that safely — RESERVED and SESSION_ACTIVE are left alone, so a
+ * tenant mid-session is never interrupted, and each device records what it was.
+ */
+export async function retireHost(
+  req: FastifyRequest, hostId: string, reasonRaw: unknown,
+): Promise<OperationOutcome> {
+  const host = await loadHost(hostId);
+  const reason = cleanReason(reasonRaw, 'retired by an operator from the console');
+
+  return audited(req, {
+    action: 'retire-host',
+    targetKind: 'host',
+    targetId: host.id,
+    targetLabel: host.hostname,
+    params: { reason },
+  }, async (): Promise<Step> => {
+    if (host.retiredAt) {
+      return {
+        result: 'noop',
+        detail: 'Already retired.',
+        value: {
+          result: 'noop',
+          message: `${host.hostname} was already retired. Nothing changed.`,
+        },
+      };
+    }
+
+    /**
+     * A MACHINE THAT IS STILL TALKING CANNOT BE RETIRED, and refusing is kinder than allowing it.
+     *
+     * Registration un-retires, and a running agent registers on start — so retiring a live host
+     * would either bounce straight back (confusing) or take a working machine out of the fleet until
+     * somebody restarted its agent (worse). Drain is the operation for "stop using this for now";
+     * retire is for "this is not coming back".
+     */
+    const silentFor = host.lastHeartbeatAt
+      ? Date.now() - host.lastHeartbeatAt.getTime()
+      : Number.POSITIVE_INFINITY;
+    if (silentFor < RETIRE_SILENCE_MS) {
+      return {
+        result: 'failed',
+        detail: `Refused: last heard from ${Math.round(silentFor / 1000)}s ago.`,
+        value: {
+          result: 'failed',
+          message: `${host.hostname} is still reporting — it was last heard from `
+            + `${Math.round(silentFor / 1000)} seconds ago. Retiring is for a machine that is not `
+            + 'coming back. To stop placing work on one that is, drain it.',
+        },
+      };
+    }
+
+    if (host.activeSessions > 0) {
+      return {
+        result: 'failed',
+        detail: `Refused: ${host.activeSessions} session(s) still running.`,
+        value: {
+          result: 'failed',
+          message: `${host.hostname} still has ${host.activeSessions} running `
+            + `session${host.activeSessions === 1 ? '' : 's'} against it. Let them end first — `
+            + 'retiring a machine must not be a way to take a device out from under somebody.',
+        },
+      };
+    }
+
+    const { userId } = requireUser(req);
+    const withdrawn = await withSystem(async (c) => {
+      // The devices first, through the function that knows how to do it safely.
+      const { rows } = await c.query<{ n: number }>(
+        'SELECT quarantine_host($1, $2, $3) AS n',
+        [host.id, `retired: ${reason}`, 'operator']);
+      await c.query(
+        `UPDATE hosts SET retired_at = now(), retired_by = $2, retired_reason = $3 WHERE id = $1`,
+        [host.id, userId, reason]);
+      return Number(rows[0]?.n ?? 0);
+    });
+    infraChanged();
+
+    return {
+      result: 'succeeded',
+      detail: `${withdrawn} device(s) withdrawn; host retired.`,
+      value: {
+        result: 'succeeded',
+        message: `${host.hostname} is retired and no longer part of the fleet`
+          + (withdrawn ? `, and ${withdrawn} device${withdrawn === 1 ? '' : 's'} went with it` : '')
+          + '. What it cost and what its devices did stays in the record. Running the agent on it '
+          + 'again brings it back.',
+        changed: { devicesWithdrawn: withdrawn },
+      },
+    };
+  });
+}

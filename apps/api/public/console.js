@@ -145,6 +145,12 @@ export const state = {
    */
   infraStream: null,
   /**
+   * The cloud estate (`GET /v1/infra/cloud`). Fetched when the section is opened rather than on the
+   * poll: four cloud API calls on a five-second tick would be a rate-limit problem, and an estate
+   * changes when somebody runs a gcloud command, not every five seconds.
+   */
+  infraCloud: { data: null, loaded: false, loading: false, error: null },
+  /**
    * The operations log and the filters it is being read through.
    *
    * HELD IN STATE, NOT IN THE DOM — the same reason `runsQuery` is: the poll re-renders this screen,
@@ -1889,7 +1895,11 @@ export function loadForRoute() {
     // The stream is opened here and nowhere else, so there is exactly one place that can leave one
     // running. `go()` closes it on the way out — see the hashchange handler.
     openInfraStream();
-    return refreshInfra();
+    // The cloud estate only when that section is the one being opened: four cloud API calls are not
+    // something to spend on somebody glancing at the overview.
+    return state.lens === 'cloud'
+      ? Promise.all([refreshInfra(), refreshInfraCloud()])
+      : refreshInfra();
   }
   return Promise.resolve();
 }
@@ -2600,6 +2610,15 @@ const LENSES = [
 const INFRA_SECTIONS = [
   ['overview', 'Overview'],
   ['hosts', 'Hosts'],
+  /**
+   * CLOUD — everything the project contains, which is not the same set as Hosts.
+   *
+   * Hosts are machines running an agent: one VM on this farm. The project also holds the CONTROL
+   * PLANE, 180 GB of disk, three snapshots and two reserved addresses — all of which bill whether or
+   * not anything is running, and none of which appeared anywhere in the product. It sits next to
+   * Hosts because the question "what do we actually have" is answered by both together.
+   */
+  ['cloud', 'Cloud'],
   ['services', 'Services'],
   ['devices', 'Devices'],
   ['usage', 'Usage & Cost'],
@@ -8566,6 +8585,44 @@ function askPower(host, verb) {
 }
 
 /**
+ * RETIRING IS THE ONE OPERATION THAT CHANGES WHAT THE FLEET *IS*, so the dialog says what survives.
+ *
+ * Everything else here is reversible by pressing the other button. This removes a machine from every
+ * answer the product gives about "what do we have" — and the fear that stops somebody pressing it is
+ * losing the record. They do not: the cost ledger, the operations log and the device history all
+ * key on a host id that still resolves. Saying so is what makes the button usable.
+ */
+function askRetire(host) {
+  const reason = h('input', {
+    class: 'field', type: 'text', maxlength: '200', autocomplete: 'off',
+    placeholder: 'Why, for the log — decommissioned, was a test machine…',
+  });
+  confirmDialog({
+    title: `Retire ${host.hostname}?`,
+    lead: 'It stops being part of the fleet: no health rollup, no alerts, no count in the headline. '
+      + 'This is for a machine that is not coming back.',
+    removesLabel: 'What happens',
+    removes: [
+      host.devices.total
+        ? `${host.devices.total} device${host.devices.total === 1 ? '' : 's'} go with it`
+        : 'it has no devices to remove',
+      'it stops raising alerts and stops being counted as down',
+      'running the agent on it again brings it straight back',
+    ],
+    keeps: 'Nothing is deleted. What it cost, what its devices did, and every operation against it '
+      + 'stay in the record.',
+    fields: [h('label', { class: 'stack tight' },
+      h('span', { class: 'micro', text: 'Reason (optional)' }), reason)],
+    confirm: 'Retire host',
+    onConfirm: () => runInfraOperation(
+      `/v1/infra/hosts/${encodeURIComponent(host.id)}/retire`,
+      { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
+      { pending: `Retiring ${host.hostname}…` },
+    ),
+  });
+}
+
+/**
  * The controls a host card offers, which is exactly what the SERVER says this deployment can do.
  *
  * `capabilities` is read per operation rather than per page: `drain` being available says nothing
@@ -8612,6 +8669,19 @@ function infraHostControls(host, caps) {
           + 'and nothing changes.',
       }));
     }
+  }
+
+  /**
+   * RETIRE — offered only for a machine that has genuinely gone quiet.
+   *
+   * The gate is the same one the server enforces, and it is here so nobody has to read a refusal to
+   * discover it: retiring is for a host that is not coming back, and a machine that is still
+   * reporting would either bounce back on its next registration or be stranded. `unavailable` is
+   * exactly "we have not heard from it past the reaper's threshold"; `unknown` is a host that has
+   * never reported at all, which is the other shape of the same thing.
+   */
+  if (caps?.retire && (host.reachability === 'unavailable' || host.reachability === 'unknown')) {
+    controls.push(btn('Retire', 'tiny ghost', () => askRetire(host)));
   }
 
   if (caps?.drain) {
@@ -9032,9 +9102,19 @@ function infraHostCard(host, rate) {
       h('span', { class: 'caption', text: `${cost(host.cost?.sinceUp, rate)} since it came up` }),
       h('span', { class: 'caption', text: `${cost(host.cost?.today, rate)} today` }),
       h('span', { class: 'caption', text: `${cost(host.cost?.monthToDate, rate)} this month` }),
+      /**
+       * THE NUMBER AND WHY IT IS THAT NUMBER. `0% used` reads as an accusation, and on a day when
+       * nobody ran a suite it is not one — the machine did exactly what was asked of it. The two
+       * cases have different fixes ("stop the machine" against "look at the suite"), so the basis is
+       * on the row rather than left to be inferred.
+       */
       host.utilisationPct !== null
-        ? h('span', { class: `caption${host.utilisationPct < 5 ? ' warn-text' : ''}`, text: `${host.utilisationPct}% used` })
-        : null,
+        ? h('span', {
+            class: `caption${host.utilisationPct < 5 ? ' warn-text' : ''}`,
+            title: host.utilisationBasis || null,
+            text: `${host.utilisationPct}% used`,
+          })
+        : h('span', { class: 'caption', title: host.utilisationBasis || null, text: 'not used today' }),
     ),
 
     host.maintenance?.drained
@@ -9060,6 +9140,189 @@ function infraHosts(data) {
       'Every machine this farm runs on. A host is billed while it is POWERED ON, whether or not '
       + 'anything is allocated on it — which is a different question from what a tenant consumed.' }),
     h('div', { class: 'stack' }, data.hosts.map((host) => infraHostCard(host, data.cost?.rate))),
+  ];
+}
+
+/* ---------------------------------------------------------------- the cloud estate */
+
+/**
+ * Everything this app has in the cloud, and what it costs when nothing is running.
+ *
+ * WHY THIS SECTION EXISTS SEPARATELY FROM HOSTS. A host is a machine running an agent — one VM on
+ * this farm. The project also holds the CONTROL PLANE, which had never appeared anywhere in the
+ * product, 180 GB of persistent disk, three snapshots and two reserved addresses. None of those
+ * care whether a VM is running, so **"we stopped it, so it costs nothing" was never true** and there
+ * was no surface that could say so.
+ *
+ * THE FLOOR IS THE HEADLINE. Everything else on this page is about the variable cost — what is on
+ * right now. This is the number underneath it, and it is the one that does not go away when you
+ * press Stop.
+ */
+async function refreshInfraCloud(force = false) {
+  if (state.infraCloud.loading) return;
+  state.infraCloud.loading = true;
+  try {
+    const data = await api(`/v1/infra/cloud${force ? '?refresh=1' : ''}`);
+    state.infraCloud = { data, loaded: true, loading: false, error: null };
+  } catch (e) {
+    // The previous answer is kept. An estate view that blanks on a transient failure is useless at
+    // exactly the moment somebody is trying to work out what they are paying for.
+    state.infraCloud = { ...state.infraCloud, loaded: true, loading: false, error: e.message };
+  }
+}
+
+/** Bytes, at the resolution a person reads them. */
+function gb(bytes) {
+  if (bytes === null || bytes === undefined) return '—';
+  const value = bytes / 1024 ** 3;
+  return value >= 100 ? `${Math.round(value)} GB` : `${value.toFixed(1)} GB`;
+}
+
+function infraCloud(data) {
+  const { data: inv, loaded, error } = state.infraCloud;
+  if (!loaded) {
+    if (!state.infraCloud.loading) void refreshInfraCloud().then(render);
+    return [h('p', { class: 'empty' }, h('strong', { text: 'Reading the project…' }))];
+  }
+
+  if (!inv?.configured) {
+    return [
+      card(null, { class: 'gate' },
+        h('p', { class: 'card-title', text: 'This control plane cannot see the cloud' }),
+        h('p', { class: 'help', text:
+          'Reading the project needs the same credential power control does — a service account on '
+          + 'the control plane and GCP_PROJECT set. Until then this page can only show machines that '
+          + 'registered an agent, which is not the same thing as what you are paying for. '
+          + 'docs/RUNBOOK.md has the commands.' })),
+    ];
+  }
+
+  const c = inv.cost || {};
+  const cur = c.currency || '';
+  const amount = (v) => (v === null || v === undefined ? '—' : `${cur}${Math.round(v).toLocaleString()}`);
+
+  const stat = (label, value, note, tone) => card(null, { class: `stat stack tight${tone === 'bad' ? ' stat-bad' : ''}` },
+    h('p', { class: 'micro', text: label }),
+    h('p', { class: 'row tight' }, h('span', { class: `dot ${tone || ''}`.trim() }), h('span', { class: 'val', text: value })),
+    h('p', { class: 'caption', text: note }),
+  );
+
+  const running = (inv.instances || []).filter((i) => i.status === 'RUNNING').length;
+
+  const row = (dot, name, code, detail, right, rightTitle) => h('div', { class: 'buildrow' },
+    h('span', { class: 'row tight idc' },
+      h('span', { class: `dot ${dot || ''}`.trim() }),
+      h('span', { class: 'secondary', text: name }),
+      code ? h('code', { class: 'caption', text: code }) : null),
+    h('span', { class: 'caption', text: detail }),
+    h('span', { class: 'spacer' }),
+    h('span', { class: 'val', text: right, title: rightTitle || null }),
+  );
+
+  return [
+    h('p', { class: 'page-sub mb-gap', text:
+      `Everything in ${inv.project}. Machines are only part of it — disks, snapshots and reserved `
+      + 'addresses are billed whether or not anything is running, which is the floor under every '
+      + '"we stopped it, so it costs nothing".' }),
+
+    error
+      ? card(null, { class: 'gate' },
+          h('p', { class: 'card-title', text: 'These numbers are not current' }),
+          h('p', { class: 'help', text: `The cloud API did not answer: ${error}` }))
+      : null,
+
+    h('div', { class: 'statgrid mb-gap' },
+      /**
+       * THE FLOOR FIRST, and it is the only figure on this page that is news. Everything else the
+       * console already says somewhere; this is the one nobody has seen.
+       */
+      stat('Floor, per month', amount(c.floorPerMonth),
+        'With every machine switched off', c.floorPerMonth ? 'warn' : ''),
+      stat('Running now', c.runningPerHour === null || c.runningPerHour === undefined
+        ? '—' : `${amount(c.runningPerHour)}/h`,
+        `${running} of ${(inv.instances || []).length} instances on`, running ? 'warn' : ''),
+      stat('Disks', amount(c.byKind?.disks),
+        `${(inv.disks || []).length} · ${(inv.disks || []).reduce((n, d) => n + d.sizeGb, 0)} GB`),
+      stat('Snapshots', amount(c.byKind?.snapshots),
+        `${(inv.snapshots || []).length} · ${gb((inv.snapshots || []).reduce((n, s) => n + (s.storageBytes || 0), 0))} stored`),
+    ),
+
+    (c.unpriced || []).length
+      ? card(null, { class: 'gate waiting' },
+          h('p', { class: 'card-title', text: 'Some of this is not priced' }),
+          h('p', { class: 'help', text:
+            `No rate is configured for ${c.unpriced.join(', ')}. Those resources are listed with `
+            + 'their size and no money rather than with a number this farm made up — see '
+            + 'deploy/docker-compose.prod.yml for the variables.' }))
+      : null,
+
+    card('Instances', { class: 'flush' },
+      h('div', null, (inv.instances || []).map((i) => row(
+        i.status === 'RUNNING' ? 'warn' : '',
+        i.name,
+        i.machineType,
+        [
+          i.status.toLowerCase(),
+          i.zone,
+          // The fact that is genuinely new here: which of these is the control plane. It runs the
+          // page you are reading and had never been listed as infrastructure anywhere.
+          i.isFleetHost ? 'runs a worker agent' : 'not in the fleet',
+        ].join(' · '),
+        i.rateHourly === null ? '—' : `${cur}${i.rateHourly}/h`,
+        i.rateHourly === null ? 'no rate configured for this instance' : null,
+      )))),
+
+    card('Disks', { class: 'flush' },
+      h('div', null, (inv.disks || []).map((d) => row(
+        // An unattached disk is pure waste and is the one thing in this list worth a colour.
+        d.attachedTo ? '' : 'bad',
+        d.name, d.type,
+        [
+          `${d.sizeGb} GB`,
+          d.zone,
+          d.attachedTo ? `attached to ${d.attachedTo}` : 'NOT ATTACHED — billed for nothing',
+        ].join(' · '),
+        amount(d.costPerMonth), 'per month',
+      )))),
+
+    card('Reserved addresses', { class: 'flush' },
+      h('div', null, (inv.addresses || []).map((a) => row(
+        a.billed ? 'warn' : '',
+        a.name, a.address,
+        [
+          a.region,
+          a.attachedTo ? `on ${a.attachedTo}` : 'unattached',
+          /**
+           * THE COUNTER-INTUITIVE ONE. GCE bills a reserved address whenever it is NOT attached to a
+           * RUNNING instance — so stopping a VM starts a charge on its address rather than ending
+           * one. Nobody discovers that from a status of IN_USE, which is why this says it in words.
+           */
+          a.billed ? 'BILLED — not on a running instance' : 'free while its instance runs',
+        ].join(' · '),
+        amount(a.costPerMonth), 'per month',
+      )))),
+
+    card('Snapshots', { class: 'flush' },
+      (inv.snapshots || []).length
+        ? h('div', null, (inv.snapshots || []).map((s) => row(
+            '', s.name, s.sourceDisk || '',
+            [
+              // Billed on bytes STORED, not on the disk it came from — a mostly-empty 150 GB disk
+              // snapshots to a few GB, and showing 150 would overstate this tenfold.
+              `${gb(s.storageBytes)} stored`,
+              `restores ${s.diskSizeGb} GB`,
+              s.createdAt ? `taken ${ago(s.createdAt)}` : null,
+            ].filter(Boolean).join(' · '),
+            amount(s.costPerMonth), 'per month',
+          )))
+        : empty('No snapshots.', 'Nothing is being kept against a catastrophe.')),
+
+    h('p', { class: 'caption mt-md' },
+      `Read from the project ${inv.fetchedAt ? ago(inv.fetchedAt) : 'just now'}, cached for a minute. `,
+      btn('Refresh', 'tiny ghost', async () => {
+        await refreshInfraCloud(true);
+        render();
+      })),
   ];
 }
 
@@ -9250,7 +9513,19 @@ function infraUsage(data) {
         `at ${cost(c.rate.hourly, c.rate)}/hour per host`, c.runningPerHour ? 'warn' : ''),
       stat('Today', cost(c.today, c.rate), 'Since midnight'),
       stat('This month', cost(c.monthToDate, c.rate), 'Month to date'),
-      stat('Projected', cost(c.estimatedMonth?.value, c.rate), c.estimatedMonth?.basis || ''),
+      /**
+       * TWO PROJECTIONS, DELIBERATELY, and the page says which is which.
+       *
+       * "If it stays as it is" is the alarming reading and it is the right one for a host somebody
+       * left on overnight. On a farm that is switched off most of the time it is ALWAYS wrong in the
+       * same direction, though, and a figure that is always wrong in the same direction is one
+       * people learn to discount. "If the month looks like the fortnight" is the other bracket.
+       * Neither is the truth; between them an operator can see which they are being asked to worry
+       * about.
+       */
+      stat('If it stays as it is', cost(c.estimatedMonth?.value, c.rate), c.estimatedMonth?.basis || ''),
+      stat('If it carries on as it has', cost(c.estimatedMonthAtRecentRate?.value, c.rate),
+        c.estimatedMonthAtRecentRate?.basis || ''),
     ),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
@@ -9291,7 +9566,12 @@ function infraUsage(data) {
                   h('span', { class: 'spacer' }),
                   h('span', { class: 'val warn-text', text: cost(i.wastedCost, c.rate) })),
                 h('p', { class: 'caption', text:
-                  `${i.poweredHours}h powered, ${i.utilisationPct}% of its device time used.` })))))
+                  `${i.poweredHours}h powered, ${i.utilisationPct}% of its device time used.` }),
+                // Which of the two idlenesses this is. A host nobody asked anything of is a
+                // different problem from one that was asked and barely used.
+                h('p', { class: 'caption', text: i.utilisationPct === 0
+                  ? 'Nothing ran on it at all today.'
+                  : 'Something ran, and left most of its devices idle.' })))))
           : card('Nothing is idling', {},
               h('p', { class: 'caption', text:
                 'Every host that has been on for more than two hours today is being used. A host '
@@ -9488,11 +9768,12 @@ function screenInfra() {
     !data ? empty('The control plane did not answer.',
       'Nothing below can be shown until it does. The banner above says what it said.')
       : section === 'hosts' ? infraHosts(data)
-        : section === 'services' ? infraServices(data)
-          : section === 'devices' ? infraDevices(data)
-            : section === 'usage' ? infraUsage(data)
-              : section === 'events' ? infraEvents(data)
-                : infraOverview(data),
+        : section === 'cloud' ? infraCloud(data)
+          : section === 'services' ? infraServices(data)
+            : section === 'devices' ? infraDevices(data)
+              : section === 'usage' ? infraUsage(data)
+                : section === 'events' ? infraEvents(data)
+                  : infraOverview(data),
   ];
 }
 

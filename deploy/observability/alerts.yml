@@ -38,6 +38,37 @@ groups:
             is deliberately not a scrape failure — a 500 would hide the process metrics too — which
             means the graphs look plausible and are not current.
 
+      # THE ALERT `STATUS.md` SAYS ALREADY COST ₹230.
+      #
+      # The console has shown a powered-on host since ADR-0035 and nothing has ever paged about one.
+      # On 2026-09-12 the header read "host up 3h 1m · ~₹196" for three and a half hours while nobody
+      # was looking at it — the instrument worked, and the absence of a pager was the whole gap.
+      #
+      # BUILT FROM SERIES THAT ALREADY EXIST rather than from a new "idle" gauge, because idleness is
+      # not a property of a host: it is a host being on AND nothing being allocated, and the two
+      # halves are already measured separately and correctly. A dedicated gauge would be a third
+      # place for the definition to drift.
+      #
+      # TWO HOURS, not twenty minutes. A farm is legitimately on and idle between two suites, and an
+      # alert that fires during a coffee break is one that gets silenced. Two hours of a device host
+      # doing nothing is roughly ₹130 on this farm and is never deliberate.
+      - alert: MfarmHostIdleAndBilling
+        expr: >-
+          (sum(mfarm_hosts{state="UP"}) > 0)
+          and
+          (sum(mfarm_devices{state=~"RESERVED|SESSION_ACTIVE"}) == 0)
+        for: 2h
+        labels: { severity: warning }
+        annotations:
+          summary: A device host has been powered on and unused for two hours
+          description: >-
+            Every host is on and not one device is allocated. A host is billed while it is POWERED
+            ON, whether or not anything is running on it — that is the whole shape of the 2026-09-11
+            incident, where the farm ran for twenty hours and forty-eight minutes after a check that
+            needed two. Stop it from the Infrastructure page, or drain it if you are keeping it for
+            something.
+          runbook: https://farm.mfarm.dev/#/infra/hosts
+
   # ------------------------------------------------------------------ devices
   - name: mfarm-devices
     rules:
