@@ -66,8 +66,48 @@ class ShimNode {
   querySelector(): ShimElement { return new ShimElement('div'); }
   querySelectorAll(): ShimNode[] { return []; }
   closest(): null { return null; }
-  addEventListener(): void {}
-  removeEventListener(): void {}
+
+  /**
+   * LISTENERS ARE KEPT, and until 2026-09-12 they were thrown away.
+   *
+   * `addEventListener` was `(): void {}`, so every handler `h()` bound went straight into the bin.
+   * That made a whole class of defect invisible to this suite by construction: **a control wired to
+   * nothing renders identically to a control that works**. A test could assert a Share button was
+   * on the page, and a version whose `onclick` was `() => {}` passed it — which is one reason every
+   * console defect in this repo has been found by opening a browser rather than by the suite.
+   *
+   * Recording them is also simply CLOSER TO THE PLATFORM, which is the rule this file already
+   * learned twice: a shim that is kinder than the browser does not fail safe, it fails silent (see
+   * `append` above, and `makeStyle` below).
+   */
+  listeners: Record<string, Array<(ev: unknown) => unknown>> = {};
+
+  addEventListener(type: string, fn: (ev: unknown) => unknown): void {
+    if (typeof fn !== 'function') return;
+    (this.listeners[type] ||= []).push(fn);
+  }
+
+  removeEventListener(type: string, fn: (ev: unknown) => unknown): void {
+    this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn);
+  }
+
+  /**
+   * Fire a type's handlers. NOT a DOM dispatch — there is no bubbling, no capture and no default
+   * action, because this shim has no tree semantics to propagate through and inventing some would
+   * be exactly the kindness the note above warns against. It presses the element, nothing more.
+   *
+   * Returns how many handlers ran, so a test can tell "the button did nothing" from "the button
+   * did nothing I could see" — the distinction that makes this worth having at all.
+   */
+  dispatch(type: string, ev: unknown = { type, target: this, preventDefault() {}, stopPropagation() {} }): number {
+    const fns = this.listeners[type] || [];
+    for (const fn of fns) fn(ev);
+    return fns.length;
+  }
+
+  /** The one shorthand worth having: `click()` is what a test is nearly always reaching for. */
+  click(): number { return this.dispatch('click'); }
+
   focus(): void {}
   blur(): void {}
   getBoundingClientRect() { return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
@@ -189,6 +229,30 @@ export function findByClass(node: unknown, cls: string): any {
     if (hit) return hit;
   }
   return null;
+}
+
+/**
+ * Find a rendered control by the text it carries, so a test can PRESS it.
+ *
+ * `findByClass` locates a thing by how it is styled; this locates it the way a person does. That
+ * matters for the same reason `dispatch` exists: asserting a button is on the page and asserting
+ * the page does something when it is pressed are different claims, and only the second one catches
+ * a control wired to nothing.
+ *
+ * Matches a node whose own text CONTAINS `text`, deepest-last so a button inside a row is preferred
+ * over the row — the narrowest thing carrying the label is nearly always the control.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function findByText(node: unknown, text: string, tag = 'button'): any {
+  const hits: ShimElement[] = [];
+  const walk = (n: unknown) => {
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (!(n instanceof ShimElement)) return;
+    if (n.tagName === tag.toUpperCase() && textOf(n).includes(text)) hits.push(n);
+    n.children.forEach(walk);
+  };
+  walk(node);
+  return hits[hits.length - 1] ?? null;
 }
 
 export function classesOf(node: unknown): string[] {

@@ -2566,3 +2566,97 @@ kbd {
 }
 .linkish:hover code { color: var(--accent-text, #C9BCF0); }
 .linkish:focus-visible { outline: 2px solid var(--mf-accent-line, rgba(117, 94, 184, .42)); outline-offset: 2px; }
+
+/* ============================================================ test rows (migration 021, 2026-09-12)
+ *
+ * A session that ran SEVERAL tests used to be one row reading `PASSED 5/5`. Five tests ran, five
+ * were counted, and not one of their names existed anywhere in this console. These are the rules
+ * for the rows that now fold out of that count, and for the Tests card on the session screen.
+ */
+
+/**
+ * The caret on the count. Rotates rather than swapping glyph: a character that changes identity
+ * reads as the control being replaced, and at this size the rotation is the only motion the eye
+ * needs to know the row opened.
+ */
+.caret {
+  display: inline-block;
+  color: var(--t-caption, #6A6A6A);
+  transition: transform var(--m-fast, 160ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+}
+.caret.open { transform: rotate(90deg); }
+.linkish:hover .caret { color: var(--t-primary, #F1F1F1); }
+
+/**
+ * The unfolded row, INSET rather than merely indented.
+ *
+ * A nested table sharing the parent's ground reads as more rows of the same table — which is
+ * exactly the wrong thing to say, because these are a different kind of thing at a different level.
+ * The recessed well is the console's existing vocabulary for "contents of the thing above".
+ */
+.table tbody tr.subrow:hover { background: none; }
+/**
+ * PADDING ON THE CELL, so the nested table sits INSIDE the well rather than spanning it.
+ *
+ * The first version set `padding: 0` and pushed the table to the cell edges. On screen that read as
+ * five more rows of the parent table — the same left edge, the same full width — which is precisely
+ * the thing this treatment exists to deny: these are one session's contents, not five more
+ * sessions. The inset ground alone was not enough to say so; the gutter is what does it.
+ */
+.table tbody tr.subrow > td {
+  padding: var(--mf-rp, 13px);
+  background: var(--s-inset, #050506);
+  border-top: 1px solid var(--b-inset, #1A1A1C);
+}
+.table tbody tr.subrow > td > * { margin: 0; }
+
+/**
+ * The test list itself, in both places it appears — the run screen's fold-out and the session
+ * screen's Tests card. One class so the two cannot drift into two different pictures of the same
+ * data, which is the whole reason a test's name is worth rendering twice.
+ *
+ * `min-width: 0` overrides `.table`'s 760px floor: this one lives inside a cell that is already as
+ * wide as it is going to get, and a minimum would force the PARENT table to scroll horizontally
+ * just because a row was opened.
+ */
+.table.testrows {
+  min-width: 0;
+  background: var(--s-card, #0D0D0F);
+  border: 1px solid var(--b-inset, #1A1A1C);
+  border-radius: var(--r-md, 9px);
+  overflow: hidden;
+}
+.table.testrows td {
+  padding: 9px var(--mf-rp, 13px);
+  border-bottom: 1px solid var(--b-row, #151517);
+  vertical-align: top;
+}
+.table.testrows tr:last-child td { border-bottom: none; }
+/* The name, at body size rather than display size: a list of forty is a list, not forty headings. */
+.table.testrows .fleet-name { font: var(--ty-strong); color: var(--t-primary, #F1F1F1); }
+.table.testrows td:first-child { width: 1%; white-space: nowrap; }
+
+/**
+ * RED FOR A TEST THE SUITE REPORTED AS FAILED, and nothing else — the same reservation the run
+ * screen keeps between a failure and a farm incident, and the steps table keeps between a failed
+ * command and a slow one.
+ */
+.table.testrows tbody tr.failed td { background: var(--bad-bg, rgba(224, 80, 95, .07)); }
+
+/**
+ * The first line of the message, under the name.
+ *
+ * ONE LINE, CLIPPED. A stack trace in a list row would push every other test off the screen, and
+ * the full text is one press away on the Failed card or through a share. Clipped with an ellipsis
+ * rather than wrapped so every row in the list stays the same height and the list stays scannable.
+ */
+.failline {
+  margin: 3px 0 0;
+  color: var(--bad-text, #EE7C88);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  max-width: 68ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
