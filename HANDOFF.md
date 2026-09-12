@@ -4616,3 +4616,75 @@ when the feature is broken. See issues 37 and 38.
     Verified in a browser against a seeded five-test session: all five named on both surfaces, the
     failure's first line in red, Share on the red row, and the fold-out re-styled after the first
     attempt read as five more rows of the parent table rather than as one row's contents.
+
+90. **A DEVICE CAN REACH A HOST ON THE CUSTOMER'S OWN NETWORK.** 2026-09-12, ADR-0037,
+    migration 052.
+
+    Third of the four, and the biggest: `docs/ltcomp/` has carried it as the last P1 gap, and
+    LambdaTest sells it as *Local Connection*. An app under test talks to `staging.acme.internal`,
+    not to production — so the most common thing a team wants to test was the one thing the product
+    could not do.
+
+    **The shape is every other tunnel in this repo, pointed the other way.** `npx @mfarm/cli tunnel`
+    dials out from inside the customer's network and holds one socket; a session sets
+    `mfarm:tunnel=<name>` and the device's HTTP traffic goes device → agent proxy → agent tunnel →
+    control plane → customer client → private host. Four hops, two of them existing machinery.
+
+    **WHO DECIDES WHAT IS THE WHOLE DESIGN.** The agent names ONE DEVICE — the only thing it
+    legitimately knows. The control plane resolves org and tunnel from ROWS (the device's live
+    session). The customer's client decides what may be reached, default deny, `--allow` required.
+    A rule the farm enforced would be a rule the customer had to take our word for, and the second
+    authorization check that eventually contradicts the first.
+
+    **A device with no live session reaches nothing**, and that is a security property rather than
+    bookkeeping: a device between tenants could otherwise let whatever the last tenant left running
+    phone home into the NEXT tenant's network.
+
+    **The one structural protocol change: the channel id space is split by parity.** `ch` was
+    allocated by the control plane alone — single-writer, no collision rule. A `proxy` channel is
+    opened by the AGENT, because a device decides when it wants to fetch something. Control plane
+    takes even, agent takes odd, which is HTTP/2's trick for the same problem. Ids are opaque, so an
+    old agent reads even ids exactly as it read odd ones.
+
+    **FOUR DEFECTS, THREE OF THEM ONLY EXISTING BECAUSE THE PIECES WERE JOINED:**
+
+    - **A race that made the feature not work at all.** The agent sends `open` then the request head
+      immediately; the router does a DB lookup first. The head reliably arrived before there was
+      anywhere to put it, so every SUCCESS timed out at sixty seconds with nothing wrong in any log.
+      **The signature was diagnostic**: every refusal passed and every success hung — that shape
+      means "decided before data" works and "needs data" does not.
+    - **One flag doing two jobs ate every response body.** `settled` meant both "the response
+      started" and "this is over", so each chunk after the head was dropped: a correct 200 with zero
+      bytes, which reads from the far side as `Unexpected end of JSON input`.
+    - **The client never forwarded request bodies.** I had left it stubbed with a comment. A POST is
+      the ordinary case for an app talking to staging — it would have failed on the second screen of
+      every app.
+    - **"Forget" looked broken because it worked.** The client reconnects with backoff by design, so
+      closing 1001 meant forgetting a tunnel dropped it and the client re-registered one second
+      later — the console said "No tunnels yet" while the API said one was connected. 1008 now,
+      which the client already treats as a refusal. **Found in a browser against a real client, with
+      every test green.**
+
+    **Verified with nothing stubbed except the thing that needs hardware.** The end-to-end test runs
+    a real `http.request` as the device, the real `DeviceProxy`, a real WebSocket to a real
+    listening control plane, the real `runTunnel` from the CLI, and a real server as staging. Two
+    security mutations were injected — allow-list always passes, routing ignores the org — and both
+    were caught, including cross-tenant.
+
+    **WHAT IS NOT VERIFIED, and it is one command.** `adb shell settings put global http_proxy
+    <host>:<port>` against a live Cuttlefish guest, and whether it survives the reset between
+    sessions. An Android guest with that setting makes exactly the request the test makes by
+    pointing an HTTP client at the same listener — so what is unproven is the SETTING, not the path.
+    Ten minutes of lab time. `STATUS.md` §7.
+
+    **Also deliberately unbuilt: `https://` through the tunnel.** It needs a raw byte-stream channel
+    beside the framed one, because a CONNECT is a TLS stream rather than a request and a response.
+    The proxy answers 405 naming the limitation instead of accepting the CONNECT and producing a
+    socket that speaks nothing — which would surface in an app as a certificate error and send
+    somebody to debug the wrong machine.
+
+    **And the lab was found RUNNING at the start of this session** — up since 23:39 the previous
+    night, ~₹230, while `STATUS.md` asserted it had "returned to rest". Stopped. The console had been
+    saying `host up 3h 1m · ~₹196` the whole time, so ADR-0035's instrument worked and nobody was
+    looking at it; there is still no alert. That sentence in `STATUS.md` is now a correction rather
+    than a claim.

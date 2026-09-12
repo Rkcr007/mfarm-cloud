@@ -224,6 +224,14 @@ export const state = {
    */
   pair: { code: '', machine: null, busy: false, error: null, enrollments: [], loaded: false },
   /**
+   * This org's tunnels (migration 052) — a device reaching a host on the customer's network.
+   *
+   * Loaded on demand like the other ORGANISATION screens, not on the five-second poll: the list
+   * changes when somebody starts or stops a client, and polling it would spend a request per tick
+   * on a screen that is usually not open.
+   */
+  tunnels: { items: [], loaded: false, loading: false },
+  /**
    * Artifacts for the session detail screen, keyed by session id.
    *
    * Per session rather than one org-wide list: a session's evidence is only ever looked at from
@@ -1540,7 +1548,7 @@ function watchScrollShadow() {
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'team', 'settings']);
+const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'tunnels', 'team', 'settings']);
 
 /**
  * THE OLD ROUTES ARE NOT DELETED, THEY ARE LENSES.
@@ -1656,6 +1664,17 @@ export function loadForRoute() {
   // Health carries the usage card. Fetched on arrival rather than on the poll, because it is a
   // thirty-day aggregate that does not change between five-second ticks.
   if (name === 'health') return loadUsage();
+  /**
+   * Tunnels, on arrival rather than on the poll (migration 052). The list changes when somebody
+   * starts or stops a client, not every five seconds, and polling it would spend a request per tick
+   * on a screen that is usually not open.
+   *
+   * Fetched HERE as well as from the screen's own render, because `hashchange` is not the only way
+   * to arrive: `boot()` calls this too, so a person who bookmarked `#/tunnels` or refreshed the
+   * page gets data rather than "Loading…" forever. That exact omission was a real defect on the
+   * device screen — see `a route fetches what its screen needs` in `console-screens.test.ts`.
+   */
+  if (name === 'tunnels') return loadTunnels();
   return Promise.resolve();
 }
 
@@ -8455,7 +8474,7 @@ let gPending = 0;
  * through `parseHash`, onto the Fleet lens that used to be that page. A shortcut somebody has in
  * their fingers is not a thing to reclaim for tidiness.
  */
-const G_ROUTES = { f: 'fleet', d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', t: 'team', s: 'settings' };
+const G_ROUTES = { f: 'fleet', d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', n: 'tunnels', t: 'team', s: 'settings' };
 
 /**
  * Is this keystroke meant for something that takes typing, rather than for the console?
@@ -8566,6 +8585,153 @@ function roleBadge(role) {
  * genuine weakness is a person talked into typing a code that was sent to them, and the only
  * defence is showing them what they are about to admit before they admit it.
  */
+/**
+ * TUNNELS — how a device on this farm reaches a host on YOUR network (migration 052, ADR-0037).
+ *
+ * WHY THIS SCREEN EXISTS AT ALL, given that nothing on it creates anything. A tunnel appears when
+ * somebody runs the client, and there is deliberately no button here that makes one — a tunnel that
+ * existed in a database and nowhere else would be a promise the product cannot keep, and a suite
+ * that named it would allocate a device, install a build and then fail every request.
+ *
+ * What this page answers is the three questions a socket cannot: WHICH tunnels this org has (so
+ * "mine is down" is distinguishable from "I never had one"), WHAT each may reach (a tunnel is a
+ * hole in somebody's network and the shape of the hole is worth showing), and WHETHER anything is
+ * going through them.
+ */
+function screenTunnels() {
+  const t = state.tunnels;
+  if (!t.loaded && !t.loading) void loadTunnels();
+  const admin = isOrgAdmin();
+
+  const rows = t.items;
+  const live = rows.filter((x) => x.connected).length;
+
+  const list = card('Tunnels', {
+    aside: h('span', { class: 'caption', text: !t.loaded
+      ? 'loading…'
+      : `${rows.length} known, ${live} connected` }),
+  },
+    !t.loaded
+      ? h('p', { class: 'caption', text: 'Loading…' })
+      : rows.length
+        ? h('div', { class: 'stack' }, rows.map((x) => h('div', { class: 'inset row between fit' },
+            h('div', { class: 'stack tight shrink' },
+              h('span', { class: 'row tight' },
+                h('code', { class: 'mono', text: x.name }),
+                /**
+                 * `connected` COMES FROM THE LIVE SOCKET, never from a recent timestamp. Those
+                 * differ during exactly the incident somebody opens this page for, and a page that
+                 * inferred "up" from a stale-window would show green for the whole window in which
+                 * every request through it was failing.
+                 */
+                x.connected ? pill('connected', 'ok', { live: true }) : pill('not connected', '', { dot: false })),
+              h('p', { class: 'caption', text: [
+                x.client ? `on ${x.client}` : null,
+                x.connected
+                  ? `up since ${when(x.connectedAt)}`
+                  : (x.lastSeenAt ? `last seen ${when(x.lastSeenAt)}` : 'never connected'),
+                x.requests ? `${x.requests} request${x.requests === 1 ? '' : 's'}` : null,
+              ].filter(Boolean).join(' \u00b7 ') }),
+              // WHAT IT MAY REACH, on the row. This is the whole security story of the feature and
+              // it belongs where a person looking at the tunnel can read it, not behind a click.
+              h('p', { class: 'caption' },
+                h('span', { class: 'micro', text: 'may reach ' }),
+                h('span', { class: 'mono', text: (x.allow || []).length
+                  ? x.allow.map((r) => `${r.host}${r.port ? `:${r.port}` : ''}`).join(', ')
+                  : 'nothing — this client declared no rules' })),
+            ),
+            admin
+              ? btn('Forget', 'tiny ghost', () => askForgetTunnel(x),
+                  { title: 'Removes the record and drops the connection' })
+              : null,
+          )))
+        : empty('No tunnels yet.',
+            'Run the client on a machine that can reach your staging environment, and it appears here.'),
+  );
+
+  return [
+    pageHead([{ label: 'Organisation' }], 'Tunnels',
+      'How a device on this farm reaches a host on your own network'),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' }, list),
+      h('div', { class: 'rail' },
+        card('Start one', {},
+          h('p', { class: 'caption' },
+            'Run this on a machine that can already reach your staging environment. It dials out '
+            + '\u2014 nothing listens, and no inbound port is opened.'),
+          copyrow('npx @mfarm/cli tunnel --name staging --allow \'*.internal\'', 'Copy'),
+          h('p', { class: 'caption mt-md' },
+            'Then set ', h('code', { class: 'mono', text: 'mfarm:tunnel' }),
+            ' to the name in your capabilities, and the device\u2019s traffic goes through it.'),
+        ),
+        /**
+         * THE SENTENCE THAT MAKES THE FEATURE HONEST, on the page rather than only in an ADR. A
+         * person deciding whether to run this needs to know where the boundary is enforced, and the
+         * answer — on their machine, by them — is the reason it is safe to run at all.
+         */
+        card('Where the limit lives', {},
+          h('p', { class: 'caption' },
+            'The '
+            , h('code', { class: 'mono', text: '--allow' })
+            , ' rules are enforced by the client on YOUR machine, not by this farm. MFARM cannot '
+            + 'know which of your hosts is a staging server and which is a database, so the '
+            + 'program you started is the one that refuses \u2014 and the default is deny.'),
+          h('p', { class: 'caption mt-sm' },
+            'A device only reaches a tunnel while it is holding a session for this organisation. '
+            + 'Between tenants it reaches nothing at all.'),
+        ),
+      ),
+    ),
+  ];
+}
+
+/** Forget a tunnel: the record and the live socket, together. */
+function askForgetTunnel(t) {
+  confirmDialog({
+    title: `Forget "${t.name}"?`,
+    lead: t.connected
+      ? 'It is connected right now, so this also drops it.'
+      : 'It is not connected. This removes the record.',
+    removes: [
+      'the record of this tunnel and what it was allowed to reach',
+      t.connected ? 'the connection it is holding, immediately' : 'nothing else — it is already gone',
+    ],
+    // The honest caveat, because a person pressing this may believe it is a revocation and it is
+    // not. The API key is the actual control.
+    // The honest caveat, because a person pressing this may believe it is a revocation and it is
+    // not. The running client STOPS — it is told this was a refusal rather than a fault, so it does
+    // not reconnect — but nothing prevents somebody starting it again. The API key is the control.
+    keeps: 'The running client stops. Whoever holds the API key can start it again \u2014 to prevent '
+      + 'that, revoke the key in Settings.',
+    confirm: 'Forget it',
+    onConfirm: async () => {
+      try {
+        await api(`/v1/tunnels/${encodeURIComponent(t.name)}`, { method: 'DELETE' });
+        toast('Tunnel forgotten', `"${t.name}" is no longer routing.`, 'ok');
+        state.tunnels = { items: [], loaded: false, loading: false };
+        await loadTunnels();
+      } catch (e) {
+        toast('Could not forget that tunnel', e.message, 'bad');
+      }
+      render();
+    },
+  });
+}
+
+async function loadTunnels() {
+  if (state.tunnels.loading) return;
+  state.tunnels = { ...state.tunnels, loading: true };
+  try {
+    const out = await api('/v1/tunnels');
+    state.tunnels = { items: out.tunnels || [], loaded: true, loading: false };
+  } catch {
+    // Loaded-with-nothing rather than left unloaded: an unloaded screen re-fetches on every render,
+    // so a failing endpoint would put this console into a request loop.
+    state.tunnels = { items: [], loaded: true, loading: false };
+  }
+  scheduleRender();
+}
+
 function screenAgents() {
   const pending = pairGate();
   const admin = isOrgAdmin();
@@ -9090,6 +9256,7 @@ export const SCREENS = {
   queue: () => screenQueue(),
   health: () => screenHealth(),
   agents: () => screenAgents(),
+  tunnels: () => screenTunnels(),
   team: () => screenTeam(),
   settings: () => screenSettings(),
 };

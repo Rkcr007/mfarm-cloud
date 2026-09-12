@@ -1969,6 +1969,20 @@ describe('a route fetches what its screen needs', () => {
    * A screen with nothing of its own to fetch must not fetch, and must not throw. `boot()` awaits
    * this before the first paint, so a rejection here is a console that never renders at all.
    */
+  /**
+   * The tunnels screen, for the reason this describe exists. `boot()` awaits `loadForRoute` and
+   * `hashchange` does not fire on load, so a screen wired only into its own render says "Loading…"
+   * forever for anybody who bookmarked it or refreshed the page — which is exactly the defect this
+   * whole block was written about, on a different screen.
+   */
+  test('the tunnels screen asks for its tunnels on arrival', async () => {
+    seed({ name: 'tunnels' });
+    const urls = recording();
+    await mod.loadForRoute();
+    assert.ok(urls.some((u) => u === '/v1/tunnels'),
+      `arriving by bookmark or refresh must fetch: ${urls.join(', ')}`);
+  });
+
   test('a screen the poll already feeds asks for nothing, quietly', async () => {
     seed({ name: 'fleet' });
     const urls = recording();
@@ -4156,5 +4170,94 @@ describe('what a session actually ran', () => {
     assert.equal(mod.testLength(-1), '');
     // The bug this helper exists to avoid, pinned so the pair cannot both go green wrongly.
     assert.equal(mod.duration(0, 8200), '—', 'duration() takes instants; 0 reads as "no start"');
+  });
+});
+
+
+/**
+ * TUNNELS — a device reaching a host on the customer's network (migration 052, ADR-0037).
+ *
+ * The screen creates nothing, deliberately, so what these assert is that it says TRUE things about
+ * state it did not produce: which tunnels exist, which are live, and what each may reach.
+ */
+describe('the tunnels screen', () => {
+  const tunnel = (over: Record<string, unknown> = {}) => ({
+    name: 'staging',
+    connected: true,
+    allow: [{ host: '*.acme.internal' }],
+    client: 'ada-laptop',
+    createdAt: new Date().toISOString(),
+    createdByEmail: null,
+    lastSeenAt: new Date().toISOString(),
+    connectedAt: new Date().toISOString(),
+    requests: 12,
+    ...over,
+  });
+
+  test('a live tunnel shows what it may reach, on the row', () => {
+    seed({ name: 'tunnels' });
+    mod.state.tunnels = { items: [tunnel()], loaded: true, loading: false };
+    const text = textOf(mod.SCREENS.tunnels());
+    assert.match(text, /staging/);
+    assert.match(text, /connected/);
+    // The allow-list is the whole security story and belongs where it can be read, not behind a
+    // click — a person auditing a tunnel should not have to open anything.
+    assert.match(text, /\*\.acme\.internal/);
+    assert.match(text, /ada-laptop/);
+  });
+
+  /**
+   * "MINE IS DOWN" AND "I NEVER HAD ONE" ARE DIFFERENT PROBLEMS. A screen that showed only live
+   * sockets could not tell them apart, which is the entire reason there is a table behind this.
+   */
+  test('a tunnel that has disconnected is still shown, and says when it was last here', () => {
+    seed({ name: 'tunnels' });
+    mod.state.tunnels = {
+      items: [tunnel({ connected: false, connectedAt: null })], loaded: true, loading: false,
+    };
+    const text = textOf(mod.SCREENS.tunnels());
+    assert.match(text, /staging/);
+    assert.match(text, /not connected/);
+    assert.match(text, /last seen/);
+  });
+
+  test('a tunnel that never connected says so rather than showing a blank date', () => {
+    seed({ name: 'tunnels' });
+    mod.state.tunnels = {
+      items: [tunnel({ connected: false, connectedAt: null, lastSeenAt: null })],
+      loaded: true, loading: false,
+    };
+    assert.match(textOf(mod.SCREENS.tunnels()), /never connected/);
+  });
+
+  test('an empty farm explains how to get one rather than showing an empty table', () => {
+    seed({ name: 'tunnels' });
+    mod.state.tunnels = { items: [], loaded: true, loading: false };
+    const text = textOf(mod.SCREENS.tunnels());
+    assert.match(text, /No tunnels yet/);
+    assert.match(text, /npx @mfarm\/cli tunnel/, 'the way to have one is to run the client');
+  });
+
+  /**
+   * THE SENTENCE THAT MAKES THE FEATURE HONEST. A person deciding whether to run this needs to know
+   * the limit is enforced on their own machine — that is why it is safe to run at all — and it must
+   * not be something only an ADR says.
+   */
+  test('the page states where the allow-list is enforced', () => {
+    seed({ name: 'tunnels' });
+    mod.state.tunnels = { items: [tunnel()], loaded: true, loading: false };
+    const text = textOf(mod.SCREENS.tunnels());
+    assert.match(text, /YOUR machine, not by this farm/);
+    assert.match(text, /default is deny/);
+    assert.match(text, /Between tenants it reaches nothing/);
+  });
+
+  test('a member sees the tunnels and is not offered the admin control', () => {
+    seed({ name: 'tunnels' });
+    mod.state.tunnels = { items: [tunnel()], loaded: true, loading: false };
+    mod.state.me.role = 'member';
+    const text = textOf(mod.SCREENS.tunnels());
+    assert.match(text, /staging/, 'a member can still see what is routing');
+    assert.ok(!/Forget/.test(text), 'removing one is an owner or admin decision');
   });
 });
