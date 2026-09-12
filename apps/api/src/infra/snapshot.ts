@@ -180,6 +180,23 @@ interface HostRow {
   device_seconds_today: string | null;
 }
 
+/**
+ * A silence, in words a person can read at a glance.
+ *
+ * `Math.round(seconds / 60)` was fine for the case it was written for — a host that missed a few
+ * beats — and on the real farm it produced **"No heartbeat for 21310 minutes"** for a laptop that
+ * had been switched off for a fortnight. A number that large is not a duration, it is a puzzle, and
+ * the alert it is in is one somebody reads while deciding whether to worry.
+ */
+function silenceFor(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)} seconds`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes} minutes`;
+  const hours = Math.round(seconds / 3600);
+  if (hours < 48) return `${hours} hours`;
+  return `${Math.round(seconds / 86400)} days`;
+}
+
 const pct = (used: number, total: number): number | null =>
   total > 0 ? Math.round((used / total) * 1000) / 10 : null;
 
@@ -344,7 +361,7 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         severity: 'critical', code: 'host-silent',
         message: beatAge === null
           ? 'This host has never sent a heartbeat.'
-          : `No heartbeat for ${Math.round(beatAge / 60)} minutes. Its devices have left the pool.`,
+          : `No heartbeat for ${silenceFor(beatAge)}. Its devices have left the pool.`,
       });
     } else if (reach === 'stale') {
       alerts.push({
@@ -359,8 +376,8 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         severity: 'warning', code: 'machine-stats-stale',
         message: machineStatus === 'unknown'
           ? 'This host has never reported disk, load or memory.'
-          : `Disk, load and memory were last measured ${Math.round((statsAgeSeconds ?? 0) / 60)} `
-            + 'minutes ago, so the figures below are not current.',
+          : `Disk, load and memory were last measured ${silenceFor(statsAgeSeconds ?? 0)} ago, `
+            + 'so the figures below are not current.',
       });
     }
     // Gauges are only worth an alert while the reading is current — see `machineStatus`. A full disk

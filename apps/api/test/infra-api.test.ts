@@ -189,6 +189,19 @@ describe('live, stale, unavailable, unknown — four answers, never two', () => 
     assert.ok(hostIn(body, liveHost).uptimeSeconds! > 3 * 3600 - 60);
   });
 
+  test('A LONG SILENCE IS SPELLED IN DAYS, not in thousands of minutes', async () => {
+    // The real farm carried a laptop that had been off for a fortnight and the alert read
+    // "No heartbeat for 21310 minutes" — correct, and a puzzle rather than a duration.
+    const ancient = await seedHost(`ancient-${REGION}`, {
+      beatSecondsAgo: 15 * 86_400, statsSecondsAgo: 15 * 86_400, upHoursAgo: null,
+    });
+    const h = hostIn((await overview()).json(), ancient);
+    const alert = h.alerts.find((a: { code: string }) => a.code === 'host-silent');
+    assert.ok(alert, 'no host-silent alert');
+    assert.match(alert.message, /No heartbeat for 15 days/);
+    assert.ok(!/\d{4,} minutes/.test(alert.message));
+  });
+
   test('a silent host carries a critical alert naming the silence', async () => {
     const body = (await overview()).json();
     const alert = hostIn(body, silentHost).alerts.find((a: { code: string }) => a.code === 'host-silent');
