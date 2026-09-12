@@ -20,7 +20,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, chmodSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, chmodSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,7 +53,11 @@ case "$2" in
   ssh) exit 0 ;;
   instances)
     case "$3" in
-      start) echo "Instance external IP is 0.0.0.0"; exit 0 ;;
+      # Every name handed to \`start\` is recorded, so a test can assert WHICH machines were
+      # started rather than only that the script survived. A multi-host farm that quietly started
+      # one box would otherwise look identical to one that started three.
+      start) shift 3; for n in "$@"; do case "$n" in -*) break ;; *) echo "$n" >> "${root}/started" ;; esac; done
+             echo "Instance external IP is 0.0.0.0"; exit 0 ;;
       describe)
         case "$4" in
 ${cases}
@@ -80,11 +84,16 @@ exit 0
 `);
   chmodSync(join(bin, 'dig'), 0o755);
 
-  const run = () => execFileSync('bash', [join(root, 'farm-online.sh')], {
+  const run = (extraEnv = {}) => execFileSync('bash', [join(root, 'farm-online.sh')], {
     encoding: 'utf8',
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...extraEnv },
   });
-  return { root, run, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  /** Which instances `gcloud compute instances start` was actually asked for. */
+  const started = () => {
+    try { return readFileSync(join(root, 'started'), 'utf8').trim().split('\n').filter(Boolean); }
+    catch { return []; }
+  };
+  return { root, run, started, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 /** The remediation block, printed only when something actually drifted. */
@@ -103,7 +112,7 @@ test('both addresses matching their names is reported as a match, with no drift'
     // addresses correct, and the old check called it DRIFT twice.
     assert.doesNotMatch(out, /DRIFT/, 'correct addresses must not be reported as drift');
     assert.doesNotMatch(out, new RegExp(REMEDIATION));
-    assert.match(out, /device host is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
+    assert.match(out, /relay host \(mfarm-lab\) is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
     assert.match(out, /control plane is 34\.100\.138\.213, matching farm\.mfarm\.dev/);
   } finally { f.cleanup(); }
 });
@@ -118,7 +127,7 @@ test('an address that really moved is reported as drift, with the remediation', 
   });
   try {
     const out = f.run();
-    assert.match(out, /DRIFT: device host is 35\.200\.1\.1 but turn\.mfarm\.dev resolves to 34\.100\.159\.34/);
+    assert.match(out, /DRIFT: relay host \(mfarm-lab\) is 35\.200\.1\.1 but turn\.mfarm\.dev resolves to 34\.100\.159\.34/);
     assert.match(out, new RegExp(REMEDIATION));
     // The half that did NOT move must still read as fine, or the operator cannot tell which to fix.
     assert.match(out, /control plane is 34\.100\.138\.213, matching farm\.mfarm\.dev/);
@@ -134,7 +143,7 @@ test('a name that will not resolve is UNRESOLVED, and is not counted as drift', 
   });
   try {
     const out = f.run();
-    assert.match(out, /UNRESOLVED: device host is 34\.100\.159\.34/);
+    assert.match(out, /UNRESOLVED: relay host \(mfarm-lab\) is 34\.100\.159\.34/);
     // "DNS is down" and "the address moved" need different actions. Telling someone to re-reserve
     // an address because their resolver is broken sends them at the wrong problem.
     assert.doesNotMatch(out, /DRIFT/);
@@ -153,5 +162,104 @@ test('a bare IP in farm.env still works, so reverting the domain does not re-bre
     const out = f.run();
     assert.doesNotMatch(out, /DRIFT/);
     assert.doesNotMatch(out, /UNRESOLVED/);
+  } finally { f.cleanup(); }
+});
+
+/* ------------------------------------------------------------------ more than one device host
+ *
+ * S7.2 audited the control plane and found nothing that assumes a single device host — the
+ * allocator, the reaper, the hub and the metrics are all per-host already. What DID assume one was
+ * this tooling, through `MFARM_LAB=mfarm-lab`. These are that assumption removed, and they matter
+ * because the failure mode is silent: a two-host farm whose script starts one box looks exactly
+ * like a healthy one until half the devices never appear.
+ */
+
+test('one device host is still the default, and nothing about it changed', () => {
+  const f = farm({
+    publicHost: 'farm.mfarm.dev',
+    turnHost: 'turn.mfarm.dev',
+    addresses: { 'mfarm-cp': '34.100.138.213', 'mfarm-lab': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+  });
+  try {
+    f.run();
+    assert.deepEqual(f.started().sort(), ['mfarm-cp', 'mfarm-lab']);
+  } finally { f.cleanup(); }
+});
+
+test('MFARM_LABS starts every device host it names', () => {
+  const f = farm({
+    publicHost: 'farm.mfarm.dev',
+    turnHost: 'turn.mfarm.dev',
+    addresses: {
+      'mfarm-cp': '34.100.138.213',
+      'mfarm-lab': '34.100.159.34',
+      'mfarm-lab-2': '35.200.9.9',
+    },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+  });
+  try {
+    f.run({ MFARM_LABS: 'mfarm-lab mfarm-lab-2' });
+    assert.deepEqual(f.started().sort(), ['mfarm-cp', 'mfarm-lab', 'mfarm-lab-2'],
+      'a farm that starts one of its two hosts looks healthy and serves half its devices');
+  } finally { f.cleanup(); }
+});
+
+/**
+ * THE SECOND HOST MUST NOT BE CHECKED AGAINST THE RELAY'S NAME.
+ *
+ * It has no reserved address and publishes nothing, so comparing its ephemeral IP to
+ * `MFARM_TURN_HOST` would report DRIFT on every single start — the always-on warning this whole
+ * file exists to keep from coming back. Asserted as an ABSENCE, which is the only way to catch it.
+ */
+test('only the relay host is compared to the turn address', () => {
+  const f = farm({
+    publicHost: 'farm.mfarm.dev',
+    turnHost: 'turn.mfarm.dev',
+    addresses: {
+      'mfarm-cp': '34.100.138.213',
+      'mfarm-lab': '34.100.159.34',
+      'mfarm-lab-2': '35.200.9.9',
+    },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+  });
+  try {
+    const out = f.run({ MFARM_LABS: 'mfarm-lab mfarm-lab-2' });
+    assert.match(out, /relay host \(mfarm-lab\) is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
+    assert.ok(!/DRIFT/.test(out), `a second host must not read as drift:\n${out}`);
+    assert.ok(!out.includes(REMEDIATION));
+  } finally { f.cleanup(); }
+});
+
+test('MFARM_RELAY_LAB names which host publishes the turn address', () => {
+  const f = farm({
+    publicHost: 'farm.mfarm.dev',
+    turnHost: 'turn.mfarm.dev',
+    addresses: {
+      'mfarm-cp': '34.100.138.213',
+      'mfarm-lab': '35.200.9.9',
+      'mfarm-lab-2': '34.100.159.34',
+    },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+  });
+  try {
+    const out = f.run({ MFARM_LABS: 'mfarm-lab mfarm-lab-2', MFARM_RELAY_LAB: 'mfarm-lab-2' });
+    assert.match(out, /relay host \(mfarm-lab-2\) is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
+    assert.ok(!/DRIFT/.test(out), out);
+  } finally { f.cleanup(); }
+});
+
+/** `MFARM_LAB` is what every existing runbook, script and habit names. It must keep working. */
+test('the old single-host variable still works', () => {
+  const f = farm({
+    publicHost: 'farm.mfarm.dev',
+    turnHost: 'turn.mfarm.dev',
+    addresses: { 'mfarm-cp': '34.100.138.213', 'other-lab': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+  });
+  try {
+    const out = f.run({ MFARM_LAB: 'other-lab' });
+    assert.deepEqual(f.started().sort(), ['mfarm-cp', 'other-lab']);
+    assert.match(out, /relay host \(other-lab\)/);
   } finally { f.cleanup(); }
 });

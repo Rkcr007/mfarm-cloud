@@ -418,7 +418,7 @@ checkout and device-host checkout all on `main`.
 behind, and bringing a worker's tree forward restarts the agent under running sessions — a different
 decision with a different blast radius. The installer refuses that box and says which case it is in.
 
-### S7.2 — One device host — **AUDITED (2026-09-07): nothing in the code blocks a second one**
+### S7.2 — One device host — **AUDITED (2026-09-07), TOOLING DONE (2026-09-12): nothing blocks a second one**
 
 A host outage is a farm outage. ADR-0027 and migration 038 reduce the blast radius; they do not
 remove it. This is a **provisioning** decision before it is an engineering one — a second lab VM
@@ -444,11 +444,28 @@ unset — so live view for a second host needs no ingress change at all.
 What a second host actually costs is a VM, a `farm-up.sh` run, the boot unit, and a registration
 token. All operational, none of it in this repo.
 
-**The dev tooling does assume one**, harmlessly: `check-deployed.sh`, `farm-online.sh`,
-`verify-failure.mjs` and friends default `MFARM_LAB=mfarm-lab`, all through env vars that already
-override. They would each need a second name, or a loop, before they described a two-host farm
-honestly — which is a real but small piece of work, and it is worth doing *when* there is a second
-host rather than in anticipation of one.
+**The dev tooling did assume one — DONE 2026-09-12.** `check-deployed.sh` and `farm-online.sh` now
+take `MFARM_LABS`, a space-separated list, with `MFARM_LAB` still honoured so every existing runbook
+and habit keeps working. `docs/SECOND_HOST.md` is the procedure.
+
+Two distinctions came out of doing it that were not obvious from the audit:
+
+- **Only the RELAY host is compared to `MFARM_TURN_HOST`.** coturn is a relay, not a device service
+  — a browser watching a device on host 2 relays through host 1's coturn perfectly well — so a
+  second host needs no second reserved address. Comparing its ephemeral IP to the relay's name would
+  have reported DRIFT on every start, which is the always-on warning `farm-online.test.mjs` exists
+  to keep from coming back. `MFARM_RELAY_LAB` names it; it defaults to the first in the list.
+- **A host that cannot be DESCRIBED is now an error, not "stopped".** `check-deployed.sh` treated
+  every non-`RUNNING` status as stopped, and an empty status means gcloud could not read the
+  instance — a typo in the list, or a VM that no longer exists. On a two-host farm that would drop a
+  host from the report while printing something reassuring.
+
+And one thing the audit got wrong by omission, found by reading the scripts to write the runbook:
+**`farm-up.sh` is not the command for a second device host.** It stands up a control plane — secrets,
+Postgres, the API image, the seed, a console user — before it ever looks for `/dev/kvm`, so running
+it on a new device host gives you a second control plane with its own empty database. The device
+host's path is `bootstrap_cuttlefish.sh`, `install-build-tools.sh`, `install-worker-service.sh` and
+`install-farm-service.sh`, which is what `farm-up.sh`'s own comment says.
 
 ### S7.3 — Rate limiting is in-memory — **AUDITED: it is not the first blocker, and the real one is bigger**
 
