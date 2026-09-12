@@ -8927,6 +8927,24 @@ function infraCapabilityCard(data) {
   const line = (ok, yes, no) => h('p', { class: 'canline' },
     h('span', { class: `dot ${ok ? 'ok' : ''}`.trim() }),
     h('span', { class: 'caption', text: ok ? yes : no }));
+  /**
+   * POWER CONFIGURED AND MATCHING NOTHING — the silent failure this page exists to prevent, in its
+   * own back yard.
+   *
+   * A worker registers under whatever `hostname` its machine reports, and on GCE that is the
+   * internal FQDN rather than the instance name. An operator who follows the runbook and writes
+   * `mfarm-lab` gets an allow-list matching no host: no error, no log line, no button, and nothing
+   * anywhere to say why. Found on the real farm, where the device host registers as
+   * `mfarm-lab.asia-south1-c.c.mfarm-lab.internal`.
+   *
+   * Matching the names loosely would "fix" this and destroy the boundary — a worker registering as
+   * `mfarm-cp.anything` would then match `mfarm-cp`. So the match stays EXACT and the mismatch is
+   * reported, with the names the fleet actually registered under.
+   */
+  const hosts = data.hosts || [];
+  const powerMismatch = Boolean(caps.power) && hosts.length > 0
+    && !hosts.some((host) => host.powerable);
+
   return card('What this page can do', {},
     line(caps.drain,
       'Drain a host for maintenance, and resume it.',
@@ -8934,9 +8952,13 @@ function infraCapabilityCard(data) {
     line(caps.services,
       'Restart the worker agent and its services.',
       'Restarting a service still needs SSH.'),
-    line(caps.power,
+    line(caps.power && !powerMismatch,
       'Start and stop device hosts.',
-      'Power is still deploy/farm-online.sh from a laptop: the control plane VM holds no compute permission and its OAuth scopes carry none either.'),
+      powerMismatch
+        ? 'Power is configured and matches none of this farm’s hosts. MFARM_POWER_INSTANCES is keyed '
+          + 'on the name a worker REGISTERS under, which on GCE is the internal FQDN rather than the '
+          + `instance name — here: ${hosts.map((host) => host.hostname).join(', ')}`
+        : 'Power is still deploy/farm-online.sh from a laptop: the control plane VM holds no compute permission and its OAuth scopes carry none either.'),
     h('p', { class: 'caption mt-md' },
       'There is deliberately no terminal here and there never will be. Operations are named, '
       + 'validated on the server, and written to the log before they are attempted.'),

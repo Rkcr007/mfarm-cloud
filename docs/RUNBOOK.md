@@ -235,11 +235,28 @@ round: a scope is a coarse cap and IAM is where "four verbs on these two machine
 
 ### 3. Tell the control plane which machines it may touch
 
+**READ THE HOST NAME, DO NOT GUESS IT.** A worker registers under whatever `hostname` its machine
+reports, and on GCE that is the internal FQDN — not the instance name. Getting this wrong produces
+no error at all: the allow-list simply matches nothing, no button appears, and there is nothing in
+any log to say why.
+
+```bash
+# on mfarm-cp — the names the fleet actually registered under
+docker exec $(docker ps -q -f name=postgres) \
+  psql -U mfarm -d mfarm -c 'SELECT hostname, state FROM hosts ORDER BY hostname'
+```
+
+On this farm (checked 2026-09-13) that is `mfarm-lab.asia-south1-c.c.mfarm-lab.internal`, while the
+GCE instance is plain `mfarm-lab` — which is exactly what the `<host>=<instance>:<zone>` form is for:
+
 ```bash
 # deploy/.env on mfarm-cp
 GCP_PROJECT=mfarm-lab
-MFARM_POWER_INSTANCES=mfarm-lab:asia-south1-c
+MFARM_POWER_INSTANCES=mfarm-lab.asia-south1-c.c.mfarm-lab.internal=mfarm-lab:asia-south1-c
 ```
+
+The startup log prints the resolved list — `powerInstances: <host>-><instance>@<zone>` — and the
+Infrastructure page says plainly when power is configured and nothing on the farm matches it.
 
 **This list is the actual security boundary, not a convenience.** `hosts.hostname` is a string a
 worker chooses for itself at registration, so a control plane that resolved host names to instance

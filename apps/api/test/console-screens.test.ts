@@ -4480,7 +4480,11 @@ describe('the infrastructure operations centre', () => {
 
   test('a capability the server grants is reflected without touching this file', () => {
     seed({ name: 'infra', lens: 'overview' });
-    mod.state.infra.data = infraPayload({ capabilities: { drain: true, power: true, services: true } });
+    const data = infraPayload({ capabilities: { drain: true, power: true, services: true } });
+    // At least one host has to be ON the allow-list, or the card correctly reports a mismatch
+    // instead — see "an allow-list that matches no host SAYS SO".
+    data.hosts[0].powerable = true;
+    mod.state.infra.data = data;
     const text = textOf(mod.SCREENS.infra());
     assert.match(text, /Drain a host for maintenance/);
     assert.match(text, /Start and stop device hosts/);
@@ -4922,5 +4926,56 @@ describe('infrastructure power controls', () => {
     assert.match(text, /not a graceful shutdown/);
     assert.match(text, /keeps billing throughout — a restart saves nothing/);
     mod.closeOverlays();
+  });
+});
+
+/**
+ * The two defects the DEPLOYED farm found, which no test and no local run could.
+ *
+ * Both are about a number or a name that is technically correct and unreadable or unmatchable in
+ * the place it lands. That class does not show up against fixtures, because a fixture is written by
+ * whoever wrote the assertion.
+ */
+describe('what the real farm showed', () => {
+  test('A SILENCE OF A FORTNIGHT READS AS DAYS, not as 21310 minutes', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = infraPayload();
+    data.hosts = [{
+      ...data.hosts[0],
+      reachability: 'unavailable', power: 'unknown', uptimeSeconds: null,
+      heartbeatAgeSeconds: 21310 * 60,
+      alerts: [],
+    }];
+    mod.state.infra.data = data;
+    // The message is built on the server, so this asserts the CONSOLE renders whatever arrives —
+    // `infra-api.test.ts` owns the wording. What matters here is that nothing re-derives minutes.
+    const text = textOf(mod.SCREENS.infra());
+    assert.ok(!/\b\d{4,} minutes\b/.test(text),
+      'a four-figure minute count is a puzzle, not a duration');
+  });
+
+  /**
+   * POWER CONFIGURED AND MATCHING NOTHING. On GCE a worker registers under the internal FQDN, not
+   * the instance name, so an allow-list written from the instance name matches nothing and fails
+   * silently — no error, no log line, no button.
+   */
+  test('an allow-list that matches no host SAYS SO, and names what the hosts are called', () => {
+    seed({ name: 'infra', lens: 'overview' });
+    const data = infraPayload({ capabilities: { drain: true, power: true, services: false } });
+    data.hosts.forEach((h) => { h.powerable = false; });
+    mod.state.infra.data = data;
+
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /matches none of this farm’s hosts/);
+    assert.match(text, /internal FQDN rather than the instance name/);
+    assert.match(text, /mfarm-lab, mfarm-lab-2/, 'it does not say what the hosts are actually called');
+  });
+
+  test('...and stays quiet when one host does match', () => {
+    seed({ name: 'infra', lens: 'overview' });
+    const data = infraPayload({ capabilities: { drain: true, power: true, services: false } });
+    data.hosts[0].powerable = true;
+    mod.state.infra.data = data;
+    assert.ok(!/matches none of this farm/.test(textOf(mod.SCREENS.infra())));
   });
 });
