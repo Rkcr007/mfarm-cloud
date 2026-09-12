@@ -837,6 +837,27 @@ export function isAutomationFrame(v: unknown): v is AutomationFrame {
  * be the thing that bounds it. See `TunnelAllowRule`.
  */
 
+/* --- VENDORED REGION START: apps/cli/src/wire.ts ---------------------------------------------
+ *
+ * EVERYTHING BETWEEN THESE MARKERS IS COPIED INTO THE CLI at build time by
+ * `apps/cli/scripts/vendor-wire.mjs`, and `apps/cli/test/wire.test.ts` fails when the copy drifts.
+ *
+ * WHY A COPY EXISTS AT ALL, given that this file says an allow-list implemented twice is one that
+ * will eventually disagree with itself. `@mfarm/cli` is PUBLISHED and this package is not: it is
+ * `private: true` and exports raw TypeScript, so a tarball that imported it would fail to resolve on
+ * a customer's machine — which is exactly what CI caught. The CLI also ships ZERO runtime
+ * dependencies on purpose, because it is a program a customer runs inside their own network and
+ * every dependency is one their security review has to read.
+ *
+ * So the choice was a published dependency, a build-time bundler, or a generated-and-committed copy
+ * with a drift test. The third is what `public/icons.js` already does in this repo and it is the
+ * only one that costs nothing at install time. There is still ONE source — this one — and the test
+ * is what makes "copied" mean "checked" rather than "diverging".
+ *
+ * Keep this region free of imports. The generator copies text, and a copy that reached for
+ * something outside the markers would resolve here and not there.
+ */
+
 /** Where a customer's tunnel client dials. One socket per tunnel, re-dialled with backoff. */
 export const CUSTOMER_TUNNEL_PATH = '/v1/tunnel';
 
@@ -996,6 +1017,13 @@ export interface TunnelBye {
 }
 
 export type TunnelControlFrame = TunnelHello | TunnelReady | TunnelBye;
+
+/* --- VENDORED REGION END ---------------------------------------------------------------------
+ *
+ * Everything BELOW is control-plane only. `TUNNEL_CAPABILITY` and `PROXY_CHUNK_BYTES` are read by
+ * the API and the agent and never by the customer's client, so copying them would put definitions
+ * in a published package that nothing there uses.
+ */
 
 /**
  * The capability a suite sets to route its device's traffic through a tunnel.

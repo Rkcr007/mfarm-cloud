@@ -77,6 +77,16 @@ distinguishable from *"I never had one"*), what each was allowed to reach, and w
 **No route creates a tunnel.** A row appears when a client connects. A tunnel that existed in a
 database and nowhere else would be a promise the product cannot keep.
 
+**Zero dependencies, and the wire definitions are VENDORED to keep it that way.** `@mfarm/protocol`
+is `private: true` and exports raw TypeScript, so a published tarball importing it fails to resolve
+on a customer's machine — and because `bin.ts` imports the tunnel module at the top level, that took
+down the *whole* CLI, not just this command. CI caught it. `apps/cli/src/wire.ts` is generated from
+the protocol's marked regions and committed, with a drift test that re-runs the generator in memory
+— the same arrangement `apps/api/public/icons.js` already has, and the only one that keeps the
+install cost at zero. There is still one source of truth; the test is what makes "copied" mean
+"checked". A fifth test asserts that no file under `apps/cli/src` imports a workspace package at
+all, because that is the defect rather than its symptom.
+
 **Zero dependencies, and therefore Node 22.** The client is a program a customer runs inside their
 own network; every dependency it has is one their security review has to read. It uses Node's own
 `WebSocket`, which is unflagged from 22 — a floor that is checked and named rather than discovered

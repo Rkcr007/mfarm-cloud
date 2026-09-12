@@ -4688,3 +4688,21 @@ when the feature is broken. See issues 37 and 38.
     saying `host up 3h 1m · ~₹196` the whole time, so ADR-0035's instrument worked and nobody was
     looking at it; there is still no alert. That sentence in `STATUS.md` is now a correction rather
     than a claim.
+
+    **A FIFTH DEFECT, AND CI FOUND IT RATHER THAN ME.** `apps/cli/src/tunnel.ts` imported
+    `@mfarm/protocol`, which is `private: true` and exports raw TypeScript — so the published
+    tarball could not resolve it, and because `bin.ts` imports the tunnel module at the top level
+    that took down the **whole CLI**, not just the new command. The npm-tarball job and the
+    real-CLI e2e job both went red with `Cannot find package '@mfarm/protocol'`.
+
+    The fix keeps the CLI's zero-dependency property, which is a real one for a program a customer
+    runs inside their own network: `apps/cli/src/wire.ts` is **generated from the protocol's marked
+    regions and committed**, with a drift test that re-runs the generator in memory — the same
+    arrangement `public/icons.js` already has and defends in a comment. There is still one source of
+    truth, and the test is what makes "copied" mean "checked" rather than "diverging". A further
+    test asserts that NO file under `apps/cli/src` imports a workspace package, because that is the
+    defect rather than its symptom.
+
+    Verified the way the defect was missed: built the tarball, installed it into an empty directory,
+    and ran `mfarm tunnel` from it — it reaches the API-key check instead of a module error, and
+    `dependencies` is empty.

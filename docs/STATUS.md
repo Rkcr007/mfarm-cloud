@@ -234,7 +234,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1710**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
+| Tests | **1714**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
 | Migrations | 52; 051 is deployed, **052 is not on the farm yet** |
 | Decisions | 36 ADRs, numbered to 0037 (there is no 0013) |
 | Merged PRs | 172 |

@@ -1,10 +1,21 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { URL } from 'node:url';
+/**
+ * `./wire.ts`, NOT `@mfarm/protocol`, and the reason is the published tarball.
+ *
+ * This package ships with ZERO runtime dependencies — a property worth keeping for a program a
+ * customer runs inside their own network — and `@mfarm/protocol` is `private: true` and exports raw
+ * TypeScript, so a tarball importing it fails to resolve on their machine. CI caught exactly that.
+ *
+ * `wire.ts` is GENERATED from the protocol and committed, with a drift test, the same way
+ * `apps/api/public/icons.js` is generated from lucide. The source of truth is still
+ * `packages/protocol/src/protocol.ts`; change it there and re-run the generator.
+ */
 import {
   CUSTOMER_TUNNEL_PATH, isProxyFrame, tunnelAllows, isValidTunnelName,
   type ProxyFrame, type TunnelAllowRule, type TunnelHello,
-} from '@mfarm/protocol';
+} from './wire.ts';
 
 /**
  * `mfarm tunnel` — let a device on the farm reach a host on YOUR network.
