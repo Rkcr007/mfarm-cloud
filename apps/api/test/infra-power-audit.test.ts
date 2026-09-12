@@ -20,8 +20,9 @@ import { withSystem, closePools } from '../src/db.ts';
 
 const REGION = `pwr-${randomUUID().slice(0, 8)}`;
 
-const q = <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-  withSystem(async (c) => (await c.query<T>(sql, params)).rows);
+const q = <T extends Record<string, unknown> = Record<string, unknown>>(
+  sql: string, params: unknown[] = [],
+) => withSystem(async (c) => (await c.query<T>(sql, params)).rows);
 
 async function newHost(name: string, opts: { upHoursAgo?: number; state?: string } = {}) {
   const rows = await q<{ id: string }>(

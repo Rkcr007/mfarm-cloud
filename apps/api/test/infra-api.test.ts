@@ -45,7 +45,11 @@ async function signIn(email: string) {
 const overview = (cookie = operatorCookie) =>
   app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie } });
 
-const hostIn = (body: { hosts: Array<{ id: string }> }, id: string) =>
+/** One host out of the overview payload. Loosely typed on purpose: the assertions below are about
+ *  the WIRE shape, and restating it here would make this file agree with itself rather than with
+ *  the server. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const hostIn = (body: { hosts: Array<Record<string, any>> }, id: string) =>
   body.hosts.find((h) => h.id === id)!;
 
 /**

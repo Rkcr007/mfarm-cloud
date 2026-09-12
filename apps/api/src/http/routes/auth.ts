@@ -143,6 +143,19 @@ export async function authRoutes(
       org: { id: orgId, name: row.org_name, slug: row.org_slug, maxConcurrent: row.max_concurrent },
       orgs,
       role,
+      /**
+       * THE FLEET GRANT (migration 053, ADR-0038), beside the org role and never folded into it.
+       *
+       * Sent so the console can decide whether to draw an Infrastructure nav item at all. That is a
+       * rendering decision and NOT an authorization one — `requireOperator` is the gate, on every
+       * `/v1/infra` route — but a nav item that leads to a 403 is a control offered on a false
+       * premise, which is the shape this repo has shipped seven times.
+       *
+       * Read from the PRINCIPAL rather than re-queried: `authenticateSession` resolved it moments
+       * ago on this same request, and a second read could disagree with the one that will actually
+       * gate the next call.
+       */
+      operator: req.principal?.kind === 'user' ? req.principal.operator : false,
       csrfToken: csrf,
     };
   });
