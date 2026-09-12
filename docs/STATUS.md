@@ -81,7 +81,7 @@ gcloud compute instances list --project mfarm-lab --format='table(name,status)'
 | Area | State | The honest caveat |
 |---|---|---|
 | **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the test suite**. All are closed. |
-| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 52 migrations. API keys are labelled, scoped, expiring and attributed (ADR-0034). | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
+| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 54 migrations. API keys are labelled, scoped, expiring and attributed (ADR-0034). | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host **today**, not by design: the control plane has been audited per-host and the tooling now takes a list, so adding a second is a VM and a runbook rather than code — [`SECOND_HOST.md`](SECOND_HOST.md). Until somebody pays for one, a host outage is still a farm outage. |
 | **Physical devices** | **Built, not currently serving.** Agent, pairing (ADR-0014), org-pinning, the outbound tunnel and the reset story (ADR-0012) are all built. | The farm's one `SM-S918B` is quarantined behind a machine that has not beaten since **2026-08-29**. Nothing is wrong with the code — it needs `npx @mfarm/agent` on that machine. |
@@ -249,7 +249,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 |---|---|
 | Tests | **1719**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
 | Migrations | 52; 051 is deployed, **052 is not on the farm yet** |
-| Decisions | 36 ADRs, numbered to 0037 (there is no 0013) |
+| Decisions | 37 ADRs, numbered to 0038 (there is no 0013) |
 | Merged PRs | 173 |
 | Defects | 48 recorded, **46 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |

@@ -17,6 +17,7 @@
  * bound to loopback (see `metrics-server.ts`), never from the port that carries the WebDriver hub.
  */
 import { appPool, systemPool, withSystem } from './db.ts';
+import { backupState } from './infra/storage.ts';
 
 // ---------------------------------------------------------------- registry primitives
 
@@ -632,51 +633,25 @@ export function collectRuntime(): void {
 }
 
 /**
- * Read the backup directory and report how fresh it is.
+ * Report how fresh the backups are.
  *
- * Synchronous-looking but async, and called from `scrape` rather than on a timer: a scrape is
- * already the moment someone asks, and a timer would keep a directory listing running on a farm
- * nobody is watching.
+ * THE MEASUREMENT ITSELF LIVES IN `infra/storage.ts` and is shared with the Infrastructure page,
+ * which needs exactly these numbers. Two readers of one directory drift — one gets the
+ * `.dump.partial` filter right and the other counts a half-written file as a backup — and then the
+ * dashboard and the alert disagree during the incident where it matters.
  *
- * Every failure lands on `-1`. An unset BACKUP_DIR, a directory that is not mounted, a permission
- * error — none of them mean "the backups are fine" and none of them mean "the backups are old",
- * they mean the measurement is unavailable, and the alert rule reads it that way.
+ * Called from `scrape` rather than on a timer: a scrape is already the moment someone asks, and a
+ * timer would keep a directory listing running on a farm nobody is watching.
+ *
+ * The `-1` convention is the storage module's and is preserved exactly, because `alerts.yml` is
+ * written against it: an unset BACKUP_DIR, an unmounted directory and a permission error all mean
+ * the measurement is unavailable, which is neither "fine" nor "old".
  */
 export async function collectBackups(): Promise<void> {
-  const dir = process.env.BACKUP_DIR?.trim();
-  if (!dir) { backupAge.set({}, -1); backupCount.set({}, 0); backupOffsiteAge.set({}, -1); return; }
-  try {
-    const { readdir, stat } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-
-    // The offsite receipt is read FIRST and independently of the dumps, so that "no backups at all"
-    // and "backups that never left the box" stay separable. Reading it inside the dump branch would
-    // make an empty directory silently imply an offsite failure it says nothing about.
-    const receipt = await stat(join(dir, '.offsite-receipt')).catch(() => null);
-    backupOffsiteAge.set({}, receipt ? (Date.now() - receipt.mtimeMs) / 1000 : -1);
-    // `mfarm-*.dump` exactly, which is what `deploy/backup.sh` writes and what its own retention
-    // sweep counts. Two details make this the right filter rather than a guess:
-    //
-    //   the dump is written as `.dump.partial`, VERIFIED with `pg_restore --list`, and only then
-    //   renamed — so a file with this suffix is a backup that was proven readable, not one that was
-    //   merely started;
-    //
-    //   the companion `.globals.sql` is deliberately not counted. It is written first and would
-    //   make a run that died halfway through `pg_dump` look like a fresh, complete backup.
-    const names = (await readdir(dir)).filter((n) => n.startsWith('mfarm-') && n.endsWith('.dump'));
-    if (!names.length) { backupAge.set({}, -1); backupCount.set({}, 0); return; }
-    let newest = 0;
-    for (const n of names) {
-      const st = await stat(join(dir, n)).catch(() => null);
-      if (st && st.mtimeMs > newest) newest = st.mtimeMs;
-    }
-    backupCount.set({}, names.length);
-    backupAge.set({}, newest ? (Date.now() - newest) / 1000 : -1);
-  } catch {
-    backupAge.set({}, -1);
-    backupCount.set({}, 0);
-    backupOffsiteAge.set({}, -1);
-  }
+  const b = await backupState();
+  backupAge.set({}, b.ageSeconds);
+  backupCount.set({}, b.count);
+  backupOffsiteAge.set({}, b.offsiteAgeSeconds);
 }
 
 /**

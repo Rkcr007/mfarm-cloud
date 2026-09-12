@@ -151,6 +151,17 @@ export interface SessionPrincipal {
   sessionId: string;
   /** The CSRF value this session was minted with, compared against the request header. */
   csrf: string;
+  /**
+   * Fleet operator (migration 053). NOT a fourth membership role, and read from `users` rather than
+   * from `memberships`: operating the farm is a relationship between a person and the FARM, while
+   * every other authority on this principal is scoped to one org.
+   *
+   * Resolved on every request alongside the role, deliberately, rather than stamped into the
+   * session at login. A grant revoked at 10:00 must stop working at 10:00, not whenever that
+   * person's session happens to expire -- which is the same rule `credential_epoch` enforces for
+   * passwords, applied to the one capability that can power-cycle a machine.
+   */
+  operator: boolean;
 }
 
 /**
@@ -166,7 +177,7 @@ export async function authenticateSession(token: string | undefined): Promise<Se
   if (!token?.startsWith('mus_')) return null;
   return withSystem(async (c) => {
     const { rows } = await c.query(
-      `SELECT s.id, s.user_id, s.org_id, s.csrf, s.epoch, m.role, u.credential_epoch
+      `SELECT s.id, s.user_id, s.org_id, s.csrf, s.epoch, m.role, u.credential_epoch, u.operator
          FROM user_sessions s
          JOIN memberships m ON m.user_id = s.user_id AND m.org_id = s.org_id
          JOIN users u ON u.id = s.user_id
@@ -191,6 +202,7 @@ export async function authenticateSession(token: string | undefined): Promise<Se
       role: row.role,
       sessionId: row.id,
       csrf: row.csrf,
+      operator: row.operator === true,
     };
   });
 }

@@ -36,7 +36,7 @@ The filename stays because a lot of things link to it.
   [../examples/java-testng/README.md](../examples/java-testng/README.md) for a Java/TestNG/Cucumber
   suite moving off LambdaTest.
 - **Building on it** — [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md),
-  [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md), [adrs/](adrs/) (26 decisions; there is no 0013).
+  [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md), [adrs/](adrs/) (37 decisions; there is no 0013).
 - **The record** — [../HANDOFF.md](../HANDOFF.md), the numbered session log. **Trust its dated
   entries over its summary sections:** the entries have held up under two audits, the summaries have
   been found carrying seventeen and then twelve stale claims.
