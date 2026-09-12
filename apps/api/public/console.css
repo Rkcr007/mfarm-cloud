@@ -2804,3 +2804,6 @@ kbd {
   margin: 0 0 8px;
 }
 .canline > .dot { margin-top: 6px; }
+
+/** The operations-log filter row. Wraps rather than overflowing, and never pushes the table. */
+.opsfilters { flex-wrap: wrap; gap: 6px; }

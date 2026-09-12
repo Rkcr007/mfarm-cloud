@@ -127,6 +127,15 @@ export interface HostSnapshot {
     memTotalMb: number | null;
   };
   devices: { total: number; ready: number; allocated: number; quarantined: number; offline: number };
+  /**
+   * Tenants on this machine RIGHT NOW.
+   *
+   * On the snapshot rather than derived in the browser, because it is the number a confirmation
+   * dialog has to put in front of somebody before they drain or stop a host — "3 sessions are
+   * running on this host" — and a count the page computed from a list it happened to have would be
+   * a different number from the one the server acts on.
+   */
+  sessions: { active: number };
   maintenance: { drained: boolean; since: string | null; reason: string | null; source: string | null };
   cost: {
     perHour: number | null;
@@ -166,7 +175,7 @@ interface HostRow {
   disk_free_bytes: string | null; disk_total_bytes: string | null; load1: string | null;
   mem_available_mb: number | null; mem_total_mb: number | null; stats_at: Date | null;
   device_count: string; ready_count: string; allocated_count: string;
-  quarantined_count: string; offline_count: string;
+  quarantined_count: string; offline_count: string; active_sessions: string;
   powered_today_seconds: string | null; powered_month_seconds: string | null;
   device_seconds_today: string | null;
 }
@@ -202,7 +211,7 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
               h.disk_free_bytes, h.disk_total_bytes, h.load1,
               h.mem_available_mb, h.mem_total_mb, h.stats_at,
               d.device_count, d.ready_count, d.allocated_count,
-              d.quarantined_count, d.offline_count,
+              d.quarantined_count, d.offline_count, d.active_sessions,
               p.today_seconds  AS powered_today_seconds,
               p.month_seconds  AS powered_month_seconds,
               m.device_seconds AS device_seconds_today
@@ -213,7 +222,14 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
                   count(*) FILTER (WHERE dv.state IN ('RESERVED','SESSION_ACTIVE'))
                                                                         AS allocated_count,
                   count(*) FILTER (WHERE dv.state = 'QUARANTINED')      AS quarantined_count,
-                  count(*) FILTER (WHERE dv.state = 'OFFLINE')          AS offline_count
+                  count(*) FILTER (WHERE dv.state = 'OFFLINE')          AS offline_count,
+                  -- The SESSION rows, not the device states. A device in RESERVED is allocated and
+                  -- may have no live session behind it yet; what a confirmation dialog has to name
+                  -- is the number of tenants who would notice.
+                  (SELECT count(*) FROM sessions s
+                     JOIN devices d2 ON d2.id = s.device_id
+                    WHERE d2.host_id = h.id AND s.state IN ('ACTIVE', 'ALLOCATING'))
+                                                                        AS active_sessions
              FROM devices dv WHERE dv.host_id = h.id
          ) d ON true
          -- POWERED TIME, clipped to each window rather than summed whole (054). An interval that
@@ -414,6 +430,7 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         quarantined: Number(h.quarantined_count ?? 0),
         offline: Number(h.offline_count ?? 0),
       },
+      sessions: { active: Number(h.active_sessions ?? 0) },
       maintenance: {
         drained: h.quarantine_source === 'operator',
         since: h.quarantined_at ? h.quarantined_at.toISOString() : null,

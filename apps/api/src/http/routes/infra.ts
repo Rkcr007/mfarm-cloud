@@ -6,6 +6,8 @@ import {
 } from '../../infra/snapshot.ts';
 import { recentEvents } from '../../infra/events.ts';
 import { history, historyFacets, type TargetKind } from '../../infra/audit.ts';
+import { drainHost, resumeHost } from '../../infra/operations.ts';
+import { waitForChange, sseFrame, SSE_KEEPALIVE, streamListeners } from '../../infra/stream.ts';
 import { GIT_SHA, BUILT_AT, shortSha } from '../../version.ts';
 
 /**
@@ -39,6 +41,43 @@ function intParam(raw: string | undefined, fallback: number, min: number, max: n
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(Math.max(Math.trunc(n), min), max);
+}
+
+/**
+ * How often the stream recomputes when nothing has signalled.
+ *
+ * TWO SECONDS, which is slower than a heartbeat and faster than the poll it accelerates. Anything
+ * shorter would spend the payload's cost — a probe, five grouped queries and a fortnight of
+ * interval arithmetic — on redrawing numbers that move at ten-second resolution.
+ *
+ * OVERRIDABLE, and the reason is a test rather than a deployment. `infraChanged()` is supposed to
+ * make an operation arrive faster than the tick; with a two-second tick, a test asserting that
+ * cannot tell a working push from a tick that happened to land — it would pass with the signal
+ * removed, which is a test that agrees with a broken feature. Winding the tick out to half a minute
+ * makes the push the only way a frame can arrive in time.
+ *
+ * Read inside the handler, not at module scope: `import` is hoisted, so an env var read during
+ * module evaluation cannot be set by a test — the trap every route file in here documents.
+ */
+function tickMs(): number {
+  return Number(process.env.INFRA_STREAM_TICK_MS ?? 2_000);
+}
+
+/**
+ * How often a quiet stream says something, INDEPENDENTLY of how often it recomputes.
+ *
+ * These were the same timer and that was a bug waiting for a slower tick. A proxy closes an idle
+ * connection — a minute is a common default — and a stream that is healthy but has nothing to
+ * report is indistinguishable from a dead one until bytes arrive. Tying the keepalive to the
+ * recompute meant that raising the tick past the proxy's patience would silently start dropping
+ * connections, and the symptom would be a page that stops updating for reasons nobody could see.
+ *
+ * Fifteen seconds, well under any idle timeout worth worrying about, and overridable for the same
+ * reason as the tick: a test asserting "a quiet farm sends keepalives, not redraws" needs both
+ * halves observable inside a few seconds.
+ */
+function keepaliveMs(): number {
+  return Number(process.env.INFRA_STREAM_KEEPALIVE_MS ?? 15_000);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -88,9 +127,14 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
    * unreachable, because the two came from different moments. `generatedAt` stamps the whole
    * payload so the page can say how old everything on it is, together.
    */
-  app.get('/infra/overview', async (req) => {
-    requireOperator(req);
-
+  /**
+   * The whole payload, built once and shared by the request route and the stream.
+   *
+   * ONE BUILDER, because the two must never drift: a console that gets a different shape depending
+   * on whether its stream is connected is a console with two rendering paths and one of them
+   * untested. The stream diffs what comes out of here; the route sends it.
+   */
+  async function overviewPayload() {
     // Sequential on purpose: `probeDatabase` is a latency measurement, and running it beside four
     // other queries on the same pool would measure the contention this page creates rather than the
     // database's own health.
@@ -129,17 +173,23 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
        */
       capabilities: {
         /**
-         * ALL FALSE UNTIL THE ROUTE BEHIND EACH ONE EXISTS. `quarantine_host` and
-         * `release_host_quarantine` are both in the database and neither has an endpoint yet, and
-         * "the mechanism exists" is not the same claim as "the console can invoke it". Declaring
-         * `drain: true` here on the strength of the SQL would put a button on the page that posts
-         * to a 404 — the same defect in a new costume.
+         * TRUE ONLY WHERE THE ROUTE BEHIND IT EXISTS. "The mechanism exists" is not the same claim
+         * as "the console can invoke it": `quarantine_host` has been in the database since 016 and
+         * declaring this true on the strength of the SQL would have put a button on the page that
+         * posts to a 404 — the same defect in a new costume.
          */
-        drain: false,
+        drain: true,
+        /** Needs a cloud credential this VM does not hold. See `capabilities` in the console. */
         power: false,
+        /** Needs the agent to learn a job kind. Its own stage. */
         services: false,
       },
     };
+  }
+
+  app.get('/infra/overview', async (req) => {
+    requireOperator(req);
+    return overviewPayload();
   });
 
   /**
@@ -197,6 +247,135 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
         limit: intParam(q.limit, 100, 1, 500),
       }),
     };
+  });
+
+  /* ------------------------------------------------------------------ operations */
+
+  /**
+   * POST /v1/infra/hosts/:id/drain — take a host out of service without evicting anybody.
+   *
+   * THE ONLY INPUT IS A REASON, and it is stored and never executed. There is no host name here,
+   * no command, no path: the id is a uuid the database resolves or 404s on. That is what makes an
+   * infrastructure control safe to put behind a browser at all.
+   *
+   * CSRF IS ALREADY HANDLED, centrally, for every unsafe request — see `server.ts`. It is not
+   * re-checked here, because a second check in one route is a check the other routes do not have.
+   *
+   * RATE LIMITING IS ALREADY HANDLED, centrally, by `@fastify/rate-limit`. Worth stating because
+   * the brief asks for it specifically and the honest answer is that the mechanism exists and is
+   * global, not that a special one was added for this.
+   */
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>(
+    '/infra/hosts/:id/drain',
+    {
+      schema: {
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+        body: {
+          type: 'object',
+          // Nothing else is accepted. A body with an extra field is a caller expecting behaviour
+          // this route does not have, and a silent ignore is how that becomes a support thread.
+          additionalProperties: false,
+          properties: { reason: { type: 'string', maxLength: 200 } },
+        },
+      },
+    },
+    async (req) => {
+      requireOperator(req);
+      return drainHost(req, req.params.id, req.body?.reason);
+    },
+  );
+
+  /** POST /v1/infra/hosts/:id/resume — put a drained host back into service. */
+  app.post<{ Params: { id: string } }>(
+    '/infra/hosts/:id/resume',
+    {
+      schema: {
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+      },
+    },
+    async (req) => {
+      requireOperator(req);
+      return resumeHost(req, req.params.id);
+    },
+  );
+
+  /* ------------------------------------------------------------------ the live stream */
+
+  /**
+   * GET /v1/infra/stream — the overview, pushed.
+   *
+   * WHY A STREAM WHEN THE CONSOLE ALREADY POLLS. An operation has a moment: somebody presses Drain
+   * and watches, and five seconds of nothing is long enough to press it again. The push closes that
+   * window to a round trip. See `infra/stream.ts` for why this is SSE and not a socket, and for the
+   * in-process limit of the change signal.
+   *
+   * THE POLL IS NOT REMOVED. A browser that cannot hold this open sees the page it would have seen
+   * anyway, five seconds later — which is what makes this an accelerator rather than a dependency.
+   */
+  app.get('/infra/stream', async (req, reply) => {
+    requireOperator(req);
+
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      // Nginx and friends buffer a response body by default, which turns an event stream into a
+      // single delivery at the end of time. This is the header that turns it off, and it is inert
+      // everywhere else.
+      'x-accel-buffering': 'no',
+    });
+
+    /**
+     * ABORTED WHEN THE CLIENT GOES, and that is the whole lifecycle. A stream that keeps computing
+     * an expensive payload for a closed tab is a leak that only shows up on a busy day.
+     */
+    const gone = new AbortController();
+    req.raw.on('close', () => gone.abort());
+
+    /**
+     * The keepalive, on its OWN timer — see `keepaliveMs`. `unref` so a stream never holds the
+     * process open, and cleared in the `finally` below so a closed client leaves no timer behind.
+     */
+    const keepalive = setInterval(() => {
+      try { reply.raw.write(SSE_KEEPALIVE); } catch { gone.abort(); }
+    }, keepaliveMs());
+    keepalive.unref?.();
+
+    let lastSignature = '';
+    try {
+      while (!gone.signal.aborted) {
+        const payload = await overviewPayload();
+        /**
+         * SENT ONLY WHEN SOMETHING THE PAGE DRAWS HAS CHANGED, at the resolution it draws it.
+         *
+         * Not `generatedAt`, which differs on every tick — sending that would make the console
+         * rebuild the screen twice a second under somebody's cursor, which is exactly what
+         * `pollSignature` exists to prevent on the polling path. The signature below is the same
+         * idea on the pushing one.
+         */
+        const signature = JSON.stringify([
+          payload.health.overall,
+          payload.hosts.map((h) => [h.id, h.power, h.reachability, h.machine.status,
+            h.maintenance.drained, h.devices, h.sessions.active,
+            h.alerts.map((a) => a.code)]),
+          payload.fleet,
+          payload.capabilities,
+        ]);
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          reply.raw.write(sseFrame('infra', payload));
+        }
+        await waitForChange(tickMs(), gone.signal);
+      }
+    } catch {
+      /* A write to a socket the client already closed. Nothing to do but stop. */
+    } finally {
+      clearInterval(keepalive);
+      gone.abort();
+      reply.raw.end();
+    }
+    // Fastify must not also try to send a body.
+    return reply;
   });
 
   /**

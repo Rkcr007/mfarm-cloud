@@ -138,6 +138,20 @@ export const state = {
    * so a failed load says so, in words, with when the numbers on screen were last true.
    */
   infra: { data: null, loaded: false, error: null, fetchedAt: 0, loading: false },
+  /**
+   * The open `EventSource`, or null. Held in state rather than in a module-scope variable so that
+   * `closeOverlays`-style cleanup and the route change can both see it, and so a test can assert
+   * that navigating away closed it.
+   */
+  infraStream: null,
+  /**
+   * The operations log and the filters it is being read through.
+   *
+   * HELD IN STATE, NOT IN THE DOM — the same reason `runsQuery` is: the poll re-renders this screen,
+   * and a filter that lived in an input would be reset under somebody's fingers every time it did.
+   */
+  infraOps: { rows: [], facets: null, loaded: false, loading: false,
+              filter: { actor: '', action: '', target: '', outcome: '', from: '' } },
   /** Metered consumption, fetched when Health is opened rather than on the 5s poll — see `loadUsage`. */
   usage: { byDay: [], total: null, window: null, loaded: false },
   /** `GET /runs/:id` for the run detail screen: the rollup plus every session in it. */
@@ -893,20 +907,36 @@ function clearToast(key) {
 let dialogOpen = false;
 
 /** Never `confirm()`: a modal dialog blocks the page, and this console polls behind it. */
-function confirmDialog({ title, lead, removes, keeps, cancel = 'Cancel', confirm, onConfirm }) {
+function confirmDialog({
+  title, lead, removes, removesLabel = 'This will remove', keeps,
+  fields, cancel = 'Cancel', confirm, confirmClass = 'danger-solid', onConfirm,
+}) {
   const d = $('dialog');
   fill(d,
     h('h2', { id: 'dialog-title', text: title }),
     h('p', { class: 'help mt-xs', text: lead }),
+    /**
+     * `removesLabel` EXISTS FOR THE INFRASTRUCTURE OPERATIONS, and it is not a cosmetic knob.
+     *
+     * This inset has always been headed "This will remove", which is exactly right for releasing a
+     * device. An infrastructure confirmation has to state an IMPACT, and most of that impact is not
+     * a removal: a drain leaves running sessions alone and keeps the machine powered and billing.
+     * Putting "the machine stays on at ₹65/hour" under a heading that says "this will remove" would
+     * be the dialog contradicting itself at the moment somebody is deciding.
+     */
     removes?.length ? h('div', { class: 'inset mt-lg' },
-      h('p', { class: 'micro', text: 'This will remove' }),
+      h('p', { class: 'micro', text: removesLabel }),
       h('ul', { class: 'mt-xs' }, removes.map((r) =>
         h('li', { class: 'help' }, '— ', r))),
     ) : null,
     keeps ? h('p', { class: 'ok-text help mt-md', text: keeps }) : null,
+    // An optional input, for the one thing an operator should be able to say at the moment they act
+    // — WHY. `formDialog` collects fields and asks no permission; this asks permission and may also
+    // collect one. Two dialogs would be two places for Escape, the scrim and focus to drift.
+    fields?.length ? h('div', { class: 'stack mt-lg' }, fields) : null,
     h('div', { class: 'row end mt-xl' },
       btn(cancel, 'ghost', closeOverlays),
-      btn(confirm, 'danger-solid', async () => { closeOverlays(); await onConfirm(); }),
+      btn(confirm, confirmClass, async () => { closeOverlays(); await onConfirm(); }),
     ),
   );
   d.hidden = false;
@@ -941,7 +971,14 @@ function formDialog({ title, lead, fields, submit, onSubmit }) {
   (d.querySelector('input:not([disabled])') || d.querySelector('.btn.ghost'))?.focus();
 }
 
-function closeOverlays() {
+/**
+ * EXPORTED so a test that opens a dialog can put it away again.
+ *
+ * Every confirmation reuses one `#dialog` element, so a test that leaves one open leaks it into the
+ * next test's assertions — which is how a suite starts agreeing with itself instead of with the
+ * page.
+ */
+export function closeOverlays() {
   $('dialog').hidden = true;
   $('palette').hidden = true;
   $('scrim').hidden = true;
@@ -1382,6 +1419,41 @@ async function refreshInfra() {
 }
 
 /**
+ * The operations log, with whatever filters are set.
+ *
+ * ON ARRIVAL AND ON A FILTER CHANGE, never on the poll. This is an append-only table read through
+ * five indexed predicates; it changes when somebody performs an operation, which is a thing they do
+ * from this very page, and `runInfraOperation` refreshes it by hand at exactly that moment. Putting
+ * it on the five-second tick would run the query twelve times a minute to redraw the same rows.
+ */
+async function refreshInfraOps() {
+  if (state.infraOps.loading) return;
+  state.infraOps.loading = true;
+  const f = state.infraOps.filter;
+  const q = new URLSearchParams();
+  if (f.actor) q.set('actor', f.actor);
+  if (f.action) q.set('action', f.action);
+  if (f.target) { q.set('targetKind', 'host'); q.set('target', f.target); }
+  if (f.outcome) q.set('outcome', f.outcome);
+  if (f.from) q.set('from', f.from);
+  try {
+    const [log, facets] = await Promise.all([
+      api(`/v1/infra/operations${q.toString() ? `?${q}` : ''}`),
+      // Fetched alongside rather than once, because the set of actions and actors GROWS as
+      // operations happen — a filter list loaded on first paint would never offer an action
+      // somebody performed while the page was open.
+      api('/v1/infra/operations/facets'),
+    ]);
+    state.infraOps = {
+      ...state.infraOps, rows: log.operations || [], facets, loaded: true, loading: false,
+    };
+  } catch (e) {
+    state.infraOps = { ...state.infraOps, loaded: true, loading: false, rows: [], facets: null };
+    toast('Could not read the operations log', e.message, 'bad', { key: 'infra-ops' });
+  }
+}
+
+/**
  * What this org actually consumed.
  *
  * NOT ON THE POLL. This is a thirty-day aggregate over an append-only table; it does not change
@@ -1813,7 +1885,12 @@ export function loadForRoute() {
    * The screen fetches too, on its first paint. Both exist deliberately: this one covers arrival,
    * that one covers a render that happens before this promise settles.
    */
-  if (name === 'infra') return refreshInfra();
+  if (name === 'infra') {
+    // The stream is opened here and nowhere else, so there is exactly one place that can leave one
+    // running. `go()` closes it on the way out — see the hashchange handler.
+    openInfraStream();
+    return refreshInfra();
+  }
   return Promise.resolve();
 }
 
@@ -1828,6 +1905,14 @@ window.addEventListener('hashchange', () => {
   if (previous.name === 'cockpit' && (state.route.name !== 'cockpit' || state.route.id !== previous.id)) {
     closeLive();
   }
+  /**
+   * Leaving Infrastructure closes its event stream, for the same reason the cockpit closes its
+   * socket: an open stream is a connection AND a payload recomputed every two seconds — a database
+   * probe, five grouped queries and a fortnight of interval arithmetic — for a page nobody is
+   * looking at. Moving BETWEEN its sections keeps the one stream, which is why the check is on the
+   * route name and not on the lens.
+   */
+  if (previous.name === 'infra' && state.route.name !== 'infra') closeInfraStream();
   render();
   // A new screen starts at the top — see `resetScroll`. After `render()`, because it is the render
   // that replaces the content whose height the scroll position was relative to.
@@ -8269,6 +8354,214 @@ function usageCard() {
   );
 }
 
+/* ---------------------------------------------------------------- infrastructure operations */
+
+/**
+ * An infrastructure operation, from the button to the answer.
+ *
+ * ---------------------------------------------------------------- three rules, one function
+ *
+ * **NOTHING IS OPTIMISTIC.** The console has never reported success before the system did — rule 4
+ * of this file — and it matters more here than anywhere: a page that shows a host as drained the
+ * instant the button is pressed is a page that will show it as drained when the request failed.
+ * The row is refreshed from the server and the toast repeats what the SERVER said happened.
+ *
+ * **`noop` IS NOT A FAILURE.** Draining an already-drained host produces a calm, neutral toast
+ * saying nothing changed. Colouring that red would teach an operator that their second click broke
+ * something, and the second click is the one people make when they are unsure the first landed.
+ *
+ * **`unknown` IS NOT A FAILURE EITHER.** It is amber, and it says so in words: the operation may
+ * have happened. That is the whole point of the fifth outcome — see `infra/audit.ts`.
+ */
+async function runInfraOperation(path, body, { pending }) {
+  const key = `infra-op-${path}`;
+  toast(pending, 'Waiting for the control plane to confirm.', '', { key });
+  try {
+    const out = await api(path, { method: 'POST', body });
+    clearToast(key);
+    const tone = out.result === 'succeeded' ? 'ok'
+      : out.result === 'failed' ? 'bad'
+        : out.result === 'unknown' ? 'warn' : '';
+    const title = out.result === 'succeeded' ? 'Done'
+      : out.result === 'noop' ? 'Nothing to do'
+        : out.result === 'unknown' ? 'Outcome unknown'
+          : 'Refused';
+    toast(title, out.message, tone);
+  } catch (err) {
+    clearToast(key);
+    /**
+     * A REQUEST THAT NEVER GOT AN ANSWER IS NOT A FAILED OPERATION.
+     *
+     * The control plane writes the audit row BEFORE it dispatches, so an operation whose response
+     * was lost may well have happened. Saying "could not drain" would send somebody to press it
+     * again; saying what is actually known sends them to the operations log, which can answer.
+     */
+    toast('The answer did not arrive', `${err.message}. The operation may still have been carried `
+      + 'out — check the operations log below before pressing it again.', 'warn');
+  }
+  await refreshInfra();
+  render();
+}
+
+/**
+ * THE IMPACT, STATED BEFORE THE ACT — and computed from the host's own snapshot, so the numbers in
+ * the dialog are the numbers on the card behind it.
+ *
+ * The line about the machine staying powered on is the one that earns this dialog. "Drain" sounds
+ * like it saves money and it does not: a drained host is switched on, idle, and billing at exactly
+ * the rate it was billing before. An operator who wanted to stop spending and pressed this instead
+ * would find out at the end of the month.
+ */
+function askDrain(host, rate) {
+  const reason = h('input', {
+    class: 'field', type: 'text', maxlength: '200', autocomplete: 'off',
+    placeholder: 'Why, for the log — kernel upgrade, disk cleanup…',
+  });
+  confirmDialog({
+    title: `Drain ${host.hostname}?`,
+    lead: 'It stays powered on and keeps its running sessions. No new session will be placed on it '
+      + 'until you resume it.',
+    removesLabel: 'What happens',
+    removes: [
+      host.devices.ready
+        ? `${host.devices.ready} ready device${host.devices.ready === 1 ? '' : 's'} leave the pool`
+        : 'no devices are idle, so none leave the pool',
+      /**
+       * `?.` for the same reason `host.cost?.` has it. A browser holding a page from before a deploy
+       * against a server from after it is an ordinary few seconds in this product's life, and a
+       * confirmation dialog that throws is a button that does nothing with no explanation.
+       */
+      host.sessions?.active
+        ? `${host.sessions.active} running session${host.sessions.active === 1 ? ' continues' : 's continue'} untouched`
+        : 'no sessions are running on it',
+      host.cost?.perHour !== null && host.cost?.perHour !== undefined
+        ? `it stays powered on, still costing ${rate?.currency || ''}${host.cost.perHour}/hour`
+        : 'it stays powered on and keeps costing money',
+    ],
+    keeps: 'Nobody is evicted. Each device remembers the state it was in and returns to it when you resume.',
+    fields: [h('label', { class: 'stack tight' },
+      h('span', { class: 'micro', text: 'Reason (optional)' }), reason)],
+    confirm: 'Drain host',
+    onConfirm: () => runInfraOperation(
+      `/v1/infra/hosts/${encodeURIComponent(host.id)}/drain`,
+      { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
+      { pending: `Draining ${host.hostname}…` },
+    ),
+  });
+}
+
+/**
+ * RESUMING IS NOT DESTRUCTIVE, so it does not wear the destructive button.
+ *
+ * The console reuses `danger-solid` for everything that changes the world, and that is how red
+ * stops meaning anything. This adds capacity back; it gets the primary style, and it still asks,
+ * because putting a host back into service on a farm somebody drained for a reason is worth one
+ * deliberate click.
+ */
+function askResume(host) {
+  confirmDialog({
+    title: `Put ${host.hostname} back into service?`,
+    lead: host.maintenance?.reason
+      ? `It was drained ${ago(host.maintenance.since)} — ${host.maintenance.reason}.`
+      : `It was drained ${ago(host.maintenance.since)}.`,
+    removesLabel: 'What happens',
+    removes: [
+      'each withdrawn device returns to the state it was in before the drain',
+      'the allocator starts placing new sessions on it again',
+      'a device that was quarantined in its own right stays quarantined',
+    ],
+    confirm: 'Resume host',
+    confirmClass: 'primary',
+    onConfirm: () => runInfraOperation(
+      `/v1/infra/hosts/${encodeURIComponent(host.id)}/resume`, {},
+      { pending: `Resuming ${host.hostname}…` },
+    ),
+  });
+}
+
+/**
+ * The controls a host card offers, which is exactly what the SERVER says this deployment can do.
+ *
+ * `capabilities` is read per operation rather than per page: `drain` being available says nothing
+ * about `power`, and a page that drew both on one flag would offer a Stop button the moment drain
+ * shipped. The seven times this repo has shipped a control on a false premise were all one flag
+ * standing in for another.
+ */
+function infraHostControls(host, caps) {
+  const controls = [];
+  if (caps?.drain) {
+    controls.push(host.maintenance?.drained
+      ? btn('Resume', 'tiny primary', () => askResume(host))
+      : btn('Drain', 'tiny ghost', () => askDrain(host, state.infra.data?.cost?.rate), {
+          // A host nobody can reach is already out of the pool; draining it would replace a
+          // quarantine that heals itself with one only a person can lift. The server refuses this
+          // and says why — the button is disabled so nobody has to read the refusal to find out.
+          disabled: host.reachability === 'unavailable',
+          title: host.reachability === 'unavailable'
+            ? 'This host is not answering, so its devices have already left the pool.'
+            : 'Stop placing new sessions here. Running sessions are untouched.',
+        }));
+  }
+  return controls.length ? h('span', { class: 'row tight' }, controls) : null;
+}
+
+/* ---------------------------------------------------------------- the live stream */
+
+/**
+ * Hold an event stream open while the Infrastructure page is on screen.
+ *
+ * WHY THIS EXISTS BESIDE THE POLL RATHER THAN INSTEAD OF IT. The five-second poll is what this
+ * console does everywhere and it is a good design — see `startPoll`. One thing about this page is
+ * different: an operation has a MOMENT. Somebody presses Drain and watches, and five seconds of
+ * nothing is long enough to press it again.
+ *
+ * SO THE STREAM IS AN ACCELERATOR, NEVER A DEPENDENCY. If it cannot connect, or the browser has no
+ * `EventSource`, or a proxy eats it, the page behaves exactly as it did: the poll is still running
+ * and still calls `refreshInfra`. Nothing below is allowed to be the only way a number arrives.
+ *
+ * CLOSED ON NAVIGATION. An event stream left open on a page nobody is looking at is a connection
+ * and a recomputed payload every two seconds, forever.
+ */
+function openInfraStream() {
+  if (state.infraStream || typeof EventSource === 'undefined') return;
+  let es;
+  try {
+    es = new EventSource('/v1/infra/stream');
+  } catch {
+    return; // No stream; the poll carries the page.
+  }
+  state.infraStream = es;
+
+  es.addEventListener('infra', (ev) => {
+    // Only while the page is actually open. A stream that outlived its screen would rebuild a
+    // screen that is no longer rendered, and `render()` would draw the Fleet instead.
+    if (state.route.name !== 'infra') return;
+    try {
+      state.infra = {
+        data: JSON.parse(ev.data), loaded: true, error: null,
+        fetchedAt: Date.now(), loading: false,
+      };
+    } catch {
+      return; // A frame we cannot parse is a frame to ignore, not a page to blank.
+    }
+    render();
+  });
+
+  /**
+   * A FAILED STREAM IS NOT AN ERROR ON THE PAGE.
+   *
+   * `EventSource` reconnects by itself, and the poll is already covering the gap, so surfacing this
+   * would be telling somebody about a degradation they cannot act on and are not experiencing.
+   * Left to reconnect; the staleness banner is what speaks if the data actually stops arriving.
+   */
+  es.addEventListener('error', () => { /* EventSource retries on its own. */ });
+}
+
+function closeInfraStream() {
+  try { state.infraStream?.close(); } catch { /* already gone */ }
+  state.infraStream = null;
+}
+
 /* ---------------------------------------------------------------------------- infrastructure */
 
 /**
@@ -8552,6 +8845,7 @@ function infraHostCard(host, rate) {
       host.state !== 'UP' ? pill(host.state.toLowerCase(), host.state === 'QUARANTINED' ? 'warn' : '', { dot: false }) : null,
       h('span', { class: 'spacer' }),
       h('span', { class: 'caption', text: host.region }),
+      infraHostControls(host, state.infra.data?.capabilities),
     ),
 
     h('p', { class: 'caption' }, [
@@ -8890,13 +9184,111 @@ function infraEventList(events, title) {
     ))));
 }
 
+/** How an operation's outcome reads, and what colour it carries. See migration 053 for the five. */
+const OP_RESULT = {
+  accepted:  { label: 'in progress', tone: '' },
+  succeeded: { label: 'success', tone: 'ok' },
+  noop:      { label: 'no change', tone: '' },
+  failed:    { label: 'failed', tone: 'bad' },
+  // Amber, never red. "We asked and never found out" is not a failure, and colouring it as one is
+  // how somebody presses Start on a machine that is already starting.
+  unknown:   { label: 'unknown', tone: 'warn' },
+};
+
+/**
+ * THE OPERATIONS HISTORY, with the five filters the brief asks for and no sixth.
+ *
+ * Date, user, host, action and success/failure are each a column and an index (migration 053).
+ * Nothing here is filtered in the browser: a filter that pages the whole table in and then discards
+ * most of it stops working exactly when the log is long enough to need filtering.
+ *
+ * OUTCOME IS COARSE ON PURPOSE — success or failure, not four checkboxes. The four-value result is
+ * on every row; making the reader decide whether `no change` counts as success before they can
+ * search is the work a filter is supposed to do for them.
+ */
+function infraOperationsLog(data) {
+  const { rows, facets, loaded, filter } = state.infraOps;
+  if (!loaded) {
+    if (!state.infraOps.loading) void refreshInfraOps().then(render);
+    return card('Operations', {}, h('p', { class: 'empty' }, h('strong', { text: 'Loading…' })));
+  }
+
+  const apply = (patch) => {
+    Object.assign(state.infraOps.filter, patch);
+    state.infraOps.loaded = false;
+    render();
+  };
+  const select = (name, value, options, onChange) => h('select', {
+    class: 'field narrow', onchange: (e) => onChange(e.target.value),
+  }, [h('option', { value: '', selected: value === '' }, name),
+      ...options.map(([v, label]) => h('option', { value: v, selected: value === v }, label))]);
+
+  const since = (days) => new Date(Date.now() - days * 86_400_000).toISOString();
+
+  /**
+   * THE FILTERS SIT ABOVE THE TABLE, not in the card's header slot.
+   *
+   * `aside` is one element beside a title and it works for a button; five selects put there wrap
+   * into the heading and push it around as the facet lists grow. Their own row also gives them
+   * somewhere to wrap TO on a narrow window.
+   */
+  const filters = h('div', { class: 'row tight opsfilters' },
+      select('Any time', filter.from, [
+        [since(1), 'Last 24 hours'], [since(7), 'Last 7 days'], [since(30), 'Last 30 days'],
+      ], (v) => apply({ from: v })),
+      select('Anyone', filter.actor,
+        (facets?.actors || []).filter((a) => a.userId).map((a) => [a.userId, a.email]),
+        (v) => apply({ actor: v })),
+      select('Any host', filter.target,
+        (facets?.targets || []).filter((t) => t.kind === 'host').map((t) => [t.id, t.label]),
+        (v) => apply({ target: v })),
+      select('Any action', filter.action,
+        (facets?.actions || []).map((a) => [a, a]), (v) => apply({ action: v })),
+      select('Any outcome', filter.outcome,
+        [['ok', 'Succeeded'], ['bad', 'Failed or unknown']], (v) => apply({ outcome: v })),
+  );
+
+  return card('Operations', {},
+    filters,
+    rows.length
+      // `.tablewrap`, because `.table` carries a 760px minimum: without it a narrow window scrolls
+      // the whole page sideways instead of the table.
+      ? h('div', { class: 'tablewrap mt-md' }, h('table', { class: 'table' },
+          h('thead', null, h('tr', null,
+            h('th', { text: 'Time' }), h('th', { text: 'Admin' }), h('th', { text: 'Action' }),
+            h('th', { text: 'Target' }), h('th', { text: 'Result' }), h('th', { text: 'Detail' }))),
+          h('tbody', null, rows.map((r) => {
+            const res = OP_RESULT[r.result] || { label: r.result, tone: '' };
+            return h('tr', null,
+              h('td', { class: 'caption', title: r.requestedAt }, ago(r.requestedAt)),
+              h('td', { class: 'secondary', text: r.actor.email }),
+              h('td', { class: 'mono', text: r.action }),
+              h('td', { text: r.target.label }),
+              h('td', null, pill(res.label, res.tone, { dot: false })),
+              h('td', { class: 'caption', text: r.detail || '' }),
+            );
+          }))))
+      : empty('Nothing matches.', Object.values(filter).some(Boolean)
+          ? 'Widen the filters above.'
+          : 'No infrastructure operation has been performed on this farm yet.'),
+  );
+}
+
 function infraEvents(data) {
   return [
     h('p', { class: 'page-sub mb-gap', text:
       'What has happened to this farm. Operators’ actions, every device quarantine and recovery, '
       + 'and every machine coming up or going away — read from the three records that already hold '
       + 'them rather than from a fourth copy that could fall behind.' }),
-    infraEventList(data.events || [], 'The last week'),
+    /**
+     * THE AUDIT FIRST, THE FEED SECOND.
+     *
+     * The feed answers "what happened"; the audit answers "who did that". Somebody who opens this
+     * tab during an incident is usually asking the second question, and the one with filters on it
+     * is the one that can be narrowed to an answer.
+     */
+    infraOperationsLog(data),
+    infraEventList(data.events || [], 'Everything, the last week'),
   ];
 }
 

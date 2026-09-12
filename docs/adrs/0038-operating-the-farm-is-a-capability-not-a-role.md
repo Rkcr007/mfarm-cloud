@@ -130,6 +130,50 @@ attempted. The console renders its controls from a `capabilities` block the **se
 deployment with no cloud driver cannot draw a Stop button that returns 501 — the shape this repo has
 shipped seven times under the name "a control on a false premise".
 
+### 6. An operation is idempotent, and its outcome is never guessed
+
+Draining a host that is already drained answers `noop` and changes nothing — not even the reason and
+timestamp of the first drain, which a second `quarantine_host` call would have overwritten. Somebody
+unsure whether their click landed will click again, and a farm that answers the second click with a
+red error teaches them to distrust the first.
+
+The refusals are as load-bearing as the successes, and each one says what to do instead:
+
+| | |
+|---|---|
+| drain a host the **reaper** quarantined | refused. It is already out of the pool, and draining it would replace a quarantine that lifts itself on the next heartbeat with one only a person can lift. |
+| resume a host the **reaper** quarantined | refused. Declaring a silent host healthy does not make packets arrive. |
+| resume a host nobody drained | `noop`. |
+
+### 7. The stream is an accelerator, never a dependency
+
+`GET /v1/infra/stream` is Server-Sent Events. The console's five-second poll stays exactly as it is,
+and a browser that cannot hold the stream open sees the page it would have seen anyway.
+
+**Why a push at all**, when a poll already covers it: an operation has a moment. Somebody presses
+Drain and watches, and five seconds of nothing is long enough to press it again — and the second
+press is the one that produces a support conversation. And the payload is expensive: a database
+probe, five grouped queries and a fortnight of interval arithmetic, which the stream computes once
+per tick for every listener rather than once per tab per five seconds.
+
+**SSE and not a WebSocket**, because this is one direction. The browser never answers. SSE
+reconnects on its own, carries the session cookie with nothing arranged, and needs no proxy
+configured for an upgrade; a socket would be a second transport to authorise, keep alive and reap,
+to carry nothing back.
+
+Three details are decisions rather than implementation:
+
+- **A frame only when something the page draws has changed**, at the resolution it draws it. Sending
+  on every tick would rebuild the screen under somebody's cursor twice a second — what
+  `pollSignature` exists to prevent on the polling path.
+- **The keepalive is a separate timer from the recompute.** They were one, and a test that wound the
+  tick out to prove the push worked also silenced the keepalive — which on a real deployment means a
+  proxy quietly reaping a healthy connection, with the symptom being a page that stops updating for
+  reasons nobody can see.
+- **The change signal is in-process, and that is written down.** With a second API process an
+  operation on one would not wake the streams on the other; those clients fall back to the tick, so
+  the failure is latency and never staleness.
+
 ## Consequences
 
 - The top bar loses its infrastructure segments. `#/infra` gains them, with everything around them
