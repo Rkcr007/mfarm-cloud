@@ -24,7 +24,7 @@ import { readFile, readdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installDom, countElements, classesOf, textOf, findByClass } from './dom-shim.ts';
+import { installDom, countElements, classesOf, textOf, findByClass, findByText } from './dom-shim.ts';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -3915,5 +3915,246 @@ describe('sharing a failure', () => {
     const el = doc().createElement('div');
     el.replaceChildren(doc().createElement('span'), null);
     assert.match(textOf(el), /null/, 'the shape of the bug that shipped into the dialog');
+  });
+});
+
+
+/**
+ * TEST ROWS FOR A MULTI-TEST SESSION (migration 021's rows, rendered 2026-09-12).
+ *
+ * THE CLAIM THIS REPO USED TO MAKE ABOUT ITSELF WAS TOO STRONG, and the correction is what these
+ * tests pin. `docs/STATUS.md` said a run "lists only its failures as test rows, so every passing
+ * test's name is written down and rendered nowhere". That is FALSE for the one-test-per-session
+ * shape: the session carries the test's name (migration 048) and the Sessions table has named it
+ * since 2026-09-09.
+ *
+ * What was genuinely missing is the other shape — a session running several tests collapsing to
+ * `PASSED 5/5`. Five ran, five were counted, and none of their names existed anywhere in this
+ * console. So the first test below asserts the state that was actually broken, and the second
+ * asserts the state that was already fine is left alone.
+ */
+describe('what a session actually ran', () => {
+  const results = (n: number) => Array.from({ length: n }, (_, i) => ({
+    id: `res-${i}`,
+    name: `Expenses: scenario ${i}`,
+    status: i === 1 ? 'failed' : 'passed',
+    failure: i === 1 ? 'AssertionError: expected "Approved" to equal "Refused"\n  at spec.ts:42' : null,
+    failureClass: i === 1 ? 'test' : null,
+    failureReason: i === 1 ? 'assertion-failure' : null,
+    durationMs: 8200 + i,
+    reportedAt: new Date().toISOString(),
+  }));
+
+  function seedEnded(n: number) {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const ended = { ...mod.state.sessions[0], state: 'ENDED', endedAt: new Date().toISOString(), expiresAt: null };
+    mod.state.sessions = [ended];
+    mod.state.detail = ended;
+    const all = results(n);
+    mod.state.artifacts = {
+      sessionId: 'sess-1',
+      items: [],
+      results: all,
+      failures: all.filter((r) => r.status === 'failed'),
+      loaded: true,
+    };
+    mod.state.testsExpanded = null;
+  }
+
+  test('a session that ran five tests names all five, passing ones included', () => {
+    seedEnded(5);
+    const text = textOf(mod.SCREENS.cockpit());
+    for (let i = 0; i < 5; i++) {
+      assert.match(text, new RegExp(`Expenses: scenario ${i}\\b`),
+        `test ${i} ran and was counted, and its name must be on the page`);
+    }
+    assert.match(text, /5 reported, 1 failed/);
+  });
+
+  /**
+   * ONE RESULT GETS NO CARD. That is the one-test-per-session shape, where the session's own name
+   * IS the test and the page head has already said it — a card repeating it is furniture. Asserted
+   * because the obvious implementation renders it always, and the reviewer who sees a Tests card
+   * with one row in it will reasonably delete the whole feature.
+   */
+  test('a session that ran one test grows no second list of it', () => {
+    seedEnded(1);
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.ok(!/reported, /.test(text),
+      'a single result is already named by the session; a Tests card would repeat it');
+  });
+
+  test('past a handful the list folds, and the control says how many there are', () => {
+    seedEnded(20);
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Show all 20/, 'a "show more" that does not say how many more is a guess');
+    assert.match(text, /Expenses: scenario 0\b/, 'the first few are shown');
+    assert.ok(!/Expenses: scenario 19\b/.test(text), 'the rest are folded away');
+    // The count in the aside is the REAL one regardless of how many rows are drawn — the same rule
+    // the steps table keeps when it collapses a run.
+    assert.match(text, /20 reported/);
+  });
+
+  test('unfolded, every one of them is there', () => {
+    seedEnded(20);
+    mod.state.testsExpanded = 'sess-1';
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Expenses: scenario 19\b/);
+    assert.match(text, /Show fewer/);
+  });
+
+  test('a live session shows no verdict, because the suite is still running', () => {
+    seedEnded(5);
+    mod.state.sessions[0].state = 'ACTIVE';
+    mod.state.sessions[0].endedAt = null;
+    mod.state.detail = mod.state.sessions[0];
+    assert.ok(!/reported, /.test(textOf(mod.SCREENS.cockpit())),
+      'a half-reported list on a running session would be read as a verdict');
+  });
+
+  /**
+   * The run screen's half: the count is a control, and only where there is something behind it.
+   */
+  test('a session with reported tests offers to unfold them; one without does not', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runTests = {};
+    mod.state.runDetail = {
+      // `screenRun` guards on `runDetail.id === route.id` and renders "Loading…" otherwise, so a
+      // fixture with a different id here asserts nothing at all — the vacuous-green shape again.
+      id: '4471',
+      run: mod.state.runs[0],
+      sessions: [
+        { ...mod.state.sessions[0], id: 'sn-many', tests: { total: 5, passed: 4, failed: 1 } },
+        { ...mod.state.sessions[0], id: 'sn-silent', tests: null },
+      ],
+      failures: [], incidents: [], events: [], loaded: true,
+    };
+    const tree = mod.SCREENS.run();
+    assert.match(textOf(tree), /4\/5/, 'the count still reads as a count');
+    assert.match(textOf(tree), /Not reported/, 'a silent session says so rather than offering a drawer');
+    // One control, for the one session that has tests behind it.
+    assert.equal(countElements(tree) > 0, true);
+  });
+
+  test('an unfolded row renders the tests it fetched', () => {
+    seed({ name: 'run', id: '4471' });
+    const all = results(3);
+    mod.state.runTests = { 'sn-many': { loaded: true, loading: false, open: true, items: all, error: null } };
+    mod.state.runDetail = {
+      // `screenRun` guards on `runDetail.id === route.id` and renders "Loading…" otherwise, so a
+      // fixture with a different id here asserts nothing at all — the vacuous-green shape again.
+      id: '4471',
+      run: mod.state.runs[0],
+      sessions: [{ ...mod.state.sessions[0], id: 'sn-many', tests: { total: 3, passed: 2, failed: 1 } }],
+      failures: [], incidents: [], events: [], loaded: true,
+    };
+    const text = textOf(mod.SCREENS.run());
+    assert.match(text, /Expenses: scenario 0\b/);
+    assert.match(text, /Expenses: scenario 2\b/);
+  });
+
+  /**
+   * A COUNT WITH NO ROWS BEHIND IT IS A REAL STATE, not an empty list. The count comes from the run
+   * rollup and results go when a session's evidence is deleted, so the two can legitimately
+   * disagree — and saying which happened is the difference between "nothing ran" and "this was
+   * cleared".
+   */
+  test('a row that unfolds to nothing explains the disagreement', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runTests = { 'sn-many': { loaded: true, loading: false, open: true, items: [], error: null } };
+    mod.state.runDetail = {
+      // `screenRun` guards on `runDetail.id === route.id` and renders "Loading…" otherwise, so a
+      // fixture with a different id here asserts nothing at all — the vacuous-green shape again.
+      id: '4471',
+      run: mod.state.runs[0],
+      sessions: [{ ...mod.state.sessions[0], id: 'sn-many', tests: { total: 3, passed: 3, failed: 0 } }],
+      failures: [], incidents: [], events: [], loaded: true,
+    };
+    assert.match(textOf(mod.SCREENS.run()), /results removed/);
+  });
+
+  test('a row whose fetch failed says so instead of retrying forever', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runTests = {
+      'sn-many': { loaded: true, loading: false, open: true, items: [], error: 'Request failed (500)' },
+    };
+    mod.state.runDetail = {
+      // `screenRun` guards on `runDetail.id === route.id` and renders "Loading…" otherwise, so a
+      // fixture with a different id here asserts nothing at all — the vacuous-green shape again.
+      id: '4471',
+      run: mod.state.runs[0],
+      sessions: [{ ...mod.state.sessions[0], id: 'sn-many', tests: { total: 3, passed: 3, failed: 0 } }],
+      failures: [], incidents: [], events: [], loaded: true,
+    };
+    assert.match(textOf(mod.SCREENS.run()), /could not be read/);
+  });
+
+  /**
+   * THE LOADER, NOT THE RENDERER — and this is here because seeding `runTests` and rendering is
+   * structurally blind to the defect that matters.
+   *
+   * Every assertion above puts the tests into state by hand and checks they are drawn. A version of
+   * this feature whose count-button `onclick` did nothing at all passes every one of them: the
+   * rows render beautifully for state nobody can ever produce by using the console. So this test
+   * presses the thing and asserts the request went out — the same argument `a route fetches what
+   * its screen needs` makes above, applied to a control instead of to a route.
+   */
+  test('pressing the count actually fetches that session\u2019s results', async () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runTests = {};
+    mod.state.runDetail = {
+      id: '4471',
+      run: mod.state.runs[0],
+      sessions: [{ ...mod.state.sessions[0], id: 'sn-pressed', tests: { total: 2, passed: 2, failed: 0 } }],
+      failures: [], incidents: [], events: [], loaded: true,
+    };
+
+    const urls: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const realFetch = (globalThis as any).fetch;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async (url: string) => {
+      urls.push(String(url));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ results: results(2) }) };
+    };
+    try {
+      /**
+       * THE BUTTON IS FOUND IN THE RENDERED TREE AND PRESSED, not the handler called by name.
+       *
+       * Calling `toggleSessionTests` directly was the first version of this test, and it passes
+       * against a count whose `onclick` is `() => {}` — the exact defect it was written for. What
+       * has to be asserted is the WIRING, so the press has to go through the element.
+       */
+      const tree = mod.SCREENS.run();
+      const control = findByText(tree, '2/2');
+      assert.ok(control, 'the count must be a button; a span cannot be pressed');
+      assert.equal(control.click(), 1, 'exactly one handler — a count wired to nothing fires zero');
+
+      await new Promise((r) => setTimeout(r, 0));
+      assert.deepEqual(urls, ['/v1/sessions/sn-pressed/results'],
+        'exactly one request, for exactly this session');
+      assert.equal(mod.state.runTests['sn-pressed'].loaded, true);
+      assert.equal(mod.state.runTests['sn-pressed'].items.length, 2);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).fetch = realFetch;
+    }
+  });
+
+  /**
+   * `testLength`, pinned because reaching for one of the console's other two helpers is a BUG that
+   * renders quietly rather than a style choice — `duration(0, ms)` answers "—" for every test,
+   * since `0` is falsy and it reads that as "no start instant".
+   */
+  test('a test length is a length, not a clock face and not a raw millisecond count', () => {
+    assert.equal(mod.testLength(8200), '8.2s');
+    assert.equal(mod.testLength(450), '450ms');
+    assert.equal(mod.testLength(125_000), '2m 5s');
+    // Exactly zero is not a measurement — a skipped test was never timed.
+    assert.equal(mod.testLength(0), '');
+    assert.equal(mod.testLength(null), '');
+    assert.equal(mod.testLength(-1), '');
+    // The bug this helper exists to avoid, pinned so the pair cannot both go green wrongly.
+    assert.equal(mod.duration(0, 8200), '—', 'duration() takes instants; 0 reads as "no start"');
   });
 });

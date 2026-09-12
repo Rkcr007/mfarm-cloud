@@ -230,9 +230,25 @@ export const state = {
    * that session, and a farm that has been running for a fortnight has more artifacts than anyone
    * wants delivered to a page that shows six of them.
    */
-  artifacts: { sessionId: null, items: [], failures: [], loaded: false },
+  artifacts: { sessionId: null, items: [], failures: [], results: [], loaded: false },
+  /**
+   * The TESTS a session reported, for the run screen — keyed by session id, fetched on demand.
+   *
+   * WHY ON DEMAND AND NOT ON THE RUN PAYLOAD. `GET /v1/runs/:id` returns a row per session with a
+   * COUNT, and returning every test name with it would put a suite's entire result set on a screen
+   * that opens to show eight rows: a nightly run of two hundred sessions at forty tests each is
+   * eight thousand rows nobody asked for. `/v1/sessions/:id/results` already answers this exactly,
+   * per session, so expanding one row costs one request and expanding none costs nothing.
+   *
+   * Keyed rather than single-valued — unlike `artifacts` — because several rows can be open at
+   * once, which is the whole point: comparing what two sessions ran is the question this closes.
+   */
+  runTests: {},
   /** The `?watch=` intent already acted on, so a re-render does not re-seek — see `sessionFailureCard`. */
   watchHonoured: null,
+  /** The session whose Tests card is showing all of them rather than the first few. One at a time,
+   *  because only one session screen is ever on screen. */
+  testsExpanded: null,
   /** This org's evidence retention (migration 046). Loaded by the Settings screen. */
   retention: { loaded: false, saving: false, retentionDays: null, autoDelete: null, maxDays: null },
   /**
@@ -571,9 +587,37 @@ function lengthInWords(from, to) {
   return rest ? `${hr}h ${rest}m` : `${hr} hour${hr === 1 ? '' : 's'}`;
 }
 
-function duration(from, to) {
+export function duration(from, to) {
   if (!from) return '—';
   return clock((to ? new Date(to) : new Date()) - new Date(from));
+}
+
+/**
+ * How long ONE TEST took, from a raw millisecond count the suite reported.
+ *
+ * NEITHER OF THE TWO HELPERS ABOVE FITS, and reaching for one of them is a bug rather than a style
+ * choice. `duration(from, to)` takes INSTANTS — called as `duration(0, ms)` it returns "—", because
+ * `0` is falsy and it reads that as "no start", which is the kind of wrong that renders quietly.
+ * `clock()` is mm:ss, which is right for a lease ticking down and says "00:08" for an eight-second
+ * test — a clock face where a person wants a length.
+ *
+ * The step table's `${ms}ms` is right for a WebDriver command and wrong here by three orders of
+ * magnitude: a two-minute test would read "118422ms".
+ */
+export function testLength(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
+  /**
+   * EXACTLY ZERO IS NOT A MEASUREMENT, so it renders as nothing rather than as "0ms".
+   *
+   * No test takes zero milliseconds. A zero here means the suite did not time it — which is the
+   * ordinary case for a SKIPPED test, where there was nothing to time — and "0ms" states a
+   * measurement that was never taken. Blank says the same true thing without the claim.
+   */
+  if (ms === 0) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  return `${m}m ${Math.round((ms % 60_000) / 1000)}s`;
 }
 
 const short = (id) => (id ? String(id).slice(0, 8) : '—');
@@ -944,7 +988,7 @@ async function refreshSessions() {
  */
 async function loadArtifacts(sessionId) {
   if (state.artifacts.sessionId === sessionId && state.artifacts.loaded) return;
-  state.artifacts = { sessionId, items: [], failures: [], loaded: false };
+  state.artifacts = { sessionId, items: [], failures: [], results: [], loaded: false };
   try {
     /**
      * The results ride along with the artifacts, because the video needs them.
@@ -967,11 +1011,21 @@ async function loadArtifacts(sessionId) {
     state.artifacts = {
       sessionId,
       items: out.artifacts || [],
+      /**
+       * EVERY RESULT IS KEPT NOW, not only the failures.
+       *
+       * `failures` stays because the video's jump buttons and the Failed card are about failures
+       * specifically and would otherwise have to re-filter on every render. `results` is what the
+       * Tests card needs: a session that ran eight tests and passed all eight used to render its
+       * eight names NOWHERE — the run screen counted them and this screen showed an empty Failed
+       * card, so the only place a passing test's name existed was the suite's own console output.
+       */
+      results: results.results || [],
       failures: (results.results || []).filter((r) => r.status === 'failed'),
       loaded: true,
     };
   } catch {
-    state.artifacts = { sessionId, items: [], failures: [], loaded: true };
+    state.artifacts = { sessionId, items: [], failures: [], results: [], loaded: true };
   }
 }
 
@@ -6071,6 +6125,104 @@ function watchFailureAt(seconds) {
   void el.play().catch(() => { /* autoplay policy; the scrubber has moved regardless */ });
 }
 
+/* ---------------------------------------------------------------------------- test rows */
+
+/**
+ * The tests one session reported, by name (migration 021, rendered 2026-09-12).
+ *
+ * THE GAP THIS CLOSES, stated precisely because `docs/STATUS.md` once overstated it. With ONE TEST
+ * PER SESSION — the LambdaTest shape, one Appium session per Cucumber scenario — the run screen's
+ * Sessions table already names every test, passing ones included, because the session carries the
+ * test's name (migration 048). That has been true since 2026-09-09.
+ *
+ * What was genuinely missing is the OTHER shape: a session running several tests collapses to one
+ * row reading `PASSED 5/5`. Five tests ran, five were counted, and not one of their names existed
+ * anywhere in this console — so "did the OTP scenario run last night?" had no answer for any suite
+ * that shares a session across scenarios, which is most suites that did not start on LambdaTest.
+ *
+ * ONE REQUEST PER ROW A PERSON OPENS. See `state.runTests` for why this is not on the run payload.
+ */
+async function loadSessionTests(sessionId) {
+  const held = state.runTests[sessionId];
+  if (held?.loaded || held?.loading) return;
+  state.runTests[sessionId] = { loading: true, loaded: false, items: [], error: null };
+  try {
+    const out = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/results`);
+    state.runTests[sessionId] = { loading: false, loaded: true, items: out.results || [], error: null };
+  } catch (e) {
+    /**
+     * A FAILED FETCH IS `loaded` WITH AN ERROR, not left unloaded. An unloaded row re-fetches on
+     * every render, so a session whose results genuinely cannot be read would put this console into
+     * a request loop against a 500 — which is the shape that turns one broken row into a broken
+     * page. Pressing the row again is what retries.
+     */
+    state.runTests[sessionId] = { loading: false, loaded: true, items: [], error: e.message };
+  }
+  scheduleRender();
+}
+
+/** Fold or unfold one session's tests. Toggling closed keeps what was fetched — reopening a row is
+ *  free, which is what makes comparing two sessions bearable. */
+export function toggleSessionTests(sessionId) {
+  const held = state.runTests[sessionId];
+  if (held?.loaded && !held.error) {
+    state.runTests[sessionId] = { ...held, open: !held.open };
+    scheduleRender();
+    return;
+  }
+  state.runTests[sessionId] = { ...(held || {}), open: true };
+  void loadSessionTests(sessionId);
+  scheduleRender();
+}
+
+/**
+ * The sub-row: one line per test the session reported.
+ *
+ * A `<tr>` under the session's own row rather than a dialog, because the question being asked is
+ * comparative — "which of these eight sessions ran the OTP scenario" — and a dialog answers it one
+ * session at a time with the other seven hidden behind it.
+ */
+function sessionTestsRow(sessionId, columns) {
+  const t = state.runTests[sessionId];
+  if (!t?.open) return null;
+
+  const body = t.loading
+    ? h('p', { class: 'caption', text: 'Loading\u2026' })
+    : t.error
+      ? h('p', { class: 'bad-text caption', text: `These could not be read: ${t.error}` })
+      : t.items.length
+        ? h('table', { class: 'table testrows' },
+            h('tbody', null, t.items.map((r) => h('tr', { class: r.status === 'failed' ? 'failed' : null },
+              h('td', null, pill(r.status, r.status === 'failed' ? 'bad' : r.status === 'skipped' ? 'warn' : 'ok')),
+              h('td', null,
+                h('span', { class: 'fleet-name', text: r.name || 'unnamed test' }),
+                // The message on the row itself, one line. A person scanning eight tests for the
+                // one that broke should not have to open anything to see WHAT broke.
+                r.failure
+                  ? h('p', { class: 'caption failline', text: r.failure.split('\n')[0] })
+                  : null),
+              h('td', { class: 'caption tnum right',
+                text: testLength(r.durationMs) }),
+              h('td', { class: 'right' },
+                // Shareable from here too (ADR-0036) — this is the row where somebody reading a
+                // nightly run decides which failure to ask about.
+                r.status === 'failed'
+                  ? btn('Share', 'tiny ghost', () => shareDialog(r))
+                  : null),
+            ))))
+        : /**
+           * REPORTED A COUNT AND THEN NO ROWS is a real state, not an empty list: the count on the
+           * session row comes from the run rollup, and results can be deleted with a session's
+           * evidence. Saying which of the two happened is the difference between "nothing ran" and
+           * "this was cleared".
+           */
+          h('p', { class: 'caption', text:
+            'This session reported no tests. The count beside it comes from the run\u2019s rollup, '
+            + 'so a session showing one here has had its results removed.' });
+
+  return h('tr', { class: 'subrow' }, h('td', { colspan: columns }, body));
+}
+
 /* ---------------------------------------------------------------------------- share a failure */
 
 /**
@@ -6307,6 +6459,72 @@ function sessionFailureCard(sess, live) {
   );
 }
 
+/**
+ * EVERYTHING THIS SESSION REPORTED, by name — not only what failed.
+ *
+ * THE HALF OF THE GAP THE RUN SCREEN COULD NOT CLOSE. A session running several tests shows one
+ * count on the run screen, which `sessionTestsRow` now unfolds; but a person who has already
+ * navigated INTO the session arrives at a page that names its failures and nothing else. Eight
+ * passing tests were counted on the previous screen and named on neither.
+ *
+ * SEPARATE FROM THE FAILED CARD ABOVE, rather than merged into one list. The Failed card exists
+ * because somebody arrived here from a red row and needs the message and the stack immediately;
+ * folding it into a list of forty would bury the one thing they came for. This card answers the
+ * other question — "what did this session actually run?" — and it is the one that gets scanned.
+ *
+ * FOLDED BY DEFAULT PAST A HANDFUL, because a suite reporting forty tests would otherwise push the
+ * evidence, the log and the steps below the fold on every visit to look at any of them.
+ */
+const TESTS_SHOWN = 8;
+
+function sessionTestsCard(sess, live) {
+  if (live) return null;
+  const mine = state.artifacts.sessionId === sess.id && state.artifacts.loaded;
+  const results = (mine && state.artifacts.results) || [];
+  /**
+   * ONE TEST AND IT ALREADY HAS A CARD: a single result is the one-test-per-session shape, where
+   * the session's own name IS the test (migration 048) and the Failed card or the page head has
+   * already said it. A card repeating it is a row of furniture.
+   */
+  if (results.length < 2) return null;
+
+  const failed = results.filter((r) => r.status === 'failed').length;
+  const skipped = results.filter((r) => r.status === 'skipped').length;
+  const expanded = state.testsExpanded === sess.id;
+  const shown = expanded ? results : results.slice(0, TESTS_SHOWN);
+
+  return card('Tests', { class: 'mb-gap',
+    aside: h('span', { class: 'caption', text:
+      `${results.length} reported`
+      + (failed ? `, ${failed} failed` : '')
+      + (skipped ? `, ${skipped} skipped` : '') }),
+  },
+    h('div', { class: 'tablewrap' }, h('table', { class: 'table testrows' },
+      h('tbody', null, shown.map((r) => h('tr', { class: r.status === 'failed' ? 'failed' : null },
+        h('td', null, pill(r.status, r.status === 'failed' ? 'bad' : r.status === 'skipped' ? 'warn' : 'ok')),
+        h('td', null,
+          h('span', { class: 'fleet-name', text: r.name || 'unnamed test' }),
+          r.failure ? h('p', { class: 'caption failline', text: r.failure.split('\n')[0] }) : null),
+        h('td', { class: 'caption tnum right',
+          text: testLength(r.durationMs) }),
+        h('td', { class: 'right' },
+          r.status === 'failed' ? btn('Share', 'tiny ghost', () => shareDialog(r)) : null),
+      )))),
+    ),
+    results.length > TESTS_SHOWN
+      // The real total in the label, always. A "show more" that does not say how many more is a
+      // control a person has to press to find out whether they wanted to.
+      ? h('p', { class: 'row tight mt-md' }, btn(
+          expanded ? 'Show fewer' : `Show all ${results.length}`,
+          'tiny ghost',
+          () => { state.testsExpanded = expanded ? null : sess.id; render(); }))
+      : null,
+    h('p', { class: 'caption mt-md', text:
+      'What the SUITE reported. MFARM cannot observe an assertion \u2014 a test that ran and never '
+      + 'reported is not here, and is not counted as passing.' }),
+  );
+}
+
 function videoPlayer(video, failures) {
   const el = h('video', {
     // Addressed by id so a card ABOVE this one can seek it — see `watchFailureAt`.
@@ -6387,7 +6605,7 @@ function askDeleteArtifact(sess, artifact) {
         // Forces the card to re-fetch rather than patching the array by hand: the server is the one
         // that knows what survived, and a list edited locally drifts from it the first time a
         // delete half-succeeds.
-        state.artifacts = { sessionId: null, items: [], failures: [], loaded: false };
+        state.artifacts = { sessionId: null, items: [], failures: [], results: [], loaded: false };
         scheduleRender();
       } catch (e) { toast('Could not delete', e.message, 'bad'); }
     },
@@ -6405,7 +6623,7 @@ function askDeleteEvidence(sess, count) {
       try {
         const r = await api(`/v1/sessions/${encodeURIComponent(sess.id)}/artifacts`, { method: 'DELETE' });
         toast('Deleted', `${r.deleted} file${r.deleted === 1 ? '' : 's'} removed.`, 'ok');
-        state.artifacts = { sessionId: null, items: [], failures: [], loaded: false };
+        state.artifacts = { sessionId: null, items: [], failures: [], results: [], loaded: false };
         scheduleRender();
       } catch (e) { toast('Could not delete', e.message, 'bad'); }
     },
@@ -6606,6 +6824,10 @@ function screenCockpit(id) {
          * page you press through to did not show it at all.
          */
         sessionFailureCard(sess, live),
+        // Then everything it ran, failures included, for the session that reported several — see
+        // `sessionTestsCard`. Below the Failed card because somebody arriving from a red row wants
+        // the message first, and above the evidence because a name is how you choose what to open.
+        sessionTestsCard(sess, live),
         /**
          * THE LIVE DOCK WHILE THE DEVICE IS LIVE, THE CAPTURED LOG AFTER.
          *
@@ -7490,7 +7712,8 @@ function screenRun(id) {
               ['State', 'Test', 'Tests', 'Device', 'Build', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
             h('tbody', null, d.sessions.map((sn) => {
               const st = SESSION_STATE[sn.state] || { label: sn.state, tone: '' };
-              return h('tr', null,
+              const open = !!state.runTests[sn.id]?.open;
+              return [h('tr', null,
                 h('td', null, pill(st.label, st.tone, { live: sn.state === 'ACTIVE' })),
                 /**
                  * WHAT THIS SESSION IS, not what it is called — `mfarm:name` (migration 048).
@@ -7506,12 +7729,30 @@ function screenRun(id) {
                       h('span', { class: 'fleet-name', text: sn.name }),
                       h('code', { class: 'caption', text: short(sn.id) }))
                   : h('code', { text: sn.id })),
+                /**
+                 * THE COUNT IS A CONTROL NOW, and only where there is something behind it.
+                 *
+                 * `PASSED 5/5` used to be the end of the road: five tests ran, five were counted,
+                 * and none of their names existed anywhere in this console. Pressing it fetches
+                 * the session's own results and folds them out underneath — see
+                 * `sessionTestsRow`. A session with no reported tests stays inert text, because a
+                 * button that opens an empty drawer is worse than no button.
+                 */
                 h('td', null, sn.tests?.total
-                  ? h('span', { class: 'row tight' },
+                  ? h('button', {
+                      class: 'linkish row tight',
+                      type: 'button',
+                      'aria-expanded': open ? 'true' : 'false',
+                      title: open ? 'Hide these tests' : 'Show what this session ran, by name',
+                      onclick: () => toggleSessionTests(sn.id),
+                    },
                       sn.tests.failed > 0
                         ? pill(`${sn.tests.failed} failed`, 'bad')
                         : pill('passed', 'ok'),
-                      h('span', { class: 'caption tnum', text: `${sn.tests.passed}/${sn.tests.total}` }))
+                      h('span', { class: 'caption tnum', text: `${sn.tests.passed}/${sn.tests.total}` }),
+                      // A caret, not a word: the column is narrow and the control has to read as
+                      // expandable at a glance rather than after the label is read.
+                      h('span', { class: `caret ${open ? 'open' : ''}`.trim(), text: '\u203a' }))
                   : h('span', { class: 'caption', text: 'Not reported' })),
                 h('td', { text: sn.device || '—' }),
                 h('td', null, sn.build
@@ -7523,7 +7764,10 @@ function screenRun(id) {
                   ? ticker('since', sn.startedAt)
                   : h('span', { class: 'tnum', text: duration(sn.startedAt, sn.endedAt) })),
                 h('td', { class: 'right' }, btn('Open', 'tiny ghost', () => go(`#/sessions/${sn.id}`))),
-              );
+              ),
+              // Eight columns, spelled as a number the header already fixes. `add()` flattens the
+              // pair, and a null second element is dropped rather than becoming an empty row.
+              sessionTestsRow(sn.id, 8)];
             })),
           ))
         : empty('This run has no sessions.',

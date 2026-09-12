@@ -4574,3 +4574,45 @@ when the feature is broken. See issues 37 and 38.
     work and was not started. Verified end to end against a local API and a real Chrome: the payload,
     the window (steps 1–3 of test one excluded, 4–9 of test two present), both themes, the
     expired-link page, Withdraw taking a live link from 200 to 404, and zero console errors.
+
+89. **TEST ROWS FOR A MULTI-TEST SESSION, AND THE TEST HARNESS LEARNED TO PRESS A BUTTON.**
+    2026-09-12.
+
+    Second of the four. `docs/STATUS.md` §4.6 has carried this as the last real gap in the debugging
+    story, with the correction already attached: for the **one-test-per-session** shape the run
+    screen has named every test since migration 048, and this page once claimed otherwise. What was
+    genuinely missing was the other shape — a session running five tests showing `PASSED 5/5`, five
+    counted and none named.
+
+    **No new endpoint.** `GET /v1/sessions/:id/results` already returns every result with its name,
+    status, duration and failure. The run screen's count became a control that fetches it on press;
+    the session screen grew a Tests card off the results it already loads. One request per row a
+    person opens, so a nightly run of two hundred sessions costs nothing until somebody asks.
+
+    **THE HARNESS CHANGE IS THE PART WORTH KNOWING ABOUT.** `dom-shim.ts` had
+    `addEventListener(): void {}` — every handler `h()` bound went straight into the bin. So **a
+    control wired to nothing rendered identically to one that worked**, and no test in this repo
+    could tell them apart. That is a structural reason, not a coincidental one, for the ratio
+    `STATUS.md` §5 keeps reporting: every console defect found by clicking, none by the suite.
+
+    Proved rather than asserted. Three bugs were injected: (a) the Tests card falling back to
+    failures only — caught by three tests; (b) the count's `onclick` replaced with `() => {}` —
+    **not caught**, because my loader test called `toggleSessionTests` by name; (c) the same bug
+    again after the shim recorded listeners and the test pressed the rendered button — caught. Step
+    (b) is `mfarm-false-premise-controls` exactly: a test that seeds state tests the renderer and
+    never the loader, and a test that calls the handler tests the handler and never the wiring.
+
+    The shim now keeps listeners, has `dispatch()`/`click()` returning how many handlers ran (so
+    "did nothing" is distinguishable from "did nothing visible"), and `findByText` finds a control
+    the way a person does. **This is available to every future console test** and is the more
+    valuable half of this entry.
+
+    **Two smaller things.** `duration(0, ms)` returns `'—'` for every test, because `0` is falsy and
+    it reads that as "no start instant" — there was no helper for a raw millisecond LENGTH, so
+    `testLength` is new and the trap is written down at it. And a zero duration now renders as
+    nothing rather than `0ms`: no test takes zero milliseconds, so a zero means the suite never
+    timed it, which is the ordinary case for a skipped test.
+
+    Verified in a browser against a seeded five-test session: all five named on both surfaces, the
+    failure's first line in red, Share on the red row, and the fold-out re-styled after the first
+    attempt read as five more rows of the parent table rather than as one row's contents.
