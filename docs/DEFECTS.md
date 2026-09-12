@@ -38,7 +38,7 @@ One row per thing that is wrong or missing.
 
 ## Open
 
-**Two, as of 2026-09-11** — forty-four recorded, forty-two closed. The two left are the CSP
+**Two, as of 2026-09-11** — forty-five recorded, forty-three closed. The two left are the CSP
 `webrtc` warning, which is deliberate, and app network capture, which is an unbuilt feature needing
 its own privacy decision rather than a defect. The four below are named at the
 bottom of this section under *Known and not fixed*; none blocks use, and each says why it is still
@@ -694,6 +694,7 @@ trace nobody had opened. Reading a stored trace before fixing would have cost on
 
 | id | what | status |
 |---|---|---|
+| D45 | **Nine settings `config.ts` reads were declared on no service, so setting any of them did nothing.** `deploy/.env` is compose's env file, not the container's environment: an undeclared variable is read for interpolation and passed to nothing. Found because `HOST_HOURLY_COST` was set on the farm and the console still showed a powered-on host with no money beside it. **The warning was already written in the block above the one being edited** — the video section says this cost a farm on 2026-09-07 (D29) and describes the symptom exactly. | Fixed 2026-09-11. The guard that should have caught it was a HAND-KEPT LIST of five names; it now derives every `env.X` from `config.ts` and allows only an explicit, reasoned set that arrives by docker secret. Verified RED by deleting one line from compose: it names the variable. |
 | D44 | **`hosts.up_since` never got stamped, so the whole cost display was dead on arrival.** Migration 050 wrote it in the registration upsert only. The farm was stopped overnight and brought back: **twelve heartbeats, zero registrations**, column still NULL. `/workers/heartbeat`'s own comment already said registration is something "a healthy agent never performs, because its stored capability fingerprint has not changed" — I had read that file to write the feature and not read that sentence. | Fixed 2026-09-11: maintained on the heartbeat, stamped when there is a GAP in beats rather than when state is not UP. **Verified RED** — all four new tests fail without it. |
 
 **THE FEATURE WAS BUILT, TESTED, SHIPPED, DEPLOYED AND INERT.** Fourteen tests covered it, including
