@@ -5127,12 +5127,27 @@ describe('retiring a machine that is not coming back', () => {
   });
 
   test('a host nobody has heard from IS', () => {
-    withHost({ reachability: 'unavailable', power: 'unknown' });
+    withHost({ reachability: 'unavailable', power: 'unknown', powerable: false });
     assert.ok(findByText(mod.SCREENS.infra(), 'Retire'));
   });
 
+  /**
+   * A MACHINE THE CLOUD SAYS EXISTS IS NOT GONE — it is off, and Start is on the same card.
+   * Offering both is a trap: retiring is for a machine that is not coming back.
+   */
+  test('a STOPPED CLOUD MACHINE is not offered Retire, because Start is right there', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = infraPayload({ capabilities: { drain: true, power: true, services: false, retire: true } });
+    data.hosts = [{ ...data.hosts[0], reachability: 'unavailable', power: 'stopped', powerable: true }];
+    mod.state.infra.data = data;
+    const tree = mod.SCREENS.infra();
+    assert.ok(findByText(tree, 'Start'), 'a stopped machine offers no way to start it');
+    assert.ok(!findByText(tree, 'Retire'),
+      'a VM in your own project was offered as something to retire');
+  });
+
   test('THE DIALOG SAYS NOTHING IS DELETED, which is the fear that stops people pressing it', () => {
-    withHost({ reachability: 'unavailable', power: 'unknown' });
+    withHost({ reachability: 'unavailable', power: 'unknown', powerable: false });
     findByText(mod.SCREENS.infra(), 'Retire').click();
     const text = dialogText();
     assert.match(text, /Retire mfarm-lab/);
@@ -5145,7 +5160,7 @@ describe('retiring a machine that is not coming back', () => {
   test('the capability is read from the server, like every other control', () => {
     seed({ name: 'infra', lens: 'hosts' });
     const data = infraPayload({ capabilities: { drain: true, power: false, services: false, retire: false } });
-    data.hosts = [{ ...data.hosts[0], reachability: 'unavailable', power: 'unknown' }];
+    data.hosts = [{ ...data.hosts[0], reachability: 'unavailable', power: 'unknown', powerable: false }];
     mod.state.infra.data = data;
     assert.ok(!findByText(mod.SCREENS.infra(), 'Retire'));
   });
