@@ -4515,3 +4515,62 @@ when the feature is broken. See issues 37 and 38.
     (00:00:24), not the actual VM boot (~23:39), so this one reading understates uptime by twenty
     minutes. It is right from the next boot onward, and the column's contract is "used at or after",
     not "exactly".
+
+88. **A FAILURE CAN NOW BE SHOWN TO SOMEBODY WITH NO ACCOUNT HERE.** 2026-09-12, ADR-0036,
+    migration 051.
+
+    First of four items picked in order: share link, test rows for multi-test sessions, a customer
+    tunnel to a private staging host, a second device host. This is the first, and it is the one a
+    QA team reaches for daily — pasting a failure into a channel and asking "is this you?" required
+    the reader to have an account on the farm, so what happened instead was a screenshot of a
+    screenshot with the stack retyped and the step trace lost.
+
+    **What shipped:** `/s/<token>` — revocable, expiring, scoped to ONE test result. Its own page
+    (40 lines of HTML, one fetch), sharing `design-tokens.css` and `/profiles.js` with the console so
+    a device is named there exactly as it is named here. A `Share` button on the session's failure
+    card and on the run screen's failures list, with a dialog that shows the links already
+    circulating and how often each has been opened — because a person about to create a fourth link
+    needs to see the three that exist.
+
+    **The two exclusions are decisions, and the page says so out loud.** No logcat: it is the one
+    artifact nobody curated before sending, and an app logs auth headers and deep links with tokens
+    in them. No recording: a video covers the whole session, which is every other test on it.
+
+    **FOUR DEFECTS FOUND WHILE BUILDING, THREE OF THEM BY OPENING A BROWSER.** None existed in the
+    register — all four were caught before merge — and all four are the shape this repo keeps
+    meeting, *a thing that looks right and does nothing*:
+
+    - **The migration's RLS policy named a setting nothing sets.** The draft
+      (untracked, from a previous session) read `current_setting('mfarm.org_id', true)` where
+      `withTenant` sets `app.org_id`. Every read and write on `result_shares` was refused: the
+      feature was dead on arrival, in a file that reads like ordinary care. Caught by a six-line
+      probe against the running schema **before a line of route code existed** — architecture rule 8.
+    - **`shareJson` returned a link built from the PREFIX.** `/s/mfs_g4M9wlev` — right shape,
+      resolves to nothing, because a prefix is 12 characters of a 47-character credential. The
+      console would have put a copy button beside a dead link and the sender would have had no way
+      to tell. Found by reading **one real HTTP response**; 32 tests were green.
+    - **`replaceChildren` stringified a `null` into the dialog.** The whole console is written
+      `cond ? node : null` because `h()` drops those; the DOM does not. `confirmDialog` and
+      `formDialog` had the same shape and were saved only by every caller happening to pass the
+      optional argument. `fill()` fixes all three. **`dom-shim.ts` already carried a comment about
+      this exact bug** from the last time it cost something — the repo knew, again.
+    - **`min-width: 0` did not stop a row wrapping.** Flex decides wrapping BEFORE shrinking, so the
+      row has to be told `nowrap` first. Symptom: a list that looked broken because one person's
+      email address was longer than another's.
+
+    **The mutation check was worth it.** Three bugs were injected into the finished code — ignore the
+    step window's lower bound, ignore `revoked_at`, widen the screenshot query from the result to the
+    session — and each was caught by the test written for it. That is the answer to
+    `mfarm-tests-that-pass-locally`, done deliberately rather than hoped for.
+
+    **The step window is the part to re-read before changing anything.** `session_commands` is the
+    whole SESSION's trace, so on the one-test-per-session shape a naive implementation passes every
+    test in the file; a suite running eight scenarios would hand the link holder all eight. The share
+    carries only the commands between the previous result's `reported_at` and this one's. Its honest
+    error — `reported_at` is when the suite POSTED, not when the assertion fired — is written into
+    `windowedSteps` and stated on the page.
+
+    **Not on the farm yet.** Migration 051 is applied locally only; the lab was not needed for this
+    work and was not started. Verified end to end against a local API and a real Chrome: the payload,
+    the window (steps 1–3 of test one excluded, 4–9 of test two present), both themes, the
+    expired-link page, Withdraw taking a live link from 200 to 404, and zero console errors.

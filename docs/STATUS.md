@@ -64,7 +64,7 @@ devices (`deploy/verify-hub-contract.mjs`, 30/30), and returned to rest afterwar
 | Area | State | The honest caveat |
 |---|---|---|
 | **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the test suite**. All are closed. |
-| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 50 migrations. API keys are labelled, scoped, expiring and attributed (ADR-0034). | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
+| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 51 migrations. API keys are labelled, scoped, expiring and attributed (ADR-0034). | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host. A host outage is a farm outage; ADR-0027 and migration 038 reduce what one costs, they do not remove it. |
 | **Physical devices** | **Built, not currently serving.** Agent, pairing (ADR-0014), org-pinning, the outbound tunnel and the reset story (ADR-0012) are all built. | The farm's one `SM-S918B` is quarantined behind a machine that has not beaten since **2026-08-29**. Nothing is wrong with the code — it needs `npx @mfarm/agent` on that machine. |
@@ -74,6 +74,7 @@ devices (`deploy/verify-hub-contract.mjs`, 30/30), and returned to rest afterwar
 | **Video / recording** | **Not built. The gate is now measured (2026-09-07) and it decided the design.** `screenrecord` costs the Flutter canvas a third of its frame rate and doubles ordinary UI's dropped frames, so guest-side encode — which is both `screenrecord` and scrcpy — is not available here. | S5 must encode on the HOST, reusing `cvd`'s WebRTC encoder; that path does not exist yet. The immediate alternative is video for physical devices only. `RENDER_BASELINE.md`. |
 | **Execution timeline UI** | **Built (2026-09-07).** A *What happened* card on the run screen, and a *Steps* card on the session screen with the failing WebDriver commands in red (ADR-0029). | Red is reserved for a test failing; an incident is amber. The distinction the run screen already kept, kept here too. |
 | **Failure evidence** | **Built (2026-09-07).** A failed result requests its own screenshot and logcat, each naming the test (migration 040). | Up to one beat — ten seconds — after the assertion. The step trace is what makes a late screenshot readable. |
+| **Sharing a failure** | **Built 2026-09-12 (ADR-0036, migration 051).** A revocable, expiring link at `/s/<token>` shows ONE test result — its message, the screenshot captured for it, and the steps between the previous test and this one — to somebody with no account here. Its own page, not the console. | It deliberately carries **no logcat and no recording**, and those are decisions rather than gaps — see the ADR. A link can outlive the evidence it points at, since artifacts go on their org's retention schedule. |
 | **Hub contract** | **Extended and DEPLOYED 2026-09-09** (`7faf06c`, migration 048, ADR-0033).** A session takes its test name at creation (`mfarm:name`), a run takes a readable one (`mfarm:runName`), a suite can ask for a device class (`mfarm:deviceClass`), and an outcome can be reported through the driver the teardown already holds (`executeScript("mfarm-status=…")`). `examples/java-testng/` is the adapter for a suite arriving from LambdaTest. | **VERIFIED ON REAL CUTTLEFISH 2026-09-11** — `deploy/verify-hub-contract.mjs`, 30/30: a session reads back its test name before any result is posted, `mfarm:deviceClass=mfarm-x1-pro` lands on the X1 Pro, an absent class is refused *naming the class*, the teardown hook writes a named row through the driver, a misspelled status is refused without killing the session, an ordinary `executeScript` still reaches Appium, and the second session joins the run without renaming it. Seen on the console: Runs shows `Android_UAE_Expenses_…` over its CI id. The remaining gap is narrower than this page used to claim — see §4.6. |
 | **Queue** | **Working, fair (ADR-0028), and it says where you stand (migration 043).** FIFO within an org, round-robin across them, per-org caps, device-class matching (ADR-0025). A queued caller gets a position and, where one can be proved, an estimate. | The estimate reads the lease, so it is the LATEST a device frees — usually pessimistic — and it is omitted rather than guessed where no lease is readable. |
 
@@ -188,10 +189,10 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1607**, green, across three workspaces plus `deploy` — measured 2026-09-11 |
-| Migrations | 50, all applied on the farm |
-| Decisions | 34 ADRs, numbered to 0035 (there is no 0013) |
-| Merged PRs | 169 |
+| Tests | **1650**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
+| Migrations | 51, applied locally; **051 is not on the farm yet** |
+| Decisions | 35 ADRs, numbered to 0036 (there is no 0013) |
+| Merged PRs | 170 |
 | Defects | 46 recorded, **44 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |

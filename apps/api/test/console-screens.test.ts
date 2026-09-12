@@ -3818,3 +3818,102 @@ describe('the captured log can be lined up with the failure', () => {
       'no anchor, no claim');
   });
 });
+
+/**
+ * Sharing one failure (migration 051), from the console side.
+ *
+ * TWO DIFFERENT FAILURE MODES, and only one of them is about the share feature.
+ *
+ * The first is the control: a Share button that is not on the card is a feature nobody finds, and
+ * the card it belongs on renders only for an ENDED session with a reported failure — a state four
+ * conditions deep that no other test in this file sets up.
+ *
+ * The second is `fill()`, which is a fix to the whole console rather than to this dialog. Every
+ * render function here is written as `cond ? node : null` because `h()` has always dropped those;
+ * `replaceChildren` is the DOM's and stringifies them, so the dialog grew the literal word "null".
+ * `confirmDialog` and `formDialog` had the same shape and every one of their callers happens to
+ * pass the optional argument, which is the only reason it had not been seen.
+ */
+describe('sharing a failure', () => {
+  /** An ended session with one reported failure — the only state `sessionFailureCard` draws in. */
+  function seedEndedFailure() {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const ended = {
+      ...mod.state.sessions[0],
+      state: 'ENDED',
+      endedAt: new Date().toISOString(),
+      expiresAt: null,
+    };
+    mod.state.sessions = [ended];
+    mod.state.detail = ended;
+    mod.state.artifacts = {
+      sessionId: 'sess-1',
+      items: [],
+      failures: [{
+        id: 'res-1',
+        name: 'Expenses: a claim over the limit is refused',
+        status: 'failed',
+        failure: 'AssertionError: expected "Approved" to equal "Refused"',
+        failureClass: 'test',
+        failureReason: 'assertion-failure',
+        reportedAt: new Date().toISOString(),
+      }],
+      loaded: true,
+    };
+    return ended;
+  }
+
+  test('an ended session with a failure offers to share it', () => {
+    seedEndedFailure();
+    const text = textOf(mod.SCREENS.cockpit());
+    assert.match(text, /Expenses: a claim over the limit is refused/,
+      'the fixture did not reach the failure card at all — the assertion below would be vacuous');
+    assert.match(text, /Share/, 'the control belongs with the failure, not in a menu');
+  });
+
+  test('a session with nothing reported offers nothing to share', () => {
+    seedEndedFailure();
+    mod.state.artifacts = { sessionId: 'sess-1', items: [], failures: [], loaded: true };
+    assert.ok(!/Share/.test(textOf(mod.SCREENS.cockpit())),
+      'a share button with no result behind it would open a dialog that can do nothing');
+  });
+
+  /**
+   * THE BUG `fill` FIXES, pinned at the helper rather than through the dialog — the dialog needs a
+   * live `fetch` and this does not, and the defect was never about sharing.
+   */
+  /**
+   * Elements come from the SHIM's `document`, reached off `globalThis` rather than through a global
+   * `document` binding: this workspace compiles without the `dom` lib on purpose — the API is a
+   * server — so naming `document` directly typechecks nowhere even though it runs fine.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const doc = () => (globalThis as unknown as { document: any }).document;
+
+  test('a conditional that is absent renders nothing, not the word "null"', () => {
+    const el = doc().createElement('div');
+    mod.fill(el,
+      doc().createElement('span'),
+      null,
+      undefined,
+      false,
+      doc().createElement('em'),
+    );
+    // `children`, not `childNodes`: the shim models one list of nodes, and `add()`/`fill()` are
+    // what this is about rather than the DOM's element/node distinction.
+    assert.equal(el.children.length, 2, 'null, undefined and false must be dropped');
+    // `textOf` walks the tree; the shim's `textContent` is one node's own text, which is '' for a
+    // parent. Reading it directly is how the first version of this test passed while asserting
+    // nothing — the exact vacuous-green shape this file's header is about.
+    assert.equal(textOf(el).trim(), '',
+      `the DOM stringifies what h() drops; fill() must not: got "${textOf(el)}"`);
+  });
+
+  test('replaceChildren is what fill exists to avoid', () => {
+    // The assertion above passes trivially if `fill` ever becomes a no-op wrapper. This pins the
+    // behaviour it is correcting, so the pair cannot both go green for the wrong reason.
+    const el = doc().createElement('div');
+    el.replaceChildren(doc().createElement('span'), null);
+    assert.match(textOf(el), /null/, 'the shape of the bug that shipped into the dialog');
+  });
+});

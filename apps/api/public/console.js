@@ -66,6 +66,25 @@ function add(parent, kids) {
   }
 }
 
+/**
+ * Replace an element's children the way `h()` appends them — skipping null, undefined and false.
+ *
+ * WHY THIS EXISTS RATHER THAN `el.replaceChildren(...)`. `replaceChildren` is the DOM's, and the
+ * DOM stringifies anything that is not a Node: a `cond ? node : null` argument becomes the literal
+ * TEXT "null" in the dialog. Every render function in this file is written in that ternary style
+ * because `h()` has always dropped them, so the moment one is passed to `replaceChildren` instead,
+ * the page grows a word nobody wrote.
+ *
+ * Found on the share dialog, where an absent error message rendered as "null" under the Create
+ * button. The three dialogs below all had the same shape; none of their callers happened to omit
+ * the optional argument that would have shown it, which is the only reason it had not been seen.
+ */
+export function fill(el, ...kids) {
+  el.replaceChildren();
+  add(el, kids);
+  return el;
+}
+
 /* ---------------------------------------------------------------------------- state */
 
 /**
@@ -808,7 +827,7 @@ let dialogOpen = false;
 /** Never `confirm()`: a modal dialog blocks the page, and this console polls behind it. */
 function confirmDialog({ title, lead, removes, keeps, cancel = 'Cancel', confirm, onConfirm }) {
   const d = $('dialog');
-  d.replaceChildren(
+  fill(d,
     h('h2', { id: 'dialog-title', text: title }),
     h('p', { class: 'help mt-xs', text: lead }),
     removes?.length ? h('div', { class: 'inset mt-lg' },
@@ -838,7 +857,7 @@ function confirmDialog({ title, lead, removes, keeps, cancel = 'Cancel', confirm
 function formDialog({ title, lead, fields, submit, onSubmit }) {
   const d = $('dialog');
   const go = async () => { closeOverlays(); await onSubmit(); };
-  d.replaceChildren(
+  fill(d,
     h('h2', { id: 'dialog-title', text: title }),
     lead ? h('p', { class: 'help mt-xs', text: lead }) : null,
     h('div', { class: 'stack mt-lg' }, fields),
@@ -6052,6 +6071,172 @@ function watchFailureAt(seconds) {
   void el.play().catch(() => { /* autoplay policy; the scrubber has moved regardless */ });
 }
 
+/* ---------------------------------------------------------------------------- share a failure */
+
+/**
+ * Hand ONE failure to somebody with no account here (migration 051).
+ *
+ * THE THING A QA ENGINEER DOES THIRTY TIMES A WEEK. Every way of looking at a failure in this
+ * console needs a session cookie for this org, so pasting one into a channel and asking "is this
+ * you?" was not possible: the developer who broke it, the contractor on the integration and the
+ * person in the incident channel each needed an account on the farm first. What happened instead
+ * was a screenshot of a screenshot, with the stack retyped and the step trace lost.
+ *
+ * ITS OWN DIALOG RATHER THAN `formDialog`, because this one does not submit and close: it is a
+ * small screen with two states — a link that does not exist yet, and the list of links that do —
+ * and both have to be visible at once. A person about to create a fourth link needs to see the
+ * three already circulating, which is the entire argument for `views` and `Revoke` being on this
+ * surface and not on a settings page nobody opens.
+ */
+export function shareDialog(result) {
+  const d = $('dialog');
+  // Per-dialog, deliberately not in `state`: nothing outside this dialog reads it, and a token in
+  // module state would outlive the dialog that showed it.
+  const view = { loading: true, shares: [], made: null, days: 7, error: null, busy: false };
+
+  const load = async () => {
+    try {
+      view.shares = (await api(`/v1/results/${encodeURIComponent(result.id)}/shares`)).shares || [];
+      view.error = null;
+    } catch (e) {
+      view.error = e.message;
+    }
+    view.loading = false;
+    draw();
+  };
+
+  const create = async () => {
+    view.busy = true; draw();
+    try {
+      /**
+       * THE TOKEN COMES BACK ONCE AND IS HELD IN `view.made` FOR AS LONG AS THIS DIALOG IS OPEN.
+       * Nothing fetches it again, because nothing can: only a sha256 is stored. Closing the dialog
+       * without copying means making another link and revoking this one, which is stated on screen
+       * rather than left to be discovered.
+       */
+      view.made = await api(`/v1/results/${encodeURIComponent(result.id)}/shares`,
+        { method: 'POST', body: { expiresInDays: view.days } });
+      view.error = null;
+      await load();
+    } catch (e) {
+      view.error = e.message;
+      view.busy = false;
+      draw();
+    }
+    view.busy = false;
+  };
+
+  const revoke = async (prefix) => {
+    try {
+      await api(`/v1/shares/${encodeURIComponent(prefix)}`, { method: 'DELETE' });
+      // A link the person just withdrew must not still be on screen as live — and if it was the one
+      // shown above, the copyable URL goes with it rather than staying copyable.
+      if (view.made && view.made.token.startsWith(prefix)) view.made = null;
+      toast('Link withdrawn', 'Anyone holding it now sees an expired page.', 'ok');
+      await load();
+    } catch (e) {
+      toast('Could not withdraw that link', e.message, 'bad');
+    }
+  };
+
+  /** The absolute URL, built from THIS page's origin rather than from the API's answer — the
+   *  browser is the only thing that knows for certain how this console was reached. */
+  const linkFor = (made) => `${location.origin}${made.path}`;
+
+  function draw() {
+    const live = view.shares.filter((x) => x.active);
+
+    fill(d,
+      h('h2', { id: 'dialog-title', text: 'Share this failure' }),
+      h('p', { class: 'help mt-xs', text:
+        'Anyone with the link can read this one test result — its message, its screenshot and the '
+        + 'steps that led to it — without an account here.' }),
+
+      /**
+       * WHAT THE LINK DOES NOT CARRY, on the screen where the decision is made rather than in a
+       * document. The person pressing this button is the one accountable for the disclosure, and
+       * "no device log" is the fact they need before they press it, not after.
+       */
+      h('div', { class: 'inset mt-lg' },
+        h('p', { class: 'micro', text: 'It does not carry' }),
+        h('ul', { class: 'mt-xs' }, [
+          'the device log \u2014 the one artifact nobody curated before sending',
+          'the recording, which covers every test on the session',
+          'any other test from the same session',
+        ].map((t) => h('li', { class: 'help' }, '\u2014 ', t))),
+      ),
+
+      view.made
+        ? h('div', { class: 'mt-lg' },
+            h('p', { class: 'micro', text: 'Your link' }),
+            copyrow(linkFor(view.made), 'Copy link'),
+            h('p', { class: 'help mt-xs', text:
+              'Shown once. Close this and it cannot be read again \u2014 make another and withdraw '
+              + 'this one.' }),
+          )
+        : h('div', { class: 'row tight mt-lg' },
+            h('label', { class: 'help', for: 'share-days', text: 'Lasts' }),
+            h('select', {
+              // `field narrow`, which is this console's select — there is no `.input` class in
+              // `console.css` and an unstyled select in a dialog reads as a different product.
+              id: 'share-days', class: 'field narrow',
+              onchange: (e) => { view.days = Number(e.target.value); },
+            }, [1, 7, 30].map((n) => h('option', {
+              value: String(n), selected: n === view.days,
+              text: n === 1 ? '1 day' : `${n} days`,
+            }))),
+            btn(view.busy ? 'Creating\u2026' : 'Create link', 'primary', create, { disabled: view.busy }),
+          ),
+
+      view.error ? h('p', { class: 'bad-text help mt-md', text: view.error }) : null,
+
+      // The links already out there. Absent entirely when there are none, rather than an empty
+      // table: a heading over nothing reads as something failing to load.
+      view.loading
+        ? h('p', { class: 'caption mt-lg', text: 'Loading\u2026' })
+        : view.shares.length
+          ? h('div', { class: 'mt-lg' },
+              h('p', { class: 'micro', text:
+                `${view.shares.length} link${view.shares.length === 1 ? '' : 's'} made for this `
+                + `result, ${live.length} still live` }),
+              h('div', { class: 'stack tight mt-xs' }, view.shares.map((x) => h('div', { class: 'row between fit' },
+                // `fit` + `shrink` so a long author email narrows this column instead of wrapping
+                // the Withdraw button under it — both are needed, see `.row.between.fit` in
+                // console.css for why `min-width: 0` on its own does nothing here.
+                h('div', { class: 'stack tight shrink' },
+                  h('span', { class: 'row tight' },
+                    // The PREFIX, which is all that is stored and all that is safe to render. It is
+                    // also enough to tell two links apart, which is the only job it has here.
+                    h('code', { class: 'mono', text: x.prefix }),
+                    x.active ? pill('live', 'ok') : pill(x.revokedAt ? 'withdrawn' : 'expired', '', { dot: false })),
+                  h('p', { class: 'caption', text: [
+                    x.createdByEmail ? `made by ${x.createdByEmail}` : 'made by an API key',
+                    // "opened N times" is the question that makes withdrawing a decision rather
+                    // than a guess. Approximate, and the tooltip says why.
+                    x.views ? `opened ${x.views}\u00d7` : 'never opened',
+                    x.active ? `until ${when(x.expiresAt)}` : null,
+                  ].filter(Boolean).join(' \u00b7 ') }),
+                ),
+                x.active
+                  ? btn('Withdraw', 'tiny ghost', () => revoke(x.prefix),
+                      { title: 'Stops the link working for everyone holding it' })
+                  : null,
+              ))),
+            )
+          : null,
+
+      h('div', { class: 'row end mt-xl' }, btn('Done', 'ghost', closeOverlays)),
+    );
+  }
+
+  draw();
+  d.hidden = false;
+  $('scrim').hidden = false;
+  dialogOpen = true;
+  void load();
+  d.querySelector('.btn.primary, .btn.ghost')?.focus();
+}
+
 /**
  * WHAT FAILED, AT THE TOP OF THE PAGE THAT EXISTS TO EXPLAIN IT.
  *
@@ -6102,13 +6287,21 @@ function sessionFailureCard(sess, live) {
         f.failure
           ? h('pre', { class: 'failtext', text: f.failure })
           : h('p', { class: 'caption', text: 'No message was reported with this failure.' }),
-        at === null
-          ? null
-          : h('p', { class: 'row tight' },
-              btn(`Watch at ${clockText(at)}`, 'tiny', () => watchFailureAt(at),
+        /**
+         * THE SHARE CONTROL SITS WITH THE FAILURE, not in a menu — it is the thing a person reaches
+         * for the moment they have read the message, and a share button anywhere else is a share
+         * button nobody finds. Always rendered, unlike `Watch`, which needs a recording with a
+         * readable anchor: sharing depends on nothing but the result existing.
+         */
+        h('p', { class: 'row tight' },
+          btn('Share', 'tiny', () => shareDialog(f),
+            { title: 'A link that shows this one failure to somebody with no account here' }),
+          at === null
+            ? null
+            : btn(`Watch at ${clockText(at)}`, 'tiny', () => watchFailureAt(at),
                 { title: 'Jumps the recording to just before this failure' }),
-              h('span', { class: 'caption', text: `reported ${when(f.reportedAt)}` }),
-            ),
+          h('span', { class: 'caption', text: `reported ${when(f.reportedAt)}` }),
+        ),
       );
     })),
   );
@@ -7230,6 +7423,15 @@ function screenRun(id) {
                 ? btn('Watch the failure', 'tiny',
                     () => go(`#/sessions/${f.sessionId}?watch=${encodeURIComponent(f.id)}`))
                 : btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
+              /**
+               * SHARE FROM HERE TOO, and this is the row it matters most on: the run screen is
+               * where somebody reads "eleven failures" and picks the one to ask about. Making them
+               * open the session first to find the button would be one navigation between reading a
+               * failure and sending it, which is the navigation that makes people paste a
+               * screenshot instead.
+               */
+              btn('Share', 'tiny ghost', () => shareDialog(f),
+                { title: 'A link that shows this one failure to somebody with no account here' }),
             ),
           ))))
       : null,

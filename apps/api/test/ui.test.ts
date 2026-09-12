@@ -94,6 +94,15 @@ describe('the console is served from an allowlist', () => {
       ['/console.css', (await get('/console.css')).body],
       ['/signin.css', (await get('/signin.css')).body],
       ['/design-tokens.css', (await get('/design-tokens.css')).body],
+      /**
+       * THE SHARE PAGE IS HERE FOR THE SAME REASON THE CONSOLE IS, and it is the surface where the
+       * failure would be worst: it is served to somebody with no account who cannot be asked to
+       * try again, and a stylesheet the allowlist does not carry would hand them an unstyled page
+       * with a stack trace on it. The token is nonsense on purpose — the shell is identical for
+       * every token, which `shares.test.ts` asserts, so any token exercises the same bytes.
+       */
+      ['/s/<token>', (await get('/s/mfs_ui-test')).body],
+      ['/share.css', (await get('/share.css')).body],
     ];
 
     let checked = 0;
@@ -190,20 +199,38 @@ describe('content security policy', () => {
  * because a hand-listed copy is the same mistake one level up.
  */
 describe('the console can load every module it imports', () => {
-  test('every browser-absolute import in console.js is a served path', async () => {
+  /**
+   * EVERY SERVED SCRIPT, not only `console.js`.
+   *
+   * It was written for the console because the console was the only page. `share.js` is a second
+   * entry point with the same failure mode and a worse audience — it imports `/profiles.js` so a
+   * device is named there exactly as the console names it, and an allowlist that did not carry it
+   * would hand a stranger a blank page with no error. Derived from `SERVED_PATHS` so a third entry
+   * point is covered the day it is added rather than the day somebody remembers this test.
+   */
+  test('every browser-absolute import in a served script is a served path', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join, dirname } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
     const { SERVED_PATHS } = await import('../src/http/routes/ui.ts');
 
     const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
-    const src = await readFile(join(publicDir, 'console.js'), 'utf8');
-    const imports = [...src.matchAll(/from\s+'(\/[^']+)'/g)].map((m) => m[1]);
+    const scripts = SERVED_PATHS.filter((p) => p.endsWith('.js'));
+    assert.ok(scripts.length >= 2, `expected several served scripts, found ${scripts.join(', ')}`);
 
-    assert.ok(imports.length > 0, 'expected console.js to import at least one module');
-    for (const spec of imports) {
-      assert.ok(SERVED_PATHS.includes(spec), `console.js imports ${spec}, which ui.ts does not serve`);
+    let checked = 0;
+    for (const script of scripts) {
+      const src = await readFile(join(publicDir, script.slice(1)), 'utf8');
+      for (const m of src.matchAll(/from\s+'(\/[^']+)'/g)) {
+        assert.ok(SERVED_PATHS.includes(m[1]!),
+          `${script} imports ${m[1]}, which ui.ts does not serve — the browser cannot resolve it, `
+          + 'the module graph fails, and the page is blank');
+        checked += 1;
+      }
     }
+    // The guard against a vacuous pass: if the regex stops matching, this test must fail rather
+    // than report that it checked nothing.
+    assert.ok(checked >= 5, `expected several absolute imports across the scripts, found ${checked}`);
   });
 
   test('an unserved import is what this catches', () => {

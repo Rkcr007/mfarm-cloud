@@ -19,6 +19,7 @@ import { appRoutes } from './routes/apps.ts';
 import { runRoutes } from './routes/runs.ts';
 import { hostRoutes } from './routes/hosts.ts';
 import { resultRoutes } from './routes/results.ts';
+import { shareRoutes, sharePageRoutes } from './routes/shares.ts';
 import { reap } from '../allocator.ts';
 import {
   httpDuration,
@@ -338,9 +339,27 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   //
   // ANYTHING ELSE MOUNTED UNDER /dp/ WOULD INHERIT THIS and be reachable anonymously. Nothing
   // should be: the prefix belongs to the data plane, whose authority lives on the other end.
+  /**
+   * `/s/` and `/v1/shares/` are the OTHER two prefixes, and they are public in exactly the sense
+   * `/dp/` is: each carries its own credential, just not one this hook can read.
+   *
+   * A share token is a 32-byte secret in the path, matched against a sha256 in `result_shares` by
+   * `resolveShare`, which also refuses a revoked or expired one. The control plane checks it in the
+   * handler because an anonymous caller has no org and therefore no `current_org()` for a policy to
+   * scope by — the same reason `authenticate()` resolves an API key on the system pool.
+   *
+   * ANYTHING ELSE MOUNTED UNDER EITHER PREFIX WOULD INHERIT THIS. `/v1/shares/:prefix` under DELETE
+   * is the one route under that prefix which is NOT anonymous, and it stays authenticated because
+   * this exemption is read by `preParsing` as "no principal is required", not as "no principal is
+   * possible": the handler calls `requireTenant`, which throws without one. A future GET added
+   * there would be reachable by anybody, so add it under `/v1/results/` instead.
+   */
   const isPublic = (req: FastifyRequest) => {
     const path = req.url.split('?')[0];
-    return PUBLIC_PATHS.has(path) || path.startsWith('/dp/');
+    if (PUBLIC_PATHS.has(path)) return true;
+    if (path.startsWith('/dp/') || path.startsWith('/s/')) return true;
+    // GET only. A DELETE under this prefix is the revoke route and must keep its principal.
+    return path.startsWith('/v1/shares/') && SAFE_METHODS.has(req.method);
   };
 
   app.addHook('onRequest', async (req) => {
@@ -569,6 +588,10 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(runRoutes, { prefix: '/v1' });
   await app.register(hostRoutes, { prefix: '/v1' });
   await app.register(resultRoutes, { prefix: '/v1' });
+  await app.register(shareRoutes, { prefix: '/v1' });
+  // Outside `/v1`: this one serves a page to a person, not JSON to a client, and its path is what
+  // gets pasted into a chat window. See `sharePageRoutes`.
+  await app.register(sharePageRoutes);
 
   // The WebDriver hub, mounted at both spellings the world uses: Appium 2 clients default to `/`,
   // Selenium Grid and Appium 1.x clients to `/wd/hub`. Serving both means the migration is one URL
