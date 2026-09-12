@@ -717,6 +717,24 @@ kbd {
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .row.tight { gap: 6px; }
 .row.between { justify-content: space-between; }
+
+/**
+ * A `.row.between` whose left side must SHRINK rather than push the right side onto its own line.
+ *
+ * TWO PROPERTIES, AND `min-width: 0` ALONE IS NOT ENOUGH — which cost a round trip to find out.
+ * `.row` sets `flex-wrap: wrap`, and in flex layout WRAPPING IS DECIDED BEFORE SHRINKING: once the
+ * left column's max-content plus the button exceeds the line, the button moves to its own line and
+ * the column is never asked to narrow. So the row must be told not to wrap FIRST; only then does
+ * `min-width: 0` let the column shrink past its content (a flex item defaults to `min-width: auto`,
+ * which refuses to).
+ *
+ * The symptom is a list that looks broken because one person's email address was longer than
+ * another's: neighbouring entries put their control in different places. Seen on the share dialog's
+ * link list, in a browser — no test in this repo renders a dialog wide enough to have caught it.
+ */
+.row.between.fit { flex-wrap: nowrap; }
+.row.between.fit > .shrink { min-width: 0; }
+.row.between.fit > .shrink > * { overflow-wrap: anywhere; }
 .spacer { flex: 1 1 auto; }
 .stack { display: grid; gap: 10px; }
 .stack.tight { gap: 6px; }

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="comfortable">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A test result · MFARM</title>
+<!--
+  THE SHELL IS IDENTICAL FOR EVERY TOKEN, valid or not, and that is a disclosure property rather
+  than a convenience: the page discovers whether the link is live by ASKING, so the HTML a stranger
+  receives says nothing about whether they hold a real link. `shares.test.ts` asserts the two are
+  byte-identical.
+
+  NO TITLE FROM THE DATA. The tab says "A test result" and keeps saying it. A document title
+  carrying the test's name would put a tenant's feature names into browser history, into the
+  window-switcher of whoever opens it, and into the link preview of every chat client that reads
+  `<title>` — three places nobody chose to disclose to.
+-->
+<link rel="preload" href="/fonts/instrument-sans-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/bricolage-grotesque-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/design-tokens.css">
+<link rel="stylesheet" href="/share.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23755EB8'/><text x='8' y='12' font-size='11' font-family='monospace' fill='white' text-anchor='middle'>M</text></svg>">
+</head>
+<body>
+
+<header class="sh-top">
+  <div class="sh-brand">
+    <div class="sh-mark" aria-hidden="true">M</div>
+    <span class="sh-wordmark">MFARM</span>
+  </div>
+  <!--
+    The theme control is the only interactive thing in this bar. A share is opened by somebody who
+    has never seen this product and may be reading it at their desk in daylight; defaulting to the
+    console's dark and giving no way out would be the one avoidable discomfort on the page.
+  -->
+  <button id="theme" class="sh-theme" type="button" aria-label="Switch theme">
+    <span id="theme-label">Light</span>
+  </button>
+</header>
+
+<main id="root" class="sh-main" aria-live="polite" aria-busy="true">
+  <div class="sh-loading">
+    <div class="sh-spinner" aria-hidden="true"></div>
+    <p>Opening this result…</p>
+  </div>
+</main>
+
+<script type="module" src="/share.js"></script>
+</body>
+</html>

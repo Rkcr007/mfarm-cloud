@@ -114,6 +114,22 @@ const FILES: Record<string, { file: string; type: string }> = {
    */
 
   /**
+   * The share page (migration 051), which is NOT part of the console.
+   *
+   * Its own stylesheet and its own script because it is served to people with no account here: it
+   * boots no application, opens no socket, and fetches exactly one endpoint. Linking it against
+   * `console.css` would put 106 KB of fleet, cockpit and bring-up styling in front of a stranger
+   * reading one stack trace, and every rule in it would then be a rule this page has to keep
+   * working. The design tokens ARE shared — that is what makes it recognisably the same product —
+   * and so is `/profiles.js`, so a device is named here exactly as the console names it.
+   *
+   * The HTML itself is not in this table: it is served by `sharePageRoutes` at `/s/<token>`, which
+   * is a pattern rather than a literal and needs its own tighter CSP.
+   */
+  '/share.css': { file: 'share.css', type: 'text/css; charset=utf-8' },
+  '/share.js': { file: 'share.js', type: 'text/javascript; charset=utf-8' },
+
+  /**
    * Three faces, latin only, and ONE COPY SERVED TO BOTH CONSOLES.
    *
    * They used to live under `/app/fonts/` because vite bundled them out of `node_modules` for the
