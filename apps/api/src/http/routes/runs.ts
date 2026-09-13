@@ -1,5 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { withTenant } from '../../db.ts';
+import { withSystem, withTenant } from '../../db.ts';
+import { loadConfig } from '../../config.ts';
+import {
+  attributeRunCost, shapeHistory, HISTORY_RUNS,
+  type DeviceHold, type HistoryRow, type TestHistory,
+} from '../../runs.ts';
 import { requireTenant } from '../server.ts';
 import { badRequest, notFound } from '../errors.ts';
 import { timeline, recordRunEvent, subscribe, type PublishedEvent } from '../../executionEvents.ts';
@@ -482,8 +487,105 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       return rows;
     });
 
+    /**
+     * How long this run held devices, per session, with the host that carried each one.
+     *
+     * `started_at` is the proof a device was held: it is stamped when a session goes ACTIVE, so a
+     * session that queued and gave up has none and contributes nothing. A live session counts to
+     * now, which is what it has cost so far. The device is joined under RLS, which sees every device
+     * this org could have been allocated — and a device since removed leaves `host_id` null, which
+     * `attributeRunCost` reports as unpriced rather than guessing a host for it.
+     */
+    const holds = await withTenant(orgId, async (c) => {
+      const { rows } = await c.query<{ seconds: number; host_id: string | null }>(
+        `SELECT GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(s.ended_at, now()) - s.started_at)))::float8 AS seconds,
+                d.host_id
+           FROM sessions s
+           LEFT JOIN devices d ON d.id = s.device_id
+          WHERE s.run_id = $1 AND s.started_at IS NOT NULL`,
+        [run.id],
+      );
+      return rows.map((r): DeviceHold => ({ seconds: Number(r.seconds), hostId: r.host_id }));
+    });
+
+    /**
+     * How many devices each of those hosts carries — on the SYSTEM pool, and only the count.
+     *
+     * Under the tenant's RLS a host shared with another org's dedicated devices would count only the
+     * devices this org can see, which shrinks the divisor and OVERSTATES this run's share: the exact
+     * error the division exists to prevent. The host ids come from the tenant-scoped read above, so
+     * nothing here widens what the caller can name; what it learns is a device count, which is the
+     * disclosure ADR-0039 accepts and names.
+     */
+    const cfg = loadConfig();
+    const hostIds = [...new Set(holds.map((h) => h.hostId).filter((h): h is string => h !== null))];
+    const devicesPerHost = cfg.hostHourlyCost === null || hostIds.length === 0
+      ? new Map<string, number>()
+      : await withSystem(async (c) => {
+          const { rows } = await c.query<{ host_id: string; devices: string }>(
+            'SELECT host_id, count(*) AS devices FROM devices WHERE host_id = ANY($1::uuid[]) GROUP BY host_id',
+            [hostIds],
+          );
+          return new Map(rows.map((r) => [r.host_id, Number(r.devices)]));
+        });
+    const usage = attributeRunCost(holds, devicesPerHost, cfg.hostHourlyCost, cfg.costCurrency);
+
+    /**
+     * Every failing test's recent history in this org, in ONE statement for all of them (ADR-0039).
+     *
+     * A TEST IS ITS NAME, WITHIN THE ORG. There is no test id: the suite sends a name and nothing
+     * else, so "the same test" can only mean "a result with the same name" — which is also what a
+     * person scanning a run means. Parameterised tests that share a name share a history, the same
+     * trade `a retry is two results` already makes in the other direction.
+     *
+     * A RUN THAT REPORTED THE TEST SEVERAL TIMES IS ONE DOT, and a failure wins. A retry that passed
+     * on the second attempt is the flakiness signal, and folding it to "passed" would hide exactly
+     * the thing the strip exists to show. Skipped results are not an outcome and are left out.
+     *
+     * UNDER THE TENANT'S OWN RLS, deliberately not a definer function: `test_results`, `sessions`
+     * and `runs` are all `org_id = current_org()`, so another org's run named "412" reporting the
+     * same test cannot appear. Architecture rule 7 is why that matters — `mfarm_definer` bypasses
+     * RLS, and a definer version of this would have been scoped by nothing but its own WHERE clause.
+     *
+     * NO INDEX ON `test_results(org_id, name)` yet: the scan is the org's own results, a deliberate
+     * trade at this farm's size and the first thing to add when a run page gets slow.
+     */
+    const failingNames = [...new Set(failures.map((f: Record<string, unknown>) => String(f.name)))];
+    const history: Map<string, TestHistory> = failingNames.length === 0
+      ? new Map()
+      : await withTenant(orgId, async (c) => {
+          const { rows } = await c.query<HistoryRow>(
+            `WITH per_run AS (
+               SELECT tr.name AS test_name, s.run_id,
+                      bool_or(tr.status = 'failed') AS failed,
+                      max(tr.reported_at)           AS at
+                 FROM test_results tr
+                 JOIN sessions s ON s.id = tr.session_id
+                WHERE tr.name = ANY($2::text[])
+                  AND s.run_id IS NOT NULL
+                  AND tr.status IN ('passed', 'failed')
+                GROUP BY tr.name, s.run_id
+             ), ranked AS (
+               SELECT p.*, row_number() OVER (PARTITION BY p.test_name ORDER BY p.at DESC, p.run_id DESC) AS rn
+                 FROM per_run p
+             )
+             SELECT k.test_name, k.run_id, r.external_id, r.name AS run_name, k.failed, k.at, k.rn
+               FROM ranked k
+               JOIN runs r ON r.id = k.run_id
+              WHERE k.rn <= $3 OR k.run_id = $1`,
+            [run.id, failingNames, HISTORY_RUNS],
+          );
+          return shapeHistory(rows, run.id);
+        });
+
     return {
-      run: runJson(run),
+      run: {
+        ...runJson(run),
+        /** Minutes devices were held across this run's sessions, rounded. Never priced here. */
+        deviceMinutes: usage.deviceMinutes,
+        /** Null when no host rate is configured — see `attributeRunCost`. */
+        cost: usage.cost,
+      },
       sessions: sessions.map((r: Record<string, unknown>) => ({
         id: r.id,
         /** The test, from `mfarm:name`. Null for a session that never said — never invented. */
@@ -517,6 +619,8 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         reportedAt: f.reported_at,
         /** Whether this failure's session left a recording — see the query's comment. */
         hasVideo: f.has_video === true,
+        /** This test's last runs in the org, this one included — see the history query. */
+        history: history.get(String(f.name)) ?? { runs: [], failedCount: 0, total: 0 },
       })),
       incidents: incidents.map((i: Record<string, unknown>) => ({
         id: i.id,
