@@ -3301,3 +3301,33 @@ kbd {
 .table.runsessions { min-width: 720px; }
 .testcell { gap: 3px; }
 .testline { font-size: 12.5px; }
+
+/* ============================================================ overlays (ADR-0041) ================= */
+
+.dialog { border-radius: var(--r-xl, 16px); }
+.dialog[data-kind="share"] { width: min(560px, 100vw - 32px); }
+.sharelink .copyrow code { color: var(--accent-text, #C9BCF0); }
+
+/* A real checkbox, visually replaced — it stays the thing that is focused, clicked and announced. */
+.checkrow { position: relative; display: flex; align-items: flex-start; gap: 10px; padding: 4px 0; cursor: pointer; }
+.checkrow input { position: absolute; left: 0; top: 6px; width: 15px; height: 15px; margin: 0; opacity: 0; }
+.checkmark {
+  position: relative;
+  flex: 0 0 auto;
+  width: 15px; height: 15px;
+  margin-top: 2px;
+  background: var(--s-inset, #050506);
+  border: 1px solid var(--b-btn, #2B2B2E);
+  border-radius: var(--r-xs, 4px);
+}
+.checkrow input:checked + .checkmark { background: var(--mf-accent, #755EB8); border-color: var(--mf-accent, #755EB8); }
+.checkrow input:checked + .checkmark::after {
+  content: '';
+  position: absolute;
+  left: 4px; top: 1px;
+  width: 4px; height: 8px;
+  border: solid var(--on-accent, #fff);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.checkrow input:focus-visible + .checkmark { outline: 2px solid var(--b-focus, #8A74D6); outline-offset: 2px; }

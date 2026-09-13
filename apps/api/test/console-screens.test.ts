@@ -5684,3 +5684,57 @@ describe('run detail reads a failure against its history (ADR-0041)', () => {
     assert.doesNotMatch(text, /₹0/, 'no rate is not a zero');
   });
 });
+
+/**
+ * THE SHARE DIALOG (ADR-0041 layout, ADR-0040 contents).
+ *
+ * Tests the WIRING — what the button actually sends — not the handler in isolation: a dead control
+ * tested green here once, which is why the shim can press buttons now.
+ */
+describe('share dialog sends what its boxes say', () => {
+  const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+
+  const withFetch = async (fn: (posts: any[]) => Promise<void>) => {
+    const posts: any[] = [];
+    const real = (globalThis as any).fetch;
+    (globalThis as any).fetch = async (url: string, init: any = {}) => {
+      if (init.method === 'POST') posts.push({ url: String(url), body: JSON.parse(init.body) });
+      const payload = init.method === 'POST'
+        ? { token: 'mfs_abcdefghijkl', path: '/s/mfs_abcdefghijkl', expiresAt: new Date().toISOString() }
+        : { shares: [] };
+      return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+    };
+    try { await fn(posts); } finally { (globalThis as any).fetch = real; mod.closeOverlays(); }
+  };
+
+  test('by default the link carries the recording and the logcat, and lasts the longest a link can', async () => {
+    seed({ name: 'run', id: '4471' });
+    await withFetch(async (posts) => {
+      mod.shareDialog({ id: 'tr-1', name: 'checkout applies a promo' });
+      await settle();
+      const dialog = (globalThis as any).document.getElementById('dialog');
+      assert.match(textOf(dialog), /The live device is never shared/);
+      findByText(dialog, 'Create link').click();
+      await settle();
+      assert.equal(posts.length, 1, 'Create link sent nothing');
+      assert.match(posts[0].url, /\/v1\/results\/tr-1\/shares$/);
+      assert.deepEqual(posts[0].body, { expiresInDays: mod.SHARE_MAX_DAYS, includeRecording: true, includeLogcat: true });
+    });
+  });
+
+  test('opening the dialog mints nothing', async () => {
+    seed({ name: 'run', id: '4471' });
+    await withFetch(async (posts) => {
+      mod.shareDialog({ id: 'tr-1', name: 'x' });
+      await settle();
+      assert.equal(posts.length, 0, 'a live link was created by pressing Share');
+    });
+  });
+
+  test('the console’s longest share is the API’s', async () => {
+    const src = await readFile(join(PUBLIC, '..', 'src', 'shares.ts'), 'utf8');
+    const m = src.match(/export const MAX_SHARE_DAYS = (\d+);/);
+    assert.ok(m, 'MAX_SHARE_DAYS moved — this guard is measuring nothing');
+    assert.equal(mod.SHARE_MAX_DAYS, Number(m[1]));
+  });
+});

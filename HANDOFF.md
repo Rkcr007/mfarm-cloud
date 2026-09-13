@@ -4818,3 +4818,41 @@ when the feature is broken. See issues 37 and 38.
 
     Not built, and said so on the page rather than quietly: per-service restart (Caddy, coturn,
     Appium, cvd). It needs the agent to learn a job kind and a fleet-wide agent deployment.
+
+93. **CONSOLE V2 — THE PHONE STAYS ON SCREEN WHILE YOU READ ITS LOG.** 2026-09-14, ADR-0041 (amends
+    0038), with ADR-0039 and ADR-0040 behind it. PRs #191 shell, #193 cockpit, #194 Apps, #195 Run
+    detail, and the overlays PR; #192 and #196 are the backend, built in parallel by a subagent in its
+    own worktree while it owned the local Postgres.
+
+    **The handoff was a re-layout, not a re-skin.** `design_handoff_mfarm_console 2/`'s palette is
+    already `design-tokens.css`'s, so every value still goes through a token and the light theme
+    survived. The complaint it names was real on the farm: on the session screen, reading a log line
+    scrolled the phone out of sight. The cockpit is now a workspace that never scrolls as a page —
+    header strip, device panel, one tabbed dock (Logs · Steps · Actions · Evidence · Inspector ·
+    Connect) — and it stacks by a CONTAINER query, because collapsing the rail changes the usable
+    width without changing the window.
+
+    **Four decisions went against a shipped ADR or my recommendation, and are the owner's:** share
+    links carry the logcat and the recording, ticked by default (ADR-0040 — I recommended keeping
+    0036); one host fact returns to the top bar for OPERATORS only; flake history and run cost were
+    built rather than deferred; Connect became a sixth tab.
+
+    **Every dock panel is built and the others are hidden** — the recording on Evidence is seeked from
+    Steps, and log lines land in Logs while another tab is open. **Log levels are four switches with
+    their own counts**, not a threshold; a line whose level did not parse is never hidden. **The
+    Inspector is the tab**, so inspect mode cannot outlive its panel and swallow taps.
+
+    **Two defects the shim tests could not have caught, found by reading the diff:** the Apps row grid
+    was first written on `.buildrow`, which Health and Infrastructure also draw as flex rows; and a
+    replace-all turned `openedDialog()` into a function that called itself, eight red tests that
+    looked like a dialog bug.
+
+    **I merged #193 on a red Test job.** The background watch reported exit 0 — the exit code of the
+    `tail` at the end of its pipeline, not of the checks. It was ADR-count drift between two branches
+    each adding an ADR (`deploy/doc-numbers.test.mjs`), and #192 had already fixed it on main; that was
+    luck. Merges since are gated on a foreground count of non-passing checks
+    (`mfarm-ci-watch-exit-code`).
+
+    Deliberately not built: "Share this run" (a share is one test result, so the button would promise
+    a link that does not exist), an amber flake cell (the API reports passed or failed per run), and
+    the prototype's width chips and "What changed" drawer, which are review tools.
