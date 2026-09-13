@@ -36,7 +36,7 @@ The filename stays because a lot of things link to it.
   [../examples/java-testng/README.md](../examples/java-testng/README.md) for a Java/TestNG/Cucumber
   suite moving off LambdaTest.
 - **Building on it** — [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md),
-  [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md), [adrs/](adrs/) (39 decisions; there is no 0013 —
+  [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md), [adrs/](adrs/) (40 decisions; there is no 0013 —
   [0039](adrs/0039-a-failure-is-read-against-its-own-history.md) is a failing test's run history and
   what a run cost).
 - **The record** — [../HANDOFF.md](../HANDOFF.md), the numbered session log. **Trust its dated

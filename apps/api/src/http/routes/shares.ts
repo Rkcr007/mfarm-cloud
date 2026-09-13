@@ -7,6 +7,7 @@ import { loadConfig } from '../../config.ts';
 import { appStore } from '../../appstore.ts';
 import { requireTenant } from '../server.ts';
 import { badRequest, notFound } from '../errors.ts';
+import { sendBlob } from '../blobRange.ts';
 import {
   createShare, listShares, revokeShare, resolveShare, windowedSteps,
   shareJson, sharePath, ShareError,
@@ -47,19 +48,17 @@ function shareUrl(req: { protocol: string; headers: Record<string, unknown> }, t
  * a `...row` would mean the next column added to `test_results` is disclosed to the public internet
  * by whoever added it, which is not a decision a migration author should be making by accident.
  *
- * WHAT IS DELIBERATELY ABSENT, and why each one:
+ * WHAT IS CARRIED ONLY WHEN THE LINK SAYS SO (ADR-0040, superseding ADR-0036 on these two):
  *
- *   THE LOGCAT. A share is readable by anyone holding the link, and a device log is the artifact
- *   most likely to contain something the person sharing it has not read — an app logs auth headers,
- *   deep links with tokens in them, and whatever a third-party SDK feels like printing. The
- *   screenshot was framed by the app, the stack was written by the suite, and the step trace is
- *   MFARM's own record of which commands it forwarded (ADR-0029 stores no request bodies). The log
- *   is the one artifact nobody curated. That is a default, not a law: somebody who wants to hand
- *   over a log can still download it and send it, and the difference is that they will have looked.
+ *   THE LOG AND THE RECORDING. ADR-0036 kept both off every link — the log because it is the one
+ *   artifact nobody curated, the recording because it covers the whole SESSION rather than this
+ *   result. On 2026-09-14 the owner chose to let a link carry them, checked by default in the
+ *   console, accepting that an unreviewed log can carry tokens. So `log` and `recording` are null
+ *   unless `include_logcat` / `include_recording` are set AND the bytes are on disk — and the flag is
+ *   checked in `logcatFor` / `recordingFor`, which the byte routes call too, so a holder who guesses
+ *   `/logcat` on a link without it gets exactly what they would for evidence that never existed.
  *
- *   THE RECORDING. A video covers the whole SESSION, which on a multi-test session is every other
- *   test that ran on that device — the exact widening that scoping a share to one result exists to
- *   prevent. There is no per-test recording to offer instead, so the honest answer is none.
+ * WHAT IS DELIBERATELY ABSENT:
  *
  *   THE IDS. No org id, no session id, no device id, no run id. They identify nothing to a person
  *   without an account and would be a map of this tenant's fleet to a person with one.
@@ -68,6 +67,10 @@ function publicPayload(
   r: ResolvedShare,
   steps: Awaited<ReturnType<typeof windowedSteps>>,
   hasScreenshot: boolean,
+  evidence: {
+    log: { sizeBytes: number } | null;
+    recording: { sizeBytes: number; startedAt: string | null; failureAtSeconds: number | null; partial: boolean } | null;
+  },
 ) {
   return {
     test: {
@@ -124,6 +127,9 @@ function publicPayload(
       truncated: steps.truncated,
     },
     screenshot: hasScreenshot,
+    // Null unless the link includes it and the bytes exist — see the comment above and ADR-0040.
+    log: evidence.log,
+    recording: evidence.recording,
     share: {
       expiresAt: r.share.expires_at.toISOString(),
       createdAt: r.share.created_at.toISOString(),
@@ -150,6 +156,69 @@ async function screenshotFor(resultId: string): Promise<{ sha256: string; conten
     );
     return rows[0] ?? null;
   });
+}
+
+interface EvidenceRow { sha256: string; content_type: string; context: Record<string, unknown> }
+
+/**
+ * The device log a link may serve — null unless the link INCLUDES it (ADR-0040).
+ *
+ * THE FLAG IS CHECKED HERE, not in the route or the payload, because both call this: a gate that
+ * lived in the payload alone would withhold the key and still hand the bytes to anybody who typed
+ * `/logcat` on the end of the link.
+ *
+ * The log captured FOR THIS RESULT when a failing test asked for one (migration 040 binds it through
+ * `context.testResultId`), otherwise the session's release-time log. A log bound to a DIFFERENT
+ * result is never the fallback: it is another test's capture, and showing it here would be the
+ * wrong test's evidence under this one's stack.
+ */
+async function logcatFor(r: ResolvedShare): Promise<EvidenceRow | null> {
+  if (!r.share.include_logcat) return null;
+  return withSystem(async (c) => {
+    const { rows } = await c.query<EvidenceRow>(
+      `SELECT sha256, content_type, context FROM artifacts
+        WHERE kind = 'logcat' AND session_id = $1
+          AND (context->>'testResultId' = $2 OR NOT (context ? 'testResultId'))
+        ORDER BY (context->>'testResultId' = $2) IS TRUE DESC, created_at DESC
+        LIMIT 1`,
+      [r.session.id, r.result.id],
+    );
+    return rows[0] ?? null;
+  });
+}
+
+/** The session's recording — null unless the link INCLUDES it. The newest one, since a session
+ *  records once and a second row would be a re-upload of the same capture. */
+async function recordingFor(r: ResolvedShare): Promise<EvidenceRow | null> {
+  if (!r.share.include_recording) return null;
+  return withSystem(async (c) => {
+    const { rows } = await c.query<EvidenceRow>(
+      `SELECT sha256, content_type, context FROM artifacts
+        WHERE kind = 'video' AND session_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [r.session.id],
+    );
+    return rows[0] ?? null;
+  });
+}
+
+/**
+ * The console's `FAILURE_LEAD_IN_SECONDS`, and the console's arithmetic (`failureOffsetSeconds` in
+ * `console.js`): `reportedAt − startedAt`, pulled back five seconds, floored at zero.
+ *
+ * COMPUTED HERE rather than in `share.js` because the share page cannot import the console, and a
+ * second copy of the subtraction in a second browser file is how the console's "Watch at 1:05" and
+ * the link's would come to disagree about when the same test failed. Both ends are approximate in
+ * the same direction — the anchor to about a frame, `reportedAt` by however long the suite took to
+ * post — which is also why the seek lands early rather than exactly.
+ */
+const FAILURE_LEAD_IN_SECONDS = 5;
+
+export function failureAtSeconds(startedAt: unknown, reportedAt: Date): number | null {
+  const start = typeof startedAt === 'string' ? Date.parse(startedAt) : NaN;
+  if (!Number.isFinite(start)) return null;
+  return Math.max(0, (reportedAt.getTime() - start) / 1000 - FAILURE_LEAD_IN_SECONDS);
 }
 
 /** Headers every anonymous share response carries. */
@@ -186,7 +255,8 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
    * result id at the moment it matters cannot use the feature. `created_by` is therefore nullable
    * and is the person where there is one.
    */
-  app.post<{ Params: { id: string }; Body: { expiresInDays?: number } }>(
+  app.post<{ Params: { id: string };
+             Body: { expiresInDays?: number; includeRecording?: boolean; includeLogcat?: boolean } }>(
     '/results/:id/shares',
     {
       schema: {
@@ -197,6 +267,9 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
             // Bounded in the schema AND in `createShare`. The schema is this door's contract; the
             // check in the module is what holds for a caller arriving through any other door.
             expiresInDays: { type: 'integer', minimum: 1, maximum: MAX_SHARE_DAYS },
+            // ADR-0040. Absent is false, which is what every caller before 057 got.
+            includeRecording: { type: 'boolean' },
+            includeLogcat: { type: 'boolean' },
           },
         },
       },
@@ -208,6 +281,8 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
         const { token, share } = await createShare(orgId, req.params.id, {
           expiresInDays: req.body?.expiresInDays ?? DEFAULT_SHARE_DAYS,
           createdBy,
+          includeRecording: req.body?.includeRecording === true,
+          includeLogcat: req.body?.includeLogcat === true,
         });
         return reply.code(201).send({
           /**
@@ -263,15 +338,30 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { token: string } }>('/shares/:token', async (req, reply) => {
     const resolved = await resolveShare(req.params.token);
     if (!resolved) throw notFound('Share');
-    const [steps, shot] = await Promise.all([
+    const [steps, shot, log, rec] = await Promise.all([
       windowedSteps(resolved),
       screenshotFor(resolved.result.id),
+      logcatFor(resolved),
+      recordingFor(resolved),
     ]);
     // The bytes must actually be on disk before the page is told there is a picture, or it renders
     // a broken image under a stack trace. `store.size` is the same question `/artifacts/:id/blob`
-    // asks before streaming.
-    const present = shot ? (await store.size(shot.sha256)) !== null : false;
-    return publicHeaders(reply).send(publicPayload(resolved, steps, present));
+    // asks before streaming — and for the recording it is the ordinary case rather than a corner,
+    // because video retention is shorter than the longest link.
+    const onDisk = (b: { sha256: string } | null) => (b ? store.size(b.sha256) : Promise.resolve(null));
+    const [shotSize, logSize, recSize] = await Promise.all([onDisk(shot), onDisk(log), onDisk(rec)]);
+    return publicHeaders(reply).send(publicPayload(resolved, steps, shotSize !== null, {
+      log: logSize !== null ? { sizeBytes: logSize } : null,
+      recording: rec && recSize !== null
+        ? {
+            sizeBytes: recSize,
+            startedAt: typeof rec.context.startedAt === 'string' ? rec.context.startedAt : null,
+            failureAtSeconds: failureAtSeconds(rec.context.startedAt, resolved.result.reported_at),
+            // Said out loud by the page: a partial file plays, and ends early.
+            partial: rec.context.partial === true,
+          }
+        : null,
+    }));
   });
 
   /**
@@ -295,6 +385,46 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
       .header('content-disposition', 'inline; filename="failure.png"')
       .send(store.read(shot.sha256));
   });
+
+  /**
+   * GET /v1/shares/:token/logcat — the device log, only on a link that includes it (ADR-0040).
+   *
+   * A DOWNLOAD, and `text/plain` whatever the row says: `attachment` plus `nosniff` means a log line
+   * that happens to look like markup is never rendered as a page on this origin. A link without the
+   * flag reaches `logcatFor`'s null and answers exactly as evidence that was never captured does.
+   */
+  app.get<{ Params: { token: string } }>('/shares/:token/logcat', async (req, reply) => {
+    const resolved = await resolveShare(req.params.token);
+    if (!resolved) throw notFound('Share');
+    const log = await logcatFor(resolved);
+    const size = log ? await store.size(log.sha256) : null;
+    if (!log || size === null) throw notFound('Log');
+    return sendBlob(req, publicHeaders(reply), store, size, {
+      sha256: log.sha256,
+      contentType: 'text/plain; charset=utf-8',
+      disposition: 'attachment; filename="device-log.txt"',
+    });
+  });
+
+  /**
+   * GET /v1/shares/:token/recording — the session recording, only on a link that includes it.
+   *
+   * With range support, through the same helper `/v1/artifacts/:id/blob` uses: a `<video>` that
+   * cannot seek cannot jump to the failure, which is the one thing the recording is on this page for.
+   * Every range request re-resolves the token, so revoking a link stops a video mid-play.
+   */
+  app.get<{ Params: { token: string } }>('/shares/:token/recording', async (req, reply) => {
+    const resolved = await resolveShare(req.params.token);
+    if (!resolved) throw notFound('Share');
+    const rec = await recordingFor(resolved);
+    const size = rec ? await store.size(rec.sha256) : null;
+    if (!rec || size === null) throw notFound('Recording');
+    return sendBlob(req, publicHeaders(reply), store, size, {
+      sha256: rec.sha256,
+      contentType: rec.content_type,
+      disposition: 'inline; filename="recording.webm"',
+    });
+  });
 }
 
 /**
@@ -316,15 +446,16 @@ export async function sharePageRoutes(app: FastifyInstance): Promise<void> {
     publicHeaders(reply)
       .header('content-type', 'text/html; charset=utf-8')
       /**
-       * The share page's OWN policy, and it is tighter than the console's in the two ways that
-       * matter for a page served to strangers: no `connect-src` beyond `'self'` (there is no data
-       * plane here and never will be), and no `media-src` at all (there is no recording on a share
-       * — see `publicPayload`). `img-src 'self'` is what carries the one screenshot.
+       * The share page's OWN policy, and it is tighter than the console's in the ways that matter
+       * for a page served to strangers: no `connect-src` beyond `'self'` (there is no data plane
+       * here and never will be), and `media-src 'self'` with no `blob:` — the recording a link may
+       * carry (ADR-0040) streams from this origin's own route and from nowhere else. The shell is
+       * identical for every token, so the policy is too, whether or not this link has a recording.
        */
       .header(
         'content-security-policy',
         "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; " +
-        "img-src 'self'; connect-src 'self'; " +
+        "img-src 'self'; media-src 'self'; connect-src 'self'; " +
         "form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
       )
       .send(await readFile(html, 'utf8')));

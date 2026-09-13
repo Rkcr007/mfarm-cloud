@@ -282,23 +282,119 @@ function stepsCard(d) {
   );
 }
 
+/** mm:ss for a position in a recording. FLOOR, like the console's `clockText`, so this agrees with
+ *  the `<video>` clock beside it — the browser truncates, and rounding once put a number one second
+ *  off directly above the player. */
+function clock(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${pad(s % 60)}`;
+}
+
+/** Bytes, in the unit a person would say. */
+function size(bytes) {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /**
- * What the link does not carry, said on the page rather than only in the code.
+ * The session recording, when the link carries one (ADR-0040).
+ *
+ * `<video controls>` IS THE PLAYER, for the reason the console gives: the browser's controls are
+ * better than a reimplementation and none of them are this file's to keep working. What this adds is
+ * the one thing the browser cannot know — where the test went red — and `failureAtSeconds` arrives
+ * already computed by the API with the console's own arithmetic, so the two cannot disagree.
+ *
+ * `preload="metadata"`: somebody opening a link on a phone must not pull forty megabytes for a card
+ * they may never scroll to. The route supports ranges, which is what lets the jump work unloaded.
+ */
+function recordingCard(d, token) {
+  const rec = d.recording;
+  if (!rec) return null;
+  const at = typeof rec.failureAtSeconds === 'number' ? rec.failureAtSeconds : null;
+
+  const video = h('video', {
+    class: 'sh-video',
+    src: `/v1/shares/${encodeURIComponent(token)}/recording`,
+    controls: true,
+    preload: 'metadata',
+    playsinline: true,
+  });
+
+  const jump = at === null ? null : h('button', {
+    class: 'sh-copy', type: 'button', text: `Watch from the failure (${clock(at)})`,
+    on: {
+      click: () => {
+        // Seeking a video the reader cannot see looks exactly like a button that does nothing.
+        video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (typeof video.fastSeek === 'function') video.fastSeek(at); else video.currentTime = at;
+        void video.play().catch(() => { /* autoplay policy; the scrubber has moved regardless */ });
+      },
+    },
+  });
+
+  return h('div', { class: 'sh-card' },
+    h('div', { class: 'sh-card-head' },
+      h('span', { class: 'sh-card-title', text: 'The recording' }), jump),
+    video,
+    rec.partial
+      ? h('p', { class: 'sh-caption sh-mt', text:
+          'This recording did not stop cleanly — it is what was on disk when the device went away, '
+          + 'so it may end early.' })
+      : null,
+    h('p', { class: `sh-caption${rec.partial ? '' : ' sh-mt'}`, text: at === null
+      ? 'This recording carries no start time, so the moment this test failed cannot be located in it.'
+      : 'The jump lands a few seconds before the failure was reported, because the report arrives '
+        + 'after the assertion. The recording covers the whole session, including any other test '
+        + 'that ran on it.' }),
+  );
+}
+
+/**
+ * The device log, when the link carries one (ADR-0040) — a DOWNLOAD, not a viewer.
+ *
+ * Rendering a couple of megabytes of logcat into this page would make it the slowest thing a
+ * recipient opens all week and add a log viewer to keep working. A link to the bytes is the whole
+ * feature; whatever the reader already uses to read logs is better at it.
+ */
+function logCard(d, token) {
+  if (!d.log) return null;
+  const bytes = size(d.log.sizeBytes);
+  return h('div', { class: 'sh-card' },
+    h('div', { class: 'sh-card-head' },
+      h('span', { class: 'sh-card-title', text: 'Device log' }),
+      h('a', {
+        class: 'sh-copy', href: `/v1/shares/${encodeURIComponent(token)}/logcat`,
+        text: bytes ? `Download (${bytes})` : 'Download',
+      })),
+    h('p', { class: 'sh-caption', text:
+      'The device’s log from the session that produced this result. Nobody reviewed it before it was '
+      + 'shared, and apps sometimes log things that should not travel — treat it accordingly.' }),
+  );
+}
+
+/**
+ * What the link carries and what it does not, said on the page rather than only in the code.
  *
  * A RECIPIENT SHOULD NOT HAVE TO GUESS WHAT ELSE THEY WERE GIVEN, and neither should the person who
- * sent it. Saying "no device log" out loud is what turns the omission from a limitation into the
- * decision it is — and it is the sentence that stops somebody asking for the logcat to be added
- * here without reading why it is not.
+ * sent it. Since ADR-0040 the answer differs per link, so the sentence is built from the payload:
+ * whatever is absent is named as absent, and a recording is said to be the whole session's.
  */
 function footer(d) {
   const expires = when(d.share.expiresAt);
+  const carried = [d.log ? 'the device log' : null, d.recording ? 'the session recording' : null].filter(Boolean);
+  const absent = [d.log ? null : 'no device log', d.recording ? null : 'no recording'].filter(Boolean);
   return h('div', { class: 'sh-foot' },
     h('p', { class: 'sh-caption', text:
       `Shared from ${d.org.name}’s MFARM device farm`
       + (expires ? `. This link stops working on ${expires}.` : '.') }),
-    h('p', { class: 'sh-caption', text:
-      'It carries this one test result and nothing else — no device log, no recording, and no '
-      + 'other test from the same session.' }),
+    h('p', { class: 'sh-caption', text: carried.length
+      ? `It carries this one test result with ${carried.join(' and ')}`
+        + (absent.length ? `, and ${absent.join(' and ')}` : '')
+        + '. The steps are this test’s alone; no other test’s result or steps are part of it.'
+      : 'It carries this one test result and nothing else — no device log, no recording, and no '
+        + 'other test from the same session.' }),
   );
 }
 
@@ -349,7 +445,9 @@ async function main() {
     // Ordered as a person reads a failure: what broke, what it looked like, how it got there.
     d.test.status === 'failed' ? stackCard(d) : null,
     screenshotCard(d, token),
+    recordingCard(d, token),
     stepsCard(d),
+    logCard(d, token),
     footer(d),
   );
 }

@@ -65,6 +65,9 @@ export interface ShareRow {
   revoked_at: Date | null;
   last_viewed_at: Date | null;
   views: number;
+  /** Migration 057 — what the link opens beyond the result itself. Both false unless asked for. */
+  include_recording: boolean;
+  include_logcat: boolean;
 }
 
 /**
@@ -90,6 +93,12 @@ export function shareJson(s: ShareRow & { created_by_email?: string | null }) {
     revokedAt: s.revoked_at ? s.revoked_at.toISOString() : null,
     lastViewedAt: s.last_viewed_at ? s.last_viewed_at.toISOString() : null,
     views: s.views,
+    /**
+     * What the link discloses beyond the result (ADR-0040). Listed because "did the one I sent
+     * carry the log?" is exactly the question somebody asks before deciding whether to revoke it.
+     */
+    includeRecording: s.include_recording,
+    includeLogcat: s.include_logcat,
     /**
      * Derived here rather than stored, so that what "live" means can change without a migration —
      * and so the console cannot disagree with the API about which links are still circulating. The
@@ -138,7 +147,15 @@ export class ShareError extends Error {
 export async function createShare(
   orgId: string,
   testResultId: string,
-  opts: { expiresInDays?: number; createdBy?: string | null } = {},
+  /**
+   * `includeRecording` and `includeLogcat` default to FALSE here as in the column (migration 057).
+   * The console's default-on is a choice made in front of a person with the checkboxes in view; a
+   * caller that sends nothing gets the disclosure every link had before ADR-0040.
+   */
+  opts: {
+    expiresInDays?: number; createdBy?: string | null;
+    includeRecording?: boolean; includeLogcat?: boolean;
+  } = {},
 ): Promise<{ token: string; share: ShareRow }> {
   const days = opts.expiresInDays ?? DEFAULT_SHARE_DAYS;
   if (!Number.isFinite(days) || days <= 0 || days > MAX_SHARE_DAYS) {
@@ -163,10 +180,12 @@ export async function createShare(
     if (rows.length === 0) throw new ShareError('no_result', 'Test result not found.');
 
     const ins = await c.query<ShareRow>(
-      `INSERT INTO result_shares (org_id, test_result_id, prefix, token_hash, created_by, expires_at)
-       VALUES ($1, $2, $3, $4, $5, now() + ($6 || ' days')::interval)
+      `INSERT INTO result_shares (org_id, test_result_id, prefix, token_hash, created_by, expires_at,
+                                  include_recording, include_logcat)
+       VALUES ($1, $2, $3, $4, $5, now() + ($6 || ' days')::interval, $7, $8)
        RETURNING *`,
-      [rows[0].org_id, rows[0].id, prefix, hash, opts.createdBy ?? null, String(days)],
+      [rows[0].org_id, rows[0].id, prefix, hash, opts.createdBy ?? null, String(days),
+       opts.includeRecording === true, opts.includeLogcat === true],
     );
     return ins.rows[0];
   });

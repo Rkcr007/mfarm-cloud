@@ -563,7 +563,198 @@ describe('the page and its headers', () => {
     const csp = String(res.headers['content-security-policy']);
     assert.match(csp, /default-src 'none'/);
     assert.match(csp, /connect-src 'self'/);
-    assert.ok(!csp.includes('media-src'), 'there is no recording on a share');
+    assert.match(csp, /media-src 'self';/, 'a recording plays from this origin (ADR-0040)');
+    assert.ok(!csp.includes('blob:'), 'and from nothing a script could mint');
     assert.ok(!/https?:\/\//.test(csp), `no external origin belongs here: ${csp}`);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The log and the recording (migration 057, ADR-0040).
+ *
+ * The owner chose to let a link carry both, and the console checks both boxes by default. What is
+ * under test is still a disclosure boundary, just a movable one: the flags open exactly two routes
+ * and two payload keys, a link without a flag answers those routes as though the evidence did not
+ * exist, and nothing about an existing link or an API caller that sends no flags changes at all.
+ */
+describe('the log and the recording, when the link says so', () => {
+  /** A real blob in the store, bound to a session — the shape the worker's upload leaves behind. */
+  async function seedArtifact(
+    orgId: string, sessionId: string, kind: 'logcat' | 'video',
+    context: Record<string, unknown>, bytes: Buffer,
+  ): Promise<string> {
+    const store = appStore(loadConfig().artifactDir);
+    const blob = await store.put(Readable.from([bytes]), 10_000_000);
+    return withSystem(async (c) => (await c.query(
+      `INSERT INTO artifacts (org_id, session_id, device_id, kind, sha256, size_bytes,
+                              content_type, filename, expires_at, context)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() + interval '7 days', $9::jsonb)
+       RETURNING id`,
+      [orgId, sessionId, deviceId, kind, blob.sha256, bytes.length,
+       kind === 'video' ? 'video/webm' : 'text/plain; charset=utf-8',
+       kind === 'video' ? 'session.webm' : 'logcat.txt', JSON.stringify(context)],
+    )).rows[0].id as string);
+  }
+
+  const reportedAtOf = (resultId: string) => withSystem(async (c) =>
+    (await c.query('SELECT reported_at FROM test_results WHERE id = $1', [resultId])).rows[0].reported_at as Date);
+
+  // Random bytes in each, so two tests never share a blob and a deduplicating store cannot make one
+  // test's fixture answer for another's.
+  const logBytes = (line: string) => Buffer.from(`${line} ${randomBytes(8).toString('hex')}\n`);
+  const webm = () => Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), randomBytes(4096)]);
+
+  test('an API caller that sends no flags gets neither, and the listing says so', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [{ name: 'no flags', status: 'failed' }]);
+    await seedArtifact(orgA, sessionId, 'logcat', {}, logBytes('E Checkout: total mismatch'));
+    const made = await share(keyA, resultIds[0]);
+    assert.equal(made.statusCode, 201, made.body);
+    assert.equal(made.json().share.includeLogcat, false);
+    assert.equal(made.json().share.includeRecording, false);
+
+    const listed = (await app.inject({
+      method: 'GET', url: `/v1/results/${resultIds[0]}/shares`, headers: auth(keyA),
+    })).json().shares[0];
+    assert.equal(listed.includeLogcat, false);
+    assert.equal(listed.includeRecording, false);
+
+    const body = (await open(made.json().token)).json();
+    assert.equal(body.log, null);
+    assert.equal(body.recording, null);
+  });
+
+  test('a link made with includeLogcat serves the session log, as a download', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [{ name: 'with log', status: 'failed' }]);
+    const bytes = logBytes('E Checkout: total mismatch');
+    await seedArtifact(orgA, sessionId, 'logcat', {}, bytes);
+    const made = await share(keyA, resultIds[0], { includeLogcat: true });
+    assert.equal(made.statusCode, 201, made.body);
+    assert.equal(made.json().share.includeLogcat, true);
+    const { token } = made.json();
+
+    assert.deepEqual((await open(token)).json().log, { sizeBytes: bytes.length });
+    const res = await app.inject({ method: 'GET', url: `/v1/shares/${token}/logcat` });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.match(String(res.headers['content-type']), /^text\/plain/);
+    assert.match(String(res.headers['content-disposition']), /^attachment/);
+    assert.equal(res.headers['cache-control'], 'no-store', 'revocation must reach the bytes');
+    assert.equal(res.body, bytes.toString());
+  });
+
+  /**
+   * THE GUESSING TEST. Withholding the key from the payload is not the lock: a person holding a link
+   * can type `/logcat` on the end of it. The ROUTE must check the flag, and one flag must not open
+   * the other's route.
+   */
+  test('a link without include_logcat cannot fetch the log by guessing its URL', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [{ name: 'guess the log', status: 'failed' }]);
+    await seedArtifact(orgA, sessionId, 'logcat', { testResultId: resultIds[0] }, logBytes('E Secret: bearer abc'));
+    await seedArtifact(orgA, sessionId, 'video', { startedAt: new Date(Date.now() - 600_000).toISOString() }, webm());
+
+    const { token } = (await share(keyA, resultIds[0], { includeRecording: true })).json();
+    const log = await app.inject({ method: 'GET', url: `/v1/shares/${token}/logcat` });
+    assert.equal(log.statusCode, 404, 'the recording flag must not open the log');
+    assert.ok(!log.body.includes('bearer'), 'and not one byte of it');
+    assert.equal((await open(token)).json().log, null);
+
+    const { token: bare } = (await share(keyA, resultIds[0])).json();
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${bare}/logcat` })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${bare}/recording` })).statusCode, 404);
+  });
+
+  test('the log captured for THIS result wins, and another test’s capture is never the fallback', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [
+      { name: 'first', status: 'failed' }, { name: 'second', status: 'failed' }, { name: 'third', status: 'failed' },
+    ]);
+    const release = logBytes('release log');
+    const firstLog = logBytes('first test log');
+    await seedArtifact(orgA, sessionId, 'logcat', {}, release);
+    await seedArtifact(orgA, sessionId, 'logcat', { testResultId: resultIds[0] }, firstLog);
+    await seedArtifact(orgA, sessionId, 'logcat', { testResultId: resultIds[1] }, logBytes('second test log'));
+
+    const first = (await share(keyA, resultIds[0], { includeLogcat: true })).json().token;
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${first}/logcat` })).body, firstLog.toString());
+    const third = (await share(keyA, resultIds[2], { includeLogcat: true })).json().token;
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${third}/logcat` })).body, release.toString(),
+      'a result with no capture of its own gets the session log, not the second test’s');
+  });
+
+  test('a link made with includeRecording serves the recording, seekable, pointed at the failure', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [{ name: 'a recorded failure', status: 'failed' }]);
+    const reported = await reportedAtOf(resultIds[0]);
+    // Recording started 65s before the result was reported: the console's arithmetic lands five
+    // seconds earlier than that, at 60.
+    const startedAt = new Date(reported.getTime() - 65_000).toISOString();
+    const bytes = webm();
+    await seedArtifact(orgA, sessionId, 'video', { startedAt, partial: true }, bytes);
+    const { token } = (await share(keyA, resultIds[0], { includeRecording: true })).json();
+
+    const rec = (await open(token)).json().recording;
+    assert.equal(rec.failureAtSeconds, 60, 'the same seek the console’s ?watch= makes');
+    assert.equal(rec.startedAt, startedAt);
+    assert.equal(rec.partial, true, 'a recording that did not stop cleanly is said to be one');
+    assert.equal(rec.sizeBytes, bytes.length);
+
+    const ranged = await app.inject({
+      method: 'GET', url: `/v1/shares/${token}/recording`, headers: { range: 'bytes=0-3' },
+    });
+    assert.equal(ranged.statusCode, 206, 'without ranges a <video> cannot seek to the failure');
+    assert.equal(ranged.rawPayload.toString('hex'), '1a45dfa3');
+    assert.equal(ranged.headers['content-type'], 'video/webm');
+    assert.equal(ranged.headers['cache-control'], 'no-store');
+  });
+
+  test('a recording with no start time is still offered, and cannot be pointed at', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [{ name: 'unanchored', status: 'failed' }]);
+    await seedArtifact(orgA, sessionId, 'video', {}, webm());
+    const { token } = (await share(keyA, resultIds[0], { includeRecording: true })).json();
+    const rec = (await open(token)).json().recording;
+    assert.equal(rec.failureAtSeconds, null);
+    assert.equal(rec.startedAt, null);
+    assert.equal(rec.partial, false);
+  });
+
+  test('a flag with nothing captured is null, not a promise', async () => {
+    const { resultIds } = await seedSession(orgA, [{ name: 'nothing captured', status: 'failed' }]);
+    const { token } = (await share(keyA, resultIds[0], { includeLogcat: true, includeRecording: true })).json();
+    const body = (await open(token)).json();
+    assert.equal(body.log, null);
+    assert.equal(body.recording, null);
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${token}/logcat` })).statusCode, 404);
+  });
+
+  test('revoked links serve neither, and answer exactly like a link that never existed', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [{ name: 'revoked evidence', status: 'failed' }]);
+    await seedArtifact(orgA, sessionId, 'logcat', {}, logBytes('revoked'));
+    await seedArtifact(orgA, sessionId, 'video', {}, webm());
+    const { token } = (await share(keyA, resultIds[0], { includeLogcat: true, includeRecording: true })).json();
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${token}/logcat` })).statusCode, 200);
+    await app.inject({ method: 'DELETE', url: `/v1/shares/${token.slice(0, 12)}`, headers: auth(keyA) });
+
+    const invented = `mfs_${randomBytes(32).toString('base64url')}`;
+    const mask = (b: string) => b.replace(/"requestId":"[^"]+"/, '"requestId":"<per-request>"');
+    for (const what of ['logcat', 'recording']) {
+      const revoked = await app.inject({ method: 'GET', url: `/v1/shares/${token}/${what}` });
+      const never = await app.inject({ method: 'GET', url: `/v1/shares/${invented}/${what}` });
+      assert.equal(revoked.statusCode, 404, `${what} after revocation`);
+      assert.equal(mask(revoked.body), mask(never.body), `${what}: revoked must read as never-existed`);
+    }
+  });
+
+  test('an expired link serves neither', async () => {
+    const { sessionId, resultIds } = await seedSession(orgA, [{ name: 'expired evidence', status: 'failed' }]);
+    await seedArtifact(orgA, sessionId, 'logcat', {}, logBytes('expired'));
+    const { token } = (await share(keyA, resultIds[0], { includeLogcat: true })).json();
+    await withSystem((c) => c.query(
+      "UPDATE result_shares SET expires_at = now() - interval '1 minute' WHERE prefix = $1",
+      [token.slice(0, 12)]));
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${token}/logcat` })).statusCode, 404);
+  });
+
+  test('a flag that is not a boolean is refused rather than coerced', async () => {
+    const { resultIds } = await seedSession(orgA, [{ name: 'strict flags', status: 'failed' }]);
+    assert.equal((await share(keyA, resultIds[0], { includeLogcat: 'yes' })).statusCode, 400);
   });
 });
