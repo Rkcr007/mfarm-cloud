@@ -1,6 +1,10 @@
 # ADR-0036 — a failure can be shown to somebody with no account here
 
-**Status:** Accepted · 2026-09-12 · migration 051
+**Status:** Accepted · 2026-09-12 · migration 051 · **partially superseded by
+[ADR-0040](0040-a-share-can-carry-the-log-and-the-recording.md) (2026-09-14)** — the two sections on
+the logcat and the recording no longer hold: a link can carry both when whoever makes it says so.
+Everything else here — the scoping to one result, the credential, and one answer for every dead
+link — stands.
 
 ## Context
 
