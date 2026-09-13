@@ -45,16 +45,44 @@ const findHost = async (hostname: string) =>
   (await hosts()).json().hosts.find((h: { hostname: string }) => h.hostname === hostname);
 
 /** A host in a chosen state, up for a chosen length of time. */
+/**
+ * SEEDED THROUGH THE PATH A REAL HOST TAKES, because the power ledger is driven by a trigger and
+ * `hosts_track_power` is AFTER UPDATE (054).
+ *
+ * The first version of this helper wrote one INSERT with `up_since` and the final state already on
+ * it. That fires no trigger at all, so every host it made had NO row in `host_power_intervals` —
+ * and a fixture with an empty ledger cannot tell a machine that is on from one that is off, which
+ * is the only thing these tests are about. It would have passed against both the bug and the fix.
+ *
+ * So: register, then stamp `up_since` the way a first beat does, then move to the state under test.
+ * Three statements, each one a transition the trigger is written to see.
+ */
 async function seedHost(hostname: string, opts: {
   org?: string | null; state?: string; upHoursAgo?: number | null;
+  /** Only meaningful with state QUARANTINED. `reaper` is silence; `operator` is a deliberate drain. */
+  quarantineSource?: 'reaper' | 'operator';
 }) {
   return withSystem(async (c) => {
     const r = await c.query(
-      `INSERT INTO hosts (region, hostname, state, protocol_version, org_id, up_since, last_heartbeat_at)
-       VALUES ($1,$2,$3,2,$4,$5, now()) RETURNING id`,
-      [REGION, hostname, opts.state ?? 'UP', opts.org ?? null,
-       opts.upHoursAgo == null ? null : new Date(Date.now() - opts.upHoursAgo * 3600_000)]);
-    return r.rows[0].id as string;
+      `INSERT INTO hosts (region, hostname, state, protocol_version, org_id, last_heartbeat_at)
+       VALUES ($1,$2,'UP',2,$3, now()) RETURNING id`,
+      [REGION, hostname, opts.org ?? null]);
+    const id = r.rows[0].id as string;
+
+    // Case 1 of the trigger: `up_since` moving is how a host says it came up, and it opens the
+    // interval at that moment. A host with no `up_since` has never spoken and gets no interval.
+    if (opts.upHoursAgo != null) {
+      await c.query(`UPDATE hosts SET up_since = $2 WHERE id = $1`,
+        [id, new Date(Date.now() - opts.upHoursAgo * 3600_000)]);
+    }
+
+    const state = opts.state ?? 'UP';
+    if (state !== 'UP') {
+      await c.query(
+        `UPDATE hosts SET state = $2, quarantined_at = now(), quarantine_source = $3 WHERE id = $1`,
+        [id, state, state === 'QUARANTINED' ? (opts.quarantineSource ?? 'reaper') : null]);
+    }
+    return id;
   });
 }
 
@@ -125,12 +153,36 @@ describe('what a machine costs to leave on', () => {
     assert.equal(h.costSinceUp, null);
   });
 
-  test('a quarantined host is still burning money and still says so', async () => {
-    const name = `quarantined-${REGION}`;
-    await seedHost(name, { org: null, state: 'QUARANTINED', upHoursAgo: 3 });
+  /**
+   * THE TWO QUARANTINES BILL DIFFERENTLY, and the version of this file that had one test here
+   * asserted "a quarantined machine is powered on" flatly. Half of that is false, and it is the
+   * half that reached production: see the pair below.
+   */
+  test('AN OPERATOR DRAIN IS STILL BURNING MONEY — the machine is on, doing nothing', async () => {
+    const name = `drained-${REGION}`;
+    await seedHost(name, { org: null, state: 'QUARANTINED', upHoursAgo: 3, quarantineSource: 'operator' });
     const h = await findHost(name);
-    assert.ok(h.uptimeSeconds > 0, 'a quarantined machine is powered on');
-    assert.ok(h.costSinceUp > 0, 'and is therefore still costing its hourly rate');
+    assert.ok(h.uptimeSeconds > 0, 'draining a host for maintenance does not switch it off');
+    assert.ok(h.costSinceUp > 0, 'and it costs exactly what it cost yesterday');
+  });
+
+  test('A HOST QUARANTINED FOR SILENCE REPORTS NO UPTIME AND NO COST', async () => {
+    /**
+     * THE DEFECT THIS TEST EXISTS FOR, found on the live farm on 2026-09-13. `mfarm-lab` had been
+     * stopped for twelve hours; the reaper quarantined it for missing beats; `up_since` still
+     * pointed at the morning it came up. The console read "up 11h 56m · ~₹776 so far" — thirty-two
+     * times the farm's entire month-to-date spend — while the operations centre, which reads the
+     * provider, correctly said nothing was powered on.
+     *
+     * Silence is the only evidence of power we have, so losing it means the meter stops. 054 closes
+     * the interval at the last heartbeat for exactly this reason; this endpoint now reads it.
+     */
+    const name = `silenced-${REGION}`;
+    await seedHost(name, { org: null, state: 'QUARANTINED', upHoursAgo: 12, quarantineSource: 'reaper' });
+    const h = await findHost(name);
+    assert.equal(h.uptimeSeconds, null, 'a machine we cannot hear is not a machine we can bill');
+    assert.equal(h.costSinceUp, null, 'and null rather than 0 — we are not measuring, not measuring zero');
+    assert.ok(h.upSince, 'when it last came up is still reported; it is simply not an uptime');
   });
 });
 

@@ -58,6 +58,11 @@ interface HostRow {
   stats_at: Date | null;
   device_count: string;
   ready_count: string;
+  /**
+   * The start of the host's OPEN power interval, or null when it has none — the ledger's answer to
+   * "is this machine switched on right now". See the comment on `uptimeSeconds` below.
+   */
+  powered_since: Date | null;
 }
 
 export async function hostRoutes(app: FastifyInstance): Promise<void> {
@@ -84,8 +89,14 @@ export async function hostRoutes(app: FastifyInstance): Promise<void> {
                 h.quarantined_at, h.quarantine_reason,
                 h.disk_free_bytes, h.disk_total_bytes, h.load1,
                 h.mem_available_mb, h.mem_total_mb, h.stats_at,
-                d.device_count, d.ready_count
+                d.device_count, d.ready_count,
+                p.started_at AS powered_since
            FROM hosts h
+           -- THE LEDGER, NOT THE STATE, decides whether this machine is on — 054. At most one row
+           -- per host can be open (host_power_intervals_open_idx is a partial unique index), so
+           -- this is one index probe and cannot multiply the outer row.
+           LEFT JOIN host_power_intervals p
+                  ON p.host_id = h.id AND p.ended_at IS NULL
            LEFT JOIN LATERAL (
              SELECT count(*)                                    AS device_count,
                     count(*) FILTER (WHERE dv.state = 'READY')  AS ready_count
@@ -115,14 +126,29 @@ export async function hostRoutes(app: FastifyInstance): Promise<void> {
       hosts: rows.map((h) => {
         const upSince = h.up_since;
         /**
-         * Only meaningful while the host is actually UP. A stopped machine's `up_since` is the last
-         * time it came up, and subtracting it from now would report a VM that has been switched off
-         * since Tuesday as having been running for four days — the exact opposite of the fact this
-         * endpoint exists to report.
+         * FROM THE POWER LEDGER, NEVER FROM `state`. An open interval in `host_power_intervals` is
+         * the only thing in this database that means "switched on"; `state` is a report about
+         * whether the host is USABLE, and the two part company in both directions.
+         *
+         * The version this replaces read `state === 'UP' || state === 'QUARANTINED'`, and the
+         * second half of that is how a machine gets billed for being off. A VM that is stopped goes
+         * quiet, the reaper quarantines it for missing beats, and `up_since` still points at the
+         * morning it last came up — so the console reported a switched-off host as having been
+         * running for twelve hours and charged ~₹776 for it, while the operations centre, reading
+         * the provider, said the fleet was costing nothing. Found on the live farm 2026-09-13.
+         *
+         * 054 ALREADY DREW THE LINE THIS NEEDS, and drew it more carefully than a state check can:
+         * a REAPER quarantine closes the interval (silence is the only evidence of power we lose),
+         * while an OPERATOR quarantine deliberately leaves it open, because draining a host for
+         * maintenance leaves the machine switched on and costing exactly what it cost yesterday.
+         * Reading the ledger inherits that distinction for free; reading `state` cannot express it.
+         *
+         * `up_since` stays in the payload — it is still the honest answer to "when did this host
+         * last come up", which is a different question from "how long has it been on".
          */
-        const running = h.state === 'UP' || h.state === 'QUARANTINED';
-        const uptimeSeconds = running && upSince
-          ? Math.max(0, Math.round((now - upSince.getTime()) / 1000))
+        const poweredSince = h.powered_since;
+        const uptimeSeconds = poweredSince
+          ? Math.max(0, Math.round((now - poweredSince.getTime()) / 1000))
           : null;
 
         return {

@@ -414,7 +414,24 @@ const ACTION_STATE = {
   FAILED:  { label: 'Did not run', tone: 'warn' },
 };
 
-const KIND_LABEL = { install: 'Install', launch: 'Launch', uninstall: 'Uninstall' };
+/**
+ * EVERY KIND THE WORKER CAN REPORT, not only the three that carry an app.
+ *
+ * `video-start` and `video-stop` were missing, so Recent Activity rendered the raw kind beside an
+ * em dash standing in for the package name a video action does not have — "video-start — —
+ * succeeded", eight times over, on three different screens. A kind absent from this map is a row
+ * that reads like a bug even when the action succeeded.
+ */
+const KIND_LABEL = {
+  install: 'Install',
+  launch: 'Launch',
+  uninstall: 'Uninstall',
+  'video-start': 'Started recording',
+  'video-stop': 'Stopped recording',
+};
+
+/** The kinds that act on a build. Everything else must not render an app segment at all. */
+const APP_KINDS = new Set(['install', 'launch', 'uninstall']);
 
 /**
  * The capability vocabulary the control plane actually reads.
@@ -2556,9 +2573,18 @@ function activityCard(filter) {
       ? timeline(acts.map((a) => {
           const meta = ACTION_STATE[a.state] || { label: a.state, tone: '' };
           const app = appById(a.appId);
+          /**
+           * THE APP SEGMENT IS OMITTED, not filled with a placeholder. `short(null)` returns an em
+           * dash, which landed directly beside the separator em dash and produced "video-start — —
+           * succeeded". A recording has no package name and never will, so the honest row names the
+           * action and its outcome and stops.
+           */
+          const subject = APP_KINDS.has(a.kind)
+            ? ` ${app?.packageName || short(a.appId)}`
+            : '';
           return {
             tone: meta.tone,
-            title: `${KIND_LABEL[a.kind] || a.kind} ${app?.packageName || short(a.appId)} — ${meta.label.toLowerCase()}`,
+            title: `${KIND_LABEL[a.kind] || a.kind}${subject} — ${meta.label.toLowerCase()}`,
             note: `${ago(a.finishedAt || a.requestedAt)}${a.error ? ` · ${a.error}` : ''}`,
           };
         }))
@@ -3120,8 +3146,19 @@ function fleetCatalogue() {
           h('span', { class: 'card-title', text: deviceName(d) }),
           h('p', { class: 'help cat-blurb', text: blurb }),
         ),
+        /**
+         * THE SAME THREE CASES AS THE BUTTON BELOW IT, and it used to have two. `free ? null : 'all
+         * in use'` printed "all in use" over a class whose every device was quarantined — on a card
+         * whose own footer, four lines down, correctly said the class was out of the pool. One card
+         * said both things at once, on the screen most likely to be shown to a buyer.
+         *
+         * This is the fifth surface of the defect `capacityState()` was written to end; that fix
+         * reached the queue card, both Waiting empty states and the fleet headline, and did not
+         * reach the glass. `coming` is the same busy-versus-unavailable distinction the action row
+         * already makes, so the panel and the button can no longer disagree.
+         */
         h('div', { class: 'cat-hero' },
-          staticFrame(d, 230, 'off', free ? null : 'all in use'),
+          staticFrame(d, 230, 'off', free ? null : coming ? 'all in use' : 'out of the pool'),
         ),
       ),
 
@@ -7539,7 +7576,9 @@ function screenSessionsBody(rows = state.sessions) {
               );
             })),
           ))
-        : empty('No sessions yet.', 'Start one from Devices, or point a WebDriver suite at the hub.'),
+        // "Start one from Devices" outlived Devices: it became a lens on this very screen in the
+        // four-lens redesign, so the empty state was sending people to a page that no longer exists.
+        : empty('No sessions yet.', 'Start one from Capacity, or point a WebDriver suite at the hub.'),
     ),
     // The full id, never a prefix: it is what `mfarm app install --session` needs and what the
     // WebDriver URL carries in its password half, and neither accepts eight characters.
@@ -9889,7 +9928,14 @@ function screenHealth() {
                 title: `${KIND_LABEL[a.kind] || a.kind} ${appById(a.appId)?.packageName || short(a.appId)}`,
                 note: `${a.error || 'no reason reported'} · ${ago(a.finishedAt || a.requestedAt)}`,
               })))
-            : empty('Nothing has failed in the last day.', null),
+            /**
+             * THE SCOPE WORD IS THE WHOLE POINT. This card reads app actions, so on a farm whose
+             * every device is quarantined it was printing "Nothing has failed in the last day"
+             * directly beneath a 0/5 counter and five red rows — a true sentence doing the work of
+             * a false one, because nothing was attempted for anything to fail.
+             */
+            : empty('No app action has failed in the last day.',
+                    'Actions only run while somebody holds a device.'),
         ),
       ),
       h('div', { class: 'rail' },
