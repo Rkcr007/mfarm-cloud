@@ -1552,6 +1552,40 @@ describe('the fleet', () => {
   });
 
   /**
+   * AND THE GLASS MUST NOT SAY THE OPPOSITE OF THE BUTTON.
+   *
+   * The test above fixed the action row and left the hero panel two lines up still reading
+   * `free ? null : 'all in use'` — two states for an allocator that has three. So a class whose
+   * every device was quarantined printed "all in use" inside the device glass while the footer of
+   * the same card said it was out of the pool. One card, both claims, on the screen most likely to
+   * be shown to a buyer. Found on the live farm 2026-09-13.
+   *
+   * This is the fifth surface of the defect `capacityState()` was written to end, and the first one
+   * that was on the same card as its own contradiction.
+   */
+  test('a quarantined class does not claim to be IN USE', () => {
+    seed({ name: 'fleet' });
+    mod.state.lens = 'catalogue';
+    mod.state.devices = [{
+      ...mod.state.devices[0], profile: 'mfarm-x1-pro', state: 'QUARANTINED',
+      quarantine: { at: new Date().toISOString(), reason: 'host stopped beating', source: 'host' },
+    }];
+    const text = textOf(mod.SCREENS.fleet());
+    assert.doesNotMatch(text, /all in use/,
+      'nothing is in use — every device in this class is out of the pool');
+    assert.match(text, /out of the pool/, 'and the panel says the same thing its own footer does');
+  });
+
+  test('a class that IS all in use still says so', () => {
+    // The other half of the same rule: a busy class is genuinely in use and comes back on its own,
+    // so weakening the copy for everything would have been the wrong fix.
+    seed({ name: 'fleet' });
+    mod.state.lens = 'catalogue';
+    mod.state.devices = [{ ...mod.state.devices[0], profile: 'mfarm-x1-pro', state: 'SESSION_ACTIVE' }];
+    assert.match(textOf(mod.SCREENS.fleet()), /all in use/);
+  });
+
+  /**
    * The flagship leads. Sorting alphabetically put "MFARM X1" above "MFARM X1 Pro", so the cheaper
    * sibling led the one page that is also a sales surface.
    */
@@ -2524,6 +2558,31 @@ describe('apps', () => {
     const text = textOf(mod.SCREENS.apps());
     assert.match(text, /Not installed/);
     assert.doesNotMatch(text, /Install failed/);
+  });
+
+  /**
+   * AN ACTION WITH NO BUILD IS NOT AN ACTION WITH A MISSING BUILD.
+   *
+   * Recent Activity's title was `${kind} ${packageName || short(appId)} — ${outcome}`, which assumes
+   * every action acts on an app. A recording does not: `appId` is null, `short(null)` returns an em
+   * dash, and it landed directly beside the separator em dash. The farm rendered
+   * "video-start — — succeeded" eight times across three screens — Fleet, Apps and Health all draw
+   * this card — and the raw kind appeared because KIND_LABEL knew only install/launch/uninstall.
+   *
+   * Seen on the live farm 2026-09-13; it was the most visible cosmetic defect in the product.
+   */
+  test('a recording names itself and does not leave a hole where a build would be', () => {
+    seed({ name: 'apps' });
+    mod.state.actions = [{
+      id: 'a-vid', kind: 'video-start', state: 'SUCCEEDED', appId: null, deviceId: 'dev-1',
+      sessionId: 'sess-1', error: null,
+      requestedAt: new Date(Date.now() - 60_000).toISOString(),
+      finishedAt: new Date(Date.now() - 60_000).toISOString(),
+    }];
+    const text = textOf(mod.SCREENS.apps());
+    assert.match(text, /Started recording — succeeded/, 'the kind has a name a person would use');
+    assert.doesNotMatch(text, /video-start/, 'and not the wire value');
+    assert.doesNotMatch(text, /— — /, 'no placeholder standing in for a build that cannot exist');
   });
 
   /** Whether you hold a device decides whether every button below is live. */
