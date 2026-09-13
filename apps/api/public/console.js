@@ -1405,10 +1405,33 @@ async function refreshOrg() {
 async function refreshHosts() {
   try {
     const out = await api('/v1/hosts');
-    state.hosts = { list: out.hosts || [], rate: out.rate || null, loaded: true };
+    state.hosts = { list: out.hosts || [], rate: out.rate || null, loaded: true, failed: false };
   } catch {
-    state.hosts = { list: [], rate: null, loaded: true };
+    // `failed` is not decoration: an empty list from a refused request and an empty list from a
+    // farm with every host stopped are different facts, and only one of them is "Hosts off".
+    state.hosts = { list: [], rate: null, loaded: true, failed: true };
   }
+}
+
+/**
+ * The top bar's host segment, or null when this person should not see one.
+ *
+ * NULL FOR ANYBODY WHO IS NOT AN OPERATOR, and null again when the hosts could not be read — saying
+ * "Hosts off" because a request was refused would be a confident statement about machines nobody
+ * looked at. A host with `uptimeSeconds` is powered on, which is what bills; whether anything is
+ * allocated on it does not change the rate.
+ */
+export function hostSegment() {
+  if (!isOperator() || !state.hosts.loaded || state.hosts.failed) return null;
+  const on = state.hosts.list.filter((x) => x.uptimeSeconds !== null && x.uptimeSeconds !== undefined);
+  if (!on.length) return { text: 'Hosts off', tone: '' };
+  const rate = state.hosts.rate;
+  const who = on.length === 1 ? 'Host on' : `${on.length} hosts on`;
+  // No rate configured is not a zero — say the fact that is known and stop.
+  return {
+    text: rate ? `${who} · ${rate.currency}${Math.round(rate.hourly * on.length)}/hr` : who,
+    tone: 'warn',
+  };
 }
 
 /**
@@ -2029,21 +2052,17 @@ function renderChrome() {
       : `${waiting} waiting`;
 
   /**
-   * WHERE THE BURN SEGMENT WAS, and where its alarm went (ADR-0038).
+   * THE MACHINES, FOR OPERATORS ONLY — see `hostSegment` (ADR-0041, amending ADR-0038).
    *
-   * This bar used to read "2 hosts up 20h · ~₹410", added because on 2026-09-11 the device host ran
-   * for twenty hours and forty-eight minutes after a check that needed two, and nothing in the
-   * product said so. It was the right alarm in the wrong place: one fact about the machines, on a
-   * bar that follows the reader around every screen, with no way to act on it — so every reading of
-   * it ended in a terminal.
-   *
-   * THE ALARM IS NOT DELETED. It moved onto the Infrastructure nav item, as a dot, for the people
-   * who can do something about it. `paintInfraAlert` below decides when it appears, and the page
-   * behind it can say which host, since when, whether anything is using it, and offer the stop.
-   *
-   * A NON-OPERATOR LOSES NOTHING HERE, because they never had anything: `/v1/hosts` is admin-only
-   * and a member's burn segment was always hidden.
+   * The Infrastructure nav dot stays: it is the way to ACT on this. The segment is the one fact an
+   * operator looking at a session needs without going there — a host is on and what it costs.
    */
+  const hostSeg = hostSegment();
+  $('fs-host').hidden = !hostSeg;
+  if (hostSeg) {
+    $('fs-host').textContent = hostSeg.text;
+    $('fs-host').className = `seg seg-host ${hostSeg.tone}`.trim();
+  }
   paintInfraAlert();
 
   // The one place that already resolved the name correctly, now through the shared helper so it
@@ -10105,6 +10124,8 @@ export function commands() {
     },
   });
   list.push({ icon: 'collapse', label: 'Toggle the sidebar', group: 'Do', run: () => $('navtoggle').click() });
+  // Below 980px the who block, and the Sign out beside it, are not drawn. This is how you still leave.
+  list.push({ icon: 'team', label: 'Sign out', group: 'Do', run: () => $('signout').click() });
   return list;
 }
 

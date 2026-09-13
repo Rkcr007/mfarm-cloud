@@ -29,7 +29,7 @@
  * whose sidebar does not collapse to 56px, and shipping it a width for a rail it does not have
  * would be a token that describes nothing.
  */
-:root[data-nav="icons"] { --mf-navw: 56px; --mf-navlabel: none; }
+:root[data-nav="icons"] { --mf-navw: 54px; --mf-navlabel: none; --mf-navshort: inline; }
 
 /* ---------------------------------------------------------------------------- type */
 
@@ -140,12 +140,35 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 
 /* ---------------------------------------------------------------------------- motion */
 
-@keyframes mf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+@keyframes mf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @keyframes mf-bar   { 0% { transform: translateX(-100%); } 100% { transform: translateX(320%); } }
 @keyframes mf-spin  { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; }
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/**
+ * SCROLLBARS, drawn as a thumb floating in the surface rather than a gutter beside it — the 3px
+ * border in the page ground is what makes a 10px bar read as 4px.
+ *
+ * `-webkit-` only, on purpose. Chrome honours the standard `scrollbar-color` when it is set and then
+ * ignores every `::-webkit-scrollbar` rule, so setting both would lose the width everywhere Chrome
+ * runs. Firefox, which has only the standard property, gets it through `@supports`.
+ */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--b-field, #242427);
+  border: 3px solid var(--s-app, #08080A);
+  border-radius: var(--r-pill, 999px);
+}
+@supports not selector(::-webkit-scrollbar) {
+  html { scrollbar-color: var(--b-field, #242427) transparent; }
 }
 
 /* ---------------------------------------------------------------------------- primitives */
@@ -780,17 +803,17 @@ kbd {
 .brand { display: inline-flex; align-items: center; gap: 9px; }
 .brand-mark {
   display: grid; place-items: center;
-  width: 19px; height: 19px;
+  width: 22px; height: 22px;
   background: var(--mf-accent, #755EB8);
-  border-radius: 2px;
+  border-radius: var(--r-sm, 6px);
   color: var(--on-accent, #fff);
-  font-size: 11px;
-  font-weight: 600;
+  font: 700 12px/1 var(--f-display);
 }
 .brand-word {
-  font-size: 12.5px;
+  font-family: var(--f-display);
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: .14em;
+  letter-spacing: var(--tr-display-lg, -.02em);
   color: var(--t-primary, #F1F1F1);
 }
 .brand-mark.lg { width: 30px; height: 30px; font-size: 16px; border-radius: 3px; }
@@ -814,48 +837,75 @@ kbd {
 .shell {
   height: 100%;
   height: 100dvh;
+  /* Below this the cockpit's two panes stop being panes; the shell scrolls as a whole instead of
+     letting them overlap. */
+  min-height: 560px;
+  overflow: hidden;
+  background: var(--s-app, #08080A);
   display: grid;
-  grid-template-columns: var(--mf-navw, 198px) 1fr;
-  grid-template-rows: auto 1fr;
+  /* `minmax(0, …)` on the content track, not `1fr`: a `1fr` track's minimum is its content's, so one
+     long unbreakable log line widened the whole page past the window. */
+  grid-template-columns: var(--mf-navw, 198px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas: "head head" "nav main";
 }
 
 .topbar {
   grid-area: head;
-  display: flex; align-items: center; gap: 14px;
+  display: flex; align-items: center; gap: 10px;
   flex-wrap: wrap;
-  min-height: 46px;
-  padding: 6px 14px;
+  min-height: 50px;
+  padding: 0 12px;
   background: var(--s-chrome, #050506);
   border-bottom: 1px solid var(--b-chrome, #191919);
 }
-.topbar .divider { width: 1px; height: 18px; background: var(--b-chrome, #191919); }
+.topbar .divider { width: 1px; height: 20px; background: var(--b-card, #1F1F22); }
 
-/* Farm status button — a button, because clicking it opens Health. */
+/* Farm status — one pill of segments, and a button, because clicking it opens Health. */
 .farmstat {
-  display: flex; align-items: center; gap: 12px;
-  flex-wrap: wrap;
-  padding: 4px 9px;
-  border: 1px solid transparent;
-  border-radius: 2px;
-  font-size: 11.5px;
+  display: flex; align-items: center;
+  min-width: 0;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--b-card, #1F1F22);
+  border-radius: var(--r-pill, 999px);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
   color: var(--t-label, #8A8A8A);
 }
-.farmstat:hover { border-color: var(--b-chrome, #191919); }
+.farmstat:hover { border-color: var(--b-hover, #3A3A3D); }
 .farmstat b { color: var(--t-primary, #F1F1F1); font-weight: 600; }
-.farmstat .seg { display: inline-flex; align-items: center; gap: 6px; }
+.farmstat .seg { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; }
+.farmstat .seg:first-child { padding-left: 0; }
+.farmstat .seg + .seg { border-left: 1px solid var(--b-card, #1F1F22); }
+.farmstat .dot { width: 6px; height: 6px; }
+/* A powered-on host is money leaving whether or not anything is allocated: amber, the tone its
+   Infrastructure nav dot already wears for the same fact. */
+.farmstat .seg-host.warn { color: var(--warn, #E8A30E); }
 
 .palette-btn {
   display: flex; align-items: center; gap: 10px;
-  min-width: 200px;
-  padding: 5px 8px 5px 11px;
-  background: var(--s-btn, #131315);
-  border: 1px solid var(--b-btn, #2B2B2E);
-  border-radius: 2px;
-  color: var(--t-micro, #5A5A5A);
-  font-size: 11.5px;
+  flex: 0 1 260px;
+  min-width: 140px;
+  max-width: 300px;
+  padding: 5px 6px 5px 11px;
+  background: var(--s-card, #0D0D0F);
+  border: 1px solid var(--b-field, #242427);
+  border-radius: var(--r-md, 9px);
+  color: var(--t-help, #787878);
+  font-size: 12.5px;
+  white-space: nowrap;
 }
+.palette-btn > span:first-child { overflow: hidden; text-overflow: ellipsis; }
 .palette-btn:hover { border-color: var(--b-hover, #3A3A3D); }
+.palette-btn kbd {
+  padding: 0 5px;
+  background: var(--s-chip, #191919);
+  border: 1px solid var(--b-field, #242427);
+  border-radius: var(--r-xs, 4px);
+  font: 400 10.5px/16px var(--f-mono);
+  color: var(--t-label, #8A8A8A);
+}
 
 .avatar {
   display: grid; place-items: center;
@@ -869,44 +919,71 @@ kbd {
 }
 .avatar.sq { border-radius: 2px; }
 
-.who { display: flex; align-items: center; gap: 9px; font-size: 11.5px; }
+.who { display: flex; align-items: center; gap: 9px; font-size: 12px; }
+.who .avatar {
+  width: 24px; height: 24px;
+  background: var(--s-chip, #191919);
+  border-color: var(--b-field, #242427);
+  font-size: 10.5px;
+}
 /* Two lines where one used to be: who, and which tenant their work belongs to. */
-.who .stack { line-height: 1.25; }
-#who-org { color: var(--t-caption, #6A6A6A); white-space: nowrap; }
+.who .stack { line-height: 1.3; }
+#who-email { color: var(--t-secondary, #C4C4C4); }
+#who-org { color: var(--t-caption, #6A6A6A); font-size: 10.5px; white-space: nowrap; }
 .link { color: var(--t-label, #8A8A8A); font-size: 11.5px; }
 .link:hover { color: var(--t-primary, #F1F1F1); }
+
+/**
+ * THE TOP BAR GIVES THINGS UP IN THE ORDER THEY MATTER LEAST.
+ *
+ * Media queries, because these ARE measured against the window. The cockpit's one-column switch is
+ * not, and is a container query on the workspace instead — the sidebar's width changes the space it
+ * has, and a window query cannot see that.
+ *
+ * NOTHING HERE HIDES A CAPABILITY. The search trigger goes below 760px and ⌘K still opens the
+ * palette; the who block goes below 980px and the palette carries Sign out.
+ */
+@media (max-width: 1239.98px) { .who .stack, #build { display: none; } }
+@media (max-width: 1179.98px) { .farmstat .seg-extra { display: none; } }
+@media (max-width: 979.98px)  { .who { display: none; } }
+@media (max-width: 759.98px)  { .palette-btn { display: none; } }
 
 /* -------------------------------------------------------------------- sidebar */
 
 .sidebar {
   grid-area: nav;
   display: flex; flex-direction: column;
-  gap: 4px;
-  padding: 14px 9px 12px;
+  gap: 2px;
+  padding: 10px 8px;
   background: var(--s-nav, #0A0A0C);
   border-right: 1px solid var(--b-chrome, #191919);
   min-width: 0;
+  overflow-x: hidden;
   /* Its own scroller, so a short viewport can still reach Settings and the collapse control rather
      than clipping them — the nav is nine items and a footer, so this almost never engages. */
   overflow-y: auto;
 }
 .navgroup {
-  margin: 12px 0 4px;
-  padding: 0 8px;
-  font-size: 10px; text-transform: uppercase; letter-spacing: .14em;
+  margin: 12px 0 6px;
+  padding: 0 9px;
+  font: 500 10px/10px var(--f-ui);
+  text-transform: uppercase; letter-spacing: var(--tr-label, .1em);
   color: var(--t-navhead, #484848);
-  display: var(--mf-navlabel, block);
 }
 .navgroup:first-child { margin-top: 0; }
+/* The label and its collapsed stand-in, a middle dot — so the groups stay visibly groups at 54px. */
+.navgroup .txt   { display: var(--mf-navlabel, inline); }
+.navgroup .short { display: var(--mf-navshort, none); }
 
 .navitem {
   display: flex; align-items: center; gap: 10px;
   width: 100%;
-  height: 29px;
-  padding: 0 8px;
-  border-radius: 7px;
+  padding: 8px 9px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-nav, #ADADAD);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 16px;
 }
 .navitem:hover { background: var(--hover-soft); color: var(--t-primary, #F1F1F1); }
 .navitem .glyph,
@@ -917,44 +994,61 @@ kbd {
   color: var(--t-label, #8A8A8A);
 }
 .navitem .txt { display: var(--mf-navlabel, block); white-space: nowrap; overflow: hidden; }
-.navitem .sc  { display: var(--mf-navlabel, block); margin-left: auto; font-size: 10px; color: var(--t-navhead, #484848); }
+.navitem .sc  { display: var(--mf-navlabel, block); margin-left: auto; font: 400 9.5px/1 var(--f-mono); color: var(--t-micro, #5A5A5A); }
 /* `--t-primary`, NOT white. The ground here is `--mf-accent-soft`, a 10% tint of the accent over
    the nav surface — near-black in dark, near-white in light. White text on it is correct in one
    theme and invisible in the other, which is exactly the bug stage 8 exists to find. */
 .navitem.is-active {
   background: var(--mf-accent-soft, rgba(117,94,184,.16));
   color: var(--t-primary, #F1F1F1);
+  /* The selection edge. A tint alone is the same weight as a hover at a glance. */
+  box-shadow: inset 2px 0 0 var(--mf-accent, #755EB8);
 }
 .navitem.is-active .glyph { color: var(--mf-accent, #755EB8); }
 
 .navtoggle {
-  margin-top: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--b-chrome, #191919);
-  border-radius: 2px;
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 6px;
+  padding: 8px 9px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-micro, #5A5A5A);
-  font-size: 11px;
+  font-size: 12px;
   text-align: left;
 }
-.navtoggle:hover { color: var(--t-secondary, #C4C4C4); border-color: var(--b-hover, #3A3A3D); }
+.navtoggle .txt { display: var(--mf-navlabel, block); }
+.navtoggle:hover { color: var(--t-secondary, #C4C4C4); background: var(--hover-soft); }
 
 .sessioncard {
-  margin-top: 10px;
+  margin-top: 8px;
   padding: 10px;
   background: var(--s-card, #0D0D0F);
   border: 1px solid var(--b-card, #1F1F22);
-  border-radius: 3px;
+  border-radius: var(--r-lg, 12px);
 }
+#sc-lease { font: 400 11px/17px var(--f-mono); color: var(--t-caption, #6A6A6A); }
+#sc-open { border-radius: 7px; }
 :root[data-nav="icons"] .sessioncard { display: none; }
 .sessionstub {
   display: none;
   width: 38px; height: 38px;
-  margin-top: 10px;
+  margin: 8px auto 0;
   place-items: center;
   border: 1px solid var(--b-card, #1F1F22);
-  border-radius: 2px;
+  border-radius: var(--r-md, 9px);
 }
 :root[data-nav="icons"] .sessionstub { display: grid; }
+
+/**
+ * BELOW 900px THE RAIL IS COLLAPSED WHATEVER WAS CHOSEN.
+ *
+ * The stored choice is left alone — widen the window and it comes back — and the toggle goes,
+ * because a control that visibly does nothing at this width is worse than no control.
+ */
+@media (max-width: 899.98px) {
+  :root { --mf-navw: 54px; --mf-navlabel: none; --mf-navshort: inline; }
+  .sessioncard, .navtoggle { display: none; }
+  .sessionstub { display: grid; }
+}
 
 /* -------------------------------------------------------------------- main */
 
@@ -1117,37 +1211,39 @@ kbd {
 }
 
 .palette {
-  position: fixed; top: 96px; left: 50%;
+  position: fixed; top: 12vh; left: 50%;
   transform: translateX(-50%);
   width: min(560px, 100vw - 32px);
-  max-height: calc(100vh - 140px);
+  max-height: calc(88vh - 16px);
   display: flex; flex-direction: column;
   background: var(--s-overlay, #101012);
   border: 1px solid var(--b-overlay, #2E2E31);
-  border-radius: 5px;
+  border-radius: var(--r-xl, 16px);
   box-shadow: var(--e-3);
-  z-index: 50;
+  z-index: 60;
   overflow: hidden;
 }
 .palette input {
-  height: 44px;
-  padding: 0 14px;
+  height: 48px;
+  padding: 0 16px;
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--b-chrome, #191919);
   color: var(--t-primary, #F1F1F1);
+  font-size: 14px;
 }
 .palette input:focus { outline: none; }
-.palette ul { overflow-y: auto; padding: 6px; }
+.palette ul { overflow-y: auto; max-height: min(46vh, 340px); padding: 6px; }
 .cmd {
   display: flex; align-items: center; gap: 11px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: 2px;
+  padding: 9px 10px;
+  border-radius: var(--r-md, 9px);
   color: var(--t-body, #D4D4D4);
-  font-size: 12px;
+  font-size: 13px;
   text-align: left;
 }
+.cmd:hover { background: var(--hover-soft); }
 .cmd .glyph {
   display: inline-grid; place-items: center;
   width: 14px; height: 14px;

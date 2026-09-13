@@ -244,26 +244,21 @@
         reader translate a zero into "nobody is waiting" on every glance; the sentence does that
         work once, here. `renderChrome` writes it.
       -->
-      <span class="seg" id="fs-queue">—</span>
+      <span class="seg seg-extra" id="fs-queue">—</span>
       <!--
-        NO INFRASTRUCTURE HERE ANY MORE (ADR-0038).
+        THE MACHINES, FOR OPERATORS ONLY (ADR-0041, amending ADR-0038).
 
-        This is where the burn segment lived: "2 hosts up 20h · ~₹410", added because on 2026-09-11
-        the device host ran for twenty hours and forty-eight minutes after a check that needed two
-        and nothing in the product said so. It was right to add and wrong to leave here.
+        ADR-0038 took "2 hosts up 20h · ~₹410" off this bar because a member cannot act on it and one
+        fact is not enough for anybody to act on. Console v2 brings back exactly ONE fact, for the
+        people who CAN act — whether a host is powered on and what that costs an hour — because the
+        2026-09-11 twenty-hour burn happened to an operator who was looking at a different screen.
+        The page that answers "which host, since when, stop it" is still Infrastructure, and its nav
+        dot stays.
 
-        A bar that follows the reader around every screen can carry ONE fact about the machines, and
-        one fact is not enough to act on: you could see that something was costing money and not
-        which host, since when, whether it was being used, or how to stop it — so the next step was
-        always a terminal. **The segment is not deleted, it is the front door of a page that can
-        answer all of that**, and the alarm it carried moved with it: the Infrastructure nav item
-        badges when a host is burning or a component is degraded, for operators, who are the only
-        people who can act on either.
-
-        What stays here is the APPLICATION: how much capacity is free, who is waiting, what you
-        hold. See `renderChrome`.
+        Empty and hidden in the markup; `renderChrome` fills it only when `isOperator()`.
       -->
-      <span class="seg" id="fs-holding">Holding <b id="fs-held">—</b></span>
+      <span class="seg seg-host" id="fs-host" hidden></span>
+      <span class="seg seg-extra" id="fs-holding">Holding <b id="fs-held">—</b></span>
     </button>
 
     <span class="spacer"></span>
@@ -317,7 +312,7 @@
       Health sits under Farm, not in an Operations group of its own. Four items and three, which is
       document 06's sidebar exactly.
     -->
-    <p class="navgroup">Farm</p>
+    <p class="navgroup"><span class="txt">Farm</span><span class="short" aria-hidden="true">&middot;</span></p>
     <button class="navitem" data-route="fleet"><span class="glyph" data-icon="devices"></span><span class="txt">Fleet</span><span class="sc">G F</span></button>
     <button class="navitem" data-route="apps"><span class="glyph" data-icon="apps"></span><span class="txt">Apps</span><span class="sc">G A</span></button>
     <button class="navitem" data-route="runs"><span class="glyph" data-icon="runs"></span><span class="txt">Runs</span><span class="sc">G U</span></button>
@@ -337,7 +332,7 @@
     -->
     <button class="navitem" data-route="infra" id="nav-infra" hidden><span class="glyph" data-icon="host"></span><span class="txt">Infrastructure</span><span class="nav-alert" id="nav-infra-alert" hidden></span><span class="sc">G I</span></button>
 
-    <p class="navgroup">Organisation</p>
+    <p class="navgroup"><span class="txt">Organisation</span><span class="short" aria-hidden="true">&middot;</span></p>
     <button class="navitem" data-route="agents"><span class="glyph" data-icon="agents"></span><span class="txt">Agents</span><span class="sc">G G</span></button>
     <button class="navitem" data-route="tunnels"><span class="glyph" data-icon="agents"></span><span class="txt">Tunnels</span><span class="sc">G N</span></button>
     <button class="navitem" data-route="team"><span class="glyph" data-icon="team"></span><span class="txt">Team</span><span class="sc">G T</span></button>
@@ -351,17 +346,18 @@
 
     <span class="spacer"></span>
 
-    <button class="navtoggle" id="navtoggle"><span class="glyph" data-icon="collapse"></span><span class="txt">Collapse</span></button>
-
     <div class="sessioncard" id="sessioncard" hidden>
       <p class="micro">Your session</p>
       <div class="row tight sc-line">
         <span class="dot ok live"></span><span class="secondary" id="sc-device">—</span>
       </div>
       <p class="caption tnum" id="sc-lease">—</p>
-      <button class="btn tiny wide mt-sm primary" id="sc-open">Open cockpit</button>
+      <button class="btn wide mt-sm primary" id="sc-open">Open cockpit</button>
     </div>
-    <button class="sessionstub" id="sessionstub" hidden title="Open your session"><span class="dot ok live"></span></button>
+    <button class="sessionstub" id="sessionstub" hidden title="Open your session" aria-label="Open your session"><span class="dot ok live"></span></button>
+
+    <!-- Last, under the session card: the control that changes the rail's width sits at its foot. -->
+    <button class="navtoggle" id="navtoggle" aria-label="Collapse the sidebar"><span class="glyph" data-icon="collapse"></span><span class="txt">Collapse</span></button>
   </nav>
 
   <main class="main" id="main"></main>
