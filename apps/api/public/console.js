@@ -7512,7 +7512,7 @@ function dropZone() {
     h('span', { class: 'drop-icon' }, icon('upload', 20)),
     h('div', { class: 'stack tight' },
       h('p', { class: 'buildname', text: 'Drop an APK here' }),
-      h('p', { class: 'help', text: 'Package, version and size are read on the farm before the build becomes installable. Re-uploading the same file is free — builds are keyed on their checksum.' }),
+      h('p', { class: 'help', text: 'Package, version and size are read on the farm. Re-uploading the same file is free — builds are keyed on their checksum.' }),
     ),
     h('span', { class: 'spacer' }),
     h('span', { class: 'btn primary', text: 'Select file' }),
@@ -7544,30 +7544,35 @@ function uploadCard() {
   );
 }
 
-function holdStrip() {
+/**
+ * THE HOLD, SAID ONCE (ADR-0041).
+ *
+ * Whether anything on this page can go on a device was said in the subtitle, in a hold strip, and
+ * in the tooltip of every disabled button — one fact in three places, and the rows got noisier each
+ * time it was repeated. It lives here now, with the lease, and nothing below restates it.
+ */
+function holdBanner() {
   const held = heldSession();
-  const ready = state.devices.filter((d) => d.state === 'READY');
-  return card('Device', {},
-    held
-      ? h('div', { class: 'row between' },
-          h('div', { class: 'stack tight' },
-            h('p', { class: 'row tight' }, h('span', { class: 'dot ok live' }),
-              h('span', { class: 'secondary', text: `Holding ${deviceLabel(held)} · session ${short(held.id)}` })),
-            h('p', { class: 'caption', text: 'An app lives on a device only while you hold it. Releasing restores the clean snapshot, which is what makes the next session trustworthy — and what removes your build.' }),
-          ),
-          h('div', { class: 'row tight' },
-            btn('Cockpit', 'ghost', () => go(`#/sessions/${held.id}`)),
-            btn('Release', 'danger', () => askRelease(held)),
-          ),
-        )
-      : h('div', { class: 'row between' },
-          h('div', { class: 'stack tight' },
-            h('p', { class: 'row tight' }, h('span', { class: 'dot' }),
-              h('span', { class: 'secondary', text: ready.length ? `Not holding a device. ${ready.length} ready.` : 'Not holding a device, and none are ready.' })),
-            h('p', { class: 'caption', text: 'Installing needs a live session — the build goes onto the device you are holding, and nowhere else.' }),
-          ),
-          btn('Go to the Fleet', 'ghost', () => go('#/fleet')),
-        ),
+  if (!held) {
+    const ready = state.devices.filter((d) => d.state === 'READY');
+    return h('div', { class: 'holdbanner idle' },
+      h('span', { class: 'dot' }),
+      h('span', { class: 'secondary', text: ready.length
+        ? `Not holding a device. ${ready.length} ready.`
+        : 'Not holding a device, and none are ready.' }),
+      h('span', { class: 'spacer' }),
+      btn('Go to the Fleet', 'ghost', () => go('#/fleet')),
+    );
+  }
+  const detail = state.held?.id === held.id ? state.held : null;
+  return h('div', { class: 'holdbanner' },
+    h('span', { class: 'dot ok live' }),
+    h('span', { class: 'secondary', text: `Holding ${deviceLabel(held)} · session ${short(held.id)}` }),
+    detail?.expiresAt
+      ? h('span', { class: 'secondary' }, '· ', ticker('until', detail.expiresAt, { suffix: ' left on the lease' }))
+      : null,
+    h('span', { class: 'spacer' }),
+    btn('Open cockpit', 'primary', () => go(`#/sessions/${held.id}`)),
   );
 }
 
@@ -7583,125 +7588,128 @@ function appsSubtitle() {
     // Said here rather than discovered one disabled button at a time.
     return `${builds}. You are holding ${deviceLabel(held)}, which does not declare app-install — the API will refuse install, launch and uninstall on it.`;
   }
-  return `${builds}. You are holding ${deviceLabel(held)}, so any of these can be installed now.`;
+  return `${builds}. You are holding ${deviceLabel(held)}, so any of these can go on the device right now. `
+    + 'Releasing the device restores the clean snapshot and removes whatever you installed.';
 }
 
+/**
+ * ONE GRAMMAR FOR EVERY ROW (ADR-0041): what it is, one status sentence, one primary action, one
+ * secondary. Installed, queued, failed and never-tried used to render differently in the same cell,
+ * with a retry hidden behind a relabelled button.
+ *
+ * A FAILED INSTALL KEEPS ITS FAILURE ON THE ROW. It used to live in a card scoped to the last thirty
+ * minutes, and after that the row looked exactly like a build nobody had tried. "Not installed" and
+ * "tried, and the worker refused it" are different facts, and only one says read the error first.
+ */
 function buildRow(a) {
   const held = heldSession();
   const device = held ? deviceById(held.deviceId) : null;
   const canInstall = (device?.capabilities || []).includes('app-install');
   const on = held && installedOn(held.id)?.id === a.id;
+  const last = state.actions.find((x) => x.appId === a.id && x.kind === 'install');
+  const pending = !on && last?.state === 'PENDING' ? last : null;
+  const failed = !on && last?.state === 'FAILED' ? last : null;
 
-  /**
-   * A BUILD THAT FAILED TO INSTALL SAID "NOT INSTALLED" AND OFFERED "INSTALL" — document 05 §04's
-   * third row, which is the one that carries information the other two do not.
-   *
-   * The failure was on the page, in `failureCard`, and that card is deliberately scoped to the last
-   * thirty minutes so a failure from last Tuesday does not sit at the top of Apps forever. The
-   * consequence nobody had noticed: after thirty minutes the failure vanished entirely and the row
-   * beneath it looked exactly like a build nobody had ever tried. "Not installed" and "tried, and
-   * the worker refused it" are different facts, and only one of them tells you to read the error
-   * before pressing the button again.
-   *
-   * The ROW is the right home for it because the row is per-build and survives; the card is
-   * per-event and should not.
-   */
-  const lastForBuild = state.actions.find((x) => x.appId === a.id && x.kind === 'install');
-  const failed = lastForBuild?.state === 'FAILED' ? lastForBuild : null;
+  const status = on ? { tone: 'ok', text: `Installed on ${deviceLabel(held)}` }
+    : pending ? { tone: 'warn', text: 'Queued for the worker’s next heartbeat' }
+      : failed ? { tone: 'bad', text: `Install failed ${ago(failed.finishedAt || failed.requestedAt)}`, error: failed.error }
+        : { tone: '', text: 'Not installed' };
 
-  return h('div', { class: 'buildrow' },
-    h('div', { class: 'idc stack tight' },
-      h('p', null, h('span', { class: 'buildname', text: a.label || a.packageName }), ' ',
+  // A button disabled for want of a hold carries NO tooltip: the banner above says it, once.
+  const gate = {
+    disabled: !held || !canInstall,
+    title: held && !canInstall ? 'This device does not declare app-install' : null,
+  };
+  const detailsOpen = state.appDetails === a.id;
+  const [primary, secondary] = on
+    ? [btn('Relaunch', 'primary', () => runAction(a, 'launch'), gate),
+       btn('Uninstall', 'ghost', () => runAction(a, 'uninstall'), gate)]
+    : failed
+      ? [btn('Retry', 'danger', () => runAction(a, 'install'), gate),
+         btn('Read the error', 'ghost', () => installErrorDialog(a, failed))]
+      : [btn('Install', 'primary', () => runAction(a, 'install'), { ...gate, disabled: gate.disabled || Boolean(pending) }),
+         btn(detailsOpen ? 'Hide details' : 'Details', 'ghost', () => { state.appDetails = detailsOpen ? null : a.id; render(); })];
+
+  // `appsrow` beside `buildrow`: the Health and Infrastructure lists wear `buildrow` too, as flex rows.
+  return h('div', { class: 'buildrow appsrow' },
+    h('div', { class: 'build-id' },
+      h('p', null,
+        h('span', { class: 'buildname', text: a.label || a.packageName }), ' ',
         h('span', { class: 'secondary', text: a.versionName || (a.versionCode == null ? '' : `code ${a.versionCode}`) })),
-      h('p', { class: 'caption', text: `${a.packageName} · ${bytes(a.sizeBytes)}${a.minSdk ? ` · minSdk ${a.minSdk}` : ''}` }),
+      h('p', { class: 'build-meta', text: [
+        a.packageName, bytes(a.sizeBytes), a.minSdk ? `minSdk ${a.minSdk}` : null, `uploaded ${ago(a.createdAt)}`,
+      ].filter(Boolean).join(' · ') }),
     ),
-    h('span', { class: 'caption', text: ago(a.createdAt) }),
-    on
-      ? h('span', { class: 'row tight' }, h('span', { class: 'dot ok' }), h('span', { class: 'ok-text', text: `Installed · ${deviceLabel(held)}` }))
-      : failed
-        ? h('span', { class: 'stack tight' },
-            h('span', { class: 'row tight' },
-              h('span', { class: 'dot bad' }),
-              h('span', { class: 'bad-text', text: `Install failed ${ago(failed.finishedAt || failed.requestedAt)}` })),
-            // The worker's own words, rendered as TEXT — this string came off a device via adb and
-            // is the most attacker-influenced value on the page.
-            failed.error ? h('span', { class: 'caption', text: failed.error }) : null)
-        : h('span', { class: 'caption', text: 'Not installed' }),
-    h('span', { class: 'spacer' }),
-    h('div', { class: 'rowactions' },
-      on
-        ? [btn('Launch', 'primary', () => runAction(a, 'launch'), { disabled: !canInstall }),
-           btn('Uninstall', 'ghost', () => runAction(a, 'uninstall'), { disabled: !canInstall })]
-        // "Retry", not "Install", when the last attempt failed: the label is the difference between
-        // a first try and a second one, and a person who has read the error deserves a button that
-        // acknowledges they have.
-        : btn(failed ? 'Retry' : 'Install', 'primary', () => runAction(a, 'install'), {
-            disabled: !held || !canInstall,
-            title: !held ? 'Hold a device first' : !canInstall ? 'This device does not declare app-install' : '',
-          }),
-      held ? btn('Session', 'ghost', () => go(`#/sessions/${held.id}`)) : null,
+    h('div', { class: 'build-status' },
+      h('span', { class: 'row tight' },
+        h('span', { class: `dot ${status.tone}`.trim() }),
+        h('span', { class: status.tone ? `${status.tone}-text` : 'caption', text: status.text })),
+      // The worker's own words, rendered as TEXT — this string came off a device via adb and is the
+      // most attacker-influenced value on the page.
+      status.error ? h('code', { class: 'build-error', text: status.error }) : null,
     ),
+    h('div', { class: 'rowactions' }, primary, secondary),
+    detailsOpen
+      ? h('p', { class: 'build-meta build-details', text: [
+          a.versionCode == null ? null : `versionCode ${a.versionCode}`,
+          a.sha256 ? `sha256 ${a.sha256.slice(0, 16)}…` : null,
+          a.filename || null,
+          Array.isArray(a.abis) && a.abis.length ? a.abis.join(', ') : null,
+        ].filter(Boolean).join(' · ') || 'Nothing more was read from this APK.' })
+      : null,
   );
 }
 
-/** The most recent failure, shown as its own card rather than a red word in a row. */
-function failureCard() {
-  const f = state.actions.find((a) => a.state === 'FAILED');
-  // Scoped to the last half hour. The action list holds 100 rows, and without this a failure from
-  // last Tuesday would sit at the top of Apps forever, looking like it had just happened.
-  if (!f || Date.now() - new Date(f.finishedAt || f.requestedAt) > 1_800_000) return null;
-  const app = appById(f.appId);
-  return card(null, { class: 'stack tight' },
-    h('div', { class: 'row tight' }, h('span', { class: 'dot bad' }),
-      h('span', { class: 'card-title bad-text', text: `${KIND_LABEL[f.kind] || f.kind} failed` })),
-    h('p', { class: 'help', text: `The worker could not ${f.kind} ${app?.packageName || short(f.appId)} on ${deviceById(f.deviceId) ? deviceName(deviceById(f.deviceId)) : short(f.deviceId)}.` }),
-    h('div', { class: 'inset stack tight' },
-      h('p', { class: 'micro', text: 'Reason' }),
-      // Straight from the worker, as text.
-      h('code', { class: 'mono-bad', text: f.error || 'The worker reported no reason.' }),
+/** The whole error, where a row only has room for its first line. */
+function installErrorDialog(app, action) {
+  const d = $('dialog');
+  const dev = deviceById(action.deviceId);
+  fill(d,
+    h('h2', { id: 'dialog-title', text: `Why ${app.label || app.packageName} did not install` }),
+    h('p', { class: 'help mt-xs', text: `What the worker reported ${ago(action.finishedAt || action.requestedAt)}, on ${dev ? deviceName(dev) : short(action.deviceId)}.` }),
+    h('pre', { class: 'failtext mt-md', text: action.error || 'The worker reported no reason.' }),
+    h('div', { class: 'row end mt-xl' },
+      btn('Open that session', 'ghost', () => { closeOverlays(); go(`#/sessions/${action.sessionId}`); }),
+      btn('Done', 'primary', closeOverlays),
     ),
-    h('div', { class: 'row tight' },
-      app ? btn('Retry', '', () => runAction(app, f.kind), { disabled: !heldSession() }) : null,
-      btn('Open session', 'ghost', () => go(`#/sessions/${f.sessionId}`)),
-    ),
-    h('p', { class: 'caption', text: `${ago(f.finishedAt || f.requestedAt)} · session ${short(f.sessionId)}` }),
   );
+  d.hidden = false;
+  $('scrim').hidden = false;
+  dialogOpen = true;
+  d.querySelector('.btn.primary')?.focus();
 }
 
 /**
  * The action lifecycle, as the system actually has it.
  *
- * The design shows four stages — queued, picked up, running, succeeded/failed. The schema has
- * three, and deliberately: a worker reports the OUTCOME and never the start, so "running" would be
- * a state nothing could ever leave if that worker died. This renders the real three and says why
- * the middle one is missing, which is more reassuring than a stage that never lights.
+ * The design once showed four stages — queued, picked up, running, succeeded/failed. The schema has
+ * three, deliberately: a worker reports the OUTCOME and never the start, so "running" would be a
+ * state nothing could ever leave if that worker died.
  */
 function lifecycleCard() {
-  return card('Action lifecycle', {},
+  return card('What happens to an install', { class: 'explainer' },
     timeline([
       { tone: 'warn', title: 'Queued', note: 'Accepted by the API. No worker has claimed it yet.' },
       { tone: 'ok', title: 'Succeeded', note: 'Reported only after the worker confirms it.' },
-      { tone: 'bad', title: 'Failed', note: 'The worker’s own error, verbatim.' },
+      { tone: 'bad', title: 'Failed', note: 'The worker’s own error, verbatim, on the row.' },
     ]),
-    h('p', { class: 'caption mt-md', text: 'A worker picks up queued work on its next heartbeat — usually within 10 seconds. Nothing here reports success before the worker confirms it.' }),
-    h('p', { class: 'caption mt-sm', text: 'There is no “running” state to show: a worker reports the outcome, never the start, so a stage between the two could never be left if that worker stopped answering.' }),
+    h('p', { class: 'caption mt-md', text: 'A worker picks up queued work on its next heartbeat, usually within 10 seconds. Nothing reports success before the worker confirms it.' }),
   );
 }
 
+/**
+ * ONE EXPLAINER, NO ACTIVITY CARD (ADR-0041). The content of this screen is a list; a rail of two
+ * cards beside it took the width the list needed. Recent activity is still on Fleet and Health, and
+ * a build's own last attempt is on its row.
+ */
 function screenApps() {
-  return [
-    /**
-     * The sub names the ACTIONABLE fact — document 05 §04 heads this screen "4 builds · you are
-     * holding MFARM X1 Pro, so any of these can be installed now". Whether you are holding a device
-     * decides whether every button below is live, so it is the first thing worth saying.
-     */
+  return h('div', { class: 'page-narrow' },
     pageHead([{ label: 'Farm' }], 'Apps', appsSubtitle()),
-    h('div', { class: 'split' },
-      h('div', { class: 'content' },
-        holdStrip(),
+    holdBanner(),
+    h('div', { class: 'apps-grid' },
+      h('div', { class: 'stack apps-main' },
         dropZone(),
         uploadCard(),
-        failureCard(),
         card('Build library', {
           aside: h('span', { class: 'caption', text: `${state.apps.length} build${state.apps.length === 1 ? '' : 's'}` }),
           class: 'flush',
@@ -7711,9 +7719,9 @@ function screenApps() {
             : empty('No builds yet.', 'Upload an APK to start testing.'),
         ),
       ),
-      h('div', { class: 'rail' }, lifecycleCard(), activityCard()),
+      lifecycleCard(),
     ),
-  ];
+  );
 }
 
 /* ---------------------------------------------------------------------------- screen: sessions */
