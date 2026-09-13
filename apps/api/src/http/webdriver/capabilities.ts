@@ -34,8 +34,14 @@ const MFARM_PREFIX = 'mfarm:';
  * and the alternative to refusing it is a session that starts happily on a device with no app on it.
  * A capability is an instruction, and silently discarding an instruction is the worst answer
  * available — worse than failing, because the run continues and reports something.
+ *
+ * EXPORTED so the console's Settings page cannot document a different set. `HUB_CAPABILITIES` in
+ * `public/console.js` prints one line per key, and `console-screens.test.ts` asserts the two name
+ * exactly the same capabilities — a key added here and not there is a feature nobody is told
+ * about, and one removed here and left there is worse: an instruction the console promises and
+ * this function refuses.
  */
-const MFARM_KEYS = new Set([
+export const MFARM_KEYS = new Set([
   'region', 'tier', 'ttlMinutes', 'queueTimeoutSeconds', 'sessionId', 'appId', 'runId',
   'runName', 'name', 'deviceClass', 'tunnel',
 ]);

@@ -246,7 +246,17 @@ export const state = {
    * `newKey` holds a freshly minted secret for exactly as long as the page shows it. It is never
    * written anywhere else, because the server cannot return it a second time.
    */
-  org: { members: [], keys: [], loaded: false, newKey: null, newKeyLabel: null },
+  /**
+   * `retiredKeys` is the disclosure on the API keys card, and it is view state rather than data:
+   * a revoked key never becomes interesting again, so the page opens with them folded away and the
+   * count on the button is the only trace they leave.
+   *
+   * `snippetLang` is which client the Connect-your-suite card is showing. Held here rather than in
+   * a closure because `render()` rebuilds the screen from scratch, so a local would reset the
+   * picker to WebdriverIO every time the poll brought a device.
+   */
+  org: { members: [], keys: [], loaded: false, newKey: null, newKeyLabel: null,
+         retiredKeys: false, snippetLang: 'wdio' },
   /**
    * The pairing screen's own state — ADR-0014.
    *
@@ -10719,15 +10729,324 @@ function appearanceCard() {
   );
 }
 
+/**
+ * The `mfarm:` capabilities the hub understands, each said in one line.
+ *
+ * A LIST THAT LIVES IN TWO PLACES IS A LIST THAT DRIFTS, so `console-screens.test.ts` imports
+ * `MFARM_KEYS` from the hub's own parser and asserts this table names the same set. Both directions
+ * are failures worth catching: a capability the server gained and this table did not is a feature
+ * nobody is told about, and one the server dropped and this table kept is worse — an instruction
+ * the console documents and the hub now refuses.
+ */
+export const HUB_CAPABILITIES = [
+  ['region', 'Which pool to allocate from. Required, unless the URL already names a session.'],
+  ['deviceClass', 'Which KIND of device, by the class id on the Fleet page — not a device, the allocator still picks. Omit it to take anything that can run WebDriver.'],
+  ['tier', 'cuttlefish, avd, container, simulator or physical.'],
+  ['appId', 'A build from your app library, installed before the session opens: a uuid, com.example.app@1.4.2, or @latest. Never alongside appium:app — the hub refuses the pair rather than guessing.'],
+  ['name', 'What this test is called. Set at creation, so a run is readable while it is still running.'],
+  ['runId', 'The id CI already has. Twenty tests become one run instead of twenty unrelated leases.'],
+  ['runName', 'What the suite calls the run, as opposed to what CI calls it. The first session of a run sets it.'],
+  ['queueTimeoutSeconds', 'How long to wait for a free device. 0 fails immediately, and 0 is the default.'],
+  ['ttlMinutes', 'How long the lease lasts. A lease, not an idle timer.'],
+  ['tunnel', 'The name of one of your tunnels, so the app under test can reach a host on your own network.'],
+  ['sessionId', 'Drive a session you allocated yourself rather than allocating another. `mfarm run` sets this for you.'],
+];
+
+const SNIPPET_LANGS = [['wdio', 'WebdriverIO'], ['python', 'Python'], ['java', 'Java']];
+
+/**
+ * The region the snippet should ask for, READ OFF THIS FLEET rather than hardcoded.
+ *
+ * `lab` is this farm's region and would be a lie on anybody else's. The devices in `state.devices`
+ * are the ones this org can actually be allocated, so the commonest region among them is the one a
+ * first session has a chance of getting. With no devices there is nothing to read, and the
+ * placeholder says so rather than naming a pool that may not exist — a snippet that fails with
+ * "no capacity in eu-west" teaches the reader something false about the farm.
+ */
+function snippetRegion() {
+  const counts = new Map();
+  for (const d of state.devices) if (d.region) counts.set(d.region, (counts.get(d.region) || 0) + 1);
+  if (!counts.size) return 'your-region';
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+}
+
+/**
+ * A copy-and-run connection, in the client the reader already has.
+ *
+ * EVERY ONE OF THESE IS LIFTED FROM A SUITE THAT RAN, not composed here: `examples/medishop-suite`
+ * (WebdriverIO), `examples/python-pytest` and `examples/java-testng`. That matters most for the
+ * credential, which is the one line each of them had to get wrong first — see the note each snippet
+ * carries. A snippet on a Settings page is read as a promise that this works.
+ *
+ * The origin and the region come from THIS farm, which is the only thing the console can say that a
+ * README cannot.
+ */
+function hubSnippet(lang, { origin, region }) {
+  const u = new URL(origin);
+  const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+
+  if (lang === 'python') {
+    return [
+      'import base64, os, time',
+      'from appium import webdriver',
+      'from appium.options.android import UiAutomator2Options',
+      'from appium.webdriver.appium_connection import AppiumConnection',
+      '',
+      'KEY = os.environ["MFARM_API_KEY"]',
+      '',
+      '',
+      'class Auth(AppiumConnection):',
+      '    # The key as a header, NOT as userinfo in the URL. Several HTTP stacks',
+      '    # quietly drop https://key@host/... and the farm then answers "Missing or',
+      '    # invalid credentials" for a request that looked correct.',
+      '    def get_remote_connection_headers(self, parsed_url, keep_alive=True):',
+      '        headers = super().get_remote_connection_headers(parsed_url, keep_alive)',
+      '        headers["Authorization"] = "Basic " + base64.b64encode(f"{KEY}:".encode()).decode()',
+      '        return headers',
+      '',
+      '',
+      'opts = UiAutomator2Options()',
+      'opts.set_capability("platformName", "Android")',
+      'opts.set_capability("appium:automationName", "UiAutomator2")',
+      `opts.set_capability("mfarm:region", "${region}")`,
+      'opts.set_capability("mfarm:appId", "com.example.app@latest")',
+      '# CI\u2019s own id in CI, your own run on a laptop. This is what makes twenty',
+      '# sessions one row on the Runs screen instead of twenty.',
+      'opts.set_capability("mfarm:runId",',
+      '                    os.environ.get("GITHUB_RUN_ID") or f"local-{int(time.time())}")',
+      'opts.set_capability("mfarm:name", "checkout applies a promo")',
+      '',
+      'driver = webdriver.Remote(',
+      `    command_executor=Auth("${origin}/wd/hub"),`,
+      '    options=opts,',
+      ')',
+      'try:',
+      '    ...  # your test',
+      'finally:',
+      '    # MFARM cannot see an assertion. Before quit(), or the run says "Not reported".',
+      '    driver.execute_script("mfarm-status=passed")',
+      '    driver.quit()',
+    ].join('\n');
+  }
+
+  if (lang === 'java') {
+    return [
+      'import io.appium.java_client.android.AndroidDriver;',
+      'import io.appium.java_client.android.options.UiAutomator2Options;',
+      'import java.net.URI;',
+      '',
+      '// Appium’s Java client turns the URL’s userinfo into the Authorization header,',
+      '// so the key can live in the URL here. From the environment, never from a',
+      '// committed properties file.',
+      `URI hub = URI.create("${origin}");`,
+      'URI url = URI.create(hub.getScheme() + "://" + System.getenv("MFARM_API_KEY")',
+      '    + "@" + hub.getAuthority() + "/wd/hub");',
+      '',
+      'UiAutomator2Options options = new UiAutomator2Options();',
+      'options.setPlatformName("Android");',
+      'options.setAutomationName("UiAutomator2");',
+      `options.setCapability("mfarm:region", "${region}");`,
+      'options.setCapability("mfarm:appId", "com.example.app@latest");',
+      '// CI\u2019s own id in CI, your own run on a laptop. This is what makes',
+      '// twenty sessions one row on the Runs screen instead of twenty.',
+      'options.setCapability("mfarm:runId", System.getenv().getOrDefault(',
+      '    "GITHUB_RUN_ID", "local-" + System.currentTimeMillis()));',
+      '// Your scenario or test method — scenario.getName() under Cucumber.',
+      'options.setCapability("mfarm:name", "checkout applies a promo");',
+      '',
+      'AndroidDriver driver = new AndroidDriver(url.toURL(), options);',
+      'try {',
+      '    // your test',
+      '} finally {',
+      '    // MFARM cannot see an assertion. Before quit(), or the run says "Not reported".',
+      '    driver.executeScript("mfarm-status=passed");',
+      '    driver.quit();',
+      '}',
+    ].join('\n');
+  }
+
+  return [
+    "import { remote } from 'webdriverio';",
+    '',
+    '// The credential as an explicit header. WebdriverIO’s `user` and `key` only',
+    '// become an Authorization header for hostnames it recognises as cloud',
+    '// providers — against your own hub they are dropped in silence.',
+    'const auth = Buffer.from(`${process.env.MFARM_API_KEY}:`).toString(\'base64\');',
+    '',
+    'const driver = await remote({',
+    `  protocol: '${u.protocol.replace(':', '')}',`,
+    `  hostname: '${u.hostname}',`,
+    `  port: ${port},`,
+    "  path: '/wd/hub',",
+    '  headers: { authorization: `Basic ${auth}` },',
+    '  capabilities: {',
+    "    platformName: 'Android',",
+    "    'appium:automationName': 'UiAutomator2',",
+    `    'mfarm:region': '${region}',`,
+    "    'mfarm:appId': 'com.example.app@latest',",
+    '    // CI\u2019s own id in CI, your own run on a laptop. This is what makes',
+    '    // twenty sessions one row on the Runs screen instead of twenty.',
+    "    'mfarm:runId': process.env.GITHUB_RUN_ID ?? `local-${Date.now()}`,",
+    "    'mfarm:name': 'checkout applies a promo',",
+    '  },',
+    '});',
+    '',
+    'try {',
+    '  // your test',
+    '} finally {',
+    '  // MFARM cannot see an assertion. Before deleteSession(), or the run says',
+    '  // "Not reported" rather than passed.',
+    "  await driver.executeScript('mfarm-status=passed', []);",
+    '  await driver.deleteSession();',
+    '}',
+  ].join('\n');
+}
+
+/**
+ * A snippet block, with the comment lines kept legible.
+ *
+ * The comments are the half worth reading here — each one is a trap somebody already fell into —
+ * so they are toned rather than greyed away, which is what a syntax theme would do to them. One
+ * class applied per line; there is no tokeniser in this console and there is no reason to grow one
+ * for three fixed strings.
+ */
+function snippetBlock(code) {
+  const pre = h('pre', { class: 'snippet' });
+  for (const line of code.split('\n')) {
+    pre.append(h('span', { class: /^\s*(\/\/|#)/.test(line) ? 'cmt' : null, text: `${line}\n` }));
+  }
+  return pre;
+}
+
+/**
+ * Connect your suite — the card a new API key is useless without.
+ *
+ * WHAT WAS MISSING WAS NEVER THE HUB URL. Settings already printed `/wd/hub` and the sentence about
+ * Basic auth, and that is exactly as far as a reader got: the next question is what a capability
+ * bag looks like, and the answer lived in three example directories in a git repository the
+ * customer does not have. The first wall a new user hits is a blank `capabilities: {}`.
+ */
+function connectSuiteCard() {
+  const origin = location.origin;
+  const region = snippetRegion();
+  const lang = SNIPPET_LANGS.some(([id]) => id === state.org.snippetLang) ? state.org.snippetLang : 'wdio';
+  const code = hubSnippet(lang, { origin, region });
+
+  return card('Connect your suite', {
+    aside: h('div', { class: 'row tight' }, SNIPPET_LANGS.map(([id, label]) => h('button', {
+      class: `btn tiny${id === lang ? ' primary' : ' ghost'}`,
+      type: 'button',
+      onclick: () => { state.org.snippetLang = id; render(); },
+    }, label))),
+  },
+    h('p', { class: 'caption' },
+      'Your suite already speaks WebDriver, so three things change: the hub it points at, the key '
+      + 'it sends, and one capability naming the pool to allocate from. Everything else — the '
+      + 'page objects, the selectors, the runner — is untouched.'),
+    h('div', { class: 'mt-sm' }, copyrow(webdriverUrl())),
+
+    h('div', { class: 'mt-md' }, snippetBlock(code)),
+    h('div', { class: 'row tight mt-sm' },
+      btn('Copy the snippet', 'tiny ghost', async () => {
+        try {
+          await navigator.clipboard.writeText(code);
+          toast('Copied', 'Paste it where your suite builds its driver.');
+        } catch { toast('Could not copy', 'Select the block and copy it manually.', 'bad'); }
+      })),
+
+    /**
+     * SAID ON THE PAGE, not only in the snippet's comments. The region is the one value here the
+     * console filled in from the farm, and a reader who does not know that will edit it to
+     * something plausible and get a queue that never drains.
+     */
+    h('p', { class: 'caption mt-md', text:
+      region === 'your-region'
+        ? 'This farm has no devices registered yet, so the region above is a placeholder — it is the '
+          + 'one value the snippet cannot guess. The Fleet page names the pools once a machine has paired.'
+        : `The region is this farm’s own: ${region}. The allocator picks the device — there is no way to ask for a named one.` }),
+    h('p', { class: 'caption mt-sm', text:
+      'The REST API under /v1 takes the same key as `Authorization: Bearer <key>`; only the '
+      + 'WebDriver hub uses the Basic form, because a WebDriver client is handed one URL and offers '
+      + 'no other hook.' }),
+  );
+}
+
+/** Every capability the hub takes, so nobody has to guess at a vendor namespace. */
+function capabilitiesCard() {
+  return card('Capabilities the hub takes', {},
+    h('p', { class: 'caption' },
+      'Anything else under the mfarm: prefix is REFUSED rather than ignored — mfarm:appid and '
+      + 'mfarm:appId differ by one character, and silently discarding an instruction is worse than '
+      + 'failing, because the run continues and reports something.'),
+    h('div', { class: 'stack tight mt-md' }, HUB_CAPABILITIES.map(([name, what]) =>
+      h('p', { class: 'caption' },
+        h('code', { text: `mfarm:${name}` }),
+        ' — ',
+        what))),
+  );
+}
+
+/**
+ * The keys, with the dead ones folded away.
+ *
+ * THE PAGE USED TO CONTRADICT ITS OWN HEADING. The head said "1 active API key" and the card below
+ * listed four, because every key this org had ever held was rendered in one flat list with a word
+ * on it. Rotation is the thing this card exists to make possible, and rotation is precisely the
+ * activity that fills the list with keys that no longer work — so the page got harder to use each
+ * time somebody did the right thing.
+ *
+ * EXPIRED COUNTS AS DEAD, which is the second half of the same defect. `authenticate()` returns
+ * null for an expired key exactly as it does for nonsense, so a key past its date authenticates
+ * nothing; it was nevertheless counted as active in the heading and drawn among the working ones.
+ */
+function keySplit() {
+  return {
+    active: state.org.keys.filter((k) => !k.revokedAt && !k.expired),
+    retired: state.org.keys.filter((k) => k.revokedAt || k.expired),
+  };
+}
+
+function keysCard(admin, pending) {
+  const { active, retired } = keySplit();
+  const shown = state.org.retiredKeys;
+  const revoked = retired.filter((k) => k.revokedAt).length;
+  const expired = retired.length - revoked;
+  // The real counts in the label, always — the same rule the Tests card keeps. A disclosure that
+  // does not say how much is behind it is a control somebody has to press to find out whether they
+  // wanted to press it.
+  const words = [revoked ? `${revoked} revoked` : null, expired ? `${expired} expired` : null]
+    .filter(Boolean).join(' and ');
+
+  return card('API keys', {}, pending || [
+    state.org.keys.length === 0
+      ? empty('No API keys yet.', 'A key is what a CI job or an Appium suite authenticates with.')
+      : null,
+    state.org.keys.length && !active.length
+      ? empty('Nothing here authenticates.', `Every key this organisation holds is ${words}.`)
+      : null,
+    active.length ? h('div', { class: 'stack' }, active.map(keyRow(admin))) : null,
+    retired.length
+      ? h('p', { class: 'row tight mt-md' },
+          btn(shown ? `Hide ${words}` : `Show ${words}`, 'tiny ghost',
+            () => { state.org.retiredKeys = !shown; render(); }))
+      : null,
+    shown && retired.length
+      ? h('div', { class: 'stack mt-sm' }, retired.map(keyRow(admin)))
+      : null,
+    h('p', { class: 'caption mt-md', text:
+      'A key belongs to the organisation, not to you. Revoking one stops every job holding it at '
+      + 'once, so give CI its own rather than sharing the one on your laptop.' }),
+  ]);
+}
+
 function screenSettings() {
   const pending = orgGate();
   const admin = isOrgAdmin();
-  const live = state.org.keys.filter((k) => !k.revokedAt);
-  const dead = state.org.keys.filter((k) => k.revokedAt);
+  const { active } = keySplit();
 
   return [
     pageHead([{ label: 'Organisation' }], 'Settings',
-      `${live.length} active API ${live.length === 1 ? 'key' : 'keys'}`,
+      `${active.length} active API ${active.length === 1 ? 'key' : 'keys'}`,
       admin ? btn('New API key', 'primary', () => createKey()) : null),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
@@ -10747,30 +11066,22 @@ function screenSettings() {
           ),
         ) : null,
 
+        keysCard(admin, pending),
+        /**
+         * Directly under the keys, and above retention, because that is the order the questions
+         * arrive in: a person makes a key, and the very next thing they need is where to put it.
+         * Evidence retention is an administrative setting somebody comes back for.
+         */
+        connectSuiteCard(),
+        capabilitiesCard(),
         retentionCard(admin),
-
-        card('API keys', {},
-          pending || (state.org.keys.length
-            ? h('div', { class: 'stack' }, [...live, ...dead].map(keyRow(admin)))
-            : empty('No API keys yet.', 'A key is what a CI job or an Appium suite authenticates with.'))),
       ),
       h('div', { class: 'rail' },
         appearanceCard(),
-        card('Using a key', {},
-          h('p', { class: 'caption' }, 'Point an existing Appium suite at the farm by changing one URL:'),
-          h('p', { class: 'mono selectable caption mt-sm', text: `${location.origin}/wd/hub` }),
-          h('p', { class: 'caption mt-sm' },
-            'Send the key as HTTP Basic — the key is the username and the password half stays empty '
-            + '— or as `Authorization: Bearer <key>` against /v1.'),
-          h('p', { class: 'caption mt-sm' },
-            'A key belongs to the organisation, not to you. Revoking one breaks every job using it, '
-            + 'so give CI its own.'),
-        ),
       ),
     ),
   ];
 }
-
 /**
  * Add a person, or reset one's password.
  *
