@@ -2943,3 +2943,252 @@ kbd {
  */
 .btn.ghost.danger { color: var(--bad-text, #EE7C88); border-color: var(--bad-line, rgba(224, 80, 95, .30)); }
 .btn.ghost.danger:hover { border-color: var(--bad-dot, #E0505F); background: var(--bad-bg, rgba(224, 80, 95, .07)); }
+
+/* ============================================================ the cockpit workspace (ADR-0041) ==
+ *
+ * THE PAGE DOES NOT SCROLL; THE PANELS DO. `.main` gives up its padding and its scrollbar for this
+ * one screen (`data-layout`, set by `render`), and the workspace fills it exactly: a header strip,
+ * then a grid whose 1px gap on a hairline ground IS the divider between the device and the dock.
+ *
+ * ONE COLUMN BELOW 1000px OF USABLE WIDTH, measured by a CONTAINER query on `.ws` rather than a
+ * media query on the window. Collapsing the rail widens this box without changing the window, and
+ * a window query would stack the cockpit on a screen that has room for both panels.
+ *
+ * The floors in the narrow block are what stop the panels overlapping. Keep them.
+ */
+.main[data-layout="workspace"] { padding: 0; overflow: hidden; scrollbar-gutter: auto; }
+
+.ws {
+  container: ws / inline-size;
+  height: 100%;
+  min-height: 0;
+  display: flex; flex-direction: column;
+}
+
+.ws-head {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 11px 16px;
+  background: var(--s-chrome, #050506);
+  border-bottom: 1px solid var(--b-row, #151517);
+}
+.ws-title { flex: 1 1 320px; min-width: 0; }
+.ws-titleline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ws-h1 {
+  margin: 0;
+  font: 600 18px/22px var(--f-display);
+  letter-spacing: var(--tr-display-md, -.015em);
+  color: var(--t-primary, #F1F1F1);
+}
+.ws-stream {
+  padding: 1px 8px;
+  border: 1px solid var(--info-line, rgba(127, 160, 216, .26));
+  border-radius: var(--r-pill, 999px);
+  background: var(--info-bg, rgba(127, 160, 216, .07));
+  color: var(--info, #7FA0D8);
+  font: 400 11px/17px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+}
+.ws-ident {
+  margin: 2px 0 0;
+  font: 400 11.5px/17px var(--f-mono);
+  color: var(--t-caption, #6A6A6A);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ws-lease {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 5px 11px;
+  background: var(--s-card, #0D0D0F);
+  border: 1px solid var(--b-card, #1F1F22);
+  border-radius: var(--r-md, 9px);
+}
+.ws-lease .micro { font-size: 10px; letter-spacing: var(--tr-label, .1em); color: var(--t-caption, #6A6A6A); }
+.ws-lease-v { font: 600 13px/16px var(--f-mono); color: var(--t-primary, #F1F1F1); }
+
+.ws-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  gap: 1px;
+  background: var(--b-row, #151517);
+  grid-template-columns: minmax(320px, .85fr) minmax(360px, 1.15fr);
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- left: the device */
+
+.ws-device {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  overflow: auto;
+  background: var(--s-stage, #060607);
+}
+.ws-device > .card { margin: 12px 14px 0; }
+.ws .devpanel {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 18px 14px;
+  background: var(--s-stage, #060607);
+  border: 0;
+  border-radius: 0;
+  /* The hardware column sits BESIDE the device, on the side away from the dock. */
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.ws .dev-stage { background: none; padding: 0; overflow: hidden; }
+/* Sized by height, clamped, so the phone survives any stage and never outgrows a laptop panel. */
+.ws .dev-stage .mf-device { --f-w: calc(clamp(300px, calc(100dvh - 250px), 430px) * var(--f-aspect)); }
+.ws .devbar {
+  align-self: center;
+  gap: 5px;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.ws .devbtn { border-color: var(--b-field, #242427); background: var(--s-card, #0D0D0F); }
+.ws .devbtn:hover:not(:disabled) { border-color: var(--b-hover, #3A3A3D); background: var(--s-btn, #131315); }
+
+.ws-appstrip {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 10px 14px;
+  background: var(--s-nav, #0A0A0C);
+  border-top: 1px solid var(--b-row, #151517);
+}
+.ws-appchip {
+  padding: 2px 9px;
+  background: var(--s-chip, #191919);
+  border: 1px solid var(--b-field, #242427);
+  border-radius: var(--r-pill, 999px);
+  font: 400 11.5px/17px var(--f-mono);
+  color: var(--t-secondary, #C4C4C4);
+}
+.ws-appstrip .caption { font-size: 11.5px; color: var(--t-help, #787878); }
+
+/* ---------------------------------------------------------------- right: the dock */
+
+.ws-dock {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  background: var(--s-app, #08080A);
+}
+.ws-tabs {
+  flex: 0 0 auto;
+  display: flex; gap: 2px;
+  padding: 6px 8px;
+  background: var(--s-nav, #0A0A0C);
+  border-bottom: 1px solid var(--b-row, #151517);
+  overflow-x: auto;
+}
+.ws-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 10px;
+  border-radius: var(--r-md, 9px);
+  color: var(--t-label, #8A8A8A);
+  font-size: 12.5px; font-weight: 500;
+  white-space: nowrap;
+}
+.ws-tab:hover { color: var(--t-primary, #F1F1F1); background: var(--hover-soft); }
+.ws-tab.is-on { background: var(--s-btn, #131315); color: var(--t-primary, #F1F1F1); }
+.ws-count {
+  padding: 0 6px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--s-btn, #131315);
+  color: var(--t-caption, #6A6A6A);
+  font: 400 10.5px/16px var(--f-mono);
+}
+.ws-tab.is-on .ws-count { background: var(--mf-accent-soft, rgba(117, 94, 184, .16)); color: var(--accent-text, #C9BCF0); }
+
+.ws-panel { flex: 1 1 auto; min-height: 0; overflow: auto; }
+/* A card inside a panel is a section of the panel, not a floating box inside a box. */
+.ws-panel > .card { margin: 0; border: 0; border-radius: 0; background: transparent; border-bottom: 1px solid var(--b-row, #151517); }
+.ws-panel > .card:last-child { border-bottom: 0; }
+.ws-note { padding: var(--mf-cp, 15px); }
+
+/* The live log fills its panel: bar, rows, footer — and only the rows scroll. */
+.ws-panel-logs:has(> .logdock) { display: flex; flex-direction: column; overflow: hidden; }
+.logdock { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.logdock .logbar {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: 0;
+  padding: 8px 12px;
+  background: var(--s-nav, #0A0A0C);
+  border-bottom: 1px solid var(--b-row, #151517);
+}
+.logdock .logfilter {
+  flex: 1 1 160px;
+  min-width: 0;
+  background: var(--s-inset, #050506);
+  border-color: var(--b-field, #242427);
+  border-radius: 8px;
+  font: 400 11.5px/17px var(--f-mono);
+}
+.logdock .levelchip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px;
+  background: transparent;
+  border-color: var(--b-card, #1F1F22);
+  border-radius: var(--r-pill, 999px);
+  color: var(--t-micro, #5A5A5A);
+  font-size: 11.5px;
+}
+.logdock .levelchip .lv-n { font: 400 10.5px/1 var(--f-mono); }
+.logdock .levelchip.lvE.on { border-color: var(--bad-line); background: var(--bad-bg); color: var(--bad-text); }
+.logdock .levelchip.lvW.on { border-color: var(--warn-line); background: var(--warn-bg); color: var(--warn); }
+.logdock .levelchip.lvI.on { border-color: var(--info-line); background: var(--info-bg); color: var(--info); }
+.logdock .levelchip.lvD.on { border-color: var(--b-field); background: var(--s-btn); color: var(--log-d); }
+.logdock .levelchip.scope.on { border-color: var(--mf-accent-line); background: var(--mf-accent-soft); color: var(--t-primary); }
+.followchip {
+  padding: 3px 10px;
+  background: var(--s-btn, #131315);
+  border: 1px solid var(--b-btn, #2B2B2E);
+  border-radius: var(--r-pill, 999px);
+  color: var(--t-secondary, #C4C4C4);
+  font-size: 11.5px; font-weight: 500;
+}
+.followchip.on { border-color: var(--ok-line); background: var(--ok-bg); color: var(--ok-text); }
+.logdock .logbody {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  padding: 6px 0;
+  background: var(--s-inset, #050506);
+  border: 0;
+  border-radius: 0;
+}
+.logfoot {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 8px 12px;
+  background: var(--s-nav, #0A0A0C);
+  border-top: 1px solid var(--b-row, #151517);
+}
+.logfoot .caption { font-size: 11.5px; color: var(--t-help, #787878); }
+
+/* Rows as four columns, so the eye can run down the level letter the way it does in adb logcat. */
+.ws-panel .logline {
+  display: grid;
+  grid-template-columns: 88px 18px minmax(0, 132px) minmax(0, 1fr);
+  gap: 10px;
+  padding: 2px 14px;
+  white-space: normal;
+  font: 400 11px/17px var(--f-mono);
+  font-variant-numeric: tabular-nums;
+}
+.ws-panel .logline:hover { background: var(--hover-soft); }
+.ws-panel .logline.lE, .ws-panel .logline.lF { background: var(--bad-bg); }
+.ws-panel .log-l { width: auto; font-weight: 700; }
+.ws-panel .log-g { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-panel .logline.lW .log-m { color: var(--log-w); }
+.ws-panel .logline.lI .log-m { color: var(--log-i); }
+.ws-panel .logline.lD .log-m, .ws-panel .logline.lV .log-m { color: var(--log-d); }
+
+@container ws (max-width: 999.98px) {
+  .ws-grid { grid-template-columns: minmax(0, 1fr); overflow: auto; }
+  .ws-device { min-height: 440px; overflow: visible; }
+  .ws .devpanel { flex: 0 0 auto; min-height: 376px; }
+  .ws .dev-stage .mf-device { --f-w: calc(340px * var(--f-aspect)); }
+  .ws-dock { min-height: 420px; }
+}

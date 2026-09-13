@@ -229,7 +229,13 @@ export const state = {
    * The scope stays, because on a device that DOES tag its lines it is the right lens. It is now
    * something you turn on, not something that turns your log off before you have seen it.
    */
-  log: { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0, scope: 'all' },
+  /**
+   * `levels` is four switches, not one threshold (ADR-0041). Debug starts OFF because on a real
+   * Cuttlefish it is most of the buffer — and its chip still shows how many lines that hides.
+   */
+  log: { lines: [], filter: '', levels: { E: true, W: true, I: true, D: false }, follow: true, dropped: 0, scope: 'all' },
+  /** Which panel of the cockpit's dock is in front. A view choice, so it survives navigation. */
+  dock: 'logs',
   /**
    * Which kind of device the fleet screen is showing (spec §25).
    *
@@ -4114,7 +4120,8 @@ function closeLive() {
   state.liveDetail = null;
   // `streaming` and `paused` reset with the connection: a new device starts following again, and a
   // pause on the last one is not an instruction about this one.
-  state.log = { lines: [], filter: '', level: 'ALL', follow: true, dropped: 0, streaming: false, paused: false };
+  // A new connection empties the buffer and keeps the reader's level chips — they are a choice, not state of the stream.
+  state.log = { lines: [], filter: '', levels: state.log.levels || { E: true, W: true, I: true, D: false }, follow: true, dropped: 0, streaming: false, paused: false };
   state.shots = [];
   state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
   // The panel goes with the connection. Keeping it would re-show the last frame of a device
@@ -5243,9 +5250,9 @@ function paintToolbar(sess, live, caps) {
      * chip list rather than filtering it out.
      */
     toolBtn('camera', 'Screenshot', Boolean(live), () => void takeScreenshot(),
-      { kbd: 'S', requires: 'screenshot', declared: caps }),
+      { requires: 'screenshot', declared: caps }),
     toolBtn('inspect', state.inspect.on ? 'Stop inspecting' : 'Inspect elements',
-      streaming, () => void toggleInspect(),
+      streaming, () => setDockTab(state.inspect.on ? 'logs' : 'inspector'),
       { active: state.inspect.on, requires: 'ui-hierarchy', declared: caps }),
     toolBtn('refresh', 'Reconnect', Boolean(live), () => reconnectLive()),
     h('span', { class: 'devbar-sep' }),
@@ -5552,9 +5559,36 @@ async function takeScreenshot() {
 
 /* ------------------------------------------------------------------ logcat dock */
 
-const LOG_LEVELS = ['ALL', 'E', 'W', 'I', 'D'];
 /** Which levels each filter admits. Choosing E shows only errors and fatals, not "E and above". */
 const LEVEL_SET = { E: ['E', 'F'], W: ['W'], I: ['I'], D: ['D', 'V'] };
+
+/** The four chips, in the order they are drawn. */
+const LEVEL_CHIPS = [['E', 'Error'], ['W', 'Warn'], ['I', 'Info'], ['D', 'Debug']];
+/** Which chip a line answers to — the inverse of `LEVEL_SET`, so fatal reads as an error. */
+const LEVEL_OF = Object.fromEntries(Object.entries(LEVEL_SET).flatMap(([chip, lv]) => lv.map((l) => [l, chip])));
+
+/**
+ * A LINE WHOSE LEVEL DID NOT PARSE IS ALWAYS SHOWN. It is not a debug line, it is a line nobody
+ * could classify — and a filter that hides what it cannot read hides the stack trace continuation
+ * that follows every crash.
+ */
+function levelShown(levels, level) {
+  const chip = LEVEL_OF[level];
+  return !chip || !levels || levels[chip] !== false;
+}
+
+/**
+ * Lines per chip, AFTER the scope and the text filter and BEFORE the chips themselves — so each
+ * chip says what turning it on would add, whether or not it is on.
+ */
+export function levelCounts() {
+  const n = { E: 0, W: 0, I: 0, D: 0 };
+  for (const l of visibleLog({ ignoreLevels: true })) {
+    const chip = LEVEL_OF[l.level];
+    if (chip) n[chip] += 1;
+  }
+  return n;
+}
 
 /**
  * The package whose lines the 'app' scope keeps, or null when nothing is installed.
@@ -5573,13 +5607,13 @@ function scopedPackage() {
  * worth testing — a filter that quietly hides an error is worse than no filter — and it is a pure
  * function of `state.log`, which makes it the right seam.
  */
-export function visibleLog() {
-  const { lines, filter, level, scope } = state.log;
+export function visibleLog({ ignoreLevels = false } = {}) {
+  const { lines, filter, levels, scope } = state.log;
   const needle = filter.trim().toLowerCase();
   const pkg = scope === 'app' ? scopedPackage()?.toLowerCase() : null;
 
   return lines.filter((l) => {
-    if (level !== 'ALL' && !(LEVEL_SET[level] || []).includes(l.level)) return false;
+    if (!ignoreLevels && !levelShown(levels, l.level)) return false;
     /**
      * SCOPE IS A NAME MATCH, AND IT IS NOT A PERFECT APP FILTER — which is why the control says
      * "This app" and the help text says what it really does.
@@ -5610,7 +5644,8 @@ export function visibleLog() {
 function paintLog() {
   const body = $('logbody');
   if (!body) return;
-  const rows = visibleLog().slice(-600);
+  const matching = visibleLog();
+  const rows = matching.slice(-600);
   /**
    * AN EMPTY PANE SAYS WHY IT IS EMPTY — D23's other half.
    *
@@ -5631,17 +5666,31 @@ function paintLog() {
         h('span', { class: 'log-g', text: l.tag }),
         h('span', { class: 'log-m', text: l.message }),
       ))));
+  // The footer says how many of how many — a filtered pane that does not admit it is filtering is
+  // how somebody concludes their app logged nothing. The tab badge is the same number.
   const count = $('logcount');
   if (count) {
-    const total = state.log.lines.length;
-    const hidden = total - rows.length;
-    // Say how many lines are NOT on screen. A filtered pane that does not admit it is filtering is
-    // how somebody concludes their app logged nothing.
-    count.textContent = hidden > 0
-      ? `${rows.length} / ${total} lines · ${hidden} hidden`
-      : `${rows.length} / ${total} lines`;
+    count.textContent = `${matching.length} of ${state.log.lines.length} lines \u00b7 `
+      + (state.log.streaming ? 'streaming from the device' : 'stream paused');
   }
+  const badge = $('dock-logcount');
+  if (badge) badge.textContent = String(matching.length);
+  const counts = levelCounts();
+  for (const [k] of LEVEL_CHIPS) {
+    const n = $(`lvn-${k}`);
+    if (n) n.textContent = String(counts[k]);
+  }
+  paintFollow();
   if (state.log.follow) body.scrollTop = body.scrollHeight;
+}
+
+/** The Follow chip, painted — scrolling flips it many times a second and must not re-render. */
+function paintFollow() {
+  const b = $('logfollow');
+  if (!b) return;
+  b.textContent = state.log.follow ? 'Following' : 'Paused';
+  b.className = `followchip${state.log.follow ? ' on' : ''}`;
+  b.setAttribute('aria-pressed', state.log.follow ? 'true' : 'false');
 }
 
 function logcatDock(sess, live) {
@@ -5649,59 +5698,101 @@ function logcatDock(sess, live) {
   if (!(device?.capabilities || []).includes('logcat')) {
     // Absent rather than empty: this device genuinely produces no log through this path, and an
     // empty pane would read as a quiet device.
-    return card('Logcat', {}, h('p', { class: 'help', text: 'This device does not declare the logcat capability, so nothing here would ever fill.' }));
+    return h('p', { class: 'help ws-note', text: 'This device does not declare the logcat capability, so nothing here would ever fill.' });
   }
 
-  const following = Boolean(state.log.streaming);
   const pkg = scopedPackage();
-  return card('Logcat', {
-    aside: h('div', { class: 'row tight' },
-      h('span', { class: 'caption tnum', id: 'logcount', text: `0 / ${state.log.lines.length} lines` }),
-      // `Pause` / `Resume`, never `Follow`: `state.log.follow` is the SCROLL behaviour, turned on and
-      // off by scrolling the pane, and having two different things called follow in one card is how
-      // someone ends up pressing this expecting the scroll to stick.
-      btn(following ? 'Pause' : 'Resume', 'tiny ghost', () => toggleLogcat(), { disabled: !live }),
-      btn('Clear', 'tiny ghost', () => { state.log.lines = []; paintLog(); }),
-    ),
-  },
-    h('div', { class: 'row tight logbar' },
+  const counts = levelCounts();
+  const matching = visibleLog();
+  return h('div', { class: 'logdock' },
+    h('div', { class: 'logbar' },
+      /**
+       * EACH CHIP CARRIES ITS OWN COUNT. Without it, turning Error on is a guess about whether you
+       * are about to read fourteen lines or none. Painted by `paintLog` as lines arrive.
+       */
+      LEVEL_CHIPS.map(([k, label]) => h('button', {
+        type: 'button',
+        class: `levelchip lv${k}${state.log.levels[k] ? ' on' : ''}`,
+        'aria-pressed': state.log.levels[k] ? 'true' : 'false',
+        onclick: (e) => {
+          state.log.levels = { ...state.log.levels, [k]: !state.log.levels[k] };
+          e.currentTarget.classList.toggle('on', state.log.levels[k]);
+          e.currentTarget.setAttribute('aria-pressed', state.log.levels[k] ? 'true' : 'false');
+          paintLog();
+        },
+      }, label, h('span', { class: 'lv-n tnum', id: `lvn-${k}`, text: String(counts[k]) }))),
       h('input', {
-        class: 'field', id: 'logfilter', placeholder: 'Filter', value: state.log.filter,
+        class: 'field logfilter', id: 'logfilter', type: 'search', value: state.log.filter,
+        placeholder: 'Filter lines, tags, stack frames', 'aria-label': 'Filter the log',
         oninput: (e) => { state.log.filter = e.target.value; paintLog(); },
       }),
       /**
        * Scope, offered ONLY when there is a build to scope to. A "This app" button on a session
        * with nothing installed is a control that cannot do anything, and §27 does not allow one.
        */
-      pkg ? h('div', { class: 'row tight' }, [['app', 'This app'], ['all', 'Everything']].map(([v, label]) => h('button', {
-        class: `levelchip${state.log.scope === v ? ' on' : ''}`,
+      pkg ? [['app', 'This app'], ['all', 'Everything']].map(([v, label]) => h('button', {
+        type: 'button',
+        class: `levelchip scope${state.log.scope === v ? ' on' : ''}`,
         title: v === 'app'
           ? `Lines mentioning ${pkg}, plus every error and fatal whoever wrote it`
           : 'Every line the device produced',
-        onclick: () => { state.log.scope = v; paintLog(); },
-      }, label))) : null,
-      h('div', { class: 'row tight' }, LOG_LEVELS.map((lv) => h('button', {
-        class: `levelchip${state.log.level === lv ? ' on' : ''}`,
-        onclick: () => { state.log.level = lv; paintLog(); },
-      }, lv))),
+        onclick: () => { state.log.scope = v; render(); },
+      }, label)) : null,
+      /**
+       * FOLLOW IS THE SCROLL, and it says which state it is in. Scrolling up turns it off — an old
+       * line you are reading must not be yanked away by a new one — and pressing it jumps back to
+       * the newest. Pausing the STREAM is a different act, and has its own control in the footer.
+       */
+      h('button', {
+        type: 'button', id: 'logfollow',
+        class: `followchip${state.log.follow ? ' on' : ''}`,
+        'aria-pressed': state.log.follow ? 'true' : 'false',
+        onclick: () => { state.log.follow = !state.log.follow; paintLog(); },
+      }, state.log.follow ? 'Following' : 'Paused'),
     ),
     h('div', {
       class: 'logbody mono', id: 'logbody',
-      // Following is turned off by scrolling up and back on by scrolling to the bottom, which is
-      // what every log viewer does and what a person expects without being told.
       onscroll: (e) => {
         const el = e.target;
-        state.log.follow = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+        const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+        if (atEnd !== state.log.follow) { state.log.follow = atEnd; paintFollow(); }
       },
     }),
-    // Both halves changed when artifacts landed (019). THIS DOCK still keeps nothing — it is a live
-    // stream to one tab — but the log itself is no longer lost, because the worker dumps the whole
-    // buffer as an artifact when the device is released. Saying "nothing was kept" now would send
-    // someone away from the evidence sitting further down the same page.
-    !live
-      ? h('p', { class: 'caption mt-sm', text: 'The session has ended, so nothing more will arrive here. The full log was captured when the device was released — see Evidence below.' })
-      : h('p', { class: 'caption mt-sm', text: 'Streamed straight off the device over the same connection as the screen. This dock stores nothing, but the whole log is kept as an artifact when the device is released.' }),
+    h('div', { class: 'logfoot' },
+      h('span', { class: 'caption tnum', id: 'logcount', text: `${matching.length} of ${state.log.lines.length} lines` }),
+      h('span', { class: 'spacer' }),
+      btn(state.log.streaming ? 'Pause stream' : 'Resume stream', 'tiny ghost', () => toggleLogcat(), { disabled: !live }),
+      btn('Clear', 'tiny ghost', () => { state.log.lines = []; paintLog(); }),
+      btn('Copy visible', 'tiny ghost', () => void copyVisibleLog()),
+      btn('Download these lines', 'tiny ghost', () => downloadVisibleLog(sess)),
+    ),
   );
+}
+
+async function copyVisibleLog() {
+  const lines = visibleLog();
+  try {
+    await navigator.clipboard.writeText(lines.map((l) => l.raw).join('\n'));
+    toast('Copied', `${lines.length} line${lines.length === 1 ? '' : 's'}`, 'ok');
+  } catch {
+    toast('Could not copy', 'The clipboard was refused. Select the lines instead.', 'bad');
+  }
+}
+
+/**
+ * THE LINES IN THIS TAB, not the device's log file — hence the label.
+ *
+ * The whole logcat becomes an artifact when the device is released, and Evidence offers it then. A
+ * button here promising "logcat · 3.7 MB" on a live session would name a file that does not exist
+ * yet, and the size beside it would be a number nobody measured.
+ */
+function downloadVisibleLog(sess) {
+  const url = URL.createObjectURL(new Blob([visibleLog().map((l) => l.raw).join('\n')], { type: 'text/plain' }));
+  const a = h('a', { href: url, download: `mfarm-${short(sess.id)}-logcat.txt` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function toggleLogcat() {
@@ -5728,6 +5819,13 @@ function toggleLogcat() {
  * so the honest answer is single digits, and a UI implying otherwise would be selling the product on
  * something it does not do.
  */
+/** The header's one line of stream health — sampled off the peer connection, never assumed. */
+function streamText() {
+  const s = state.liveStats;
+  const path = !s.ice ? '\u2014' : s.ice === 'relay' ? 'relayed' : 'direct';
+  return `${s.fps || '\u2014'} fps \u00b7 ${s.rtt == null ? '\u2014' : `${s.rtt} ms`} \u00b7 ${path}`;
+}
+
 function paintVitals() {
   const s = state.liveStats;
   const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
@@ -5737,7 +5835,7 @@ function paintVitals() {
   set('vit-path', s.ice ? (s.ice === 'relay' ? 'relayed (TURN)' : `direct (${s.ice})`) : '—');
   // The header pill, painted for the same reason the rows above are: it changes every second, and
   // re-rendering the screen to move one number is what made the cockpit hitch.
-  set('live-fps-pill', `LIVE · ${s.fps || '—'} fps`);
+  set('ws-stream', streamText());
 }
 
 function vitalsCard() {
@@ -6459,6 +6557,8 @@ function clockText(seconds) {
  * see looks exactly like a button that does nothing.
  */
 function watchFailureAt(seconds) {
+  // The recording is on the Evidence tab. A hidden <video> would seek and play where nobody sees it.
+  if (state.route.name === 'cockpit' && state.dock !== 'evidence') { state.dock = 'evidence'; render(); }
   const el = document.getElementById('evidence-video');
   if (!el) return;
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -7086,160 +7186,251 @@ function screenCockpit(id) {
   const app = installedOn(sess.id);
   const acts = actionsFor(sess.id);
 
-  return [
-    /**
-     * THE DEVICE IS THE TITLE, not the session's uuid — document 04 S1.
-     *
-     * "Session 3b97a8de" names the row in a table; the person on this screen is holding an MFARM X1
-     * Pro and every decision they make here is about that device. The uuid does not disappear, it
-     * moves one line down into the identity strip beside the OS and the geometry, which is where a
-     * support message or a log line needs it anyway.
-     *
-     * Geometry comes from the DEVICE'S OWN REPORT via `geometryText` (ADR-0016), so a class whose
-     * members disagreed would show it here rather than average it away.
-     */
-    pageHead(
-      [{ label: 'Fleet', to: '#/fleet' }, { label: 'Session' }],
-      device ? deviceName(device) : (sess.device || `Session ${short(sess.id)}`),
-      null,
-      h('div', { class: 'row tight' },
-        state.liveState === 'streaming'
-          // Never a hard-coded "LIVE · 60 fps". The number is sampled off the peer connection, and
-          // on a software-rendered device it is honestly small.
-          ? pill(`LIVE · ${state.liveStats.fps || '—'} fps`, 'bad',
-              { live: true, title: 'Measured from the media stream', labelId: 'live-fps-pill' })
-          : null,
-        pill(st.label, st.tone, { live: sess.state === 'ACTIVE' }),
-        live ? btn('Release', 'danger', () => askRelease(sess), { kbd: 'R' }) : null,
+  /**
+   * A WORKSPACE, NOT A PAGE (ADR-0041).
+   *
+   * This screen used to stack the stage, then logcat a full scroll below it, then actions and
+   * evidence, beside a rail of six cards — so reading a log line scrolled the phone out of sight,
+   * and the phone is what the line is about. Now the device holds the left panel and never moves,
+   * and one dock on the right swaps between everything else. Nothing outside the panels scrolls.
+   */
+  return h('div', { class: 'ws' },
+    cockpitHeader(sess, live, device, st),
+    h('div', { class: 'ws-grid' },
+      h('section', { class: 'ws-device', 'aria-label': 'Device' },
+        queuedNote(sess),
+        state.acceptedHandover === sess.id ? null : handoverNotice(sess),
+        stagePanel(sess, live),
+        endedSummary(sess, live),
+        appStrip(sess, live, device, app),
       ),
+      cockpitDock(sess, live, device, acts),
     ),
+  );
+}
 
-    h('div', { class: 'ident' },
-      h('span', { class: 'mono', text: [
+/**
+ * THE DEVICE IS THE TITLE, not the session's uuid — document 04 S1. The uuid moves one line down
+ * into the identity strip beside the OS and the geometry, which is where a support message or a log
+ * line needs it anyway. Geometry is the DEVICE'S OWN REPORT via `geometryText` (ADR-0016).
+ *
+ * LEASE AND STREAM HEALTH ARE FACTS HERE, NOT CARDS. The vitals card and the lease block were two
+ * of the rail's six; each answered one glanceable question with a panel.
+ */
+function cockpitHeader(sess, live, device, st) {
+  const failures = (state.artifacts.sessionId === sess.id && state.artifacts.failures) || [];
+  return h('header', { class: 'ws-head' },
+    h('div', { class: 'ws-title' },
+      h('p', { class: 'crumb' },
+        h('button', { type: 'button', text: 'Fleet', onclick: () => go('#/fleet') }), ' / Session'),
+      h('div', { class: 'ws-titleline' },
+        h('h1', { class: 'ws-h1', text: device ? deviceName(device) : (sess.device || `Session ${short(sess.id)}`) }),
+        pill(st.label, st.tone, { live: sess.state === 'ACTIVE' }),
+        // Only while there is a stream to measure. Painted by `paintVitals`, never re-rendered.
+        live && state.liveState === 'streaming'
+          ? h('span', { class: 'ws-stream', id: 'ws-stream', title: 'Frame rate, round trip and path — measured from the media stream', text: streamText() })
+          : null,
+      ),
+      h('p', { class: 'ws-ident', text: [
         short(sess.id),
         device ? `${device.platform} ${device.osVersion}` : null,
         device ? geometryText(device) : null,
         sess.region,
-      ].filter(Boolean).join(' \u00b7 ') }),
+      ].filter(Boolean).join(' · ') }),
+      sess.endReason ? h('p', { class: 'caption', text: `Ended: ${sess.endReason}` }) : null,
     ),
+    // No Extend beside the lease: there is no endpoint that moves `expires_at`, and a button that
+    // silently does nothing is worse than its absence.
+    live && sess.expiresAt
+      ? h('div', { class: 'ws-lease', title: `The device is released at ${when(sess.expiresAt)}` },
+          h('span', { class: 'micro', text: 'Lease' }),
+          ticker('until', sess.expiresAt, { cls: 'ws-lease-v' }))
+      : live
+        ? ticker('since', sess.startedAt || sess.createdAt, { prefix: 'running ', cls: 'caption' })
+        // "ran 20 minutes", not "ran 20:00" — a duration beside a clock reads as a time of day.
+        : h('span', { class: 'caption', text: `ran ${lengthInWords(sess.startedAt || sess.createdAt, sess.endedAt)}` }),
+    // Share only where there is a failure behind it. The link is scoped to one test result, and a
+    // live session has not reported one yet.
+    failures.length
+      ? btn('Share', '', () => shareDialog(failures[0]), { title: failures.length > 1
+          ? `Shares the first of ${failures.length} failures. Each has its own Share on the Steps tab.`
+          : 'A read-only link to this failure, for somebody with no account here' })
+      : null,
+    live ? btn('Release', 'danger', () => askRelease(sess), { kbd: 'R' }) : null,
+  );
+}
 
-    h('div', { class: 'card mb-gap' },
-      h('div', { class: 'row' },
-        app ? pill(`${app.label || app.packageName} ${app.versionName || ''}`.trim(), 'warn plain', {
-          dot: false,
-          title: 'Session-only. Releasing restores the clean snapshot and removes it.',
-        }) : null,
-        h('span', { class: 'spacer' }),
-        live
-          ? ticker('since', sess.startedAt || sess.createdAt, { prefix: 'running ', cls: 'caption' })
-          // "ran 20 minutes", not "ran 20:00" — this sits beside a wall-clock time and the two
-          // were indistinguishable.
-          : h('span', { class: 'caption', text: `ran ${lengthInWords(sess.startedAt || sess.createdAt, sess.endedAt)}` }),
-        copyrow(sess.id, 'Copy id'),
-      ),
-      live && sess.expiresAt ? h('div', { class: 'mt-md' }, leaseBlock(sess)) : null,
-      // No Extend button: there is no endpoint that moves `expires_at`, and a button that silently
-      // does nothing is worse than its absence.
-      sess.endReason ? h('p', { class: 'caption mt-sm', text: `Ended: ${sess.endReason}` }) : null,
-    ),
+/**
+ * What is on the device, under it. Session-only, which is the one fact about an install people get
+ * wrong — releasing restores the clean snapshot and the build goes with it.
+ */
+function appStrip(sess, live, device, app) {
+  if (!live) return null;
+  const canInstall = (device?.capabilities || []).includes('app-install');
+  return h('div', { class: 'ws-appstrip' },
+    app
+      ? h('code', { class: 'ws-appchip', text: `${app.packageName}${app.versionName ? `@${app.versionName}` : ''}` })
+      : h('span', { class: 'secondary', text: 'No build installed' }),
+    h('span', { class: 'caption', text: app ? 'installed for this session only' : 'install one from the Actions tab' }),
+    h('span', { class: 'spacer' }),
+    // Typing needs the stream's input channel, so it is offered exactly when that exists.
+    state.liveState === 'streaming'
+      ? btn('Type on device', '', () => {
+          setDockTab('actions');
+          setTimeout(() => document.querySelector('.ws-panel-actions input[name="txt"]')?.focus(), 0);
+        })
+      : null,
+    app && canInstall ? btn('Relaunch', 'primary', () => runAction(app, 'launch')) : null,
+  );
+}
 
-    h('div', { class: 'split' },
-      h('div', { class: 'content' },
-        queuedNote(sess),
-        state.acceptedHandover === sess.id ? null : handoverNotice(sess),
-        /**
-         * D10 — THE STAGE AND THE ACCOUNTING, SIDE BY SIDE ON AN ENDED SESSION.
-         *
-         * Sequenced one under the other for a live session, which is right: there the stage is the
-         * thing and nothing competes with it. On an ended one the numbers ARE the content and the
-         * frame is the memento, so the two share a row and both are above the fold — which is what
-         * document 04 S4 draws.
-         */
-        (() => {
-          const stage = stagePanel(sess, live);
-          const summary = endedSummary(sess, live);
-          return summary ? h('div', { class: 'endedwrap' }, stage, summary) : stage;
-        })(),
-        /**
-         * WHAT FAILED, FIRST. See `sessionFailureCard` — the run screen shows the message and the
-         * page you press through to did not show it at all.
-         */
-        sessionFailureCard(sess, live),
-        // Then everything it ran, failures included, for the session that reported several — see
-        // `sessionTestsCard`. Below the Failed card because somebody arriving from a red row wants
-        // the message first, and above the evidence because a name is how you choose what to open.
-        sessionTestsCard(sess, live),
-        /**
-         * THE LIVE DOCK WHILE THE DEVICE IS LIVE, THE CAPTURED LOG AFTER.
-         *
-         * They are not the same thing shown twice: the dock is a stream for a device somebody is
-         * watching, and it is empty by definition once the session ends. Rendering it on an ended
-         * session produced a full card reading `0 / 0 lines`, with level chips that filtered
-         * nothing, pointing at an artifact that could only be downloaded.
-         */
-        live ? logcatDock(sess, live) : capturedLogCard(sess),
-        card('Actions on this session', { aside: h('span', { class: 'caption', text: `${acts.length} total` }) },
-          acts.length
-            ? h('div', { class: 'tablewrap' }, h('table', { class: 'table narrow' },
-                h('thead', null, h('tr', null, ['What', 'Build', 'State', 'When'].map((t) => h('th', { text: t })))),
-                h('tbody', null, acts.map((a) => {
-                  const meta = ACTION_STATE[a.state] || { label: a.state, tone: '' };
-                  return h('tr', null,
-                    h('td', { text: KIND_LABEL[a.kind] || a.kind }),
-                    h('td', { class: 'mono', text: appById(a.appId)?.packageName || short(a.appId) }),
-                    h('td', null,
-                      h('span', { class: 'row tight' }, h('span', { class: `dot ${meta.tone}` }), meta.label),
-                      // The worker's own words, rendered as TEXT. This string came off a device via
-                      // adb and is the most attacker-influenced value on the page.
-                      a.error ? h('p', { class: 'caption bad-text', text: a.error }) : null,
-                    ),
-                    h('td', { class: 'caption', text: `${ago(a.finishedAt || a.requestedAt)}` }),
-                  );
-                })),
-              ))
-            : empty('Nothing has been sent to this device.', 'Install a build from the panel beside this one.'),
-          // Said out loud, because two amber rows on a red session still invite the wrong reading.
-          acts.some((a) => a.state === 'FAILED')
-            ? h('p', { class: 'caption mt-sm', text:
-                'These are the farm\u2019s own errands — a capture, an install, a recording. One that '
-                + 'did not run is never a statement about your test; the recording and the log below '
-                + 'are what the session actually left behind.' })
-            : null,
-        ),
-        /**
-         * STEPS ABOVE EVIDENCE, deliberately.
-         *
-         * A person opening a red session asks "which step" before "show me the picture" — and the
-         * picture is only readable once you know what the device was being asked to do when it was
-         * taken. The screenshot 040 captures can be up to a beat late, so the step list is also
-         * what tells you what happened in between.
-         */
-        stepsCard(sess),
-        evidenceCard(sess, live),
-      ),
-      h('div', { class: 'rail' },
-        // First in the rail while it is on: the inspector is a mode you are actively working in,
-        // and hunting for its panel under four others is the opposite of the point.
-        inspectorCard(device?.capabilities || []),
-        toolsCard(sess, live),
-        vitalsCard(),
-        capturesCard(),
-        connectCard(sess),
-        card('Activity', {},
-          acts.length
-            ? timeline(acts.slice(0, 10).map((a) => {
-                const meta = ACTION_STATE[a.state] || { label: a.state, tone: '' };
-                return {
-                  tone: meta.tone,
-                  title: `${KIND_LABEL[a.kind] || a.kind} — ${meta.label.toLowerCase()}`,
-                  note: `${appById(a.appId)?.packageName || short(a.appId)} · ${ago(a.finishedAt || a.requestedAt)}`,
-                };
-              }))
-            : h('p', { class: 'help', text: 'Nothing yet.' }),
-        ),
-      ),
-    ),
-  ];
+/**
+ * The dock's tabs for THIS device. Inspector only where the device declares ui-hierarchy — a tab
+ * that can never fill is the same lie as a button for a capability the device lacks.
+ */
+const DOCK_TABS = [
+  { key: 'logs', label: 'Logs', kbd: 'L' },
+  { key: 'steps', label: 'Steps', kbd: 'S' },
+  { key: 'actions', label: 'Actions' },
+  { key: 'evidence', label: 'Evidence', kbd: 'E' },
+  { key: 'inspector', label: 'Inspector', kbd: 'I', requires: 'ui-hierarchy' },
+  { key: 'connect', label: 'Connect' },
+];
+
+export function dockTabs(device) {
+  const caps = device?.capabilities || [];
+  return DOCK_TABS.filter((t) => !t.requires || caps.includes(t.requires));
+}
+
+/**
+ * Bring a tab to the front.
+ *
+ * THE INSPECTOR IS THE TAB, not a mode beside it. While it is open, taps select rather than reach
+ * the app — so opening it turns inspecting on and leaving it turns inspecting off. A mode that
+ * outlived its panel would swallow taps on a device whose screen shows no reason why.
+ */
+export function setDockTab(key) {
+  if (state.dock === key) return;
+  const leaving = state.dock;
+  state.dock = key;
+  if (key === 'inspector' && !state.inspect.on && state.live) void toggleInspect();
+  else if (leaving === 'inspector' && state.inspect.on) void toggleInspect();
+  else render();
+}
+
+function cockpitDock(sess, live, device, acts) {
+  const caps = device?.capabilities || [];
+  const tabs = dockTabs(device);
+  if (!tabs.some((t) => t.key === state.dock)) state.dock = 'logs';
+
+  // Arrived on the Inspector (by `I`, or a remembered tab) before the stream was up: start it now.
+  if (state.dock === 'inspector' && live && state.live && state.liveState === 'streaming'
+    && !state.inspect.on && !state.inspect.loading) {
+    setTimeout(() => { if (state.dock === 'inspector' && !state.inspect.on) void toggleInspect(); }, 0);
+  }
+
+  const cmds = state.commands.sessionId === sess.id && state.commands.loaded ? state.commands.items : null;
+  const arts = state.artifacts.sessionId === sess.id && state.artifacts.loaded ? state.artifacts.items : null;
+  // A count only where one is known. "0" for a list that has not loaded is a claim about the session.
+  const count = {
+    logs: live ? visibleLog().length : null,
+    steps: cmds ? cmds.length : null,
+    actions: acts.length,
+    evidence: arts ? arts.length : null,
+  };
+
+  /**
+   * EVERY PANEL IS BUILT, AND THE OTHERS ARE HIDDEN — not built on demand.
+   *
+   * The recording is a <video> on the Evidence panel, and "Watch at 1:23" on the Steps panel seeks
+   * it; the log pane is painted into a node that has to exist for lines to land in it while you are
+   * reading Steps. Building only the front panel would drop both on every tab change.
+   */
+  const body = {
+    logs: () => (live ? logcatDock(sess, live) : capturedLogCard(sess)),
+    steps: () => [sessionFailureCard(sess, live), sessionTestsCard(sess, live), stepsCard(sess)],
+    actions: () => [toolsCard(sess, live), actionsCard(sess, acts)],
+    evidence: () => [evidenceCard(sess, live), capturesCard()],
+    inspector: () => inspectorCard(caps) || inspectorIdle(live),
+    connect: () => [connectCard(sess), vitalsCard()],
+  };
+
+  const onKey = (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    const i = tabs.findIndex((t) => t.key === state.dock);
+    const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    e.preventDefault();
+    setDockTab(next.key);
+    document.getElementById(`dock-tab-${next.key}`)?.focus();
+  };
+
+  return h('section', { class: 'ws-dock', 'aria-label': 'Session panels' },
+    h('div', { class: 'ws-tabs', role: 'tablist', 'aria-label': 'Session panels', onkeydown: onKey },
+      tabs.map((t) => {
+        const on = t.key === state.dock;
+        return h('button', {
+          type: 'button', role: 'tab', id: `dock-tab-${t.key}`,
+          class: `ws-tab${on ? ' is-on' : ''}`,
+          'aria-selected': on ? 'true' : 'false',
+          'aria-controls': `dock-panel-${t.key}`,
+          tabindex: on ? '0' : '-1',
+          title: t.kbd ? `${t.label} (${t.kbd})` : null,
+          onclick: () => setDockTab(t.key),
+        },
+          t.label,
+          count[t.key] === null || count[t.key] === undefined ? null
+            : h('span', { class: 'ws-count tnum', id: t.key === 'logs' ? 'dock-logcount' : null, text: String(count[t.key]) }),
+        );
+      })),
+    tabs.map((t) => h('div', {
+      class: `ws-panel ws-panel-${t.key}`,
+      role: 'tabpanel', id: `dock-panel-${t.key}`, 'aria-labelledby': `dock-tab-${t.key}`,
+      hidden: t.key !== state.dock,
+    }, body[t.key]())),
+  );
+}
+
+/** The Inspector tab before there is anything to inspect. */
+function inspectorIdle(live) {
+  return h('div', { class: 'ws-note' },
+    h('p', { class: 'help', text: !live
+      ? 'This session has ended. Inspecting reads the screen of a device you are holding.'
+      : state.liveState === 'streaming'
+        ? 'Tap anything on the device and MFARM hands you a selector you can paste into your test. Taps select while this tab is open — nothing reaches the app.'
+        : 'Inspecting reads the live screen, so it starts once the live view is connected.' }),
+  );
+}
+
+/** The farm's own errands on this session — never a statement about the test. */
+function actionsCard(sess, acts) {
+  return card('Actions on this session', { aside: h('span', { class: 'caption', text: `${acts.length} total` }) },
+    acts.length
+      ? h('div', { class: 'tablewrap' }, h('table', { class: 'table narrow' },
+          h('thead', null, h('tr', null, ['What', 'Build', 'State', 'When'].map((t) => h('th', { text: t })))),
+          h('tbody', null, acts.map((a) => {
+            const meta = ACTION_STATE[a.state] || { label: a.state, tone: '' };
+            return h('tr', null,
+              h('td', { text: KIND_LABEL[a.kind] || a.kind }),
+              h('td', { class: 'mono', text: appById(a.appId)?.packageName || short(a.appId) }),
+              h('td', null,
+                h('span', { class: 'row tight' }, h('span', { class: `dot ${meta.tone}` }), meta.label),
+                // The worker's own words, rendered as TEXT. This string came off a device via
+                // adb and is the most attacker-influenced value on the page.
+                a.error ? h('p', { class: 'caption bad-text', text: a.error }) : null,
+              ),
+              h('td', { class: 'caption', text: `${ago(a.finishedAt || a.requestedAt)}` }),
+            );
+          })),
+        ))
+      : empty('Nothing has been sent to this device.', 'Install a build from the panel beside this one.'),
+    // Said out loud, because two amber rows on a red session still invite the wrong reading.
+    acts.some((a) => a.state === 'FAILED')
+      ? h('p', { class: 'caption mt-sm', text:
+          'These are the farm\u2019s own errands — a capture, an install, a recording. One that '
+          + 'did not run is never a statement about your test; the recording and the log below '
+          + 'are what the session actually left behind.' })
+      : null,
+  );
 }
 
 /* ---------------------------------------------------------------------------- screen: apps */
@@ -10087,6 +10278,11 @@ export function commands() {
     if (caps.includes('screenshot')) list.push({ icon: 'camera', label: 'Take a screenshot', group: 'Do', run: () => void takeScreenshot() });
     if (caps.includes('logcat')) list.push({ icon: 'logcat', label: state.log.streaming ? 'Pause logcat' : 'Resume logcat', group: 'Do', run: () => toggleLogcat() });
   }
+  // Offered only where there is a failure to share — a Share with nothing behind it is a dead end.
+  if (state.route.name === 'cockpit' && state.artifacts.sessionId === state.route.id) {
+    const f = (state.artifacts.failures || [])[0];
+    if (f) list.push({ icon: 'copy', label: 'Share the current failure', note: f.name || '', group: 'Do', run: () => shareDialog(f) });
+  }
   /**
    * Device results carry a FRAME rather than an icon — the same component at its smallest size.
    *
@@ -10289,13 +10485,18 @@ document.addEventListener('keydown', (e) => {
     if (sess && LIVE_SESSION_STATES.has(sess.state) && sess.deviceId) { e.preventDefault(); askRelease(sess); }
   }
 
-  // The design's `S` and `L`. Both are cockpit-only and both check the same capability the button
-  // does — the shortcut is never a way to reach a control the device does not have.
-  if (state.route.name === 'cockpit' && state.live) {
-    const device = deviceById(state.detail?.deviceId);
-    const caps = device?.capabilities || [];
-    if (k === 's' && caps.includes('screenshot')) { e.preventDefault(); void takeScreenshot(); }
-    if (k === 'l' && caps.includes('logcat')) { e.preventDefault(); toggleLogcat(); }
+  /**
+   * THE DOCK'S TABS — L, S, E, I (ADR-0041). `S` used to take a screenshot and `L` to pause the
+   * stream; both are still a control and a palette command. Only a tab the device actually has is
+   * reachable, so `I` on a device without ui-hierarchy does nothing rather than opening a panel
+   * that can never fill.
+   */
+  if (state.route.name === 'cockpit') {
+    const tab = { l: 'logs', s: 'steps', e: 'evidence', i: 'inspector' }[k];
+    if (tab && dockTabs(deviceById(state.detail?.deviceId)).some((t) => t.key === tab)) {
+      e.preventDefault();
+      setDockTab(tab);
+    }
   }
 });
 
@@ -11377,6 +11578,8 @@ export function render() {
 
   main.replaceChildren();
   add(main, [(SCREENS[state.route.name] || SCREENS.devices)()]);
+  // A workspace scrolls inside its panels, never as a page — see `.main[data-layout]`.
+  main.dataset.layout = main.firstElementChild?.classList?.contains('ws') ? 'workspace' : 'page';
   // Everything below re-attaches live state to the nodes that were just created. A render throws
   // the previous DOM away wholesale, so a <video> loses its stream, the log dock comes back empty,
   // and the vitals reset to em-dashes — none of which is a state change, so none of it belongs in
