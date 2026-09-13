@@ -982,6 +982,9 @@ describe('no screen leaks a stringified nullish', () => {
  * These test `visibleLog` through the screen, because the interesting failures are about WHICH
  * lines survive, and a filter that quietly hides an error would be worse than no filter at all.
  */
+/** Every chip on — these tests are about scope, not about the Debug-off default. */
+const ALL_LEVELS = { E: true, W: true, I: true, D: true };
+
 describe('the log pane scopes to the app under test', () => {
   const LINES = [
     { time: '00:01', level: 'D', tag: 'AiSealSystemService', message: 'not yet available; trying again', raw: 'D AiSealSystemService not yet available; trying again' },
@@ -997,7 +1000,7 @@ describe('the log pane scopes to the app under test', () => {
    */
   const shown = (scope: string) => {
     seed({ name: 'cockpit', id: 'sess-1' });
-    mod.state.log = { lines: [...LINES], filter: '', level: 'ALL', follow: true, dropped: 0, scope };
+    mod.state.log = { lines: [...LINES], filter: '', levels: ALL_LEVELS, follow: true, dropped: 0, scope };
     // The seeded action is a confirmed install of app-1 (com.acme.app) on sess-1.
     return mod.visibleLog().map((l: { raw: string }) => l.raw).join('\n');
   };
@@ -1027,13 +1030,13 @@ describe('the log pane scopes to the app under test', () => {
     // Otherwise a session with no app would hide every line and look like a dead device.
     seed({ name: 'cockpit', id: 'sess-1' });
     mod.state.actions = [];
-    mod.state.log = { lines: [...LINES], filter: '', level: 'ALL', follow: true, dropped: 0, scope: 'app' };
+    mod.state.log = { lines: [...LINES], filter: '', levels: ALL_LEVELS, follow: true, dropped: 0, scope: 'app' };
     assert.equal(mod.visibleLog().length, LINES.length);
   });
 
   test('a level chip still narrows within the scope', () => {
     seed({ name: 'cockpit', id: 'sess-1' });
-    mod.state.log = { lines: [...LINES], filter: '', level: 'E', follow: true, dropped: 0, scope: 'all' };
+    mod.state.log = { lines: [...LINES], filter: '', levels: { E: true, W: false, I: false, D: false }, follow: true, dropped: 0, scope: 'all' };
     const out = mod.visibleLog();
     assert.equal(out.length, 1);
     assert.match(out[0].raw, /a crash nobody should hide/);
@@ -1342,7 +1345,9 @@ describe('the copy rules hold', () => {
     seed({ name: 'cockpit', id: 'sess-1' });
     mod.state.devices[0].capabilities = ['app-install', 'webdriver', 'logcat'];
     mod.state.stage = null;
-    const text = textOf(mod.SCREENS.cockpit());
+    // The DEVICE panel's words. The dock beside it has a log chip called "Error", which is the name
+    // of a filter and not a statement that anything went wrong.
+    const text = textOf(findByClass(mod.SCREENS.cockpit(), 'ws-device'));
     assert.match(text, /property of the device, not a fault/);
     /**
      * The list GREW with stage 5, and the growth is the point. It used to name four capabilities
@@ -3232,12 +3237,16 @@ describe('the UI defects found by using the console', () => {
         'none of these can ever work again for this session, so none of them is offered');
     });
 
-    test('D10 — the accounting sits beside the frame, not under it', () => {
-      const tree = ended();
-      const wrap = findByClass(tree, 'endedwrap');
-      assert.ok(wrap, 'the stage and the numbers are still stacked');
-      assert.ok(findByClass(wrap, 'devpanel'), 'the frame stays — it is the device you gave back');
-      assert.ok(findByClass(wrap, 'endstats'), 'the numbers are what the page is now about');
+    /**
+     * D10's point was never the side-by-side: it was that the accounting is in view WITH the frame
+     * rather than a scroll below it. ADR-0041 keeps that by a different route — the device panel does
+     * not scroll away, and the numbers live in it, under the device you gave back.
+     */
+    test('D10 — the accounting sits with the frame, in the panel that does not scroll away', () => {
+      const panel = findByClass(ended(), 'ws-device');
+      assert.ok(panel, 'no device panel');
+      assert.ok(findByClass(panel, 'devpanel'), 'the frame stays — it is the device you gave back');
+      assert.ok(findByClass(panel, 'endstats'), 'the numbers are what the page is now about');
     });
 
     test('the stage knows it is an ended session', () => {
@@ -3614,7 +3623,7 @@ describe('the defects an hour of using it found', () => {
     test('a real device log names no package, so the app scope would hide all of it', () => {
       seed({ name: 'cockpit', id: 'sess-1' });
       mod.state.log = {
-        ...mod.state.log, scope: 'app', filter: '', level: 'ALL',
+        ...mod.state.log, scope: 'app', filter: '', levels: ALL_LEVELS,
         lines: [
           { time: 't', level: 'D', tag: 'AiSealSystemService', message: 'not yet available', raw: 'D AiSealSystemService not yet available' },
           { time: 't', level: 'I', tag: 'adbd', message: 'shell', raw: 'I adbd shell' },
@@ -3628,7 +3637,7 @@ describe('the defects an hour of using it found', () => {
     test('with the default scope, system lines survive', () => {
       seed({ name: 'cockpit', id: 'sess-1' });
       mod.state.log = {
-        ...mod.state.log, scope: 'all', filter: '', level: 'ALL',
+        ...mod.state.log, scope: 'all', filter: '', levels: ALL_LEVELS,
         lines: [
           { time: '09-05 20:13:22.365', level: 'D', tag: 'AiSealSystemService', message: 'not yet available', raw: 'D AiSealSystemService not yet available' },
           { time: '09-05 20:13:22.432', level: 'I', tag: 'adbd', message: 'shell', raw: 'I adbd shell' },
@@ -3641,7 +3650,7 @@ describe('the defects an hour of using it found', () => {
     test('choosing the app scope still narrows to lines that name it', () => {
       seed({ name: 'cockpit', id: 'sess-1' });
       mod.state.log = {
-        ...mod.state.log, scope: 'app', filter: '', level: 'ALL',
+        ...mod.state.log, scope: 'app', filter: '', levels: ALL_LEVELS,
         lines: [
           { time: 't', level: 'I', tag: 'ActivityManager', message: 'Start com.acme.app', raw: 'I ActivityManager Start com.acme.app' },
           { time: 't', level: 'I', tag: 'adbd', message: 'shell', raw: 'I adbd shell' },
@@ -5459,5 +5468,134 @@ describe('connecting a suite', () => {
     seed({ name: 'settings' });
     const text = textOf(mod.SCREENS.settings());
     for (const name of MFARM_KEYS) assert.match(text, new RegExp(`mfarm:${name}\\b`));
+  });
+});
+
+/**
+ * THE COCKPIT IS A WORKSPACE (ADR-0041).
+ *
+ * The session screen used to stack the stage, logcat and evidence down one scrolling page beside a
+ * rail of six cards, so reading a log line scrolled the phone away. These pin the shape that fixed
+ * it — and the one property that is easy to lose in a tidy-up: every dock panel is BUILT, and only
+ * one is in front. The recording on Evidence is seeked from Steps, and log lines land in the Logs
+ * pane while another tab is open; a dock that built only the front panel would drop both.
+ */
+describe('the cockpit is a workspace (ADR-0041)', () => {
+  const cockpit = () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
+    mod.state.dock = 'logs';
+    return mod.SCREENS.cockpit();
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idOf = (n: any): string => n.getAttribute?.('id') ?? n.id;
+
+  test('the device and the dock are two panels of one grid, and the rail is gone', () => {
+    const tree = cockpit();
+    const grid = findByClass(tree, 'ws-grid');
+    assert.ok(grid, 'no workspace grid');
+    const device = findByClass(grid, 'ws-device');
+    assert.ok(device && findByClass(grid, 'ws-dock'));
+    assert.ok(findByClass(device, 'devpanel'), 'the stage belongs to the device panel');
+    assert.equal(findByClass(tree, 'rail'), null, 'the six-card rail is back');
+  });
+
+  test('every panel is built and exactly one is in front', () => {
+    const dock = findByClass(cockpit(), 'ws-dock');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const panels = dock.children.filter((c: any) => typeof c.className === 'string' && c.className.includes('ws-panel'));
+    assert.deepEqual(panels.map(idOf),
+      ['dock-panel-logs', 'dock-panel-steps', 'dock-panel-actions', 'dock-panel-evidence', 'dock-panel-inspector', 'dock-panel-connect']);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const front = panels.filter((p: any) => !p.hidden);
+    assert.equal(front.length, 1);
+    assert.equal(idOf(front[0]), 'dock-panel-logs');
+  });
+
+  test('the tabs are a real tablist, and only the selected one says so', () => {
+    const tabs = findByClass(cockpit(), 'ws-tabs');
+    assert.equal(tabs.getAttribute('role'), 'tablist');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const selected = tabs.children.filter((t: any) => t.getAttribute('aria-selected') === 'true');
+    assert.equal(selected.length, 1);
+    assert.match(textOf(selected[0]), /Logs/);
+  });
+
+  test('Inspector is a tab only on a device that can fill it', () => {
+    assert.deepEqual(mod.dockTabs({ capabilities: ['ui-hierarchy'] }).map((t: { key: string }) => t.key),
+      ['logs', 'steps', 'actions', 'evidence', 'inspector', 'connect']);
+    assert.ok(!mod.dockTabs({ capabilities: [] }).some((t: { key: string }) => t.key === 'inspector'));
+    assert.ok(!mod.dockTabs(undefined).some((t: { key: string }) => t.key === 'inspector'));
+  });
+
+  test('a remembered tab the device does not have falls back to Logs', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].capabilities = mod.state.devices[0].capabilities.filter((c: string) => c !== 'ui-hierarchy');
+    mod.state.dock = 'inspector';
+    mod.SCREENS.cockpit();
+    assert.equal(mod.state.dock, 'logs');
+  });
+
+  test('the lease is a fact in the header, not a card', () => {
+    const head = findByClass(cockpit(), 'ws-head');
+    assert.ok(findByClass(head, 'ws-lease'), 'the lease left the header');
+    assert.match(textOf(head), /Lease/);
+  });
+
+  const artifacts = (failures: unknown[]) => ({ sessionId: 'sess-1', items: [], failures, results: [], loaded: true });
+
+  test('Share is not offered on a session with no failure behind it', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.artifacts = artifacts([]);
+    mod.state.dock = 'logs';
+    const head = findByClass(mod.SCREENS.cockpit(), 'ws-head');
+    assert.equal(findByText(head, 'Share'), null);
+    assert.ok(findByText(head, 'Release'), 'a live session can still be released from the header');
+  });
+
+  test('Share appears in the header once the suite has reported a failure', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.artifacts = artifacts([{ id: 'r1', name: 'applies the promo code', failure: 'expected 20%', reportedAt: new Date().toISOString() }]);
+    mod.state.dock = 'logs';
+    const head = findByClass(mod.SCREENS.cockpit(), 'ws-head');
+    assert.ok(findByText(head, 'Share'), 'a failure with no way to send it from the header');
+    assert.ok(mod.commands().some((c: { label: string }) => c.label === 'Share the current failure'));
+  });
+});
+
+describe('the log chips count what they hide (ADR-0041)', () => {
+  const line = (level: string | null, raw: string) => ({ time: 't', level, tag: 'x', message: raw, raw });
+  const LINES = [
+    line('E', 'boom'), line('F', 'fatal'), line('W', 'careful'), line('I', 'hello'),
+    line('D', 'chatter'), line('V', 'verbose'), line(null, '\tat com.acme.Main.run'),
+  ];
+  const withLog = (over: Record<string, unknown>) => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.log = { ...mod.state.log, lines: [...LINES], filter: '', scope: 'all', ...over };
+  };
+
+  test('Debug off hides debug and verbose, and its chip still counts them', () => {
+    withLog({ levels: { E: true, W: true, I: true, D: false } });
+    const shown = mod.visibleLog().map((l: { raw: string }) => l.raw);
+    assert.ok(!shown.includes('chatter') && !shown.includes('verbose'));
+    assert.ok(shown.includes('boom') && shown.includes('fatal'), 'fatal answers to the Error chip');
+    assert.deepEqual(mod.levelCounts(), { E: 2, W: 1, I: 1, D: 2 });
+  });
+
+  test('a line whose level did not parse is never hidden — it is the stack trace under a crash', () => {
+    withLog({ levels: { E: false, W: false, I: false, D: false } });
+    assert.deepEqual(mod.visibleLog().map((l: { raw: string }) => l.raw), ['\tat com.acme.Main.run']);
+  });
+
+  test('the text filter narrows the counts as well as the lines', () => {
+    withLog({ levels: { E: true, W: true, I: true, D: true }, filter: 'BOOM' });
+    assert.deepEqual(mod.levelCounts(), { E: 1, W: 0, I: 0, D: 0 });
+  });
+
+  test('a fresh console starts with Error, Warn and Info on and Debug off', async () => {
+    const fresh = await import(`${pathToFileURL(SHIMMED).href}?levels-default`);
+    clearInterval(fresh.state.poll);
+    clearInterval(fresh.state.tick);
+    assert.deepEqual(fresh.state.log.levels, { E: true, W: true, I: true, D: false });
   });
 });
