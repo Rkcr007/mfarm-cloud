@@ -2616,14 +2616,15 @@ describe('apps', () => {
    * Seen on the live farm 2026-09-13; it was the most visible cosmetic defect in the product.
    */
   test('a recording names itself and does not leave a hole where a build would be', () => {
-    seed({ name: 'apps' });
+    // Drawn on Health since Apps lost its activity card (ADR-0041); the defect is in the card.
+    seed({ name: 'health' });
     mod.state.actions = [{
       id: 'a-vid', kind: 'video-start', state: 'SUCCEEDED', appId: null, deviceId: 'dev-1',
       sessionId: 'sess-1', error: null,
       requestedAt: new Date(Date.now() - 60_000).toISOString(),
       finishedAt: new Date(Date.now() - 60_000).toISOString(),
     }];
-    const text = textOf(mod.SCREENS.apps());
+    const text = textOf(mod.SCREENS.health());
     assert.match(text, /Started recording — succeeded/, 'the kind has a name a person would use');
     assert.doesNotMatch(text, /video-start/, 'and not the wire value');
     assert.doesNotMatch(text, /— — /, 'no placeholder standing in for a build that cannot exist');

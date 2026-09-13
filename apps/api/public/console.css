@@ -3192,3 +3192,54 @@ kbd {
   .ws .dev-stage .mf-device { --f-w: calc(340px * var(--f-aspect)); }
   .ws-dock { min-height: 420px; }
 }
+
+/* ============================================================ Apps (ADR-0041) ===================== */
+
+/* A list screen reads best at a measure, not edge to edge on an ultrawide. Run detail shares it. */
+.page-narrow { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; }
+.page-narrow > div > .page-head { margin-bottom: 0; }
+.page-narrow .page-sub { max-width: 70ch; font-size: 13.5px; }
+
+.holdbanner {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 10px 14px;
+  background: var(--ok-bg, rgba(111, 203, 99, .10));
+  border: 1px solid var(--ok-line, rgba(111, 203, 99, .28));
+  border-radius: var(--r-lg, 12px);
+}
+.holdbanner.idle { background: var(--s-card, #0D0D0F); border-color: var(--b-card, #1F1F22); }
+
+.apps-grid {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+}
+@media (max-width: 899.98px) { .apps-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.drop {
+  padding: 16px;
+  background: var(--s-nav, #0A0A0C);
+  border-color: var(--b-dash, #303033);
+  border-radius: var(--r-lg, 12px);
+}
+.drop:hover, .drop.is-over { background: var(--s-card, #0D0D0F); }
+.drop-icon { width: 38px; height: 38px; }
+
+.appsrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 16px;
+}
+.appsrow:hover { background: var(--hover-row); }
+.build-id { min-width: 0; }
+.build-meta { font: 400 11.5px/17px var(--f-mono); color: var(--t-caption, #6A6A6A); overflow-wrap: anywhere; }
+.build-status { display: grid; gap: 4px; min-width: 0; }
+.build-error { font: 400 11px/17px var(--f-mono); color: var(--bad-mono, #F0A0A8); overflow-wrap: anywhere; background: none; padding: 0; }
+.build-details { grid-column: 1 / -1; }
+@media (max-width: 719.98px) {
+  .appsrow { grid-template-columns: minmax(0, 1fr); }
+  .appsrow .rowactions { justify-content: flex-start; }
+}
