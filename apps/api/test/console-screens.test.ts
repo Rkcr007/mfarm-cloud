@@ -5600,3 +5600,87 @@ describe('the log chips count what they hide (ADR-0041)', () => {
     assert.deepEqual(fresh.state.log.levels, { E: true, W: true, I: true, D: false });
   });
 });
+
+/**
+ * RUN DETAIL, CONSOLE V2 (ADR-0041, with ADR-0039's history and cost behind it).
+ */
+describe('run detail reads a failure against its history (ADR-0041)', () => {
+  const runs = (outcomes: string[], currentAt = outcomes.length - 1) => ({
+    runs: outcomes.map((o, i) => ({ runId: `r${i}`, name: null, outcome: o, at: new Date().toISOString(), current: i === currentAt })),
+    failedCount: outcomes.filter((o) => o === 'failed').length,
+    total: outcomes.length,
+  });
+
+  test('a test that just broke, one that alternates, and one that always fails read differently', () => {
+    assert.deepEqual(mod.flakeVerdict(runs(['passed', 'passed', 'passed', 'failed'])),
+      { tone: 'bad', text: 'newly broken — the other 3 passed' });
+    assert.equal(mod.flakeVerdict(runs(['failed', 'passed', 'failed', 'passed', 'passed', 'failed'])).tone, 'warn');
+    assert.match(mod.flakeVerdict(runs(['failed', 'passed', 'failed', 'passed', 'passed', 'failed'])).text, /flaky — fails about 1 run in 2/);
+    assert.equal(mod.flakeVerdict(runs(['failed', 'failed', 'failed'])).text, 'failing every time — 3 of 3 runs');
+    assert.equal(mod.flakeVerdict(runs(['failed'])).text, 'nothing to compare yet');
+  });
+
+  test('a run opened weeks later sits in the oldest slot, and the verdict still counts the OTHER runs', () => {
+    // Current first, then nineteen newer runs that passed: that is "newly broken" relative to the rest.
+    assert.equal(mod.flakeVerdict(runs(['failed', 'passed', 'passed'], 0)).text, 'newly broken — the other 2 passed');
+  });
+
+  const withHistory = () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.failures[0].history = runs(['passed', 'failed', 'passed', 'failed']);
+    mod.state.runDetail.incidents = [{
+      id: 'si-1', sessionId: 'sess-1', class: 'infrastructure', reason: 'device-disconnected',
+      detail: 'adb: device offline', device: 'phone-ABC123', occurredAt: new Date().toISOString(),
+    }];
+    return mod.SCREENS.run();
+  };
+
+  test('each failing test gets a strip and a sentence, not only colour', () => {
+    const tree = withHistory();
+    const text = textOf(tree);
+    assert.match(text, /Across the last 4 runs/);
+    assert.match(text, /Also failed in 1 of the other 3 runs that reported it/);
+    assert.ok(findByClass(tree, 'flakestrip'), 'no strip');
+    assert.ok(findByClass(tree, 'flakeverdict'), 'a strip with no words is colour-only');
+  });
+
+  test('failures and what the farm saw are two cards in one row', () => {
+    const judge = findByClass(withHistory(), 'run-judge');
+    assert.ok(judge, 'the two cards are stacked again');
+    assert.ok(findByClass(judge, 'judge-fail') && findByClass(judge, 'judge-farm'));
+  });
+
+  test('the sessions table has four columns, and names the failing test inside its row', () => {
+    const tree = withHistory();
+    const table = findByClass(tree, 'runsessions');
+    assert.ok(table, 'no sessions table');
+    assert.match(textOf(findByClass(table, 'testcell')), /checkout applies a promo/);
+    const head = textOf(table.children[0]);
+    for (const col of ['State', 'Tests in this session', 'Device', 'Duration']) assert.match(head, new RegExp(col));
+    assert.doesNotMatch(head, /Build|Started/, 'build and start belong to the run header now');
+  });
+
+  test('the build moved into the run header', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.run = { ...mod.state.runDetail.run, build: { packageName: 'com.medishop.app', versionName: '1.4.2' }, buildCount: 1 };
+    const tree = mod.SCREENS.run();
+    assert.match(textOf(findByClass(tree, 'run-sub')), /com\.medishop\.app@1\.4\.2/);
+  });
+
+  test('device minutes carry the backend’s cost sentence verbatim, and say so when there is no rate', () => {
+    seed({ name: 'run', id: '4471' });
+    mod.state.runDetail.run = {
+      ...mod.state.runDetail.run, deviceMinutes: 86,
+      cost: { inr: 23.29, hostHourlyCost: 65, note: '≈ share of ₹65/hr across 4 devices' },
+    };
+    let text = textOf(findByClass(mod.SCREENS.run(), 'factgrid'));
+    assert.match(text, /Device minutes/);
+    assert.match(text, /86/);
+    assert.match(text, /≈ ₹23 · share of ₹65\/hr across 4 devices/);
+
+    mod.state.runDetail.run = { ...mod.state.runDetail.run, cost: null };
+    text = textOf(findByClass(mod.SCREENS.run(), 'factgrid'));
+    assert.match(text, /No hourly rate is configured/);
+    assert.doesNotMatch(text, /₹0/, 'no rate is not a zero');
+  });
+});
