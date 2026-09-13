@@ -4491,9 +4491,9 @@ describe('the infrastructure operations centre', () => {
     assert.equal(mod.parseHash('#/infra/usage').lens, 'usage');
   });
 
-  /* ---------------------------------------------------------------- the top bar actually lost it */
+  /* ---------------------------------------------------------------- the top bar, for operators only (ADR-0041) */
 
-  test('THE TOP BAR NO LONGER CARRIES ANY INFRASTRUCTURE', async () => {
+  test('the top bar ships no host fact in its markup — only an empty, hidden slot', async () => {
     const html = await readFile(join(PUBLIC, 'index.html'), 'utf8');
     // Sliced from the topbar FORWARD. `indexOf('</header>')` alone finds the sign-in page's header,
     // which closes earlier in the document, and the slice came back empty — a test asserting
@@ -4501,13 +4501,50 @@ describe('the infrastructure operations centre', () => {
     const from = html.indexOf('<header class="topbar"');
     const bar = html.slice(from, html.indexOf('</header>', from));
     assert.ok(bar.length > 200, 'the top bar could not be located in index.html');
-    assert.ok(!/id="fs-burn"/.test(bar), 'the burn segment is still in the top bar');
+    assert.ok(!/id="fs-burn"/.test(bar), 'the old burn segment is back in the top bar');
+    // A member's bar must never flash a host fact before the script runs: the slot is empty AND hidden.
+    assert.match(bar, /<span class="seg seg-host" id="fs-host" hidden><\/span>/);
     assert.ok(!/₹|cost|Host up|hosts up/i.test(bar.replace(/<!--[\s\S]*?-->/g, '')),
-      'something in the top bar still talks about hosts or money');
-    // What the bar KEEPS is the application: capacity, the queue, what you hold.
+      'something in the top bar markup talks about hosts or money');
     assert.match(bar, /id="fs-devices"/);
     assert.match(bar, /id="fs-queue"/);
     assert.match(bar, /id="fs-held"/);
+  });
+
+  test('a member never gets a host segment, whatever the hosts say', () => {
+    seed({ name: 'fleet' });
+    mod.state.me.operator = false;
+    mod.state.hosts = { list: [{ id: 'h1', uptimeSeconds: 3600 }], rate: { hourly: 65, currency: '₹' }, loaded: true, failed: false };
+    assert.equal(mod.hostSegment(), null);
+  });
+
+  test('an operator sees a powered-on host and what it costs an hour', () => {
+    seed({ name: 'fleet' });
+    mod.state.me.operator = true;
+    mod.state.hosts = { list: [{ id: 'h1', uptimeSeconds: 3600 }, { id: 'h2', uptimeSeconds: null }], rate: { hourly: 65, currency: '₹' }, loaded: true, failed: false };
+    assert.deepEqual(mod.hostSegment(), { text: 'Host on · ₹65/hr', tone: 'warn' });
+
+    mod.state.hosts.list[1].uptimeSeconds = 60;
+    assert.equal(mod.hostSegment().text, '2 hosts on · ₹130/hr');
+
+    // No rate configured is not a zero.
+    mod.state.hosts.rate = null;
+    assert.equal(mod.hostSegment().text, '2 hosts on');
+  });
+
+  test('a refused hosts request is not "Hosts off"', () => {
+    seed({ name: 'fleet' });
+    mod.state.me.operator = true;
+    mod.state.hosts = { list: [], rate: null, loaded: true, failed: true };
+    assert.equal(mod.hostSegment(), null, 'an unread fleet was reported as switched off');
+
+    mod.state.hosts = { list: [{ id: 'h1', uptimeSeconds: null }], rate: null, loaded: true, failed: false };
+    assert.deepEqual(mod.hostSegment(), { text: 'Hosts off', tone: '' });
+  });
+
+  test('Sign out is reachable from the palette, because the who block is not below 980px', () => {
+    seed({ name: 'fleet' });
+    assert.ok(mod.commands().some((c: { label: string }) => c.label === 'Sign out'));
   });
 
   test('the console no longer paints a burn segment anywhere', async () => {

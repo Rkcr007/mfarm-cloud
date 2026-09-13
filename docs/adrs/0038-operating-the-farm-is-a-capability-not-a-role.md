@@ -1,6 +1,8 @@
 # ADR-0038 — operating the farm is a capability, not a role
 
-**Status:** Accepted · 2026-09-12 · migrations 053, 054
+**Status:** Accepted · 2026-09-12 · migrations 053, 054 · **amended by
+[ADR-0041](0041-the-console-is-a-workspace-not-a-page.md) on 2026-09-14**: one host fact
+(`Host on · ₹/hr`) returns to the top bar for fleet operators only.
 
 ## Context
 
