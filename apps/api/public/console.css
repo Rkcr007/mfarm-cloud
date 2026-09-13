@@ -3243,3 +3243,61 @@ kbd {
   .appsrow { grid-template-columns: minmax(0, 1fr); }
   .appsrow .rowactions { justify-content: flex-start; }
 }
+
+/* ============================================================ Run detail (ADR-0041) ================ */
+
+/* The sub-line breaks under the title and the verdict pill, whatever order the head builds them in. */
+.page-head > .run-sub {
+  order: 5;
+  flex-basis: 100%;
+  margin: 0;
+  font: 400 11.5px/17px var(--f-mono);
+  color: var(--t-caption, #6A6A6A);
+}
+
+.factgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.fact {
+  display: grid; gap: 4px; align-content: start;
+  padding: 13px 14px;
+  background: var(--s-card, #0D0D0F);
+  border: 1px solid var(--b-card, #1F1F22);
+  border-radius: var(--r-lg, 12px);
+}
+.fact .micro { font-size: 10px; letter-spacing: var(--tr-label, .1em); }
+.fact-v {
+  margin: 0;
+  font: 600 26px/30px var(--f-display);
+  letter-spacing: var(--tr-display-lg, -.02em);
+  font-variant-numeric: tabular-nums;
+  color: var(--t-primary, #F1F1F1);
+}
+.fact.bad .fact-v { color: var(--bad-text, #EE7C88); }
+.fact.warn .fact-v { color: var(--warn, #E8A30E); }
+.fact .caption { font-size: 11.5px; }
+
+/* Side by side on a desktop, because that is how the judgement is made; stacked only when narrow. */
+.run-judge { display: grid; gap: 16px; align-items: start; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.card.judge-fail { border-color: var(--bad-line, rgba(224, 80, 95, .30)); }
+.card.judge-farm { border-color: var(--warn-line, rgba(232, 163, 14, .24)); }
+.run-judge .failtext {
+  background: var(--s-inset, #050506);
+  border: 1px solid var(--b-inset, #1A1A1C);
+  border-radius: 7px;
+  font: 400 11px/17px var(--f-mono);
+  color: var(--bad-mono, #F0A0A8);
+}
+.failitem + .failitem { padding-top: 12px; border-top: 1px solid var(--b-row, #151517); }
+
+.flakerow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 6px 14px; }
+.flakename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--t-secondary, #C4C4C4); }
+.flakestrip { display: inline-flex; gap: 3px; }
+.flakecell { width: 10px; height: 16px; border-radius: 2px; background: var(--ok-line, rgba(111, 203, 99, .28)); }
+.flakecell.fail { background: var(--bad-dot, #E0505F); }
+/* The run being viewed, marked by an outline rather than a colour — colour already means outcome. */
+.flakecell.now { outline: 1px solid var(--t-secondary, #C4C4C4); outline-offset: 1px; }
+.flakeverdict { font-size: 12px; }
+@media (max-width: 719.98px) { .flakerow { grid-template-columns: minmax(0, 1fr); } }
+
+.table.runsessions { min-width: 720px; }
+.testcell { gap: 3px; }
+.testline { font-size: 12.5px; }

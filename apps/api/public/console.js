@@ -6616,54 +6616,6 @@ export function toggleSessionTests(sessionId) {
   scheduleRender();
 }
 
-/**
- * The sub-row: one line per test the session reported.
- *
- * A `<tr>` under the session's own row rather than a dialog, because the question being asked is
- * comparative — "which of these eight sessions ran the OTP scenario" — and a dialog answers it one
- * session at a time with the other seven hidden behind it.
- */
-function sessionTestsRow(sessionId, columns) {
-  const t = state.runTests[sessionId];
-  if (!t?.open) return null;
-
-  const body = t.loading
-    ? h('p', { class: 'caption', text: 'Loading\u2026' })
-    : t.error
-      ? h('p', { class: 'bad-text caption', text: `These could not be read: ${t.error}` })
-      : t.items.length
-        ? h('table', { class: 'table testrows' },
-            h('tbody', null, t.items.map((r) => h('tr', { class: r.status === 'failed' ? 'failed' : null },
-              h('td', null, pill(r.status, r.status === 'failed' ? 'bad' : r.status === 'skipped' ? 'warn' : 'ok')),
-              h('td', null,
-                h('span', { class: 'fleet-name', text: r.name || 'unnamed test' }),
-                // The message on the row itself, one line. A person scanning eight tests for the
-                // one that broke should not have to open anything to see WHAT broke.
-                r.failure
-                  ? h('p', { class: 'caption failline', text: r.failure.split('\n')[0] })
-                  : null),
-              h('td', { class: 'caption tnum right',
-                text: testLength(r.durationMs) }),
-              h('td', { class: 'right' },
-                // Shareable from here too (ADR-0036) — this is the row where somebody reading a
-                // nightly run decides which failure to ask about.
-                r.status === 'failed'
-                  ? btn('Share', 'tiny ghost', () => shareDialog(r))
-                  : null),
-            ))))
-        : /**
-           * REPORTED A COUNT AND THEN NO ROWS is a real state, not an empty list: the count on the
-           * session row comes from the run rollup, and results can be deleted with a session's
-           * evidence. Saying which of the two happened is the difference between "nothing ran" and
-           * "this was cleared".
-           */
-          h('p', { class: 'caption', text:
-            'This session reported no tests. The count beside it comes from the run\u2019s rollup, '
-            + 'so a session showing one here has had its results removed.' });
-
-  return h('tr', { class: 'subrow' }, h('td', { colspan: columns }, body));
-}
-
 /* ---------------------------------------------------------------------------- share a failure */
 
 /**
@@ -6904,7 +6856,7 @@ function sessionFailureCard(sess, live) {
  * EVERYTHING THIS SESSION REPORTED, by name — not only what failed.
  *
  * THE HALF OF THE GAP THE RUN SCREEN COULD NOT CLOSE. A session running several tests shows one
- * count on the run screen, which `sessionTestsRow` now unfolds; but a person who has already
+ * count on the run screen, which `sessionTestsCell` names in its row; but a person who has already
  * navigated INTO the session arrives at a page that names its failures and nothing else. Eight
  * passing tests were counted on the previous screen and named on neither.
  *
@@ -8130,192 +8082,286 @@ function screenRun(id) {
   }
 
   const run = d.run;
-  return [
-    // The name is the title when there is one, and the id moves into the subtitle rather than
-    // disappearing — the id is what somebody pastes into their CI search.
-    pageHead([{ label: 'Farm' }, { label: 'Runs', to: '#/runs' }], run.name || run.runId,
-      `${run.name ? `${run.runId} · ` : ''}`
-      + `${run.sessions.total} session${run.sessions.total === 1 ? '' : 's'}, `
-      + `${run.sessions.live} still live.`),
-    h('div', { class: 'statgrid mb-gap' },
-      runStat('Tests', runOutcome(run),
-        run.tests?.total
-          ? `${run.tests.sessionsReporting} of ${run.sessions.total} sessions reported`
-          : 'The suite has to tell us; the farm cannot see assertions'),
-      runStat('Build', runBuild(run),
-        run.buildCount > 1 ? 'The sessions did not agree' : 'Installed before each session'),
-      runStat('Sessions', h('span', { class: 'val tnum', text: String(run.sessions.total) }),
-        `${run.sessions.ended} ended, ${run.sessions.live} live`),
-      runStat('Started', h('span', { class: 'val',
-        text: run.firstSessionAt ? ago(run.firstSessionAt) : ago(run.createdAt) }),
-        when(run.firstSessionAt || run.createdAt)),
-      // SPAN, not duration. It is the gap between the first session and the last thing that
-      // happened, and a run has no end — so calling it a duration would invite reading it as one.
-      runStat('Span', h('span', { class: 'val tnum',
-        text: run.firstSessionAt ? duration(run.firstSessionAt, run.lastActivityAt) : '—' }),
-        'First session to last activity'),
-    ),
+  const failures = d.failures || [];
+  const incidents = d.incidents || [];
+  const started = run.firstSessionAt || run.createdAt;
+
+  return h('div', { class: 'page-narrow' },
+    /**
+     * BUILD AND START MOVED UP HERE (ADR-0041). They were two of the session table's eight columns
+     * and identical on every row of a run whose sessions agreed — a table that needed 760px to say
+     * the same thing eight times. The id stays in the sub-line: it is what somebody pastes into CI.
+     */
+    pageHead([{ label: 'Farm' }, { label: 'Runs', to: '#/runs' }], run.name || run.runId, null,
+      runVerdict(run),
+      h('p', { class: 'run-sub', text: [
+        run.name ? run.runId : null,
+        `${run.sessions.total} session${run.sessions.total === 1 ? '' : 's'}`,
+        `${run.sessions.live} still live`,
+        started ? `started ${ago(started)}` : null,
+        run.build
+          ? `${run.build.packageName}${run.build.versionName ? `@${run.build.versionName}` : ''}`
+          : run.buildCount > 1 ? `${run.buildCount} builds` : null,
+      ].filter(Boolean).join(' · ') })),
+
+    h('div', { class: 'factgrid' }, runFacts(run, started)),
     runPartialNote(run),
 
-    // Failures first, above the session list. The reason somebody opened this page is on this card,
-    // and each row carries the session that produced it — which is where its logcat and screenshot
-    // live. That link is the whole payoff of runs plus outcomes.
-    d.failures?.length
-      ? card(`Failures (${d.failures.length})`, { class: 'mb-gap' },
-          h('div', { class: 'stack' }, d.failures.map((f) => h('div', { class: 'stack tight' },
-            h('p', { class: 'row tight' },
-              pill('failed', 'bad'),
-              h('strong', { text: f.name }),
-              // What KIND of failure, when the suite said (spec §18). Absent when it did not, and
-              // absent is NOT the same as "the product's fault" — see `failureLabel`.
-              f.failureClass ? failureTag(f.failureClass, f.failureReason) : null,
-            ),
-            f.failure
-              ? h('pre', { class: 'failtext', text: f.failure })
-              : h('p', { class: 'caption', text: 'No message was reported with this failure.' }),
-            h('p', { class: 'row tight' },
-              h('span', { class: 'caption', text: 'Evidence:' }),
-              /**
-               * "WATCH" ONLY WHERE THERE IS SOMETHING TO WATCH (`hasVideo`, from the API).
-               *
-               * A button promising a recording that lands on an empty Evidence card is worse than
-               * the generic one it replaces. `#watch` is an INTENT, not a route: the session screen
-               * reads it, scrolls to the player and seeks to this failure. A screen that does not
-               * understand it simply opens normally, which is what an older tab does after a deploy.
-               */
-              f.hasVideo
-                ? btn('Watch the failure', 'tiny',
-                    () => go(`#/sessions/${f.sessionId}?watch=${encodeURIComponent(f.id)}`))
-                : btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
-              /**
-               * SHARE FROM HERE TOO, and this is the row it matters most on: the run screen is
-               * where somebody reads "eleven failures" and picks the one to ask about. Making them
-               * open the session first to find the button would be one navigation between reading a
-               * failure and sending it, which is the navigation that makes people paste a
-               * screenshot instead.
-               */
-              btn('Share', 'tiny ghost', () => shareDialog(f),
-                { title: 'A link that shows this one failure to somebody with no account here' }),
-            ),
-          ))))
-      : null,
-
     /**
-     * What the FARM saw, as its own card (spec §18).
-     *
-     * SEPARATE FROM THE FAILURES ABOVE, deliberately. Merging them would mean attaching each
-     * incident to whichever test happened to be running and calling that test infrastructure —
-     * a claim the farm cannot support, and wrong often enough to matter: a test can genuinely fail
-     * an assertion during a session that also had a cable glitch. Side by side, a person reads
-     * "eleven failures, and the phone dropped off USB twice" and draws their own conclusion.
-     *
-     * It renders even when there are no failures at all, because "nothing failed but the farm had
-     * three incidents" is a real and important state — it is a run that should be re-read with
-     * suspicion rather than trusted.
+     * FAILURES AND WHAT THE FARM SAW, SIDE BY SIDE (ADR-0041) — which is how the judgement is
+     * actually made. Stacked, you scrolled past eleven failures to learn the phone dropped off USB
+     * during them. They stay SEPARATE cards: attaching an incident to whichever test was running
+     * would be a claim the farm cannot support.
      */
-    d.incidents?.length
-      ? card(`What the farm saw (${d.incidents.length})`, { class: 'mb-gap' },
-          h('p', { class: 'help' },
-            'Problems MFARM detected with the device or the harness during this run. These are not '
-            + 'test failures, and they are not counted as any. A failure above that overlaps one of '
-            + 'these is worth re-running before it is believed.'),
-          h('div', { class: 'stack mt-md' }, d.incidents.map((i) => h('div', { class: 'row tight' },
-            failureTag(i.class, i.reason),
-            h('span', { class: 'caption mono', text: i.device || '—' }),
-            h('span', { class: 'caption', text: i.detail || FAILURE_REASON_LABEL[i.reason] || i.reason }),
-            h('span', { class: 'caption', text: ago(i.occurredAt) }),
-          ))))
+    failures.length || incidents.length
+      ? h('div', { class: `run-judge${failures.length && incidents.length ? '' : ' single'}` },
+          failures.length ? runFailuresCard(failures) : null,
+          incidents.length ? runFarmCard(incidents) : null)
       : null,
 
+    flakeCard(failures),
+
     /**
-     * WHAT HAPPENED, AND WHEN (migration 030, and 042 for the test lines).
-     *
-     * The events have been recorded and served since 2026-09-01 and no screen has ever rendered
-     * them — `AutomationExecutionPlan.md` §18 asks for exactly this, and `STATUS.md` has carried it
-     * as the one console screen the execution model still wanted.
-     *
-     * RED IS RESERVED, and the reservation is the point. `test-failed` is `bad`; an `incident` is
-     * `warn`. The run screen already refuses to conflate a test failing with the farm having a
-     * problem — the two cards above are side by side for that reason — and a timeline that painted
-     * both red would undo that distinction in the one place a reader scans fastest.
+     * WHAT HAPPENED, AND WHEN (migration 030, and 042 for the test lines). Red is reserved: a
+     * `test-failed` is `bad`, an `incident` is `warn`, for the same reason the two cards above are
+     * separate.
      */
     d.events?.length
-      ? card('What happened', { class: 'mb-gap' },
+      ? card('What happened', {},
           h('p', { class: 'help' },
             'Every state change this run went through, in order. Red is a test the suite reported '
             + 'as failed; amber is a problem the farm had.'),
           h('div', { class: 'mt-md' }, timeline(d.events.map(runEventLine))))
       : null,
 
-    card('Sessions', { class: 'flush' },
-      d.sessions.length
-        ? h('div', { class: 'tablewrap' }, h('table', { class: 'table wide' },
-            h('thead', null, h('tr', null,
-              ['State', 'Test', 'Tests', 'Device', 'Build', 'Started', 'Duration', ''].map((t) => h('th', { text: t })))),
-            h('tbody', null, d.sessions.map((sn) => {
-              const st = SESSION_STATE[sn.state] || { label: sn.state, tone: '' };
-              const open = !!state.runTests[sn.id]?.open;
-              return [h('tr', null,
-                h('td', null, pill(st.label, st.tone, { live: sn.state === 'ACTIVE' })),
-                /**
-                 * WHAT THIS SESSION IS, not what it is called — `mfarm:name` (migration 048).
-                 *
-                 * This column was the session uuid, which is the one fact on the row nobody is
-                 * looking for: on a run of eight it read as eight identical rows, and "which phone
-                 * is on the OTP scenario" had no answer until every session had ended and posted a
-                 * result. The id stays underneath, because it is what the API and the artifact
-                 * index are keyed on.
-                 */
-                h('td', null, sn.name
-                  ? h('span', { class: 'stack none' },
-                      h('span', { class: 'fleet-name', text: sn.name }),
-                      h('code', { class: 'caption', text: short(sn.id) }))
-                  : h('code', { text: sn.id })),
-                /**
-                 * THE COUNT IS A CONTROL NOW, and only where there is something behind it.
-                 *
-                 * `PASSED 5/5` used to be the end of the road: five tests ran, five were counted,
-                 * and none of their names existed anywhere in this console. Pressing it fetches
-                 * the session's own results and folds them out underneath — see
-                 * `sessionTestsRow`. A session with no reported tests stays inert text, because a
-                 * button that opens an empty drawer is worse than no button.
-                 */
-                h('td', null, sn.tests?.total
-                  ? h('button', {
-                      class: 'linkish row tight',
-                      type: 'button',
-                      'aria-expanded': open ? 'true' : 'false',
-                      title: open ? 'Hide these tests' : 'Show what this session ran, by name',
-                      onclick: () => toggleSessionTests(sn.id),
-                    },
-                      sn.tests.failed > 0
-                        ? pill(`${sn.tests.failed} failed`, 'bad')
-                        : pill('passed', 'ok'),
-                      h('span', { class: 'caption tnum', text: `${sn.tests.passed}/${sn.tests.total}` }),
-                      // A caret, not a word: the column is narrow and the control has to read as
-                      // expandable at a glance rather than after the label is read.
-                      h('span', { class: `caret ${open ? 'open' : ''}`.trim(), text: '\u203a' }))
-                  : h('span', { class: 'caption', text: 'Not reported' })),
-                h('td', { text: sn.device || '—' }),
-                h('td', null, sn.build
-                  ? h('code', { text: `${sn.build.packageName}${sn.build.versionName ? `@${sn.build.versionName}` : ''}` })
-                  : h('span', { class: 'caption', text: '—' })),
-                h('td', { class: 'caption', text: sn.startedAt ? ago(sn.startedAt) : ago(sn.createdAt),
-                  title: when(sn.startedAt || sn.createdAt) }),
-                h('td', null, sn.startedAt && !sn.endedAt
-                  ? ticker('since', sn.startedAt)
-                  : h('span', { class: 'tnum', text: duration(sn.startedAt, sn.endedAt) })),
-                h('td', { class: 'right' }, btn('Open', 'tiny ghost', () => go(`#/sessions/${sn.id}`))),
-              ),
-              // Eight columns, spelled as a number the header already fixes. `add()` flattens the
-              // pair, and a null second element is dropped rather than becoming an empty row.
-              sessionTestsRow(sn.id, 8)];
-            })),
-          ))
-        : empty('This run has no sessions.',
-            'It was named by a session that never got a device — every one of its allocations failed.'),
-    ),
+    runSessionsCard(d, failures),
+  );
+}
+
+/** The run's outcome as one pill beside its name. Unreported is never drawn as a pass. */
+function runVerdict(run) {
+  const t = run.tests || {};
+  if (!t.total) {
+    return pill('Not reported', '', { dot: false,
+      title: 'Your suite has not reported any outcomes. The farm does not run your tests and cannot judge them.' });
+  }
+  return t.failed > 0
+    ? pill(`${t.failed} of ${t.total} tests failed`, 'bad')
+    : pill(`all ${t.total} tests passed`, 'ok');
+}
+
+function runFact(label, value, note, tone = '') {
+  return h('div', { class: `fact ${tone}`.trim() },
+    h('p', { class: 'micro', text: label }),
+    h('p', { class: 'fact-v tnum', text: value }),
+    note ? h('p', { class: 'caption', text: note }) : null,
+  );
+}
+
+/**
+ * The strip. DEVICE MINUTES carries the backend's cost sentence VERBATIM (ADR-0039): the rate is per
+ * HOST and a host carries several devices, so the note says what share was taken — the console
+ * does no arithmetic of its own on money.
+ */
+function runFacts(run, started) {
+  const t = run.tests || {};
+  const cost = run.cost;
+  const symbol = cost ? ((cost.note.match(/([^\s\d.,≈]+)\d/) || [])[1] || '') : '';
+  return [
+    runFact('Tests', !t.total ? '—' : t.failed ? `${t.failed} failed` : 'passed',
+      t.total
+        ? `${t.passed} of ${t.total} passed${t.skipped ? `, ${t.skipped} skipped` : ''}`
+        : 'The suite has to tell us; the farm cannot see assertions',
+      t.failed ? 'bad' : ''),
+    runFact('Sessions', String(run.sessions.total), `${run.sessions.ended} ended, ${run.sessions.live} live`),
+    runFact('Build',
+      run.build ? (run.build.versionName || run.build.packageName) : run.buildCount > 1 ? `${run.buildCount} builds` : '—',
+      run.buildCount > 1 ? 'The sessions did not agree' : run.build ? run.build.packageName : 'Nothing was installed by the farm'),
+    // SPAN, not duration: first session to last activity. A run has no end.
+    runFact('Span', started ? duration(started, run.lastActivityAt) : '—', 'First session to last activity'),
+    run.deviceMinutes === undefined || run.deviceMinutes === null ? null
+      : runFact('Device minutes', String(run.deviceMinutes),
+          cost
+            ? `≈ ${symbol}${Math.round(cost.inr).toLocaleString()} · ${cost.note.replace(/^≈\s*/, '')}`
+            : 'No hourly rate is configured, so no cost is shown',
+          'warn'),
   ];
+}
+
+function runFailuresCard(failures) {
+  return card(`Failures (${failures.length})`, { class: 'judge-fail' },
+    h('div', { class: 'stack' }, failures.map((f) => h('div', { class: 'stack tight failitem' },
+      h('p', { class: 'row tight' },
+        h('strong', { text: f.name }),
+        // What KIND of failure, when the suite said. Absent is NOT "the product's fault".
+        f.failureClass ? failureTag(f.failureClass, f.failureReason) : null,
+      ),
+      f.failure
+        ? h('pre', { class: 'failtext', text: f.failure })
+        : h('p', { class: 'caption', text: 'No message was reported with this failure.' }),
+      h('p', { class: 'row tight' },
+        /**
+         * "WATCH" ONLY WHERE THERE IS SOMETHING TO WATCH (`hasVideo`, from the API). `#watch` is an
+         * INTENT: the cockpit opens on Evidence and seeks to this failure.
+         */
+        f.hasVideo
+          ? btn('Watch the failure', 'tiny primary',
+              () => go(`#/sessions/${f.sessionId}?watch=${encodeURIComponent(f.id)}`))
+          : btn('Open the session', 'tiny ghost', () => go(`#/sessions/${f.sessionId}`)),
+        btn('Share link', 'tiny ghost', () => shareDialog(f),
+          { title: 'A link that shows this one failure to somebody with no account here' }),
+      ),
+      f.history ? h('p', { class: 'caption', text: historyLine(f.history) }) : null,
+    ))),
+  );
+}
+
+function runFarmCard(incidents) {
+  return card(`What the farm saw (${incidents.length})`, { class: 'judge-farm' },
+    h('p', { class: 'help' },
+      'Problems MFARM detected with the device or the harness. These are not test failures — but a '
+      + 'failure that overlaps one is worth re-running before you believe it.'),
+    h('div', { class: 'stack mt-md' }, incidents.map((i) => h('div', { class: 'row tight' },
+      failureTag(i.class, i.reason),
+      h('span', { class: 'caption mono', text: i.device || '—' }),
+      h('span', { class: 'caption', text: i.detail || FAILURE_REASON_LABEL[i.reason] || i.reason }),
+      h('span', { class: 'caption', text: ago(i.occurredAt) }),
+    ))),
+  );
+}
+
+/** "also failed in 6 of the other 19 runs" — the other runs, because this one is the failure. */
+function historyLine(history) {
+  const others = (history.runs || []).filter((r) => !r.current);
+  if (!others.length) return 'The first run to report this test — there is nothing to compare it with yet.';
+  const failed = others.filter((r) => r.outcome === 'failed').length;
+  return failed
+    ? `Also failed in ${failed} of the other ${others.length} run${others.length === 1 ? '' : 's'} that reported it.`
+    : `Passed in all ${others.length} other run${others.length === 1 ? '' : 's'} that reported it.`;
+}
+
+/**
+ * A PLAIN VERDICT FOR A STRIP OF DOTS (ADR-0039). A test that alternates is telling you something
+ * different from one that just broke, and a person should not have to count cells to tell which.
+ *
+ * "Other runs", never "earlier": opened weeks later, the run being viewed sits in the OLDEST slot
+ * and most of the others are after it.
+ */
+export function flakeVerdict(history) {
+  const runs = history?.runs || [];
+  const others = runs.filter((r) => !r.current);
+  const otherFails = others.filter((r) => r.outcome === 'failed').length;
+  const fails = runs.filter((r) => r.outcome === 'failed').length;
+  if (!others.length) return { tone: '', text: 'nothing to compare yet' };
+  if (otherFails === 0) return { tone: 'bad', text: `newly broken — the other ${others.length} passed` };
+  if (otherFails === others.length) return { tone: 'bad', text: `failing every time — ${fails} of ${runs.length} runs` };
+  return { tone: 'warn', text: `flaky — fails about 1 run in ${Math.max(2, Math.round(runs.length / fails))}` };
+}
+
+function flakeCard(failures) {
+  const seen = new Set();
+  const rows = failures.filter((f) => f.history?.runs?.length && !seen.has(f.name) && seen.add(f.name));
+  if (!rows.length) return null;
+  const most = Math.max(...rows.map((f) => f.history.runs.length));
+  return card(`Across the last ${most} run${most === 1 ? '' : 's'}`, {},
+    h('p', { class: 'help', text: 'Same test name, same organisation, one dot per run — a run that failed and then passed on retry counts as a failure, because that is the pattern worth seeing.' }),
+    h('div', { class: 'stack mt-md' }, rows.map((f) => {
+      const v = flakeVerdict(f.history);
+      return h('div', { class: 'flakerow' },
+        h('span', { class: 'flakename', text: f.name }),
+        h('span', {
+          class: 'flakestrip', role: 'img',
+          'aria-label': `${f.history.failedCount} failed of ${f.history.runs.length} runs`,
+        }, f.history.runs.map((r) => h('span', {
+          class: `flakecell ${r.outcome === 'failed' ? 'fail' : 'pass'}${r.current ? ' now' : ''}`,
+          title: `${r.name || r.runId} · ${r.outcome}${r.current ? ' · this run' : ''} · ${ago(r.at)}`,
+        }))),
+        // A word beside the colour, always: the strip alone is colour-only.
+        h('span', { class: v.tone ? `flakeverdict ${v.tone}-text` : 'flakeverdict caption', text: v.text }),
+      );
+    })),
+  );
+}
+
+/**
+ * FOUR COLUMNS, NOT EIGHT (ADR-0041). Build and start went to the header; the session's name and id
+ * went INTO the tests cell, which is where a multi-test session now names what it ran.
+ */
+function runSessionsCard(d, failures) {
+  const failedBySession = new Map();
+  for (const f of failures) {
+    if (!failedBySession.has(f.sessionId)) failedBySession.set(f.sessionId, []);
+    failedBySession.get(f.sessionId).push(f);
+  }
+  return card('Sessions', { class: 'flush' },
+    d.sessions.length
+      ? h('div', { class: 'tablewrap' }, h('table', { class: 'table runsessions' },
+          h('thead', null, h('tr', null,
+            ['State', 'Tests in this session', 'Device', 'Duration', ''].map((t) => h('th', { text: t })))),
+          h('tbody', null, d.sessions.map((sn) => {
+            const st = SESSION_STATE[sn.state] || { label: sn.state, tone: '' };
+            const live = LIVE_SESSION_STATES.has(sn.state);
+            const device = deviceById(sn.deviceId);
+            return h('tr', null,
+              // The outcome where there is one; the session's own state where the suite said nothing.
+              h('td', null, live ? pill(st.label, st.tone, { live: sn.state === 'ACTIVE' })
+                : sn.tests?.failed ? pill('Failed', 'bad')
+                  : sn.tests?.total ? pill('Passed', 'ok')
+                    : pill(st.label, st.tone)),
+              h('td', null, sessionTestsCell(sn, failedBySession.get(sn.id) || [])),
+              // Named by what it is, never the worker's local handle.
+              h('td', { text: device ? deviceName(device) : (sn.device || '—') }),
+              h('td', null, sn.startedAt && !sn.endedAt
+                ? ticker('since', sn.startedAt)
+                : h('span', { class: 'tnum', text: duration(sn.startedAt, sn.endedAt) })),
+              h('td', { class: 'right' }, btn('Open', 'tiny ghost', () => go(`#/sessions/${sn.id}`))),
+            );
+          })),
+        ))
+      : empty('This run has no sessions.',
+          'It was named by a session that never got a device — every one of its allocations failed.'),
+  );
+}
+
+/**
+ * THE TESTS A SESSION RAN, NAMED IN ITS ROW.
+ *
+ * Failed tests are named straight away: the run already carries them. Passed ones cost a request per
+ * session, so the count is a control that unfolds them — a run of a hundred sessions must not fire a
+ * hundred fetches to draw a table. A session that reported nothing says so rather than offering a
+ * drawer that opens onto nothing.
+ */
+function sessionTestsCell(sn, failed) {
+  const t = state.runTests[sn.id];
+  const open = !!t?.open;
+  const line = (status, name) => h('span', { class: 'row tight testline' },
+    h('span', { class: `dot ${status === 'failed' ? 'bad' : status === 'skipped' ? 'warn' : 'ok'}` }),
+    h('span', { class: status === 'failed' ? 'bad-text' : null, text: name || 'unnamed test' }));
+
+  const names = open
+    ? (t.loading ? h('p', { class: 'caption', text: 'Loading…' })
+      : t.error ? h('p', { class: 'bad-text caption', text: `These could not be read: ${t.error}` })
+        : t.items.length ? t.items.map((r) => line(r.status, r.name))
+          : h('p', { class: 'caption', text:
+              'This session reported no tests. The count beside it comes from the run’s rollup, '
+              + 'so a session showing one here has had its results removed.' }))
+    : failed.length ? failed.map((f) => line('failed', f.name))
+      : sn.name ? h('span', { class: 'fleet-name', text: sn.name })
+        : null;
+
+  const control = sn.tests?.total
+    ? h('button', {
+        class: 'linkish row tight', type: 'button',
+        'aria-expanded': open ? 'true' : 'false',
+        title: open ? 'Hide these tests' : 'Name every test this session ran',
+        onclick: () => toggleSessionTests(sn.id),
+      },
+        h('span', { class: 'caption tnum', text: `${sn.tests.passed}/${sn.tests.total}` }),
+        h('span', { class: 'caption', text: open ? 'hide' : 'show all' }),
+        h('span', { class: `caret ${open ? 'open' : ''}`.trim(), text: '›' }))
+    : h('span', { class: 'caption', text: 'Not reported' });
+
+  return h('div', { class: 'stack none testcell' }, names, control, h('code', { class: 'caption', text: short(sn.id) }));
 }
 
 
