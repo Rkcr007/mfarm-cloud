@@ -25,6 +25,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { installDom, countElements, classesOf, textOf, findByClass, findByText } from './dom-shim.ts';
+/**
+ * The hub's own capability allow-list, imported so the console cannot document a different one.
+ *
+ * Pure — it parses capability bags and touches neither the database nor the server — so this file
+ * stays a DOM-only suite despite reaching into `src/`.
+ */
+import { MFARM_KEYS } from '../src/http/webdriver/capabilities.ts';
 
 const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -278,6 +285,35 @@ function seed(route: { name: string; id?: string | null; lens?: string }) {
      * that skips navigation.
      */
     lens: route.lens ?? 'capacity',
+    /**
+     * The organisation, LOADED — same trap as `pair` and `infra` above.
+     *
+     * Without this `orgGate()` returns its skeleton, Settings and Team render the word "Loading",
+     * and every assertion about either page passes against an empty screen. Three keys, because the
+     * three states are the whole point of that card: one that works, one somebody revoked, and one
+     * the clock retired.
+     */
+    org: {
+      loaded: true, newKey: null, newKeyLabel: null, retiredKeys: false, snippetLang: 'wdio',
+      members: [
+        { email: 'someone@mfarm.local', role: 'admin', lastSeenAt: new Date().toISOString() },
+        { email: 'other@mfarm.local', role: 'member', lastSeenAt: null },
+      ],
+      keys: [
+        { prefix: 'mfk_live', label: 'gha-nightly', scope: 'automation',
+          createdAt: new Date(Date.now() - 86_400_000).toISOString(), createdBy: 'someone@mfarm.local',
+          revokedAt: null, expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+          expired: false, lastUsedAt: new Date().toISOString() },
+        { prefix: 'mfk_gone', label: 'laptop-old', scope: 'automation',
+          createdAt: new Date(Date.now() - 8 * 86_400_000).toISOString(), createdBy: 'someone@mfarm.local',
+          revokedAt: new Date(Date.now() - 3600_000).toISOString(), expiresAt: null,
+          expired: false, lastUsedAt: null },
+        { prefix: 'mfk_stale', label: 'contractor-2025', scope: 'full',
+          createdAt: new Date(Date.now() - 400 * 86_400_000).toISOString(), createdBy: null,
+          revokedAt: null, expiresAt: new Date(Date.now() - 86_400_000).toISOString(),
+          expired: true, lastUsedAt: null },
+      ],
+    },
     error: null,
   });
   return { device, session };
@@ -335,6 +371,9 @@ describe('screens survive an empty farm', () => {
     test(`${name} renders with nothing in it`, () => {
       seed({ name });
       Object.assign(mod.state, { devices: [], available: 0, sessions: [], apps: [], actions: [], runs: [], runDetail: null, detail: null, held: null });
+      // Emptied in place: `state.org` carries view state (`retiredKeys`, `snippetLang`) that
+      // replacing the object would drop, and the screen reads both.
+      Object.assign(mod.state.org, { members: [], keys: [] });
       assert.ok(countElements(mod.SCREENS[name]()) > 0, `${name} produced no elements when empty`);
     });
   }
@@ -5222,5 +5261,166 @@ describe('retiring a machine that is not coming back', () => {
     data.hosts = [{ ...data.hosts[0], reachability: 'unavailable', power: 'unknown', powerable: false }];
     mod.state.infra.data = data;
     assert.ok(!findByText(mod.SCREENS.infra(), 'Retire'));
+  });
+});
+
+/**
+ * SETTINGS — the page a new key is minted on, and the page that used to contradict its own heading.
+ *
+ * Two defects, both visible on the deployed console on 2026-09-13 and both about the same thing:
+ * the screen described a state it was not in.
+ *
+ *   "1 active API key" over four rows   Every key the org had ever held was drawn in one flat list
+ *                                       with a word on it, so rotation — the activity this card
+ *                                       exists to make possible — made the card harder to read
+ *                                       every time somebody did it.
+ *   an expired key counted as active    `authenticate()` returns null for an expired key exactly
+ *                                       as it does for nonsense. It authenticates nothing, and the
+ *                                       heading counted it anyway.
+ */
+describe('the API keys card', () => {
+  test('the heading counts only the keys that authenticate', () => {
+    seed({ name: 'settings' });
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /1 active API key(?!s)/,
+      'one of the three keys works; the other two are revoked and expired');
+    assert.doesNotMatch(text, /[23] active API keys/);
+  });
+
+  test('a key that no longer works is folded away, and the button says how many', () => {
+    seed({ name: 'settings' });
+    const tree = mod.SCREENS.settings();
+    const text = textOf(tree);
+    assert.match(text, /gha-nightly/, 'the working key is the one the page is about');
+    assert.doesNotMatch(text, /laptop-old/, 'a revoked key is not in the list by default');
+    assert.doesNotMatch(text, /contractor-2025/, 'an expired key is not in the list by default');
+    assert.ok(findByText(tree, 'Show 1 revoked and 1 expired'),
+      'a disclosure that does not say how much is behind it is a control you press to find out');
+  });
+
+  /**
+   * EXPIRY ALONE FOLDS A KEY, which is the half a `!k.revokedAt` filter passes.
+   *
+   * The first fix here filtered on `revokedAt` only — the page then still drew a key the hub
+   * refuses among the ones it accepts, and still counted it in the heading. So the fixture for this
+   * one has nothing revoked in it at all.
+   */
+  test('a key the clock retired is folded away too, not just one somebody revoked', () => {
+    seed({ name: 'settings' });
+    mod.state.org.keys = mod.state.org.keys.filter((k: { revokedAt: string | null }) => !k.revokedAt);
+    const tree = mod.SCREENS.settings();
+    assert.match(textOf(tree), /1 active API key(?!s)/);
+    assert.doesNotMatch(textOf(tree), /contractor-2025/);
+    assert.ok(findByText(tree, 'Show 1 expired'), 'the button names expiry, not revocation');
+  });
+
+  test('pressing the disclosure shows them, through the element rather than the handler', () => {
+    seed({ name: 'settings' });
+    const control = findByText(mod.SCREENS.settings(), 'Show 1 revoked and 1 expired');
+    assert.equal(control.click(), 1, 'exactly one handler — a disclosure wired to nothing fires zero');
+
+    const after = mod.SCREENS.settings();
+    assert.match(textOf(after), /laptop-old/);
+    assert.match(textOf(after), /contractor-2025/);
+    assert.ok(findByText(after, 'Hide 1 revoked and 1 expired'), 'the control folds them back');
+  });
+
+  test('an org whose every key is dead is told that, rather than shown an empty card', () => {
+    seed({ name: 'settings' });
+    mod.state.org.keys = mod.state.org.keys.filter((k: { expired: boolean; revokedAt: string | null }) =>
+      k.expired || k.revokedAt);
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /0 active API keys/);
+    assert.match(text, /Nothing here authenticates/);
+    assert.match(text, /Every key this organisation holds is 1 revoked and 1 expired/);
+  });
+});
+
+/**
+ * CONNECTING A SUITE — the first wall a new user hits.
+ *
+ * Settings printed the hub URL and the sentence about Basic auth, and that is exactly as far as a
+ * reader got: the next question is what a capability bag looks like, and the answer lived in three
+ * example directories in a repository the customer does not have.
+ *
+ * What these protect is the part a README cannot do — the snippet is filled in from THIS farm — and
+ * the part every example suite had to get wrong first, which is where the credential goes.
+ */
+describe('connecting a suite', () => {
+  test('the snippet points at this farm, not at an example hostname', () => {
+    seed({ name: 'settings' });
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /farm\.test/, 'the console knows its own origin and a README does not');
+    assert.match(text, /\/wd\/hub/);
+    assert.match(text, /'mfarm:region'/);
+  });
+
+  test('the region is read off the fleet rather than hardcoded', () => {
+    const { device } = seed({ name: 'settings' });
+    device.region = 'eu-west';
+    assert.match(textOf(mod.SCREENS.settings()), /'mfarm:region': 'eu-west'/,
+      'a snippet naming a pool this farm does not have teaches the reader something false');
+  });
+
+  test('with no devices to read, the region is a placeholder that says so', () => {
+    seed({ name: 'settings' });
+    mod.state.devices = [];
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /'mfarm:region': 'your-region'/);
+    assert.match(text, /no devices registered yet/);
+  });
+
+  /**
+   * THE TRAP EVERY EXAMPLE SUITE HIT. WebdriverIO's `user`/`key` only become an Authorization
+   * header for hostnames it recognises as cloud providers, and several HTTP stacks drop
+   * `https://key@host/…` userinfo — the farm then answers "Missing or invalid credentials" for a
+   * request that looked correct. A snippet that omits this is a snippet that costs an afternoon.
+   */
+  test('the JavaScript snippet sets the credential as a header, and says why', () => {
+    seed({ name: 'settings' });
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /headers: \{ authorization/);
+    assert.match(text, /cloud\s*\n?\s*\/\/ providers|recognises as cloud/);
+  });
+
+  test('picking another client changes the snippet, through the button', () => {
+    seed({ name: 'settings' });
+    const control = findByText(mod.SCREENS.settings(), 'Python');
+    assert.ok(control, 'every client the examples cover is offered');
+    assert.equal(control.click(), 1, 'a picker wired to nothing fires zero');
+
+    const text = textOf(mod.SCREENS.settings());
+    assert.match(text, /UiAutomator2Options/);
+    assert.doesNotMatch(text, /import \{ remote \} from 'webdriverio'/);
+  });
+
+  test('every client offered builds a snippet, including the one nobody clicks', () => {
+    for (const lang of ['wdio', 'python', 'java']) {
+      seed({ name: 'settings' });
+      mod.state.org.snippetLang = lang;
+      const text = textOf(mod.SCREENS.settings());
+      assert.match(text, /mfarm:region/, `${lang} produced no capability bag`);
+      assert.match(text, /mfarm-status/, `${lang} never tells the farm how the test went`);
+    }
+  });
+
+  /**
+   * The console's capability table and the hub's allow-list are ONE list in two files, so it is
+   * asserted rather than maintained. A capability the hub gained and this table did not is a
+   * feature nobody is told about; one the hub dropped and the table kept is worse — an instruction
+   * the console promises and `parseCapabilities` refuses.
+   */
+  test('the capability table names exactly what the hub accepts', () => {
+    const documented = mod.HUB_CAPABILITIES.map(([name]: [string, string]) => name);
+    assert.deepEqual([...documented].sort(), [...MFARM_KEYS].sort());
+    for (const [, what] of mod.HUB_CAPABILITIES) {
+      assert.ok(what.length > 20, 'every capability is said in a sentence, not named and left');
+    }
+  });
+
+  test('the table is on the page, not merely exported', () => {
+    seed({ name: 'settings' });
+    const text = textOf(mod.SCREENS.settings());
+    for (const name of MFARM_KEYS) assert.match(text, new RegExp(`mfarm:${name}\\b`));
   });
 });

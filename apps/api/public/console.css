@@ -535,6 +535,35 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
 }
 .copyrow code::-webkit-scrollbar { display: none; }
 
+/*
+ * A block somebody is going to paste into their own suite.
+ *
+ * SCROLLS, NEVER WRAPS. A wrapped line of code changes what the code appears to say — an
+ * indentation level that is really a soft wrap is how a person ends up debugging their own eyes —
+ * so the overflow goes sideways in its own box and the page body never moves with it.
+ *
+ * `user-select` is left alone rather than set to `all` the way `.keyplain` does. A key is copied
+ * whole or not at all; a snippet is read, and a reader wants to select the one line they are
+ * changing. The Copy button beside it covers the whole-block case.
+ */
+.snippet {
+  margin: 0;
+  overflow-x: auto;
+  padding: 11px 12px;
+  border-radius: var(--r-md, 9px);
+  background: var(--s-inset, #050506);
+  border: 1px solid var(--b-field, #242427);
+  font-family: var(--f-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--t-body, #D4D4D4);
+  white-space: pre;
+  tab-size: 2;
+}
+/* The comments carry the traps — each one is a mistake somebody already made — so they are toned
+   down rather than greyed out of legibility, which is what a syntax theme does to them. */
+.snippet .cmt { color: var(--t-caption, #6A6A6A); }
+
 /**
  * Buttons. Three variants and no more: primary, secondary, destructive.
  *

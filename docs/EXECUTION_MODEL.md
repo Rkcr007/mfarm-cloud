@@ -51,8 +51,13 @@ on the device host; the two are mutually exclusive and the hub refuses both rath
 
 The recognised vendor namespace is now: `mfarm:region`, `mfarm:tier`, `mfarm:ttlMinutes`,
 `mfarm:sessionId`, `mfarm:queueTimeoutSeconds`, `mfarm:appId`, `mfarm:runId`, `mfarm:runName`,
-`mfarm:name`, `mfarm:deviceClass`. Anything else under the `mfarm:` prefix is **refused** — that
-rule was documented below before it was true, and is now enforced.
+`mfarm:name`, `mfarm:deviceClass`, `mfarm:tunnel`. Anything else under the `mfarm:` prefix is
+**refused** — that rule was documented below before it was true, and is now enforced.
+
+That list is also printed in the console, on Settings, one line per capability — and
+`console-screens.test.ts` asserts the console's table and the hub's `MFARM_KEYS` name the same set,
+so neither can drift from the other. This paragraph still can: `mfarm:tunnel` was missing from it
+for the whole of migration 052's life.
 
 ### Which sessions belong together?
 

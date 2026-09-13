@@ -55,21 +55,25 @@ off between sessions, and the console now says so rather than reporting it as si
 | Manual testing | **Partial** | A "No build" payload mode, locale, and a tunnel to a private staging host (migration 052). | iOS, mobile-browser URL sessions, geolocation. |
 | App library | **Mostly open** | `GET /v1/apps?package=` groups by package; install history is readable through `/v1/app-actions`. | URL upload, IPA and AAB, deletion (there is no `DELETE /apps/:id`), labels, visibility controls. |
 
-### P2 — one partial, two open
+### P2 — two partial, one mostly open
 
 | Gap | Status | Built | Still missing |
 |---|---|---|---|
 | Usage and billing | **Partial** | `GET /v1/account/usage` (`account.ts:146`) meters consumption by day, drawn on Health; `GET /v1/hosts` echoes the hourly rate and currency. | Per-team and per-device cost summaries, export, queue-versus-billed reconciliation. |
 | Organisation controls | **Mostly open** | A fleet-operator role and an append-only operations log (053) — but scoped to infrastructure, not to the tenant. | Teams, projects, quotas, budgets, SSO/MFA, a tenant-facing audit log. |
-| Onboarding and integrations | **Open** | Nothing. There are no capability snippets in the console and no webhook of any kind. | Capability builder, framework snippets, SDK examples, webhooks, CI integrations. |
+| Onboarding and integrations | **Partial** | Settings carries a **Connect your suite** card — a copy-ready snippet in WebdriverIO, Python and Java, with this farm's own origin and region filled in — plus every `mfarm:` capability the hub takes, one line each and pinned to the hub's allow-list by a test. | Webhooks, CI integrations, an interactive capability builder. |
 
 ### What this leaves as the real next slice
 
 The review's own sequence, corrected for what shipped: step 1 is done, step 2 is two thirds done
 (test rows and video are in; the network log, UI hierarchy and artifact search are not), and the
-largest genuinely untouched surfaces are **app lifecycle** (delete, AAB/IPA, URL upload) and
-**onboarding** (snippets, webhooks) — the second of which is the cheapest thing on this page and the
-one a new user hits first.
+largest genuinely untouched surface is **app lifecycle** (delete, AAB/IPA, URL upload).
+
+**Onboarding was the other one, and its cheapest half shipped on 13 September 2026.** The snippets
+are in the console; what is left under that heading is webhooks and CI integrations, which are a
+different and larger piece of work. The three example suites in `examples/` were already runnable
+before this — the gap was never that MFARM had no answer, it was that the answer lived in a
+repository the customer does not have.
 
 One correction to the review's P0 prose: it reports that "the Health page also states that host
 heartbeat and host state have no console read endpoint". That sentence was true when written and is
