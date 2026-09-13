@@ -945,6 +945,41 @@ function clearToast(key) {
 
 let dialogOpen = false;
 
+/**
+ * OVERLAYS GIVE FOCUS BACK, AND KEEP IT WHILE OPEN (ADR-0041).
+ *
+ * A keyboard user who opened Share from a failure row and pressed Escape used to land on <body>,
+ * at the top of the page, and had to Tab back through everything to find the row. The opener is
+ * remembered on the way in and focused on the way out; while an overlay is open, Tab cycles inside it
+ * rather than wandering into the page underneath the scrim.
+ */
+let overlayOpener = null;
+
+function rememberOpener() {
+  if (!overlayOpener) overlayOpener = document.activeElement;
+}
+
+function openedDialog() {
+  rememberOpener();
+  dialogOpen = true;
+}
+
+function trapFocus(e) {
+  const box = !$('dialog').hidden ? $('dialog') : !$('palette').hidden ? $('palette') : null;
+  if (!box) return false;
+  const stops = [...box.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea, a[href]')];
+  if (!stops.length) return false;
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  const at = document.activeElement;
+  if (!box.contains(at) || (e.shiftKey && at === first) || (!e.shiftKey && at === last)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+    return true;
+  }
+  return false;
+}
+
 /** Never `confirm()`: a modal dialog blocks the page, and this console polls behind it. */
 function confirmDialog({
   title, lead, removes, removesLabel = 'This will remove', keeps,
@@ -980,7 +1015,7 @@ function confirmDialog({
   );
   d.hidden = false;
   $('scrim').hidden = false;
-  dialogOpen = true;
+  openedDialog();
   d.querySelector('.btn.ghost')?.focus();
 }
 
@@ -1005,7 +1040,7 @@ function formDialog({ title, lead, fields, submit, onSubmit }) {
   );
   d.hidden = false;
   $('scrim').hidden = false;
-  dialogOpen = true;
+  openedDialog();
   // Focus the first thing a person has to type into, not the cancel button.
   (d.querySelector('input:not([disabled])') || d.querySelector('.btn.ghost'))?.focus();
 }
@@ -1019,9 +1054,14 @@ function formDialog({ title, lead, fields, submit, onSubmit }) {
  */
 export function closeOverlays() {
   $('dialog').hidden = true;
+  delete $('dialog').dataset.kind;
   $('palette').hidden = true;
   $('scrim').hidden = true;
   dialogOpen = false;
+  const back = overlayOpener;
+  overlayOpener = null;
+  // Only if it is still on the page: a confirm that navigated has replaced the row that opened it.
+  if (back?.isConnected && typeof back.focus === 'function') back.focus({ preventScroll: true });
 }
 
 $('scrim').addEventListener('click', closeOverlays);
@@ -6633,11 +6673,38 @@ export function toggleSessionTests(sessionId) {
  * three already circulating, which is the entire argument for `views` and `Revoke` being on this
  * surface and not on a settings page nobody opens.
  */
+/**
+ * The longest a share may last. MUST equal `MAX_SHARE_DAYS` in `src/shares.ts` — the API refuses
+ * anything longer, and `console-screens.test.ts` reads that file to hold the two together.
+ */
+export const SHARE_MAX_DAYS = 30;
+
+/**
+ * SHARE A FAILURE (ADR-0036, as amended by ADR-0040).
+ *
+ * THE LINK CARRIES THE RECORDING AND THE LOGCAT BY DEFAULT — the product owner's choice, and the
+ * reason both boxes say what they widen. The recording covers the whole session, not only this test;
+ * the log is the one artifact nobody curated, and apps print tokens into it. Unticking is one click,
+ * and the sentence at the top changes as you do, so what is sent is always what is described.
+ *
+ * NOTHING IS MINTED UNTIL "CREATE LINK". A dialog that made a credential on open would leave a live
+ * link behind every accidental press of Share.
+ */
 export function shareDialog(result) {
   const d = $('dialog');
+  d.dataset.kind = 'share';
   // Per-dialog, deliberately not in `state`: nothing outside this dialog reads it, and a token in
   // module state would outlive the dialog that showed it.
-  const view = { loading: true, shares: [], made: null, days: 7, error: null, busy: false };
+  const view = {
+    loading: true, shares: [], made: null, error: null, busy: false,
+    recording: true, logcat: true, week: false,
+  };
+
+  const carries = (v) => [
+    'the failure message, the step that broke and the screenshot',
+    v.recording ? 'the recording' : null,
+    v.logcat ? 'the full device log' : null,
+  ].filter(Boolean).join(', ').replace(/, ([^,]*)$/, ' and $1');
 
   const load = async () => {
     try {
@@ -6653,14 +6720,15 @@ export function shareDialog(result) {
   const create = async () => {
     view.busy = true; draw();
     try {
-      /**
-       * THE TOKEN COMES BACK ONCE AND IS HELD IN `view.made` FOR AS LONG AS THIS DIALOG IS OPEN.
-       * Nothing fetches it again, because nothing can: only a sha256 is stored. Closing the dialog
-       * without copying means making another link and revoking this one, which is stated on screen
-       * rather than left to be discovered.
-       */
-      view.made = await api(`/v1/results/${encodeURIComponent(result.id)}/shares`,
-        { method: 'POST', body: { expiresInDays: view.days } });
+      view.made = await api(`/v1/results/${encodeURIComponent(result.id)}/shares`, {
+        method: 'POST',
+        body: {
+          expiresInDays: view.week ? 7 : SHARE_MAX_DAYS,
+          includeRecording: view.recording,
+          includeLogcat: view.logcat,
+        },
+      });
+      view.made.carried = { recording: view.recording, logcat: view.logcat };
       view.error = null;
       await load();
     } catch (e) {
@@ -6684,61 +6752,63 @@ export function shareDialog(result) {
     }
   };
 
-  /** The absolute URL, built from THIS page's origin rather than from the API's answer — the
-   *  browser is the only thing that knows for certain how this console was reached. */
   const linkFor = (made) => `${location.origin}${made.path}`;
+
+  // Painted, not redrawn: rebuilding the dialog on a click would throw keyboard focus off the box.
+  let lead = null;
+  const leadText = () => `Anyone with the link sees ${carries(view)} — read-only, with no console login. `
+    + 'The live device is never shared.';
+  const toggle = (key) => (e) => {
+    view[key] = e.target.checked;
+    if (lead) lead.textContent = leadText();
+  };
+
+  const box = (key, label, hint) => h('label', { class: 'checkrow' },
+    h('input', { type: 'checkbox', checked: view[key], onchange: toggle(key) }),
+    h('span', { class: 'checkmark', 'aria-hidden': 'true' }),
+    h('span', { class: 'stack none' },
+      h('span', { class: 'secondary', text: label }),
+      h('span', { class: 'caption', text: hint })),
+  );
+
+  const carriedBy = (x) => [x.includeRecording ? 'recording' : null, x.includeLogcat ? 'logcat' : null]
+    .filter(Boolean).join(' + ');
 
   function draw() {
     const live = view.shares.filter((x) => x.active);
+    lead = h('p', { class: 'help mt-xs', text: leadText() });
 
     fill(d,
       h('h2', { id: 'dialog-title', text: 'Share this failure' }),
-      h('p', { class: 'help mt-xs', text:
-        'Anyone with the link can read this one test result — its message, its screenshot and the '
-        + 'steps that led to it — without an account here.' }),
-
-      /**
-       * WHAT THE LINK DOES NOT CARRY, on the screen where the decision is made rather than in a
-       * document. The person pressing this button is the one accountable for the disclosure, and
-       * "no device log" is the fact they need before they press it, not after.
-       */
-      h('div', { class: 'inset mt-lg' },
-        h('p', { class: 'micro', text: 'It does not carry' }),
-        h('ul', { class: 'mt-xs' }, [
-          'the device log \u2014 the one artifact nobody curated before sending',
-          'the recording, which covers every test on the session',
-          'any other test from the same session',
-        ].map((t) => h('li', { class: 'help' }, '\u2014 ', t))),
-      ),
+      lead,
 
       view.made
-        ? h('div', { class: 'mt-lg' },
-            h('p', { class: 'micro', text: 'Your link' }),
-            copyrow(linkFor(view.made), 'Copy link'),
+        ? h('div', { class: 'mt-lg sharelink' },
+            h('p', { class: 'micro', text: 'Read-only link' }),
+            copyrow(linkFor(view.made), 'Copy'),
             h('p', { class: 'help mt-xs', text:
-              'Shown once. Close this and it cannot be read again \u2014 make another and withdraw '
-              + 'this one.' }),
+              `Carries ${carries(view.made.carried)}. Shown once — close this and it cannot be read `
+              + 'again; make another and withdraw this one.' }),
           )
-        : h('div', { class: 'row tight mt-lg' },
-            h('label', { class: 'help', for: 'share-days', text: 'Lasts' }),
-            h('select', {
-              // `field narrow`, which is this console's select — there is no `.input` class in
-              // `console.css` and an unstyled select in a dialog reads as a different product.
-              id: 'share-days', class: 'field narrow',
-              onchange: (e) => { view.days = Number(e.target.value); },
-            }, [1, 7, 30].map((n) => h('option', {
-              value: String(n), selected: n === view.days,
-              text: n === 1 ? '1 day' : `${n} days`,
-            }))),
-            btn(view.busy ? 'Creating\u2026' : 'Create link', 'primary', create, { disabled: view.busy }),
-          ),
+        : null,
+
+      h('div', { class: 'stack tight mt-lg', role: 'group', 'aria-label': 'What the link carries' },
+        box('recording', 'Include the recording', 'It covers the whole session, not only this test.'),
+        box('logcat', 'Include the full logcat', 'Nobody has read it. Apps log tokens and deep links — look before you send.'),
+        box('week', 'Expire in 7 days', `Otherwise the link lasts ${SHARE_MAX_DAYS} days, the longest one can. Either way you can withdraw it.`),
+      ),
+
+      h('div', { class: 'row tight mt-md' },
+        btn(view.busy ? 'Creating…' : view.made ? 'Make another link' : 'Create link', 'primary', create, { disabled: view.busy }),
+        view.made ? h('span', { class: 'caption', text: 'The boxes apply to the next link you make.' }) : null,
+      ),
 
       view.error ? h('p', { class: 'bad-text help mt-md', text: view.error }) : null,
 
       // The links already out there. Absent entirely when there are none, rather than an empty
       // table: a heading over nothing reads as something failing to load.
       view.loading
-        ? h('p', { class: 'caption mt-lg', text: 'Loading\u2026' })
+        ? h('p', { class: 'caption mt-lg', text: 'Loading…' })
         : view.shares.length
           ? h('div', { class: 'mt-lg' },
               h('p', { class: 'micro', text:
@@ -6746,21 +6816,19 @@ export function shareDialog(result) {
                 + `result, ${live.length} still live` }),
               h('div', { class: 'stack tight mt-xs' }, view.shares.map((x) => h('div', { class: 'row between fit' },
                 // `fit` + `shrink` so a long author email narrows this column instead of wrapping
-                // the Withdraw button under it — both are needed, see `.row.between.fit` in
-                // console.css for why `min-width: 0` on its own does nothing here.
+                // the Withdraw button under it — see `.row.between.fit` in console.css.
                 h('div', { class: 'stack tight shrink' },
                   h('span', { class: 'row tight' },
-                    // The PREFIX, which is all that is stored and all that is safe to render. It is
-                    // also enough to tell two links apart, which is the only job it has here.
+                    // The PREFIX, which is all that is stored and all that is safe to render.
                     h('code', { class: 'mono', text: x.prefix }),
                     x.active ? pill('live', 'ok') : pill(x.revokedAt ? 'withdrawn' : 'expired', '', { dot: false })),
                   h('p', { class: 'caption', text: [
                     x.createdByEmail ? `made by ${x.createdByEmail}` : 'made by an API key',
-                    // "opened N times" is the question that makes withdrawing a decision rather
-                    // than a guess. Approximate, and the tooltip says why.
-                    x.views ? `opened ${x.views}\u00d7` : 'never opened',
+                    carriedBy(x) ? `carries ${carriedBy(x)}` : 'no recording or log',
+                    // "opened N times" is what makes withdrawing a decision rather than a guess.
+                    x.views ? `opened ${x.views}×` : 'never opened',
                     x.active ? `until ${when(x.expiresAt)}` : null,
-                  ].filter(Boolean).join(' \u00b7 ') }),
+                  ].filter(Boolean).join(' · ') }),
                 ),
                 x.active
                   ? btn('Withdraw', 'tiny ghost', () => revoke(x.prefix),
@@ -6770,29 +6838,18 @@ export function shareDialog(result) {
             )
           : null,
 
-      h('div', { class: 'row end mt-xl' }, btn('Done', 'ghost', closeOverlays)),
+      h('div', { class: 'row end mt-xl' }, btn('Close', 'ghost', closeOverlays)),
     );
   }
 
   draw();
   d.hidden = false;
   $('scrim').hidden = false;
-  dialogOpen = true;
+  openedDialog();
   void load();
   d.querySelector('.btn.primary, .btn.ghost')?.focus();
 }
 
-/**
- * WHAT FAILED, AT THE TOP OF THE PAGE THAT EXISTS TO EXPLAIN IT.
- *
- * The gap this closes was found by walking the journey: the run screen shows the failure and its
- * message, you press the button beside it, and the session screen renders the message NOWHERE. The
- * test's name survived only as the label on a jump button next to the video, four cards down. You
- * navigate from a failure into the page for investigating it and the failure is gone.
- *
- * ENDED SESSIONS ONLY. On a live one the suite is still running and a half-reported list would be
- * read as a verdict; the run screen is where a finished picture lives.
- */
 function sessionFailureCard(sess, live) {
   if (live) return null;
   const mine = state.artifacts.sessionId === sess.id && state.artifacts.loaded;
@@ -7627,7 +7684,7 @@ function installErrorDialog(app, action) {
   );
   d.hidden = false;
   $('scrim').hidden = false;
-  dialogOpen = true;
+  openedDialog();
   d.querySelector('.btn.primary')?.focus();
 }
 
@@ -10454,6 +10511,7 @@ function renderPalette() {
 }
 
 function openPalette() {
+  rememberOpener();
   state.palIndex = 0;
   $('palette-input').value = '';
   $('palette').hidden = false;
@@ -10513,6 +10571,7 @@ function inField(e) {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeOverlays(); return; }
+  if (e.key === 'Tab' && trapFocus(e)) return;
   if (!state.me) return;
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
