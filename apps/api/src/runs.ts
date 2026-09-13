@@ -141,3 +141,141 @@ export async function stampSessionRun(
   );
   return (rowCount ?? 0) > 0;
 }
+
+// ---------------------------------------------------------------- what a run held, and cost
+
+/** One session's hold on a device, as the run detail reads it. `hostId` is null when the device
+ *  row has since been removed — the minutes were still held, the host that carried them is unknown. */
+export interface DeviceHold {
+  seconds: number;
+  hostId: string | null;
+}
+
+export interface RunCost {
+  inr: number;
+  hostHourlyCost: number;
+  note: string;
+}
+
+/**
+ * Device-minutes for a run, and the share of the host rate those minutes stand for (ADR-0039).
+ *
+ * THE RATE IS PER HOST AND A HOST CARRIES SEVERAL DEVICES. Multiplying device-minutes by the whole
+ * `HOST_HOURLY_COST` would bill a four-device host four times over for one hour of four parallel
+ * sessions — a number wrong by exactly the factor nobody checks, on the screen somebody quotes in a
+ * budget. So each session is priced at the rate DIVIDED BY THE DEVICES ITS HOST CARRIES, which is
+ * what the hour would cost if every device on that host were busy: the fair share, and an upper
+ * bound on nothing else.
+ *
+ * The divisor is the host's devices NOW, not at the time. Nothing records how many devices a host
+ * had last Tuesday, and a farm whose device count changes is rare enough that inventing a history
+ * for it would be the less honest choice. The ADR says so; the note does not need to.
+ *
+ * A session whose device has since been removed has minutes and no host, so it counts towards
+ * `deviceMinutes` and is NOT priced — and the note says how much was left out, because a cost
+ * silently lower than the minutes imply is the same lie pointed the other way.
+ *
+ * `cost` is null when no rate is configured, never zero: ADR-0035's rule that a number invented in
+ * config would be rendered as though the farm had measured it.
+ */
+export function attributeRunCost(
+  holds: DeviceHold[],
+  devicesPerHost: Map<string, number>,
+  rate: number | null,
+  currency: string,
+): { deviceMinutes: number; cost: RunCost | null } {
+  const totalSeconds = holds.reduce((n, h) => n + Math.max(0, h.seconds), 0);
+  const deviceMinutes = Math.round(totalSeconds / 60);
+  if (rate === null) return { deviceMinutes, cost: null };
+
+  let inr = 0;
+  let unpricedSeconds = 0;
+  const divisors = new Set<number>();
+  for (const h of holds) {
+    const seconds = Math.max(0, h.seconds);
+    const devices = h.hostId ? devicesPerHost.get(h.hostId) ?? 0 : 0;
+    if (devices <= 0) { unpricedSeconds += seconds; continue; }
+    divisors.add(devices);
+    inr += (seconds / 3600) * (rate / devices);
+  }
+
+  const rateText = `${currency}${rate}/hr`;
+  const plural = (n: number) => `${n} device${n === 1 ? '' : 's'}`;
+  let note: string;
+  if (holds.length === 0 || totalSeconds === 0) {
+    note = `No device was held, so no share of ${rateText} is attributed`;
+  } else if (divisors.size === 0) {
+    note = `≈ share of ${rateText}, but the devices this run held have since been removed, so none of it is priced`;
+  } else {
+    const sorted = [...divisors].sort((a, b) => a - b);
+    note = sorted.length === 1
+      ? `≈ share of ${rateText} across ${plural(sorted[0])}`
+      : `≈ share of ${rateText}, split across each host's ${sorted[0]}–${sorted[sorted.length - 1]} devices`;
+    const unpricedMinutes = Math.round(unpricedSeconds / 60);
+    if (unpricedMinutes > 0) note += `; ${unpricedMinutes} min on a since-removed device is not priced`;
+  }
+
+  return {
+    deviceMinutes,
+    cost: { inr: Math.round(inr * 100) / 100, hostHourlyCost: rate, note },
+  };
+}
+
+// ---------------------------------------------------------------- flake history
+
+/** How many runs a failing test's history carries. Enough to see a pattern, few enough to draw. */
+export const HISTORY_RUNS = 20;
+
+export interface HistoryRow {
+  test_name: string;
+  run_id: string;
+  external_id: string;
+  run_name: string | null;
+  failed: boolean;
+  at: Date;
+  rn: number;
+}
+
+export interface TestHistory {
+  runs: Array<{ runId: string; name: string | null; outcome: 'passed' | 'failed'; at: string; current: boolean }>;
+  failedCount: number;
+  total: number;
+}
+
+/**
+ * Fold the history query's rows into one history per test name.
+ *
+ * THE CURRENT RUN IS ALWAYS IN IT. The query returns the newest `HISTORY_RUNS` per name plus the
+ * current run wherever it ranks; for a run opened weeks later, when twenty newer runs have reported
+ * the same test, the current one takes the OLDEST slot rather than being dropped. A history that
+ * omitted the run you are looking at could not say where that run sits in it.
+ *
+ * `runId` is the run's EXTERNAL id — what `runJson` calls `runId`, and what the console routes by.
+ */
+export function shapeHistory(rows: HistoryRow[], currentRunId: string): Map<string, TestHistory> {
+  const byName = new Map<string, HistoryRow[]>();
+  for (const r of rows) {
+    const list = byName.get(r.test_name) ?? [];
+    list.push(r);
+    byName.set(r.test_name, list);
+  }
+
+  const out = new Map<string, TestHistory>();
+  for (const [name, list] of byName) {
+    const newest = list.filter((r) => Number(r.rn) <= HISTORY_RUNS).sort((a, b) => Number(a.rn) - Number(b.rn));
+    const current = list.find((r) => r.run_id === currentRunId);
+    const kept = current && !newest.includes(current)
+      ? [...newest.slice(0, HISTORY_RUNS - 1), current]
+      : newest;
+    // Oldest → newest, the order a strip of dots is read in.
+    const runs = kept.reverse().map((r) => ({
+      runId: r.external_id,
+      name: r.run_name,
+      outcome: r.failed ? 'failed' as const : 'passed' as const,
+      at: r.at.toISOString(),
+      current: r.run_id === currentRunId,
+    }));
+    out.set(name, { runs, failedCount: runs.filter((r) => r.outcome === 'failed').length, total: runs.length });
+  }
+  return out;
+}

@@ -14,6 +14,10 @@
  */
 process.env.RATE_LIMIT_MAX = '10000';
 process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
+// The run detail prices device-minutes against this. Set before the config is first read, because
+// `loadConfig` parses once per process.
+process.env.HOST_HOURLY_COST = '65';
+process.env.COST_CURRENCY = '₹';
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,6 +29,7 @@ import { withSystem, closePools } from '../src/db.ts';
 import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { parseCapabilities } from '../src/http/webdriver/capabilities.ts';
 import { watchedRuns } from '../src/executionEvents.ts';
+import { attributeRunCost, HISTORY_RUNS } from '../src/runs.ts';
 
 let app: FastifyInstance;
 let orgA: string, orgB: string, hostId: string;
@@ -1672,5 +1677,175 @@ describe('a failed test reaches the timeline', () => {
       'the id is what makes the entry a link rather than a note');
     assert.equal((made[0].detail.context as Record<string, unknown>).source, 'test-failure',
       'a capture taken for a failure and one somebody took by hand mean different things');
+  });
+});
+
+// ---------------------------------------------------------------- history and device minutes
+
+describe('run detail: flake history and device minutes (ADR-0039)', () => {
+  /**
+   * Seeded directly rather than driven through the hub, because what is under test is a READ over
+   * many runs — twenty-odd of them for the cap — and opening a WebDriver session per run would make
+   * this the slowest describe in the file while testing the hub a second time.
+   */
+  async function seedRun(orgId: string, externalId: string, opts: {
+    results?: Array<[string, 'passed' | 'failed' | 'skipped']>;
+    heldMinutes?: number | null;
+    at?: Date;
+    deviceId?: string | null;
+  } = {}): Promise<{ runId: string; sessionId: string }> {
+    return withSystem(async (c) => {
+      const at = opts.at ?? new Date();
+      const run = (await c.query(
+        'INSERT INTO runs (org_id, external_id, name) VALUES ($1,$2,$3) RETURNING id',
+        [orgId, externalId, `name of ${externalId}`])).rows[0].id as string;
+      const held = opts.heldMinutes ?? null;
+      const session = (await c.query(
+        `INSERT INTO sessions (org_id, device_id, state, region, run_id, started_at, ended_at)
+         VALUES ($1,$2,'ENDED',$3,$4,$5,$6) RETURNING id`,
+        [orgId, opts.deviceId ?? null, REGION, run,
+         held === null ? null : new Date(at.getTime() - held * 60_000),
+         held === null ? null : at])).rows[0].id as string;
+      let n = 0;
+      for (const [name, status] of opts.results ?? []) {
+        await c.query(
+          `INSERT INTO test_results (org_id, session_id, name, status, reported_at)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [orgId, session, name, status, new Date(at.getTime() + n++)]);
+      }
+      return { runId: run, sessionId: session };
+    });
+  }
+
+  const detail = async (key: string, run: string) => {
+    const r = await app.inject({ method: 'GET', url: `/v1/runs/${encodeURIComponent(run)}`, headers: auth(key) });
+    assert.equal(r.statusCode, 200, r.body);
+    return r.json();
+  };
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000);
+
+  test('a failing test carries its outcome on each earlier run, oldest first, this run marked', async () => {
+    await clearFleet();
+    await seedRun(orgA, 'h-1', { results: [['checkout', 'passed']], at: ago(3) });
+    await seedRun(orgA, 'h-2', { results: [['checkout', 'failed']], at: ago(2) });
+    await seedRun(orgA, 'h-3', { results: [['something else', 'failed']], at: ago(1) });
+    await seedRun(orgA, 'h-4', { results: [['checkout', 'failed']] });
+
+    const f = (await detail(keyA, 'h-4')).failures[0];
+    assert.deepEqual(f.history.runs.map((r: { runId: string }) => r.runId), ['h-1', 'h-2', 'h-4'],
+      'a run that never reported this test is not part of its history');
+    assert.deepEqual(f.history.runs.map((r: { outcome: string }) => r.outcome), ['passed', 'failed', 'failed']);
+    assert.deepEqual(f.history.runs.map((r: { current: boolean }) => r.current), [false, false, true]);
+    assert.equal(f.history.runs[0].name, 'name of h-1');
+    assert.equal(f.history.failedCount, 2);
+    assert.equal(f.history.total, 3);
+  });
+
+  test('a run that failed and then passed the same test is one failed dot, and skips are not a dot', async () => {
+    await clearFleet();
+    await seedRun(orgA, 'retry-1', { results: [['flaky', 'failed'], ['flaky', 'passed']], at: ago(2) });
+    await seedRun(orgA, 'skip-1', { results: [['flaky', 'skipped']], at: ago(1) });
+    await seedRun(orgA, 'retry-2', { results: [['flaky', 'passed'], ['flaky', 'failed']] });
+
+    const h = (await detail(keyA, 'retry-2')).failures[0].history;
+    assert.deepEqual(h.runs.map((r: { runId: string; outcome: string }) => `${r.runId}:${r.outcome}`),
+      ['retry-1:failed', 'retry-2:failed'], 'a retry that passed is the flake signal, not a pass');
+  });
+
+  /**
+   * THE DISCLOSURE BOUNDARY. Every CI system numbers builds from 1 and every suite has a "login"
+   * test, so another org reporting the same name is the ordinary case. The query runs under the
+   * tenant's RLS rather than as a definer function precisely so that this holds by policy.
+   */
+  test('another org’s runs of a test with the same name never appear', async () => {
+    await clearFleet();
+    await seedRun(orgB, 'theirs-1', { results: [['login', 'failed']], at: ago(2) });
+    await seedRun(orgB, 'theirs-2', { results: [['login', 'passed']], at: ago(1) });
+    await seedRun(orgA, 'ours-1', { results: [['login', 'failed']] });
+
+    const raw = await app.inject({ method: 'GET', url: '/v1/runs/ours-1', headers: auth(keyA) });
+    const h = raw.json().failures[0].history;
+    assert.deepEqual(h.runs.map((r: { runId: string }) => r.runId), ['ours-1']);
+    assert.ok(!raw.body.includes('theirs'), `another org's run leaked into history: ${raw.body}`);
+  });
+
+  test('history is capped, and the run being viewed keeps its place even when twenty newer ones exist', async () => {
+    await clearFleet();
+    await seedRun(orgA, 'old', { results: [['capped', 'failed']], at: ago(30) });
+    for (let i = 0; i < HISTORY_RUNS + 2; i++) {
+      await seedRun(orgA, `newer-${i}`, { results: [['capped', i % 2 ? 'failed' : 'passed']], at: ago(20 - i * 0.5) });
+    }
+
+    const h = (await detail(keyA, 'old')).failures[0].history;
+    assert.equal(h.total, HISTORY_RUNS);
+    assert.equal(h.runs.length, HISTORY_RUNS);
+    assert.equal(h.runs[0].runId, 'old', 'the current run takes the oldest slot rather than vanishing');
+    assert.equal(h.runs[0].current, true);
+    assert.equal(h.runs.at(-1).runId, `newer-${HISTORY_RUNS + 1}`, 'and the newest runs fill the rest');
+    const ats = h.runs.map((r: { at: string }) => Date.parse(r.at));
+    assert.deepEqual([...ats].sort((a, b) => a - b), ats, 'oldest to newest');
+
+    const newest = (await detail(keyA, `newer-${HISTORY_RUNS + 1}`)).failures[0].history;
+    assert.ok(!newest.runs.some((r: { runId: string }) => r.runId === 'old'), 'past the cap, the oldest drops out');
+    assert.equal(newest.runs.at(-1).current, true);
+  });
+
+  test('device minutes sum what each session held; a session that never started holds nothing', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(4);
+    const { runId } = await seedRun(orgA, 'held', { heldMinutes: 30, deviceId: dev, results: [['x', 'failed']] });
+    // A second session that held the same device for 30 more minutes, and a third that queued and
+    // never got one.
+    await withSystem(async (c) => {
+      await c.query(
+        `INSERT INTO sessions (org_id, device_id, state, region, run_id, started_at, ended_at)
+         VALUES ($1,$2,'ENDED',$3,$4, now() - interval '30 minutes', now())`,
+        [orgA, dev, REGION, runId]);
+      await c.query(
+        `INSERT INTO sessions (org_id, state, region, run_id, ended_at, end_reason)
+         VALUES ($1,'ENDED',$2,$3, now(), 'queue-timeout')`,
+        [orgA, REGION, runId]);
+    });
+
+    const d = await detail(keyA, 'held');
+    assert.equal(d.run.deviceMinutes, 60);
+    /**
+     * THE NUMBER THAT MUST NOT BE 65. An hour of device time on a four-device host is a quarter of
+     * that host's hour; the whole rate would bill the host four times over for four parallel hours.
+     */
+    assert.equal(d.run.cost.hostHourlyCost, 65);
+    assert.equal(d.run.cost.inr, 16.25);
+    assert.equal(d.run.cost.note, '≈ share of ₹65/hr across 4 devices');
+  });
+
+  test('a live session counts up to now', async () => {
+    await clearFleet();
+    const [dev] = await seedDevices(1);
+    const { runId } = await seedRun(orgA, 'still-going', { results: [['x', 'failed']] });
+    await withSystem((c) => c.query(
+      `INSERT INTO sessions (org_id, device_id, state, region, run_id, started_at)
+       VALUES ($1,$2,'ACTIVE',$3,$4, now() - interval '12 minutes')`,
+      [orgA, dev, REGION, runId]));
+    assert.equal((await detail(keyA, 'still-going')).run.deviceMinutes, 12);
+  });
+
+  test('cost is null when no rate is configured, and minutes on a removed device are named, not priced', () => {
+    const holds = [{ seconds: 3600, hostId: 'h1' }, { seconds: 1200, hostId: null }];
+    const hosts = new Map([['h1', 2]]);
+
+    const unset = attributeRunCost(holds, hosts, null, '₹');
+    assert.equal(unset.deviceMinutes, 80);
+    assert.equal(unset.cost, null, 'no rate is no money, never zero money');
+
+    const priced = attributeRunCost(holds, hosts, 65, '₹');
+    assert.equal(priced.cost?.inr, 32.5);
+    assert.equal(priced.cost?.note, '≈ share of ₹65/hr across 2 devices; 20 min on a since-removed device is not priced');
+
+    const mixed = attributeRunCost(
+      [{ seconds: 3600, hostId: 'a' }, { seconds: 3600, hostId: 'b' }], new Map([['a', 1], ['b', 4]]), 40, '$');
+    assert.equal(mixed.cost?.inr, 50);
+    assert.match(mixed.cost!.note, /each host's 1–4 devices/);
+
+    assert.equal(attributeRunCost([], new Map(), 65, '₹').cost?.inr, 0);
   });
 });
