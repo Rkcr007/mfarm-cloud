@@ -3186,11 +3186,32 @@ kbd {
 .ws-panel .logline.lD .log-m, .ws-panel .logline.lV .log-m { color: var(--log-d); }
 
 @container ws (max-width: 999.98px) {
-  .ws-grid { grid-template-columns: minmax(0, 1fr); overflow: auto; }
+  /**
+   * ROWS SIZED BY THEIR CONTENT, NEVER SQUEEZED. The first version put a 440px floor on the device
+   * panel inside a stretched row, and the row honoured the floor instead of the content — so on the
+   * farm at 1000px the fifteen-button hardware column and the phone drew straight over the dock's
+   * tabs. The device row is `max-content`; the dock gets a bounded row so its log still scrolls
+   * inside itself rather than growing the page by six hundred lines.
+   */
+  .ws-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: max-content minmax(420px, 70vh);
+    overflow: auto;
+  }
   .ws-device { min-height: 440px; overflow: visible; }
-  .ws .devpanel { flex: 0 0 auto; min-height: 376px; }
+  /* The hardware column becomes a wrapping row above the phone: a column that tall is the panel. */
+  .ws .devpanel {
+    flex: 0 0 auto;
+    min-height: 376px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "bar" "stage" "caption";
+    gap: 10px 0;
+  }
+  .ws .devbar { flex-direction: row; flex-wrap: wrap; justify-content: center; max-height: none; overflow: visible; }
+  .ws .devbar-sep { width: 1px; height: auto; margin: 5px 4px; }
   .ws .dev-stage .mf-device { --f-w: calc(340px * var(--f-aspect)); }
-  .ws-dock { min-height: 420px; }
+  .ws-dock { min-height: 0; }
 }
 
 /* ============================================================ Apps (ADR-0041) ===================== */

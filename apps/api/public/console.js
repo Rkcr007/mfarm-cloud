@@ -5681,6 +5681,17 @@ export function visibleLog({ ignoreLevels = false } = {}) {
  * every rebuild under a pointer costs a click (see `render`), which on this screen could be the
  * Release button. So the dock owns its own node and this writes into it directly.
  */
+/**
+ * The time column of a LIVE log row, without the date.
+ *
+ * A live logcat line carries `09-14 07:24:51.444`, and the date is the same on every line of a
+ * session you are watching right now — while the column it sits in is sized for a clock. On the farm
+ * it wrapped every row onto two lines. The full stamp stays in the tooltip.
+ */
+export function clockOnly(t) {
+  return String(t ?? '').replace(/^\d{2}-\d{2}\s+/, '');
+}
+
 function paintLog() {
   const body = $('logbody');
   if (!body) return;
@@ -5701,7 +5712,7 @@ function paintLog() {
           ? `No line in this log names ${scopedPackage() || 'the installed build'}. Many devices tag their lines with a class name rather than a package, so "Everything" is usually the one to read.`
           : 'Nothing in the log matches this filter.')]
     : rows.map((l) => h('div', { class: `logline l${l.level || 'X'}` },
-        h('span', { class: 'log-t', text: l.time }),
+        h('span', { class: 'log-t', text: clockOnly(l.time), title: l.time }),
         h('span', { class: 'log-l', text: l.level }),
         h('span', { class: 'log-g', text: l.tag }),
         h('span', { class: 'log-m', text: l.message }),

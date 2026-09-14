@@ -5738,3 +5738,11 @@ describe('share dialog sends what its boxes say', () => {
     assert.equal(mod.SHARE_MAX_DAYS, Number(m[1]));
   });
 });
+
+describe('found on the deployed farm (2026-09-14)', () => {
+  test('a live log row shows the clock, not the date the whole session shares', () => {
+    assert.equal(mod.clockOnly('09-14 07:24:51.444'), '07:24:51.444');
+    assert.equal(mod.clockOnly('07:24:51.444'), '07:24:51.444', 'a stamp with no date is left alone');
+    assert.equal(mod.clockOnly(undefined), '');
+  });
+});

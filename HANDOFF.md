@@ -4856,3 +4856,18 @@ when the feature is broken. See issues 37 and 38.
     Deliberately not built: "Share this run" (a share is one test result, so the button would promise
     a link that does not exist), an amber flake cell (the API reports passed or failed per run), and
     the prototype's width chips and "What changed" drawer, which are review tools.
+
+    **Verified on the deployed farm (`c02785c`), in Chrome, on a real MFARM X1 Pro session.** The
+    cockpit header measured `49–51 fps · 27 ms · direct` with the lease counting down; the level chips
+    counted their own lines (Debug 222 hidden by default); `S` and `I` switched tabs, and opening the
+    Inspector turned inspect mode on (22 elements) while leaving it turned it off. Apps, Run detail (a
+    real flake strip reading "failing every time — 4 of 4 runs", the backend's cost note verbatim), the
+    share dialog, the palette and focus-return on Escape all held, with zero console errors. The shell
+    at 820px collapsed the rail and dropped the who block as specified.
+
+    **And two defects only the farm showed, fixed in the follow-up PR.** At 1000px the stacked cockpit
+    drew the phone and its fifteen-button hardware column over the dock's tabs: a 440px floor inside a
+    stretched grid row wins over the content. And live log rows carry `09-14 07:24:51.444`, which
+    wrapped every row in a column sized for a clock. A third reading — the operator pill saying "Hosts
+    off" two minutes after the host came up — was the automation tab being `document.hidden`, where the
+    poll deliberately does nothing; it is NOT verified in a visible tab.
