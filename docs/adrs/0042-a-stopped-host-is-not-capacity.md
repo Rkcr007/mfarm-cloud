@@ -1,6 +1,6 @@
 # ADR-0042 — a stopped host is not capacity
 
-**Status:** Accepted · 2026-09-15 · migration 058 · amends ADR-0038 (power) and ADR-0041 (console)
+**Status:** Accepted · 2026-09-15 · migrations 058, 059 · amends ADR-0038 (power) and ADR-0041 (console)
 
 ## Context
 
@@ -72,6 +72,36 @@ one Start button in the product was two clicks deep, on Infrastructure › Hosts
 - The allocator still does not look at the host. The invariant is held by the writers (every path to
   a non-running host withdraws its devices) rather than by a join in `allocate_device`, which would
   mean rewriting the hottest definer function for a fact two functions now keep.
+
+## Correction, the same day — migration 059
+
+058 was deployed and the button pressed on the real farm. Stop at 08:56:28 withdrew the four devices
+with "its host was stopped: stopped from the console", exactly as decided above — and they were READY
+again seconds later, until the reaper re-quarantined them at 08:58:12 with "no heartbeat for 90s".
+
+**A GCE stop takes about ninety seconds to silence the agent, which beats every ten throughout, and
+ADR-0038 made a beat lift `DOWN`.** Each beat undid the withdrawal. 058 turned "READY until the
+reaper notices" into "READY for ninety seconds" — better, and still not what this ADR claims.
+
+**A beat is the disproof of `DOWN` in general; it is not the disproof of a stop still in progress.**
+Those packets were in flight before the machine went away.
+
+1. **`lift_host_down` takes a grace window** and refuses while a `stop-host` operation for that host
+   was requested inside it (`accepted` or `succeeded` — a refused stop is not one in progress). Past
+   the window a beat lifts `DOWN` as before, so a stop that silently failed self-heals in minutes
+   rather than stranding a running machine. Default three minutes, `INFRA_STOP_GRACE_MS`.
+2. **Registration passes zero.** A worker registers once per boot, so a registration inside the
+   window is a machine that has *booted* since the stop — the same asymmetry 056 draws between a
+   registration and a beat.
+3. **`power: 'stopping'`**, the mirror of `starting`: a recent stop while the host is still audible.
+   The card shows a disabled "Stopping…" instead of reading RUNNING and offering Stop again.
+4. **`mfarm_definer` needed `SELECT` on `infra_operations`.** Without it the new guard throws
+   `permission denied` on every beat from a stopped host — a 500 on the busiest route on the farm, in
+   the exact state this feature exists for. Caught by a test; ADR-0038 has the same note about the
+   power ledger, found the same way.
+
+**Consequence accepted:** a stopping host is not counted in "hosts powered on", so the burn headline
+understates by one host for up to three minutes while a machine finishes switching off.
 
 ## Alternatives rejected
 

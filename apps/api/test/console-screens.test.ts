@@ -1642,10 +1642,15 @@ describe('the fleet', () => {
       assert.ok(findByText(tree, 'Start host…'));
     });
 
-    test('the page says the host is off, once, with the way forward', () => {
+    /**
+     * "NOT RUNNING", NEVER "OFF". Fleet does not load the infrastructure snapshot, so a start may be
+     * in flight and unknown here — and it was, on the farm, thirty seconds after Start was pressed.
+     */
+    test('the page says the host is not running, once, with the way forward', () => {
       hostOff();
       const text = textOf(mod.SCREENS.fleet());
-      assert.match(text, /The device host is off, so nothing can be allocated/);
+      assert.match(text, /The device host is not running, so nothing can be allocated/);
+      assert.match(text, /1 device returns when it starts/, 'a singular device took a plural verb');
     });
 
     test('a member is told to ask an operator, and is not handed a button they cannot use', () => {
@@ -1667,7 +1672,7 @@ describe('the fleet', () => {
       hostOff();
       mod.state.route = { name: 'apps' };
       const tree = mod.SCREENS.apps();
-      assert.match(textOf(tree), /The device host is off/);
+      assert.match(textOf(tree), /The device host is not running/);
       assert.ok(!findByText(tree, 'Go to the Fleet'), 'the Fleet has nothing to press either');
     });
 
@@ -5140,6 +5145,22 @@ describe('infrastructure power controls', () => {
     const busy = findByText(tree, 'Starting…');
     assert.ok(busy, 'nothing on the card said the start had been taken');
     assert.equal(busy.disabled, true);
+  });
+
+  /**
+   * THE OTHER DIRECTION, AND THE ONE THE FARM FOUND (059). A GCE stop keeps beating for about ninety
+   * seconds, so the card read RUNNING and offered Stop again on a machine already on its way off.
+   */
+  test('a STOPPING host offers nothing to press either', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = withPower([true]);
+    data.hosts = [{ ...data.hosts[0], power: 'stopping', powerable: true }];
+    mod.state.infra.data = data;
+    const tree = mod.SCREENS.infra();
+    for (const label of ['Start', 'Stop', 'Restart']) {
+      assert.ok(!exactButton(tree, label), `${label} was offered on a machine being powered off`);
+    }
+    assert.equal(findByText(tree, 'Stopping…')?.disabled, true);
   });
 
   test('while this browser waits on an answer, the card is busy even though the server still says stopped', () => {

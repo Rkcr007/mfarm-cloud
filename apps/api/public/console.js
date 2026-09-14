@@ -3529,15 +3529,28 @@ function hostOffBanner() {
   const cap = capacityState();
   const off = state.devices.filter(hostIsOffFor).length;
   if (cap.ready > 0 || off === 0) return null;
-  const booting = (state.infra.data?.hosts || []).some((x) => x.power === 'starting');
+  /**
+   * "OFF" IS THE ONE THING THIS CANNOT SAY. These screens do not load the infrastructure snapshot —
+   * that query is the Infrastructure page's — so a start may be in flight and unknown here. NOT
+   * RUNNING is true in every one of those states, and it is the fact that matters: nothing can be
+   * allocated. When the snapshot does happen to be loaded, the more specific sentence is used.
+   */
+  const moving = (state.infra.data?.hosts || []).find((x) => TRANSITION[x.power]);
+  // One device is a singular subject, and the farm has had a one-device host. Written out rather
+  // than as a bare plural `s`, because the VERB changes too.
+  const many = off !== 1;
+  const count = `${off} device${many ? 's' : ''}`;
   return h('div', { class: 'holdbanner idle', role: 'status' },
-    h('span', { class: `dot ${booting ? 'warn live' : 'warn'}` }),
-    h('span', { class: 'secondary', text: booting
-      ? `The device host is starting. ${off} device${off === 1 ? '' : 's'} return to the pool when it reports in.`
-      : `The device host is off, so nothing can be allocated. ${off} device${off === 1 ? '' : 's'} return when it starts.`
-        + (isOperator() ? '' : ' Ask an operator to start it.') }),
+    h('span', { class: `dot ${moving ? 'warn live' : 'warn'}` }),
+    h('span', { class: 'secondary', text: moving?.power === 'starting'
+      ? `The device host is starting. ${count} ${many ? 'return' : 'returns'} to the pool when it reports in.`
+      : moving?.power === 'stopping'
+        ? `The device host is stopping. ${count} ${many ? 'have' : 'has'} left the pool.`
+        : `The device host is not running, so nothing can be allocated. ${count} ${many ? 'return' : 'returns'} when it starts.`
+          + (isOperator() ? '' : ' Ask an operator to start it.') }),
     h('span', { class: 'spacer' }),
-    booting ? null : hostOffAction('primary'),
+    // Nothing to press while it is already moving — the same rule the host card holds.
+    moving ? null : hostOffAction('primary'),
   );
 }
 
@@ -8952,6 +8965,20 @@ const BUSY_LABEL = {
 };
 
 /**
+ * THE TWO POWER STATES THAT ARE A MOVEMENT RATHER THAN A PLACE, and what the card says during each.
+ *
+ * The server derives both from the operations log, so they outlive this browser: a reload, or a
+ * second operator, sees the same disabled control. `stopping` exists because a GCE stop keeps
+ * beating for about ninety seconds, during which the card used to read RUNNING and offer Stop again.
+ */
+const TRANSITION = {
+  starting: { label: BUSY_LABEL.start,
+    title: 'The machine is booting. Its devices return to the pool when its agent reports in — a few minutes.' },
+  stopping: { label: BUSY_LABEL.stop,
+    title: 'The machine is being powered off. Its devices have already left the pool.' },
+};
+
+/**
  * THE IMPACT, STATED BEFORE THE ACT — and computed from the host's own snapshot, so the numbers in
  * the dialog are the numbers on the card behind it.
  *
@@ -9170,14 +9197,13 @@ function infraHostControls(host, caps) {
    * spent booting. Stop and Retire are withheld too: stopping a machine mid-boot is a decision for
    * after it has come up, not a button to leave under somebody's cursor.
    */
-  const busy = state.infraPending?.[host.id] || (host.power === 'starting' ? BUSY_LABEL.start : null);
+  const moving = TRANSITION[host.power];
+  const busy = state.infraPending?.[host.id] || moving?.label || null;
   if (busy) {
     return h('span', { class: 'row tight' },
       h('button', {
         class: 'btn tiny ghost', type: 'button', disabled: true, 'aria-busy': 'true',
-        title: host.power === 'starting'
-          ? 'The machine is booting. Its devices return to the pool when its agent reports in — a few minutes.'
-          : 'Waiting for the control plane to answer.',
+        title: moving?.title || 'Waiting for the control plane to answer.',
       }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), busy));
   }
 
@@ -9619,7 +9645,7 @@ function infraHostCard(host, rate) {
   const fresh = FRESHNESS[host.reachability] || FRESHNESS.unknown;
   const m = host.machine || {};
   const powerTone = host.power === 'running' ? 'warn'
-    : host.power === 'starting' ? 'accent'
+    : TRANSITION[host.power] ? 'accent'
       : host.power === 'stopped' ? '' : 'bad';
 
   return card(null, { class: 'inhost' },

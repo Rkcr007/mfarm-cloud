@@ -4901,3 +4901,31 @@ when the feature is broken. See issues 37 and 38.
     **Test trap found on the way:** `findByText` matches by SUBSTRING, so `!findByText(tree, 'Start')`
     is true of no card holding a "Starting…" button — the new tests match labels exactly. Both new
     server tests and both busy-state console tests were checked by putting the bug back.
+
+95. **THE FIX FROM ENTRY 94, PRESSED ON THE REAL FARM, WAS A NINETY-SECOND FIX.** 2026-09-15,
+    ADR-0042 corrected, migration 059.
+
+    Deployed 94 and used it: started the lab from the console (the card read STARTING with a disabled
+    "Starting…", the devices came back on the first beat as 3 READY + 1 CLEANING — the restore
+    putting one device back to CLEANING rather than guessing READY is the whole point of
+    `quarantined_from`), then stopped it from the console and watched the database.
+
+    **It withdrew the devices at 08:56:28 and gave them back seconds later.** A GCE stop takes about
+    ninety seconds to silence the agent; it beats every ten throughout, and ADR-0038 made a beat lift
+    `DOWN`. The reaper re-quarantined them at 08:58:12. So 058 had turned "READY until the reaper
+    notices" into "READY for ninety seconds" — an improvement that still did not do what its own ADR
+    said.
+
+    **059: a beat does not lift `DOWN` while a stop asked for inside a grace window is in progress**
+    (three minutes, env-overridable so a test can stand on either side of it). Registration still
+    lifts it immediately — a worker registers once per boot, so it has demonstrably come back, which
+    is 056's distinction one level down. `power: 'stopping'` is the mirror of `starting`.
+
+    **The test caught what the farm would have made a 500:** `mfarm_definer` had no SELECT on
+    `infra_operations`, so the guard threw `permission denied` on every beat from a stopped host.
+    ADR-0038 recorded the identical omission about the power ledger. **A definer function that reads a
+    new table needs a grant, every time, and the failure lands on the busiest route.**
+
+    Also fixed on the way: the Fleet/Apps banner said the host was "off" when a start could be in
+    flight — those screens do not load the infrastructure snapshot — so it says "not running"; and it
+    read "1 device return when it starts".

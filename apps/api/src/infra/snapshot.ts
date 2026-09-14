@@ -2,6 +2,7 @@ import { withSystem } from '../db.ts';
 import { loadConfig } from '../config.ts';
 import { backupState, volumeState } from './storage.ts';
 import { giveUpMs } from './reconcile.ts';
+import { stopGraceMs } from './stopGrace.ts';
 
 /**
  * Everything the Infrastructure page reads, assembled once.
@@ -104,7 +105,7 @@ export interface HostSnapshot {
    * `state`. A drained host is RUNNING and QUARANTINED at the same time, and an operations page
    * that showed only one of those would be hiding the expensive half.
    */
-  power: 'running' | 'starting' | 'stopped' | 'unknown';
+  power: 'running' | 'starting' | 'stopping' | 'stopped' | 'unknown';
   reachability: Freshness;
   /** True only while the agent's tunnel socket is open. The live-view path depends on this. */
   tunnelConnected: boolean;
@@ -349,9 +350,23 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
       && now - h.power_op_at.getTime() < giveUpMs()
       && (h.last_heartbeat_at === null || h.last_heartbeat_at < h.power_op_at);
 
+    /**
+     * STOPPING — asked to stop, and still audible.
+     *
+     * The mirror of `startPending`, and it was found the same way: by pressing the button on the real
+     * farm. A GCE stop takes about ninety seconds to silence the agent, and while those beats keep
+     * arriving the host is reachable, so the card said RUNNING and offered Stop again on a machine
+     * already on its way off. Once the beats stop, `DOWN` answers and this no longer applies.
+     */
+    const stopPending = h.power_op_action === 'stop-host'
+      && (h.power_op_result === 'accepted' || h.power_op_result === 'succeeded')
+      && h.power_op_at !== null
+      && now - h.power_op_at.getTime() < stopGraceMs();
+
     const power: HostSnapshot['power'] =
       startPending ? 'starting'
-        : h.state === 'DOWN' ? 'stopped'
+        : stopPending && (reach === 'live' || reach === 'stale') ? 'stopping'
+          : h.state === 'DOWN' ? 'stopped'
         : reach === 'live' || reach === 'stale' ? 'running'
           : 'unknown';
 
@@ -424,7 +439,14 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         : 'device-seconds used over device-seconds paid for';
 
     const alerts: Alert[] = [];
-    if (power === 'starting') {
+    if (power === 'stopping') {
+      // Its devices are already out of the pool (058) and the bill stops when the machine is off.
+      // Said here because the Overview is where an operator watches a stop they just asked for.
+      alerts.push({
+        severity: 'warning', code: 'host-stopping',
+        message: 'Stopping. Its devices have left the pool; it stops costing the moment it is off.',
+      });
+    } else if (power === 'starting') {
       // Not the silence alert. The silence is expected — somebody just started it — and a CRITICAL
       // "no heartbeat for 9 hours" beside a spinner reads as the start having failed.
       alerts.push({

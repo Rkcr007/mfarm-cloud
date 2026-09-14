@@ -323,11 +323,60 @@ describe('the happy paths', () => {
     assert.equal(row.state, 'DOWN',
       'the one moment the control plane KNOWS a machine is off, and it threw the knowledge away');
 
-    const overview = await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie } });
-    const h = overview.json().hosts.find((x: { id: string }) => x.id === labA);
-    assert.equal(h.power, 'stopped', 'the card would offer no way back');
+    const read = async () => (await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie } }))
+      .json().hosts.find((x: { id: string }) => x.id === labA);
+
+    /**
+     * STOPPING WHILE IT IS STILL AUDIBLE, stopped once it is not — migration 059, and this assertion
+     * used to read `stopped` here. On the real farm a GCE stop keeps the agent beating for about
+     * ninety seconds, so with a fresh beat the honest answer is that it is on its way off.
+     */
+    assert.equal((await read()).power, 'stopping', 'a machine still beating was called stopped');
+
+    await q(`UPDATE hosts SET last_heartbeat_at = now() - interval '10 minutes' WHERE id = $1`, [labA]);
+    assert.equal((await read()).power, 'stopped', 'the card would offer no way back');
 
     // Put it back, so the tests after this one see a host that has not been switched off.
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  /**
+   * THE DEFECT THE REAL FARM SHOWED MINUTES AFTER 058 DEPLOYED (059).
+   *
+   * Stop was pressed at 08:56:28 and the four devices were withdrawn exactly as intended — then a
+   * beat put them back, and the reaper re-quarantined them at 08:58:12 with "no heartbeat for 90s".
+   * The agent beats every ten seconds for the ninety a GCE stop takes, and each beat lifted DOWN.
+   *
+   * The window is a PARAMETER so this test can stand on either side of it; with one constant in the
+   * function, a test could not tell this rule from the bug.
+   */
+  test('A BEAT WHILE THE MACHINE IS STILL DYING DOES NOT GIVE ITS DEVICES BACK', async () => {
+    const [dev] = await q<{ id: string }>(
+      `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities, local_id)
+       VALUES ($1,$2,'android','cuttlefish','cf_x86_64','15','READY','["screen-stream"]'::jsonb,$3)
+       RETURNING id`, [labA, REGION, `pwr-${randomUUID()}`]);
+    fakeCloud({ status: 'RUNNING' });
+    assert.equal((await post(`/v1/infra/hosts/${labA}/stop`)).json().result, 'succeeded');
+
+    const state = async () => (await q<{ state: string }>(
+      'SELECT state::text AS state FROM devices WHERE id = $1', [dev.id]))[0].state;
+    assert.equal(await state(), 'QUARANTINED');
+
+    // The beat, inside the window. `-1` is "nothing lifted", the same answer a silence quarantine
+    // gives when it refuses.
+    const [inside] = await q<{ n: number }>(
+      'SELECT lift_host_down($1, make_interval(secs => 180)) AS n', [labA]);
+    assert.equal(Number(inside.n), -1, 'a dying machine’s beat handed its devices back');
+    assert.equal(await state(), 'QUARANTINED');
+
+    // Past the window — or on a registration, which passes zero because a worker registers once per
+    // boot and so has demonstrably come back.
+    const [after] = await q<{ n: number }>(
+      'SELECT lift_host_down($1, make_interval(secs => 0)) AS n', [labA]);
+    assert.equal(Number(after.n), 1, 'a machine that really did come back stayed stranded');
+    assert.equal(await state(), 'READY');
+
+    await q('DELETE FROM devices WHERE id = $1', [dev.id]);
     await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
   });
 
