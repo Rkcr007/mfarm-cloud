@@ -921,6 +921,52 @@ describe('worker events', () => {
     assert.equal(after.cleaning.quarantined_from, null);
   });
 
+  /**
+   * MIGRATION 058. A console Stop marks the host DOWN and, since 058, withdraws its devices — and the
+   * beat that proves it came back has to give them back, or a started farm reads 0 ready forever.
+   * The CLEANING device is the one that matters, for the same reason as the silence case above.
+   */
+  test('a stopped host takes its devices out of the pool, and its next beat gives them back', async () => {
+    await clearDevices();
+    const [ready, cleaning] = await seedDevices(2);
+    await withSystem((c) => c.query(`UPDATE devices SET state='CLEANING' WHERE id=$1`, [cleaning]));
+    await withSystem((c) => c.query(`SELECT mark_host_down($1, 'stopped from the console')`, [hostId]));
+
+    const down = await app.inject({ method: 'GET', url: '/v1/devices', headers: auth(keyA) });
+    const mine = down.json().devices.filter((d: { id: string }) => [ready, cleaning].includes(d.id));
+    assert.deepEqual(mine.map((d: { state: string }) => d.state), ['QUARANTINED', 'QUARANTINED'],
+      'a stopped host left its devices READY — the allocator would hand them out');
+    assert.ok(mine.every((d: { quarantine?: { source: string; reason: string } }) =>
+      d.quarantine?.source === 'host' && /^its host was stopped/.test(d.quarantine.reason)));
+
+    const r = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+    assert.equal(r.json().hostState, 'UP');
+
+    const after = await withSystem(async (c) => ({
+      host: (await c.query(`SELECT state::text AS state FROM hosts WHERE id=$1`, [hostId])).rows[0],
+      ready: (await c.query(`SELECT state, quarantine_source FROM devices WHERE id=$1`, [ready])).rows[0],
+      cleaning: (await c.query(`SELECT state FROM devices WHERE id=$1`, [cleaning])).rows[0],
+    }));
+    assert.equal(after.host.state, 'UP');
+    assert.equal(after.ready.state, 'READY', 'a started farm kept every device quarantined');
+    assert.equal(after.ready.quarantine_source, null);
+    assert.equal(after.cleaning.state, 'CLEANING', 'the beat guessed READY and skipped the restore');
+  });
+
+  test("stopping a host never lifts an operator's or a health check's quarantine on the way back", async () => {
+    await clearDevices();
+    const [dev] = await seedDevices(1);
+    await withSystem((c) => c.query(
+      `UPDATE devices SET state='QUARANTINED', quarantine_source='health', quarantine_reason='bad screen',
+              quarantined_at=now() WHERE id=$1`, [dev]));
+    await withSystem((c) => c.query(`SELECT mark_host_down($1, 'x')`, [hostId]));
+    await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+    const row = await withSystem(async (c) =>
+      (await c.query(`SELECT state, quarantine_source FROM devices WHERE id=$1`, [dev])).rows[0]);
+    assert.equal(row.state, 'QUARANTINED');
+    assert.equal(row.quarantine_source, 'health');
+  });
+
   test('an operator quarantine survives every heartbeat the host can send', async () => {
     await clearDevices();
     const [dev] = await seedDevices(1);

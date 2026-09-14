@@ -1620,6 +1620,66 @@ describe('the fleet', () => {
     assert.match(text, /out of the pool/, 'and the panel says the same thing its own footer does');
   });
 
+  /**
+   * THE 2026-09-15 WALKTHROUGH, with the lab off. Fleet offered Recover on every device whose host
+   * was off — a recovery asks the host that is not answering — and nothing anywhere offered Start.
+   */
+  describe('a farm whose host is off', () => {
+    const hostOff = (reason = 'its host was stopped: stopped from the console') => {
+      seed({ name: 'fleet' });
+      mod.state.devices = [{
+        ...mod.state.devices[0], state: 'QUARANTINED',
+        quarantine: { at: new Date().toISOString(), reason, source: 'host' },
+      }];
+      mod.state.available = 0;
+      mod.state.sessions = [];
+    };
+
+    test('the row offers Start host, never Recover', () => {
+      hostOff();
+      const tree = mod.SCREENS.fleet();
+      assert.ok(!findByText(tree, 'Recover'), 'Recover asks the host that is not answering');
+      assert.ok(findByText(tree, 'Start host…'));
+    });
+
+    test('the page says the host is off, once, with the way forward', () => {
+      hostOff();
+      const text = textOf(mod.SCREENS.fleet());
+      assert.match(text, /The device host is off, so nothing can be allocated/);
+    });
+
+    test('a member is told to ask an operator, and is not handed a button they cannot use', () => {
+      hostOff();
+      mod.state.me = { ...mod.state.me, operator: false };
+      const tree = mod.SCREENS.fleet();
+      assert.ok(!findByText(tree, 'Start host…'));
+      assert.match(textOf(tree), /Ask an operator to start it/);
+    });
+
+    test('no banner while anything is ready — a busy or partly-off farm needs different advice', () => {
+      hostOff();
+      mod.state.devices = [...mod.state.devices, { ...mod.state.devices[0], id: 'dev-2', state: 'READY', quarantine: undefined }];
+      mod.state.available = 1;
+      assert.doesNotMatch(textOf(mod.SCREENS.fleet()), /The device host is off/);
+    });
+
+    test('Apps offers Start rather than a loop back to the Fleet', () => {
+      hostOff();
+      mod.state.route = { name: 'apps' };
+      const tree = mod.SCREENS.apps();
+      assert.match(textOf(tree), /The device host is off/);
+      assert.ok(!findByText(tree, 'Go to the Fleet'), 'the Fleet has nothing to press either');
+    });
+
+    test('a device whose host was STOPPED is not described as quarantined by it', () => {
+      hostOff();
+      mod.state.route = { name: 'device', id: 'dev-1' };
+      const text = textOf(mod.SCREENS.device());
+      assert.match(text, /Its host is stopped/);
+      assert.doesNotMatch(text, /Its host was quarantined/);
+    });
+  });
+
   test('a class that IS all in use still says so', () => {
     // The other half of the same rule: a busy class is genuinely in use and comes back on its own,
     // so weakening the copy for everything would have been the wrong fix.
@@ -5044,6 +5104,57 @@ describe('infrastructure power controls', () => {
     assert.ok(!findByText(tree, 'Stop'),
       'Stop on a machine that may be fine and merely partitioned would interrupt it');
     assert.ok(!findByText(tree, 'Restart'));
+  });
+
+  /**
+   * STARTING IS ONE DISABLED CONTROL. A start waits out the settle window and then a boot; for all of
+   * it the card offered Start again, and pressing it a second time was the natural response to a
+   * button that did nothing visible.
+   */
+  /**
+   * EXACT, NOT `findByText`. The shim matches by substring, so `findByText(tree, 'Start')` finds the
+   * disabled "Starting…" button itself and the assertion below could never pass — or, written the
+   * other way round, could never fail.
+   */
+  const exactButton = (node: unknown, label: string): any => {
+    const n = node as { tagName?: string; children?: unknown[] };
+    if (Array.isArray(node)) {
+      for (const c of node) { const hit = exactButton(c, label); if (hit) return hit; }
+      return null;
+    }
+    if (!n || typeof n !== 'object') return null;
+    if (n.tagName === 'BUTTON' && textOf(n).trim() === label) return n;
+    for (const c of n.children || []) { const hit = exactButton(c, label); if (hit) return hit; }
+    return null;
+  };
+
+  test('a STARTING host offers no Start, Stop or Restart — only a disabled "Starting…"', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = withPower([true]);
+    data.hosts = [{ ...data.hosts[0], power: 'starting', reachability: 'unavailable', uptimeSeconds: null, powerable: true }];
+    mod.state.infra.data = data;
+    const tree = mod.SCREENS.infra();
+    for (const label of ['Start', 'Stop', 'Restart', 'Retire']) {
+      assert.ok(!exactButton(tree, label), `${label} was offered on a machine that is booting`);
+    }
+    const busy = findByText(tree, 'Starting…');
+    assert.ok(busy, 'nothing on the card said the start had been taken');
+    assert.equal(busy.disabled, true);
+  });
+
+  test('while this browser waits on an answer, the card is busy even though the server still says stopped', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    const data = withPower([true]);
+    data.hosts = [{ ...data.hosts[0], power: 'stopped', powerable: true }];
+    mod.state.infra.data = data;
+    mod.state.infraPending = { [data.hosts[0].id]: 'Starting…' };
+    try {
+      const tree = mod.SCREENS.infra();
+      assert.ok(!exactButton(tree, 'Start'), 'a second press was possible while the first was in flight');
+      assert.equal(findByText(tree, 'Starting…')?.disabled, true);
+    } finally {
+      mod.state.infraPending = {};
+    }
   });
 
   test('STOPPING NAMES THE SESSIONS IT INTERRUPTS, because that is a decision somebody can make', () => {

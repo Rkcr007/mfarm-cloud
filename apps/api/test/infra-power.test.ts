@@ -354,6 +354,76 @@ describe('the happy paths', () => {
     await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
   });
 
+  /**
+   * THE DEFECT FOUND 2026-09-14 (migration 058). Marking the host DOWN was all a Stop did, and nothing
+   * else ever moved its devices: the reaper sweeps only UP hosts and the allocator never looks at the
+   * host. With the lab off for eight hours Fleet and Apps read "4 of 4 ready".
+   */
+  test('A STOP TAKES THE HOST’S DEVICES OUT OF THE POOL', async () => {
+    const [dev] = await q<{ id: string }>(
+      `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities, local_id)
+       VALUES ($1,$2,'android','cuttlefish','cf_x86_64','15','READY','["screen-stream"]'::jsonb,$3)
+       RETURNING id`, [labA, REGION, `pwr-${randomUUID()}`]);
+    fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
+    const res = await post(`/v1/infra/hosts/${labA}/stop`);
+    assert.equal(res.json().result, 'accepted');
+
+    const [row] = await q<{ state: string; quarantine_source: string; quarantined_from: string }>(
+      'SELECT state::text AS state, quarantine_source, quarantined_from::text AS quarantined_from FROM devices WHERE id = $1',
+      [dev.id]);
+    assert.equal(row.state, 'QUARANTINED', 'a stopped host left its device READY');
+    assert.equal(row.quarantine_source, 'host');
+    assert.equal(row.quarantined_from, 'READY', 'the restore would have nothing to restore to');
+
+    const overview = await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie } });
+    const h = overview.json().hosts.find((x: { id: string }) => x.id === labA);
+    assert.equal(h.devices.ready, 0);
+
+    await q('DELETE FROM devices WHERE id = $1', [dev.id]);
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
+  /**
+   * STARTING, UNTIL THE MACHINE SPEAKS. The start answers inside the settle window but the agent's
+   * first beat is a boot later; reading DOWN as `stopped` in between put Start back on the card.
+   * Both the `accepted` and the `succeeded` answers leave a host that has not beaten yet.
+   */
+  for (const [label, statusAfter, result] of [
+    ['still booting', 'STAGING', 'accepted'],
+    ['provider already says running', 'RUNNING', 'succeeded'],
+  ] as const) {
+    test(`A STARTED HOST READS \`starting\` UNTIL ITS FIRST BEAT — ${label}`, async () => {
+      await q(`UPDATE hosts SET state = 'DOWN', last_heartbeat_at = now() - interval '9 hours' WHERE id = $1`, [labA]);
+      fakeCloud({ status: 'TERMINATED', statusAfter });
+      const res = await post(`/v1/infra/hosts/${labA}/start`);
+      assert.equal(res.json().result, result);
+
+      const read = async () => (await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie } }))
+        .json().hosts.find((x: { id: string }) => x.id === labA);
+      const h = await read();
+      assert.equal(h.power, 'starting', 'the card would offer Start again while the machine boots');
+      assert.deepEqual(h.alerts.map((a: { code: string }) => a.code).filter((c: string) => c.startsWith('host-')),
+        ['host-starting'], 'a CRITICAL silence alert beside a spinner reads as a failed start');
+
+      // The beat is what ends it.
+      await q(`UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1`, [labA]);
+      assert.notEqual((await read()).power, 'starting');
+      await q(`UPDATE hosts SET state = 'UP' WHERE id = $1`, [labA]);
+    });
+  }
+
+  test('a STOP pressed after a start ends `starting` — the latest operation is the answer', async () => {
+    await q(`UPDATE hosts SET state = 'DOWN', last_heartbeat_at = now() - interval '9 hours' WHERE id = $1`, [labA]);
+    fakeCloud({ status: 'TERMINATED', statusAfter: 'STAGING' });
+    await post(`/v1/infra/hosts/${labA}/start`);
+    fakeCloud({ status: 'RUNNING', statusAfter: 'STOPPING' });
+    await post(`/v1/infra/hosts/${labA}/stop`);
+    const h = (await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie } }))
+      .json().hosts.find((x: { id: string }) => x.id === labA);
+    assert.equal(h.power, 'stopped');
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
   test('a STARTING machine is NOT marked down — that is the other direction', async () => {
     fakeCloud({ status: 'TERMINATED', statusAfter: 'STAGING' });
     const res = await post(`/v1/infra/hosts/${labA}/start`);

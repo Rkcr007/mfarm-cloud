@@ -50,7 +50,7 @@ const TARGET: Record<string, 'running' | 'stopped'> = {
  * cannot backdate the row either — `requested_at` is immutable and migration 053's trigger refuses
  * the UPDATE, which is the trigger working.
  */
-function giveUpMs(): number {
+export function giveUpMs(): number {
   return Number(process.env.INFRA_OPERATION_GIVE_UP_MS ?? 10 * 60_000);
 }
 
