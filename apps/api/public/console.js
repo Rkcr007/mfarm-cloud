@@ -156,6 +156,12 @@ export const state = {
    * HELD IN STATE, NOT IN THE DOM — the same reason `runsQuery` is: the poll re-renders this screen,
    * and a filter that lived in an input would be reset under somebody's fingers every time it did.
    */
+  /**
+   * Host id → the label of the operation this browser is waiting on ("Starting…"). Client-side,
+   * because the request can take the whole 25-second settle window and nothing on the server says
+   * "somebody pressed it" until it answers. `power: 'starting'` takes over once it has.
+   */
+  infraPending: {},
   infraOps: { rows: [], facets: null, loaded: false, loading: false,
               filter: { actor: '', action: '', target: '', outcome: '', from: '' } },
   /** Metered consumption, fetched when Health is opened rather than on the 5s poll — see `loadUsage`. */
@@ -2141,6 +2147,13 @@ function renderChrome() {
 $('sc-open').addEventListener('click', () => { const s = heldSession(); if (s) go(`#/sessions/${s.id}`); });
 $('sessionstub').addEventListener('click', () => { const s = heldSession(); if (s) go(`#/sessions/${s.id}`); });
 $('farmstat').addEventListener('click', () => go('#/health'));
+/**
+ * THE HOST SEGMENT GOES WHERE ITS FACT CAN BE ACTED ON. The whole pill opened Farm health, so the one
+ * segment that names a machine — "Hosts off" — sent an operator to a page with no Start button on it
+ * (2026-09-15 walkthrough). Stopped here so the pill's own handler does not run as well.
+ */
+$('fs-host').addEventListener('click', (e) => { e.stopPropagation(); go('#/infra/hosts'); });
+$('fs-host').title = 'Open Infrastructure › Hosts';
 
 $('navtoggle').addEventListener('click', () => {
   const icons = root.dataset.nav === 'icons';
@@ -3104,9 +3117,16 @@ function fleetCapacity() {
             ? btn('Open cockpit', 'tiny primary', () => go(`#/sessions/${sess.id}`))
             : d.state === 'READY'
               ? btn(`Start ${deviceName(d)}`, 'tiny primary', () => startSession(d))
-              : d.state === 'QUARANTINED'
-                ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
-                : null,
+              /**
+               * NOT RECOVER ON A HOST-OFF DEVICE — Health already refused it, and this row was the
+               * one the comment there said still needed fixing. A recovery asks the host that is not
+               * answering; the way forward is starting the host (2026-09-15 walkthrough).
+               */
+              : hostIsOffFor(d)
+                ? hostOffAction()
+                : d.state === 'QUARANTINED'
+                  ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
+                  : null,
           /**
            * D3 — THE BUILD, FROM THE ROW YOU ARE ALREADY LOOKING AT.
            *
@@ -3369,6 +3389,8 @@ function screenFleet() {
           : null);
     })()),
 
+    hostOffBanner(),
+
     h('div', { class: 'row tight mb-gap lensrow' }, LENSES.map(([key, label]) => h('button', {
       class: `lens${lens === key ? ' on' : ''}`,
       onclick: () => go(`#/fleet/${key}`),
@@ -3442,6 +3464,82 @@ const QUARANTINE_SOURCE = {
   operator: 'An operator took it out of service.',
   health:   'It failed a health check.',
 };
+
+/**
+ * A HOST THAT WAS SWITCHED OFF IS NOT A HOST THAT WENT QUIET, and the sentence says which.
+ *
+ * Both collapse their devices with source `host` (migration 058 made a console Stop do what the
+ * silence quarantine always did), so the source cannot tell them apart and the machine-written
+ * reason can: `mark_host_down` prefixes it with "its host was stopped". Telling somebody a handset
+ * is "quarantined" because a person turned the lab off for the night sends them looking for a fault.
+ */
+const HOST_STOPPED_SENTENCE = 'Its host is stopped. It comes back on its own when the host is started.';
+const hostWasStopped = (d) => d?.quarantine?.source === 'host'
+  && /^its host was stopped/i.test(d.quarantine.reason || '');
+
+/** Out of the pool because its HOST is not running — stopped or silent — not for anything it did. */
+const hostIsOffFor = (d) => d?.state === 'QUARANTINED' && d.quarantine?.source === 'host';
+
+/**
+ * START THE HOST, FROM WHEREVER SOMEBODY DISCOVERED IT WAS OFF.
+ *
+ * Found by walking the console with the lab stopped (2026-09-15): Fleet said "Nothing can be
+ * allocated — 5 quarantined", Apps said "none are ready" and sent you to the Fleet, the device page
+ * offered a recovery the host could not answer, and the only Start button in the product was two
+ * clicks deep on Infrastructure › Hosts. Every screen that noticed the problem was a dead end.
+ *
+ * It opens the SAME confirmation the host card does, from the same snapshot, so the money sentence
+ * and the busy state cannot differ by where it was pressed. Anything this cannot resolve to exactly
+ * one powerable, not-running host — power not configured, a mismatch, a host already booting — goes
+ * to the Hosts page, which already explains each of those in words.
+ */
+async function startHostFromAnywhere() {
+  if (!state.infra.data) {
+    await refreshInfra().catch(() => {});
+  }
+  const data = state.infra.data;
+  const hosts = data?.hosts || [];
+  const booting = hosts.find((x) => x.power === 'starting' || state.infraPending?.[x.id]);
+  const off = data?.capabilities?.power
+    ? hosts.filter((x) => x.powerable && x.power !== 'running' && x.power !== 'starting')
+    : [];
+  if (!booting && off.length === 1) {
+    askPower(off[0], 'start');
+    return;
+  }
+  if (booting) toast('Already starting', `${booting.hostname} is booting. Its devices return when it reports in.`);
+  go('#/infra/hosts');
+}
+
+/**
+ * The control a screen offers beside a host-off device: Start for an operator, and for anybody else
+ * a sentence, because a member cannot power a machine and a button they cannot press is not a way
+ * forward.
+ */
+function hostOffAction(cls = 'tiny ghost') {
+  return isOperator() ? btn('Start host…', cls, () => startHostFromAnywhere()) : null;
+}
+
+/**
+ * THE BANNER FOR A FARM THAT IS OFF, and only for that. Nothing ready AND at least one device out
+ * because its host is not running — a fleet that is merely busy, or quarantined by a health check,
+ * needs different advice and gets it from `capacityState`.
+ */
+function hostOffBanner() {
+  const cap = capacityState();
+  const off = state.devices.filter(hostIsOffFor).length;
+  if (cap.ready > 0 || off === 0) return null;
+  const booting = (state.infra.data?.hosts || []).some((x) => x.power === 'starting');
+  return h('div', { class: 'holdbanner idle', role: 'status' },
+    h('span', { class: `dot ${booting ? 'warn live' : 'warn'}` }),
+    h('span', { class: 'secondary', text: booting
+      ? `The device host is starting. ${off} device${off === 1 ? '' : 's'} return to the pool when it reports in.`
+      : `The device host is off, so nothing can be allocated. ${off} device${off === 1 ? '' : 's'} return when it starts.`
+        + (isOperator() ? '' : ' Ask an operator to start it.') }),
+    h('span', { class: 'spacer' }),
+    booting ? null : hostOffAction('primary'),
+  );
+}
 
 /**
  * Release, spelled out.
@@ -3597,6 +3695,15 @@ function hostQuarantineConsequences(hostLastSeenAt) {
       hostLastSeenAt
         ? `The farm last heard from that host ${ago(hostLastSeenAt)}. Nothing to do until that changes.`
         : 'The farm has no heartbeat recorded for that host at all.'),
+    /**
+     * "Nothing to do until that changes" — and the thing that changes it. The page told an operator
+     * to wait for a host and gave them no way to start one (2026-09-15 walkthrough).
+     */
+    isOperator()
+      ? h('div', { class: 'row tight mt-sm' },
+        hostOffAction('primary'),
+        btn('View host', 'ghost', () => go('#/infra/hosts')))
+      : null,
   );
 }
 
@@ -3661,7 +3768,8 @@ function quarantineCard(d) {
 
     const took = actor
       ? ['Taken out by ', h('code', { text: actor }), showNote ? ' with the note ' : '.']
-      : [(QUARANTINE_SOURCE[d.quarantine?.source] || 'The farm did not record who took it out.'),
+      : [(hostWasStopped(d) ? HOST_STOPPED_SENTENCE
+        : QUARANTINE_SOURCE[d.quarantine?.source] || 'The farm did not record who took it out.'),
         showNote ? ' The note reads ' : ''];
 
     /**
@@ -7573,6 +7681,10 @@ function uploadCard() {
  */
 function holdBanner() {
   const held = heldSession();
+  // A farm that is OFF says so, and offers Start. "None are ready — Go to the Fleet" sent somebody to
+  // a Fleet with nothing to press, which is a loop rather than a way forward.
+  const off = held ? null : hostOffBanner();
+  if (off) return off;
   if (!held) {
     const ready = state.devices.filter((d) => d.state === 'READY');
     return h('div', { class: 'holdbanner idle' },
@@ -7826,7 +7938,19 @@ function screenSessionsBody(rows = state.sessions) {
           ))
         // "Start one from Devices" outlived Devices: it became a lens on this very screen in the
         // four-lens redesign, so the empty state was sending people to a page that no longer exists.
-        : empty('No sessions yet.', 'Start one from Capacity, or point a WebDriver suite at the hub.'),
+        : h('div', { class: 'stack tight' },
+          empty('No sessions yet.', 'Start one from Capacity, or point a WebDriver suite at the hub.'),
+          // Both halves of that sentence as controls — it named two places and linked neither.
+          h('div', { class: 'row tight' },
+            btn('Go to Capacity', 'ghost', () => go('#/fleet')),
+            btn('Copy WebDriver URL', 'ghost', async () => {
+              try {
+                await navigator.clipboard.writeText(webdriverUrl());
+                toast('Copied', webdriverUrl(), 'ok');
+              } catch {
+                toast('Could not copy', `The clipboard was refused. The URL is ${webdriverUrl()}`, 'bad');
+              }
+            }))),
     ),
     // The full id, never a prefix: it is what `mfarm app install --session` needs and what the
     // WebDriver URL carries in its password half, and neither accepts eight characters.
@@ -8691,7 +8815,7 @@ function lastCheck(d) {
   // somebody to look at a device that is fine — the same mistake the fleet already had to unlearn.
   if (d.quarantine?.at) {
     return {
-      text: `${d.quarantine.source === 'host' ? 'host stopped beating' : 'taken out of service'} ${ago(d.quarantine.at)}`,
+      text: `${hostWasStopped(d) ? 'host stopped' : d.quarantine.source === 'host' ? 'host stopped beating' : 'taken out of service'} ${ago(d.quarantine.at)}`,
       tone: 'bad',
     };
   }
@@ -8773,9 +8897,18 @@ function usageCard() {
  * **`unknown` IS NOT A FAILURE EITHER.** It is amber, and it says so in words: the operation may
  * have happened. That is the whole point of the fifth outcome — see `infra/audit.ts`.
  */
-async function runInfraOperation(path, body, { pending }) {
+async function runInfraOperation(path, body, { pending, busy }) {
   const key = `infra-op-${path}`;
   toast(pending, 'Waiting for the control plane to confirm.', '', { key });
+  /**
+   * THE CARD'S CONTROLS ARE REPLACED WHILE THIS IS IN FLIGHT. A start waits up to twenty-five
+   * seconds for the provider, and for all of it the card used to keep its Start button — so the
+   * person who pressed it, seeing nothing change, pressed it again.
+   */
+  if (busy) {
+    state.infraPending = { ...state.infraPending, [busy.hostId]: busy.label };
+    render();
+  }
   try {
     const out = await api(path, { method: 'POST', body });
     clearToast(key);
@@ -8802,9 +8935,21 @@ async function runInfraOperation(path, body, { pending }) {
     toast('The answer did not arrive', `${err.message}. The operation may still have been carried `
       + 'out — check the operations log below before pressing it again.', 'warn');
   }
-  await refreshInfra();
+  // Refreshed BEFORE the pending mark is dropped, so the card goes straight from "Starting…" to
+  // whatever the server now says — `starting` included — without flashing the Start button between.
+  await refreshInfra().catch(() => {});
+  if (busy) {
+    const { [busy.hostId]: _done, ...rest } = state.infraPending;
+    state.infraPending = rest;
+  }
   render();
 }
+
+/** What an in-flight operation reads as on the card, by verb. */
+const BUSY_LABEL = {
+  start: 'Starting…', stop: 'Stopping…', restart: 'Restarting…',
+  drain: 'Draining…', resume: 'Resuming…', retire: 'Retiring…',
+};
 
 /**
  * THE IMPACT, STATED BEFORE THE ACT — and computed from the host's own snapshot, so the numbers in
@@ -8848,7 +8993,7 @@ function askDrain(host, rate) {
     onConfirm: () => runInfraOperation(
       `/v1/infra/hosts/${encodeURIComponent(host.id)}/drain`,
       { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
-      { pending: `Draining ${host.hostname}…` },
+      { pending: `Draining ${host.hostname}…`, busy: { hostId: host.id, label: BUSY_LABEL.drain } },
     ),
   });
 }
@@ -8877,7 +9022,7 @@ function askResume(host) {
     confirmClass: 'primary',
     onConfirm: () => runInfraOperation(
       `/v1/infra/hosts/${encodeURIComponent(host.id)}/resume`, {},
-      { pending: `Resuming ${host.hostname}…` },
+      { pending: `Resuming ${host.hostname}…`, busy: { hostId: host.id, label: BUSY_LABEL.resume } },
     ),
   });
 }
@@ -8960,7 +9105,8 @@ function askPower(host, verb) {
     onConfirm: () => runInfraOperation(
       `/v1/infra/hosts/${encodeURIComponent(host.id)}/${verb}`,
       { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
-      { pending: `Asking the cloud provider to ${verb} ${host.hostname}…` },
+      { pending: `Asking the cloud provider to ${verb} ${host.hostname}…`,
+        busy: { hostId: host.id, label: BUSY_LABEL[verb] } },
     ),
   });
 }
@@ -8998,7 +9144,7 @@ function askRetire(host) {
     onConfirm: () => runInfraOperation(
       `/v1/infra/hosts/${encodeURIComponent(host.id)}/retire`,
       { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
-      { pending: `Retiring ${host.hostname}…` },
+      { pending: `Retiring ${host.hostname}…`, busy: { hostId: host.id, label: BUSY_LABEL.retire } },
     ),
   });
 }
@@ -9013,6 +9159,27 @@ function askRetire(host) {
  */
 function infraHostControls(host, caps) {
   const controls = [];
+
+  /**
+   * ONE DISABLED CONTROL WHILE SOMETHING IS ALREADY HAPPENING TO THIS HOST, and nothing else.
+   *
+   * Two sources, in order: this browser is waiting on an answer (`infraPending`), or the server says
+   * a start was accepted and the machine has not beaten since (`power: 'starting'`). The second is
+   * what survives a reload and what a second operator sees — without it the card went back to
+   * `stopped` the moment the request returned and offered Start again for the minutes the machine
+   * spent booting. Stop and Retire are withheld too: stopping a machine mid-boot is a decision for
+   * after it has come up, not a button to leave under somebody's cursor.
+   */
+  const busy = state.infraPending?.[host.id] || (host.power === 'starting' ? BUSY_LABEL.start : null);
+  if (busy) {
+    return h('span', { class: 'row tight' },
+      h('button', {
+        class: 'btn tiny ghost', type: 'button', disabled: true, 'aria-busy': 'true',
+        title: host.power === 'starting'
+          ? 'The machine is booting. Its devices return to the pool when its agent reports in — a few minutes.'
+          : 'Waiting for the control plane to answer.',
+      }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), busy));
+  }
 
   /**
    * POWER, and only for a machine this control plane is actually allowed to power.
@@ -9326,6 +9493,16 @@ function infraAlerts(data) {
             class: 'link', type: 'button', text: r.host.hostname,
             onclick: () => go('#/infra/hosts'),
           }),
+          /**
+           * THE ALERT CARRIES THE POWER CONTROL ITS HOST CARD HAS — the same function, so the busy
+           * state and the gates are identical. "No heartbeat for 10 hours" was plain text, and the
+           * Start button that answers it lived on another tab (2026-09-15 walkthrough). Only on the
+           * alerts a start answers; a full disk is not fixed by powering anything.
+           */
+          (r.code === 'host-silent' || r.code === 'host-starting') && r.host.power !== 'running'
+            ? [h('span', { class: 'spacer' }),
+              infraHostControls(r.host, { ...data.capabilities, drain: false, retire: false })]
+            : null,
         ),
         h('p', { class: 'caption', text: r.message }),
       ))));
@@ -9441,7 +9618,9 @@ function infraCapabilityCard(data) {
 function infraHostCard(host, rate) {
   const fresh = FRESHNESS[host.reachability] || FRESHNESS.unknown;
   const m = host.machine || {};
-  const powerTone = host.power === 'running' ? 'warn' : host.power === 'stopped' ? '' : 'bad';
+  const powerTone = host.power === 'running' ? 'warn'
+    : host.power === 'starting' ? 'accent'
+      : host.power === 'stopped' ? '' : 'bad';
 
   return card(null, { class: 'inhost' },
     h('div', { class: 'row tight' },
@@ -10257,7 +10436,8 @@ function screenHealth() {
                    */
                   d.state === 'QUARANTINED' && d.quarantine?.source !== 'host' && isOrgAdmin()
                     ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
-                    : null,
+                    // What it offers instead: the thing that actually brings the device back.
+                    : hostIsOffFor(d) ? hostOffAction() : null,
                   pill(st.label, st.tone, { dot: false }),
                 );
               }))
@@ -11004,7 +11184,9 @@ function screenTeam() {
             + 'it by having an admin reset it.'),
           h('p', { class: 'caption mt-sm' },
             'Removing someone ends their browser sessions immediately. It does not revoke API keys, '
-            + 'which belong to the organisation rather than to a person — revoke those in Settings.'),
+            + 'which belong to the organisation rather than to a person — revoke those in ',
+            h('button', { class: 'link', type: 'button', text: 'Settings', onclick: () => go('#/settings') }),
+            '.'),
         ),
       ),
     ),

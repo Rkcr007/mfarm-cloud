@@ -326,10 +326,19 @@ function settleMs(): number {
  * NEVER FAILS THE OPERATION. The machine is already stopping; refusing the request over bookkeeping
  * would send somebody to press Stop again on a machine that is on its way off.
  */
+/**
+ * DOWN, AND ITS DEVICES WITH IT (migration 058).
+ *
+ * This used to write the host row and nothing else, and nothing else ever moved the devices: the
+ * reaper sweeps only `UP` hosts and the allocator never looks at a host. With the lab stopped for
+ * eight hours on 2026-09-14, Fleet and Apps both read "4 of 4 ready" and the allocator would have
+ * handed any of them out. `mark_host_down` collapses them the way a silence quarantine does, and a
+ * beat (or registration) restores them through `lift_host_down`.
+ */
 async function markDown(host: Host): Promise<void> {
   try {
     await withSystem((c) =>
-      c.query(`UPDATE hosts SET state = 'DOWN' WHERE id = $1 AND state <> 'DOWN'`, [host.id]));
+      c.query('SELECT mark_host_down($1, $2)', [host.id, 'stopped from the console']));
   } catch (e) {
     console.warn(`[infra] stopped ${host.hostname} but could not mark it DOWN: ${(e as Error).message}`);
   }

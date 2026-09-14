@@ -4871,3 +4871,33 @@ when the feature is broken. See issues 37 and 38.
     wrapped every row in a column sized for a clock. A third reading — the operator pill saying "Hosts
     off" two minutes after the host came up — was the automation tab being `document.hidden`, where the
     poll deliberately does nothing; it is NOT verified in a visible tab.
+
+94. **A STOPPED HOST IS NOT CAPACITY, AND EVERY SCREEN THAT NOTICED IT WAS A DEAD END.** 2026-09-15,
+    ADR-0042, migration 058.
+
+    **The defect.** A console Stop wrote `hosts.state = 'DOWN'` and nothing else. The reaper sweeps
+    only `UP` hosts and `allocate_device` never looks at the host, so a stopped lab's devices stayed
+    READY forever: Fleet and Apps read "4 of 4 ready" after eight hours off, and the allocator would
+    have handed them out. A stop made outside the console did NOT show it — that host was still `UP`,
+    went silent, and the reaper caught it — which is why the walkthrough on 2026-09-15 saw correct
+    counts on a lab stopped from a laptop. The bug lived only on the path the product offers.
+
+    **The fix mirrors the silence quarantine exactly.** `mark_host_down` collapses the devices (source
+    `host`, `quarantined_from` kept); `lift_host_down` restores them, called by the heartbeat and by
+    registration when the host is DOWN. The host stays DOWN so the card still says `stopped`. 058
+    repairs hosts already DOWN.
+
+    **Start had no in-progress state**, so the button stayed for the 25-second settle and then for
+    the whole boot. Now the card is one disabled "Starting…" while the request is in flight
+    (client-side), and `power: 'starting'` holds it afterwards until the first beat — derived from
+    the latest power operation, so a reload or a second operator sees it too.
+
+    **A read-only walkthrough by a subagent, with the lab off, found the rest.** Fleet offered Recover
+    on host-off devices (Health already refused it); Apps sent you to a Fleet with nothing to press;
+    the device page said to wait for the host with no way to start one; the CRITICAL alert was plain
+    text; "Hosts off" opened Farm health. All now offer Start host (operators) or say to ask one. The
+    walkthrough's 24 findings are summarised in the PR; the P2/P3 remainder is listed, not built.
+
+    **Test trap found on the way:** `findByText` matches by SUBSTRING, so `!findByText(tree, 'Start')`
+    is true of no card holding a "Starting…" button — the new tests match labels exactly. Both new
+    server tests and both busy-state console tests were checked by putting the bug back.

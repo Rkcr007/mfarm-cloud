@@ -136,7 +136,9 @@ export async function workerRoutes(app: FastifyInstance) {
            -- the normal path. Un-quarantining now happens in exactly one place, the same
            -- clear_silence_quarantine the heartbeat calls, which also restores each device to
            -- what it was doing rather than guessing READY.
-           state = CASE WHEN hosts.state = 'QUARANTINED' THEN hosts.state ELSE 'UP' END,
+           -- DOWN is kept here too, and lifted below by the same function the heartbeat calls
+           -- (migration 058) -- flipping it to UP in this CASE would skip giving the devices back.
+           state = CASE WHEN hosts.state IN ('QUARANTINED', 'DOWN') THEN hosts.state ELSE 'UP' END,
            -- REGISTRATION UN-RETIRES (056), and only registration does.
            --
            -- Retiring says "this machine is not part of the fleet any more". Running the agent on it
@@ -182,6 +184,12 @@ export async function workerRoutes(app: FastifyInstance) {
          reg.automationEndpoint ?? null, token.prefix, token.hash, orgId],
       );
       const hostId = rows[0].id as string;
+
+      // A stopped host registering is a host that came back. Before the device upsert below, so the
+      // devices it restores are the ones that upsert then re-asserts.
+      if (rows[0].state === 'DOWN') {
+        await c.query('SELECT lift_host_down($1)', [hostId]);
+      }
 
       // One un-quarantine path, shared with the heartbeat. A registration is evidence the host is
       // alive, so it falsifies a SILENCE quarantine exactly the way a beat does — and has exactly
@@ -395,17 +403,6 @@ export async function workerRoutes(app: FastifyInstance) {
         // being written on the line above it.
         `UPDATE hosts SET
            last_heartbeat_at = now(),
-           -- A BEAT FALSIFIES 'DOWN', exactly as it falsifies a silence quarantine below.
-           --
-           -- 'DOWN' is written by two things: the column default, and an operator stopping the
-           -- machine from the console (ADR-0038). Both are claims that it is not running, and a
-           -- packet from it is the disproof. Without this the stop would be STICKY -- an agent whose
-           -- capability fingerprint has not changed never re-registers, so a host that came back on
-           -- its own would beat forever into a control plane still showing it stopped.
-           --
-           -- Scoped to DOWN on purpose. QUARANTINED is handled below and by migration 016's rules,
-           -- and an operator quarantine is a judgement no packet may overrule.
-           state = CASE WHEN state = 'DOWN' THEN 'UP'::host_state ELSE state END,
            up_since = CASE
              WHEN up_since IS NULL THEN now()
              WHEN last_heartbeat_at IS NULL THEN now()
@@ -432,6 +429,28 @@ export async function workerRoutes(app: FastifyInstance) {
        * the common beat down to one write, not to decide anything.
        */
       let state = rows[0]?.state as string | undefined;
+      /**
+       * A BEAT FALSIFIES 'DOWN', exactly as it falsifies a silence quarantine below.
+       *
+       * 'DOWN' is written by two things: the column default, and an operator stopping the machine
+       * from the console (ADR-0038). Both are claims that it is not running, and a packet from it is
+       * the disproof. Without this the stop would be STICKY — an agent whose capability fingerprint
+       * has not changed never re-registers, so a host that came back would beat forever into a
+       * control plane still showing it stopped.
+       *
+       * A FUNCTION RATHER THAN A CASE IN THE UPDATE ABOVE (migration 058), because lifting DOWN now
+       * also has to give the devices back: a stop withdraws them, and a beat that flipped only the
+       * host row would leave a running farm with every device quarantined.
+       */
+      if (state === 'DOWN') {
+        const { rows: lifted } = await c.query<{ n: number }>(
+          'SELECT lift_host_down($1) AS n', [hostId],
+        );
+        if (Number(lifted[0]?.n ?? -1) >= 0) {
+          state = 'UP';
+          req.log.warn({ hostId, devices: Number(lifted[0].n) }, 'stopped host beat again — devices returned');
+        }
+      }
       if (state === 'QUARANTINED' && rows[0]?.quarantine_source === 'reaper') {
         const { rows: cleared } = await c.query<{ n: number }>(
           'SELECT clear_silence_quarantine($1) AS n', [hostId],

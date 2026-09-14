@@ -1,6 +1,7 @@
 import { withSystem } from '../db.ts';
 import { loadConfig } from '../config.ts';
 import { backupState, volumeState } from './storage.ts';
+import { giveUpMs } from './reconcile.ts';
 
 /**
  * Everything the Infrastructure page reads, assembled once.
@@ -103,7 +104,7 @@ export interface HostSnapshot {
    * `state`. A drained host is RUNNING and QUARANTINED at the same time, and an operations page
    * that showed only one of those would be hiding the expensive half.
    */
-  power: 'running' | 'stopped' | 'unknown';
+  power: 'running' | 'starting' | 'stopped' | 'unknown';
   reachability: Freshness;
   /** True only while the agent's tunnel socket is open. The live-view path depends on this. */
   tunnelConnected: boolean;
@@ -180,6 +181,7 @@ interface HostRow {
   quarantined_count: string; offline_count: string; active_sessions: string;
   powered_today_seconds: string | null; powered_month_seconds: string | null;
   device_seconds_today: string | null;
+  power_op_action: string | null; power_op_result: string | null; power_op_at: Date | null;
 }
 
 /**
@@ -233,7 +235,9 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
               d.quarantined_count, d.offline_count, d.active_sessions,
               p.today_seconds  AS powered_today_seconds,
               p.month_seconds  AS powered_month_seconds,
-              m.device_seconds AS device_seconds_today
+              m.device_seconds AS device_seconds_today,
+              op.action AS power_op_action, op.result AS power_op_result,
+              op.requested_at AS power_op_at
          FROM hosts h
          LEFT JOIN LATERAL (
            SELECT count(*)                                              AS device_count,
@@ -278,6 +282,17 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
               AND me.kind = 'device_seconds'
               AND me.occurred_at >= date_trunc('day', now())
          ) m ON true
+         -- The most recent POWER operation against this host, for the starting state. Only the
+         -- latest one: a Stop pressed after a Start is the answer, not the Start before it. One
+         -- probe on infra_operations_target_idx.
+         LEFT JOIN LATERAL (
+           SELECT o.action, o.result::text AS result, o.requested_at
+             FROM infra_operations o
+            WHERE o.target_kind = 'host' AND o.target_id = h.id::text
+              AND o.action IN ('start-host', 'stop-host', 'restart-host')
+            ORDER BY o.requested_at DESC
+            LIMIT 1
+         ) op ON true
         -- THE CURRENT FLEET, and nothing else (056). A machine somebody retired is not a host that
         -- is down; it is a host that is gone, and counting it kept this page's health rollup amber
         -- forever over a laptop switched off a fortnight ago.
@@ -317,8 +332,26 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
      * A beat LIFTS the DOWN rather than overriding it here — see the heartbeat route, which does it
      * the same way it lifts a silence quarantine. That is what keeps this from being sticky.
      */
+    /**
+     * STARTING — asked to start, and not heard from since.
+     *
+     * A GCE start answers inside the settle window, but the agent's first beat is a boot later, and
+     * until it arrives the host is still DOWN. Reading that as `stopped` put the Start button back on
+     * the card the moment the first press returned, so a second press looked necessary and was
+     * possible. This is the fact the card needs: a start was accepted (or confirmed) and no beat has
+     * come since. The beat ends it by being newer than the request; a failed or `unknown` settle
+     * ends it by no longer matching; and the give-up horizon ends it for a start that never lands,
+     * so the card cannot say "starting" forever.
+     */
+    const startPending = (h.power_op_action === 'start-host' || h.power_op_action === 'restart-host')
+      && (h.power_op_result === 'accepted' || h.power_op_result === 'succeeded')
+      && h.power_op_at !== null
+      && now - h.power_op_at.getTime() < giveUpMs()
+      && (h.last_heartbeat_at === null || h.last_heartbeat_at < h.power_op_at);
+
     const power: HostSnapshot['power'] =
-      h.state === 'DOWN' ? 'stopped'
+      startPending ? 'starting'
+        : h.state === 'DOWN' ? 'stopped'
         : reach === 'live' || reach === 'stale' ? 'running'
           : 'unknown';
 
@@ -391,7 +424,14 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         : 'device-seconds used over device-seconds paid for';
 
     const alerts: Alert[] = [];
-    if (reach === 'unavailable') {
+    if (power === 'starting') {
+      // Not the silence alert. The silence is expected — somebody just started it — and a CRITICAL
+      // "no heartbeat for 9 hours" beside a spinner reads as the start having failed.
+      alerts.push({
+        severity: 'warning', code: 'host-starting',
+        message: 'Starting. Its devices return to the pool when its agent reports in, a few minutes after boot.',
+      });
+    } else if (reach === 'unavailable') {
       alerts.push({
         severity: 'critical', code: 'host-silent',
         message: beatAge === null
