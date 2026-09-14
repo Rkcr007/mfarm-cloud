@@ -953,6 +953,39 @@ describe('worker events', () => {
     assert.equal(after.cleaning.state, 'CLEANING', 'the beat guessed READY and skipped the restore');
   });
 
+  /**
+   * MIGRATION 059, AND THE ROUTE'S HALF OF IT. The function refuses inside the window; this asserts
+   * the HEARTBEAT passes a window at all. Wired with a zero here by mistake — or not passed, as the
+   * registration path deliberately does — the farm is back to devices returning for ninety seconds
+   * after every Stop, which is what the real lab did on 2026-09-15.
+   */
+  test('a beat while the machine is still being stopped does not give its devices back', async () => {
+    await clearDevices();
+    const [dev] = await seedDevices(1);
+    await withSystem((c) => c.query(
+      `INSERT INTO infra_operations (actor_email, action, target_kind, target_id, target_label, result)
+       VALUES ('op@example.test', 'stop-host', 'host', $1, 'http-test-host', 'succeeded')`, [hostId]));
+    await withSystem((c) => c.query(`SELECT mark_host_down($1, 'stopped from the console')`, [hostId]));
+
+    const r = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+    assert.equal(r.json().hostState, 'DOWN', 'a beat from a dying machine cancelled the stop');
+    const during = await withSystem(async (c) =>
+      (await c.query(`SELECT state FROM devices WHERE id=$1`, [dev])).rows[0]);
+    assert.equal(during.state, 'QUARANTINED', 'the devices came back while the machine was going away');
+
+    // Past the window the beat means what it always meant: the machine is there.
+    process.env.INFRA_STOP_GRACE_MS = '0';
+    try {
+      const back = await app.inject({ method: 'POST', url: '/v1/workers/heartbeat', headers: auth(workerToken) });
+      assert.equal(back.json().hostState, 'UP');
+      const after = await withSystem(async (c) =>
+        (await c.query(`SELECT state FROM devices WHERE id=$1`, [dev])).rows[0]);
+      assert.equal(after.state, 'READY', 'a machine that really did come back stayed stranded');
+    } finally {
+      delete process.env.INFRA_STOP_GRACE_MS;
+    }
+  });
+
   test("stopping a host never lifts an operator's or a health check's quarantine on the way back", async () => {
     await clearDevices();
     const [dev] = await seedDevices(1);

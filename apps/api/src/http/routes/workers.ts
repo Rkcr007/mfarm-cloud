@@ -3,6 +3,7 @@ import { timingSafeEqual, createHash } from 'node:crypto';
 import { withSystem } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import { generateWorkerToken, sha256, safeEqualHex } from '../../auth.ts';
+import { stopGraceMs } from '../../infra/stopGrace.ts';
 import { redeemEnrollment, markRedeemed } from '../../enrollment.ts';
 import { negotiate, deviceAutomationEndpoint, classifyReason, TUNNEL_CAPABILITY, type AppActionKind, type WorkerRegistration } from '@mfarm/protocol';
 import { finishRecovery, resetComplete, sessionAttach } from '../../allocator.ts';
@@ -187,8 +188,13 @@ export async function workerRoutes(app: FastifyInstance) {
 
       // A stopped host registering is a host that came back. Before the device upsert below, so the
       // devices it restores are the ones that upsert then re-asserts.
+      //
+      // NO STOP GRACE HERE, and the asymmetry is deliberate (059). A worker registers once per boot,
+      // so a registration inside the window is a machine that has BOOTED since the stop — the same
+      // reasoning that lets registration un-retire a host (056) while a beat may not. A beat can
+      // come from a process that was already dying.
       if (rows[0].state === 'DOWN') {
-        await c.query('SELECT lift_host_down($1)', [hostId]);
+        await c.query('SELECT lift_host_down($1, make_interval(secs => 0))', [hostId]);
       }
 
       // One un-quarantine path, shared with the heartbeat. A registration is evidence the host is
@@ -443,8 +449,15 @@ export async function workerRoutes(app: FastifyInstance) {
        * host row would leave a running farm with every device quarantined.
        */
       if (state === 'DOWN') {
+        /**
+         * …EXCEPT WHILE A STOP IS STILL HAPPENING (059). A GCE stop takes about ninety seconds to
+         * silence the agent, which beats every ten throughout — so on the real farm every beat undid
+         * the withdrawal and the devices read READY for a minute and a half after Stop was pressed.
+         * Those packets were in flight before the machine went away; they are not evidence it stayed.
+         */
         const { rows: lifted } = await c.query<{ n: number }>(
-          'SELECT lift_host_down($1) AS n', [hostId],
+          'SELECT lift_host_down($1, make_interval(secs => $2)) AS n',
+          [hostId, stopGraceMs() / 1000],
         );
         if (Number(lifted[0]?.n ?? -1) >= 0) {
           state = 'UP';
