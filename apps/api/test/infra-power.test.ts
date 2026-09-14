@@ -473,6 +473,38 @@ describe('the happy paths', () => {
     await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
   });
 
+  /**
+   * THE COST LEDGER, AND THE REGRESSION 059 CAUSED (migration 060).
+   *
+   * Read off the top bar on the deployed farm: "Host on · ₹65/hr" beside an Infrastructure page
+   * saying "0 of 1 hosts powered on", for a VM the provider called TERMINATED.
+   *
+   * 054 case 2 opens an interval whenever a host speaks and none is open — harmless while a beat
+   * also lifted DOWN, because the reaper's silence quarantine closed it ninety seconds later. 059
+   * stopped the beat lifting DOWN, the reaper only sweeps UP hosts, and so nothing ever closed it.
+   * ADR-0035 exists because a switched-off host was billed for twelve hours.
+   */
+  test('A DYING BEAT DOES NOT RESTART THE METER on a host we stopped', async () => {
+    fakeCloud({ status: 'RUNNING' });
+    assert.equal((await post(`/v1/infra/hosts/${labA}/stop`)).json().result, 'succeeded');
+
+    const open = async () => Number((await q<{ n: string }>(
+      'SELECT count(*) AS n FROM host_power_intervals WHERE host_id = $1 AND ended_at IS NULL',
+      [labA]))[0].n);
+    assert.equal(await open(), 0, 'the stop did not close the interval it was billing');
+
+    // The beat that arrives while the machine is being killed.
+    await q(`UPDATE hosts SET last_heartbeat_at = now() WHERE id = $1`, [labA]);
+    assert.equal(await open(), 0, 'a TERMINATED machine was put back on the meter and left there');
+
+    // And the meter starts again the moment the host is genuinely back — which is `lift_host_down`
+    // flipping DOWN to UP, a transition that carries nothing else with it.
+    await q('SELECT lift_host_down($1, make_interval(secs => 0))', [labA]);
+    assert.equal(await open(), 1, 'a host that came back was running for free');
+
+    await q(`UPDATE hosts SET state = 'UP', last_heartbeat_at = now() WHERE id = $1`, [labA]);
+  });
+
   test('a STARTING machine is NOT marked down — that is the other direction', async () => {
     fakeCloud({ status: 'TERMINATED', statusAfter: 'STAGING' });
     const res = await post(`/v1/infra/hosts/${labA}/start`);

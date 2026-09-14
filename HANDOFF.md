@@ -4929,3 +4929,26 @@ when the feature is broken. See issues 37 and 38.
     Also fixed on the way: the Fleet/Apps banner said the host was "off" when a start could be in
     flight — those screens do not load the infrastructure snapshot — so it says "not running"; and it
     read "1 device return when it starts".
+
+96. **AND THAT FIX BILLED A SWITCHED-OFF VM FOR EVER.** 2026-09-15, migration 060, same sitting as 95.
+
+    After 059 deployed I stopped the lab again and watched the database: the devices were withdrawn
+    once and STAYED withdrawn for four minutes, with no reaper churn behind them — 059 worked. Then I
+    read the top bar: **"Host on · ₹65/hr"**, beside an Infrastructure page saying "0 of 1 hosts
+    powered on", for a VM the provider called TERMINATED.
+
+    `host_power_intervals` had an interval opened at 09:40 and nothing that would ever close it. 054
+    case 2 opens one whenever a host speaks and none is open; that was harmless while the same beat
+    lifted `DOWN`, because the host went UP and the reaper's silence quarantine closed the interval
+    ninety seconds later. **059 removed the lift, the reaper only sweeps UP hosts, and so the meter
+    ran for ever.** ADR-0035 exists because a stopped host was billed for twelve hours.
+
+    060: a beat only opens an interval when the host is not `DOWN`, a `DOWN -> UP` lift opens one
+    (that transition now arrives carrying nothing else), and every interval left open on a DOWN host
+    is closed at its last beat.
+
+    **Three defects in one feature, all three found by pressing the button on the farm and reading
+    what it wrote down, none by 1400 green tests.** Each fix moved the failure somewhere the previous
+    version could not reach: the withdrawal that never happened, the withdrawal that lasted ninety
+    seconds, the meter that never stopped. Verify the LEDGER after a power change, not only the
+    device states — the two are written by different mechanisms and only one of them is on screen.

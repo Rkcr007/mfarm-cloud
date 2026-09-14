@@ -103,6 +103,27 @@ Those packets were in flight before the machine went away.
 **Consequence accepted:** a stopping host is not counted in "hosts powered on", so the burn headline
 understates by one host for up to three minutes while a machine finishes switching off.
 
+### And 059 broke the cost ledger — migration 060
+
+Read off the top bar minutes later: **"Host on · ₹65/hr"** for a VM the provider called TERMINATED,
+beside an Infrastructure page saying "0 of 1 hosts powered on". `host_power_intervals` had an
+interval opened after the stop and nothing that would ever close it.
+
+054 case 2 opens an interval whenever a host speaks and none is open. That was harmless while a beat
+also lifted `DOWN`: the host went back to UP and the reaper's silence quarantine closed the interval
+ninety seconds later. 059 stopped the beat lifting `DOWN`; the reaper only sweeps `UP` hosts; so the
+interval stayed open for ever. **ADR-0035 exists because a switched-off host was billed for twelve
+hours; this would have billed one for the rest of the month.**
+
+**A beat is not evidence of power when the control plane knows it stopped the machine.** Case 2 now
+requires `NEW.state <> 'DOWN'`, and a new case opens the interval on `DOWN -> UP` — the transition
+`lift_host_down` performs, which before 059 always carried a moved heartbeat with it. 060 also closes
+every interval left open on a host that is `DOWN`.
+
+**Each of these three was found by using the thing on the real farm, and none by the suite** — the
+stop that came back for ninety seconds, and the meter that never stopped. The tests were written
+after, from what the farm did.
+
 ## Alternatives rejected
 
 **Sweep DOWN hosts in the reaper.** `quarantine_host` sets the host QUARANTINED, which turns the card
