@@ -58,7 +58,12 @@ function farm({ released = true, ready = true, deployOk = true, running = 'old' 
     writeFileSync(p, `#!/usr/bin/env bash\n${body}\n`);
     chmodSync(p, 0o755);
   };
-  stub('docker', `echo "$@" >> "${root}/docker.log"\n[ "${released}" = true ] && exit 0 || exit 1`);
+  // `released: 'denied'` answers the way ghcr.io does to an expired login: a message on stderr naming
+  // the refusal, and a non-zero exit — the SAME exit an unreleased tag gets, which is the whole trap.
+  stub('docker', `echo "$@" >> "${root}/docker.log"
+[ "${released}" = true ] && exit 0
+[ "${released}" = denied ] && { echo 'Get "https://ghcr.io/v2/x/manifests/y": denied: denied' >&2; exit 1; }
+exit 1`);
   // The stubs read their answers from files at RUN time rather than baking them in, so a test can
   // change the farm's health between ticks — which is the only way to express "a build that was
   // healthy yesterday and is not today", the case the rollback exists for.
@@ -175,6 +180,26 @@ describe('a tick that finds main ahead', () => {
     assert.match(r.out, /verdict=waiting/);
     assert.equal(existsSync(join(root, 'deployed.log')), false);
     assert.equal(sh(`git -C "${root}" rev-parse HEAD`).trim(), before, 'must not move the tree yet');
+  });
+
+  /**
+   * THE TEN-DAY FREEZE, 2026-09-14 → 09-24. An expired registry login answered `denied` to every
+   * lookup, the script heard "not released yet", logged `waiting` every five minutes and exited 0,
+   * so the unit reported success on every tick while four releases went undeployed.
+   */
+  test('a registry that refuses is DENIED, fails the unit, and names the fix', () => {
+    const root = farm({ released: 'denied' });
+    const before = sh(`git -C "${root}" rev-parse HEAD`).trim();
+    newCommitUpstream(root);
+    const r = run(root);
+    assert.match(r.out, /verdict=denied/);
+    assert.doesNotMatch(r.out, /verdict=waiting/);
+    assert.notEqual(r.code, 0, 'systemd must see a FAILED unit, not a successful one');
+    assert.match(r.out, /REGISTRY REFUSED/);
+    assert.match(r.out, /docker login ghcr\.io/, 'the log says how to fix it');
+    assert.equal(state(root, 'status'), 'denied');
+    assert.equal(existsSync(join(root, 'deployed.log')), false, 'nothing to pull, nothing deployed');
+    assert.equal(sh(`git -C "${root}" rev-parse HEAD`).trim(), before, 'the tree is not moved');
   });
 
   test('--dry-run decides and reports without touching the farm', () => {

@@ -122,9 +122,16 @@ fi
 # and the honest verdict is `waiting`. Asking the registry rather than GitHub keeps the question to
 # the one that matters — not "did the workflow pass" but "is there an image to pull" — and needs no
 # API token beyond the docker login the box already has.
+#
+# THREE ANSWERS, NOT TWO. A manifest that is not there yet is `waiting`; a registry that REFUSED to
+# say is `denied`, and must never be folded into the first — see `mfarm_autodeploy_decision`.
 RELEASED=''
-if [ -n "$WANT" ] && docker manifest inspect "$IMAGE_REPO:$WANT" >/dev/null 2>&1; then
-  RELEASED=yes
+if [ -n "$WANT" ]; then
+  if MANIFEST_ERR="$(docker manifest inspect "$IMAGE_REPO:$WANT" 2>&1 >/dev/null)"; then
+    RELEASED=yes
+  elif printf '%s' "$MANIFEST_ERR" | grep -qiE 'denied|unauthorized|authentication required|403|401'; then
+    RELEASED=denied
+  fi
 fi
 
 FAILED="$(cat "$AD_DIR/failed-sha" 2>/dev/null || true)"
@@ -175,6 +182,11 @@ case "$VERDICT" in
   unknown) log "could not read origin/main; doing nothing"; exit 1 ;;
   waiting) log "no image for ${WANT:0:7} yet — Release runs after CI; will retry"; exit 0 ;;
   blocked) log "REFUSING ${WANT:0:7}: its last deploy failed the health gate. A human must look."; exit 1 ;;
+  # Non-zero, so the unit shows FAILED in `systemctl` and the gap is visible without reading this log.
+  denied)  log "REGISTRY REFUSED this box: $IMAGE_REPO answered 'denied'. The docker login for ghcr.io"
+           log "  has expired or been revoked, so NOTHING can deploy until it is renewed. On this box, as"
+           log "  $(id -un): echo <token with read:packages> | docker login ghcr.io -u <github user> --password-stdin"
+           exit 1 ;;
 esac
 
 [ "$DRY" = 1 ] && { log "--dry-run: would deploy ${WANT:0:7}"; exit 0; }
