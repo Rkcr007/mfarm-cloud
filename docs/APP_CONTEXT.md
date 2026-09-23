@@ -177,7 +177,7 @@ workers/agent/     Runs on a device host. Owns the device lifecycle, installs, r
                    captures evidence, heartbeats, and tunnels back to the control plane.
 packages/protocol/ The wire types shared by both sides.
 deploy/            Bring-up, deploy, and ~15 verify-*.mjs scripts that check the REAL farm.
-docs/adrs/         41 decisions, each with what was rejected and why (numbered to 0042;
+docs/adrs/         42 decisions, each with what was rejected and why (numbered to 0043;
                    there is no 0013).
 ```
 
@@ -272,7 +272,7 @@ written by somebody who keeps being wrong about them, which is why this one name
 ## 9. Where to start reading
 
 1. `docs/STATUS.md` — where every part stands, with its honest caveat.
-2. `docs/adrs/` — 41 decisions (numbered to 0042; there is no 0013). Each says what was rejected
+2. `docs/adrs/` — 42 decisions (numbered to 0043; there is no 0013). Each says what was rejected
    and why, which is usually the useful half.
 3. `apps/api/src/allocator.ts` — the reconciliation loop the whole product turns on.
 4. `apps/api/src/http/webdriver/capabilities.ts` — the contract a customer's suite meets.

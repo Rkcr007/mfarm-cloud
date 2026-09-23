@@ -98,6 +98,39 @@ installs onto the device the run is holding with no further arguments.
 Prefer the environment variables in CI: an API key on a command line is visible to every other
 process on the runner via `ps`, and shells with `set -x` echo it into the build log.
 
+### `mfarm mcp`
+
+A [Model Context Protocol](https://modelcontextprotocol.io) server, so an AI agent (Claude Code,
+Cursor, Codex, Windsurf, Google's Artemis…) can borrow a real farm device, read its screen and drive
+it. It speaks MCP on stdin/stdout; register it with your agent once:
+
+```sh
+claude mcp add mfarm --env MFARM_API_KEY=mfk_… --env MFARM_REGION=us-east -- npx -y @mfarm/cli mcp
+```
+
+or, in any client that takes a JSON config:
+
+```json
+{ "mcpServers": { "mfarm": {
+  "command": "npx", "args": ["-y", "@mfarm/cli", "mcp"],
+  "env": { "MFARM_API_KEY": "mfk_…", "MFARM_REGION": "us-east" } } } }
+```
+
+| tool | does |
+|---|---|
+| `list_devices`, `list_apps` | what the org can use |
+| `start_session` | borrow a device; with `appId`, install and launch a build first |
+| `ui_tree` | the readable/tappable elements as numbered lines with centre points |
+| `screenshot` | the screen as an image — for canvas and game screens the tree cannot see |
+| `tap`, `type_text`, `swipe`, `press_key`, `launch_app` | act; `tap` takes a `ui_tree` index or `x,y` |
+| `device_logs` | logcat (Android) or syslog (iOS), with an optional filter |
+| `end_session` | give the device back |
+
+It drives devices through the same `/wd/hub` your Appium suite uses, so an agent's session is
+recorded, reset and billed exactly like a scripted one and appears in the console. **One device at a
+time**, released on `end_session`, when the client disconnects, and on SIGINT/SIGTERM; the farm's
+idle sweep is the backstop. Nothing but protocol is written to stdout — progress goes to stderr.
+
 ## Environment given to your command
 
 ```

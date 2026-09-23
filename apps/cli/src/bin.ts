@@ -6,6 +6,7 @@ import { ControlPlaneClient, describe, sleep } from './client.ts';
 import { run, EXIT_FAILURE } from './run.ts';
 import { nodeTooOld } from './engine.ts';
 import { runTunnel, parseAllowRule } from './tunnel.ts';
+import { McpServer } from './mcp.ts';
 import type { AppSummary, DataPlaneCoordinates, DeviceSummary, SessionSummary } from './client.ts';
 
 /**
@@ -50,6 +51,7 @@ USAGE
   mfarm app launch <app-id> --session <id>     open it on that device
   mfarm app uninstall <app-id> --session <id>  remove it from that device
   mfarm tunnel --name <n> --allow <host[:port]> let farm devices reach YOUR network
+  mfarm mcp                                    MCP server: let an AI agent drive a farm device
   mfarm --version | --help
 
 GLOBAL OPTIONS
@@ -75,6 +77,13 @@ TUNNEL OPTIONS
   --label <text>    how this machine appears in the console (default: this hostname)
 
   Needs Node 22+. Nothing listens and no port is opened: this dials out and holds one socket.
+
+MCP
+  Speaks the Model Context Protocol on stdin/stdout, so an AI coding agent can borrow a device,
+  read the screen, tap, type, swipe and read logs. One device at a time; it is released when the
+  agent calls end_session or the client disconnects. Register it with your agent, e.g.
+    claude mcp add mfarm --env MFARM_API_KEY=mfk_… --env MFARM_REGION=us-east -- npx -y @mfarm/cli mcp
+  --region <r>      default region for start_session  (env MFARM_REGION)
 
 DEVICES OPTIONS
   --region <r>  --platform <android|ios>  --state <s>   filters, all optional
@@ -194,6 +203,8 @@ async function main(): Promise<number> {
       return appCommand(flags, rest);
     case 'tunnel':
       return tunnelCommand(flags);
+    case 'mcp':
+      return mcpCommand(flags);
     default:
       throw new UsageError(`Unknown command "${command}". Run "mfarm --help".`);
   }
@@ -324,6 +335,34 @@ async function tunnelCommand(flags: Flags): Promise<number> {
   // Reached only when the farm refused the tunnel in a way retrying cannot fix; `runTunnel`
   // otherwise runs until the process is signalled.
   return EXIT_FAILURE;
+}
+
+/**
+ * `mfarm mcp` — serve the Model Context Protocol on stdio until the client goes away (ADR-0043).
+ *
+ * Like `tunnel`, long-lived. Unlike every other command, stdout is not ours to print on: it is the
+ * protocol channel, so `--json` and progress output do not apply and diagnostics go to stderr.
+ */
+async function mcpCommand(flags: Flags): Promise<number> {
+  const g = globals(flags);
+  const server = new McpServer({
+    apiBaseUrl: g.apiBaseUrl,
+    apiKey: g.apiKey,
+    defaultRegion: text(flags.region, process.env.MFARM_REGION),
+    input: process.stdin,
+    output: process.stdout,
+    log: g.quiet ? () => {} : (line: string) => process.stderr.write(`${line}\n`),
+    version: await version(),
+  });
+  // A client stopping its server sends a signal as often as it closes stdin. Either way the device
+  // goes back first — a held phone is billed until its TTL.
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(sig, () => {
+      void server.shutdown(`received ${sig}`).finally(() => process.exit(sig === 'SIGINT' ? 130 : 143));
+    });
+  }
+  await server.serve();
+  return 0;
 }
 
 async function devicesCommand(flags: Flags): Promise<number> {
