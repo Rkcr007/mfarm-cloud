@@ -341,3 +341,11 @@ a.sh-copy { display: inline-block; text-decoration: none; }
   .sh-main { padding: 18px 14px 48px; }
   .sh-testname { font: var(--ty-display-md); letter-spacing: var(--tr-display-md); }
 }
+
+/* An AI run's steps (ADR-0043 C10): the reason beside the screen it was decided on. */
+.sh-ai-prompt { margin: 8px 0 0; padding: 10px 12px; border-left: 3px solid var(--mf-accent, #755EB8); color: var(--t-body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.sh-ai-steps { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.sh-ai-step { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
+.sh-ai-step-body { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.sh-ai-thumb { flex: none; width: 72px; height: auto; border-radius: 8px; border: 1px solid var(--b-card, #1F1F22); }
+@media (max-width: 480px) { .sh-ai-thumb { width: 56px; } }

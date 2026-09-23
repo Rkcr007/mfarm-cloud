@@ -45,8 +45,15 @@ export interface StepRecord {
   phase: StepPhase;
   /** What the model said it was doing — the visible reasoning a person reads in the trajectory. */
   thought: string | null;
-  /** The tool it chose and the arguments, as it sent them. Null for a plan step. */
-  action: { tool: string; input: Record<string, unknown> } | null;
+  /**
+   * The tool it chose and the arguments, as it sent them. Null for a plan step.
+   *
+   * `target` is OURS, not the model's: the element the action actually landed on, captured from the
+   * observation it was decided on (C9). "Tap [3]" means nothing outside this one screen; a resource
+   * id, a label or a text is a locator a script can use next week — and "Export as script" is only
+   * as good as what was written down here at the time.
+   */
+  action: { tool: string; input: Record<string, unknown>; target?: ActionTarget | null } | null;
   /** What happened when the action ran: `ok`, or the error, in words. */
   result: string | null;
   /** The observation this step decided on. */
@@ -56,6 +63,33 @@ export interface StepRecord {
   model: string;
   startedAt: Date;
   durationMs: number;
+}
+
+/** The element an action landed on, as a script would need to find it again. */
+export interface ActionTarget {
+  kind: string;
+  text: string | null;
+  label: string | null;
+  id: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function targetOf(el: UiElement | undefined): ActionTarget | null {
+  if (!el) return null;
+  return { kind: el.kind, text: el.text, label: el.label, id: el.id, x: el.x, y: el.y, width: el.width, height: el.height };
+}
+
+/**
+ * What an action touched: the element a tap_element named, or for typing the field that had focus
+ * on the screen the decision was made on. Null for actions that touch no element.
+ */
+export function actionTarget(name: string, input: Record<string, unknown>, elements: UiElement[]): ActionTarget | null {
+  if (name === 'tap_element') return targetOf(elements[Number(input.index)]);
+  if (name === 'type_text') return targetOf(elements.find((e) => e.focused));
+  return null;
 }
 
 export interface Sink {
@@ -326,7 +360,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
 
     await sink.record({
       n, phase, thought: [reason, thoughtText].filter(Boolean).join('\n') || null,
-      action: { tool: use.name, input }, result,
+      action: { tool: use.name, input, target: actionTarget(use.name, input, obs.elements) }, result,
       screenshotB64: obs.screenshotB64, elementCount: obs.elements.length,
       usage: usage(m), model: modelId, startedAt: r.startedAt, durationMs: Date.now() - r.t0,
     });

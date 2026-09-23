@@ -80,9 +80,9 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 | C5 | Console AI section | Merged | #204 | Farm › AI testing (`#/ai`, `G E`): prompt, Flash/Pro, build, region; recent runs; budget meter; run page with step trajectory + the screen at each step, Stop, Run again, link to the session's recording & log. Prices only from `/v1/ai/pricing` |
 | C6 | Saved AI tests | Merged | #205 | `ai_tests` (migration 062): name, prompt, mode, the app package it is about; Run = `<package>@latest`; last 10 verdicts on the row; archive keeps history |
 | C7 | Exploratory run on upload | Merged | #205 | `run_on_upload` on a saved test: a NEW build of its package (not a re-upload) queues it against that build id. Best effort — an upload never fails for AI; the answer carries `aiRuns` / `aiRunsSkipped`; `mfarm app upload` prints them |
-| C8 | AI failure diagnosis | Merged | | `POST /v1/ai/diagnoses {sessionId}` (migration 063): the reported failure, last 40 WebDriver commands, the last 250 logcat lines, the last screenshot and any AI steps → one structured call → app_bug / test_bug / environment / unknown + evidence + fix. Billed from the same budget; kept, so it is shown rather than re-bought. "Explain this failure" under every failed result |
-| C9 | Export as script | Planned | | |
-| C10 | Share an AI run | Planned | | |
+| C8 | AI failure diagnosis | Merged | #207 | `POST /v1/ai/diagnoses {sessionId}` (migration 063): the reported failure, last 40 WebDriver commands, the last 250 logcat lines, the last screenshot and any AI steps → one structured call → app_bug / test_bug / environment / unknown + evidence + fix. Billed from the same budget; kept, so it is shown rather than re-bought. "Explain this failure" under every failed result |
+| C9 | Export as script | Merged | #208 | `GET /v1/ai/runs/:id/script?lang=webdriverio\|python`: each step now records the element it landed on (`action.target`); locators best-first (id → accessibility → text → marked FRAGILE coordinates); auth by header exactly as `examples/` do; ends in a TODO assertion, never a fake one. Generated files are parse-checked in tests (TypeScript + Python `ast`), including a hostile prompt |
+| C10 | Share an AI run | Merged | #208 | "Share" on a passed/failed AI run → the existing result link; the public page adds the task, verdict and every step with its screen (`/v1/shares/:token/ai-steps/:n/screenshot`, scoped to that run). **Typed text is never sent** — only its length |
 
 ## 4. Open questions and what would change them
 

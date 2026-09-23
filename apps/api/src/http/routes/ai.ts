@@ -9,6 +9,7 @@ import { AI_CURRENCY, AI_DIAGNOSE_PRICE_INR, AI_PROFILES } from '../../ai/pricin
 import { queueAiRun, spendThisMonth } from '../../ai/queue.ts';
 import { aiConfigured, aiStepStore, anthropicModel } from '../../ai/runner.ts';
 import { diagnoseSession, diagnosisJson, DIAGNOSIS_SELECT } from '../../ai/diagnose.ts';
+import { exportScript, type ScriptLang, type ExportStep } from '../../ai/export.ts';
 import type { Model } from '../../ai/agent.ts';
 
 /**
@@ -217,6 +218,52 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       // Content-addressed and tenant-checked above: the bytes never change, the permission might.
       .header('cache-control', 'private, max-age=86400, immutable')
       .send(createReadStream(path));
+  });
+
+  /**
+   * C9 — the run as a WebdriverIO or pytest script, from the locators its steps recorded.
+   *
+   * `origin` is where the CONSOLE is served from, sent by the console, because this farm has no
+   * configured public URL and behind its proxy this process sees plain HTTP on an internal host —
+   * a script pointing there would not reach the hub. Only an http(s) origin is accepted; anything
+   * else falls back to this request's host.
+   */
+  app.get<{ Params: { id: string }; Querystring: { lang?: string; origin?: string } }>('/ai/runs/:id/script', {
+    schema: {
+      querystring: {
+        type: 'object', additionalProperties: false,
+        properties: { lang: { type: 'string', enum: ['webdriverio', 'python'] }, origin: { type: 'string', maxLength: 300 } },
+      },
+    },
+  }, async (req, reply) => {
+    const { orgId } = requireTenant(req);
+    const id = uuidParam(req.params.id);
+    const lang: ScriptLang = req.query.lang === 'python' ? 'python' : 'webdriverio';
+    let origin = `https://${req.headers.host ?? 'localhost'}`;
+    try {
+      const u = new URL(req.query.origin ?? '');
+      if (u.protocol === 'https:' || u.protocol === 'http:') origin = u.origin;
+    } catch { /* keep the default */ }
+    const { run, steps } = await withTenant(orgId, async (c) => {
+      const run = (await c.query<RunRow>(
+        `SELECT ${RUN_COLUMNS} FROM ai_runs r LEFT JOIN users u ON u.id = r.created_by WHERE r.org_id = $1 AND r.id = $2`,
+        [orgId, id],
+      )).rows[0];
+      if (!run) throw notFound('AI run');
+      const steps = (await c.query<ExportStep>(
+        'SELECT n, phase, action, result FROM ai_steps WHERE org_id = $1 AND ai_run_id = $2 ORDER BY n', [orgId, id],
+      )).rows;
+      return { run, steps };
+    });
+    const text = exportScript(lang, {
+      id: run.id, prompt: run.prompt, platform: run.platform === 'ios' ? 'ios' : 'android', region: run.region,
+      appRef: run.app_ref, status: run.status, summary: run.summary, evidence: run.evidence,
+    }, steps, origin);
+    const file = `mfarm-ai-${run.id.slice(0, 8)}.${lang === 'python' ? 'py' : 'ts'}`;
+    return reply
+      .type('text/plain; charset=utf-8')
+      .header('content-disposition', `attachment; filename="${file}"`)
+      .send(text);
   });
 
   /**

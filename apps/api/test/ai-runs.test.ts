@@ -33,6 +33,8 @@ import { AI_DIAGNOSE_PRICE_INR } from '../src/ai/pricing.ts';
 import { appStore } from '../src/appstore.ts';
 import { drainCommandLog } from '../src/commandLog.ts';
 import { Readable } from 'node:stream';
+import { execFileSync } from 'node:child_process';
+import ts from 'typescript';
 import type { Model } from '../src/ai/agent.ts';
 import { buildApk } from './fixtures/apk.ts';
 
@@ -250,7 +252,9 @@ describe('an AI run', () => {
     ]);
     const { status, body } = await startRun({ prompt: 'Log in to the app', region: REGION });
     assert.equal(status, 201);
-    assert.equal(body.aiRun.status, 'queued');
+    // `queued` OR `running`: the runner may claim it between the insert and this read — both are
+    // true answers, and asserting one of them is a race, not a check.
+    assert.ok(['queued', 'running'].includes(body.aiRun.status), body.aiRun.status);
 
     const done = await settle(body.aiRun.id);
     assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
@@ -600,6 +604,160 @@ describe('explaining a failure (C8)', () => {
     } finally {
       diagnosisReply = { verdict: 'app_bug', summary: 'The app crashed on checkout', evidence: ['E/AndroidRuntime: FATAL EXCEPTION'], suggested_fix: 'x' };
     }
+  });
+});
+
+describe('export as a script (C9)', () => {
+  function tsSyntaxErrors(src: string): string[] {
+    const out = ts.transpileModule(src, { reportDiagnostics: true, compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
+    return (out.diagnostics ?? []).map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+  }
+  function pyParses(src: string): true | string {
+    try { execFileSync('python3', ['-c', 'import ast,sys; ast.parse(sys.stdin.read())'], { input: src, stdio: ['pipe', 'pipe', 'pipe'] }); return true; }
+    catch (e) { return String((e as { stderr?: Buffer }).stderr ?? e); }
+  }
+  const script = (id: string, lang: string) => app.inject({
+    method: 'GET', url: `/v1/ai/runs/${id}/script?lang=${lang}&origin=${encodeURIComponent('https://farm.example.test')}`, headers: auth(keyA),
+  });
+
+  test('each step records the element it landed on — the locator a script needs', async () => {
+    await resetFleet();
+    scripts.set('Tap log in for export', [
+      { tool: 'tap_element', input: { index: 1, why: 'log in' } },
+      { tool: 'finish', input: { passed: true, summary: 'Logged in', evidence: 'Welcome', why: 'done' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Tap log in for export', region: REGION });
+    const done = await settle(body.aiRun.id) as unknown as { steps: { action: { target?: { id: string; text: string } } | null }[] };
+    assert.equal(done.steps[0]!.action!.target!.id, 'com.acme:id/login');
+    assert.equal(done.steps[0]!.action!.target!.text, 'Log in');
+  });
+
+  test('a passed run exports as a WebdriverIO file that parses, authenticates by header, and finds by id', async () => {
+    await resetFleet();
+    scripts.set('Export me', [
+      { tool: 'tap_element', input: { index: 1, why: 'log in' } },
+      { tool: 'tap_point', input: { x: 10, y: 20, why: 'the canvas' } },
+      { tool: 'scroll', input: { direction: 'down', why: 'more' } },
+      { tool: 'finish', input: { passed: true, summary: 'Logged in', evidence: 'Welcome shown', why: 'done' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Export me', region: REGION });
+    await settle(body.aiRun.id);
+    const res = await script(body.aiRun.id, 'webdriverio');
+    assert.equal(res.statusCode, 200);
+    assert.match(String(res.headers['content-disposition']), /mfarm-ai-.*\.ts/);
+    const src = res.body;
+    assert.deepEqual(tsSyntaxErrors(src), [], 'the file must at least parse');
+    assert.match(src, /\$\("id=com\.acme:id\/login"\)\.click\(\)/);
+    assert.match(src, /https:\/\/farm\.example\.test\/wd\/hub/);
+    assert.match(src, /authorization: `Basic/, 'a header, not WebdriverIO user/key');
+    assert.doesNotMatch(src, /\buser:|\bkey:/);
+    assert.match(src, /'mfarm:region': "ai-test"/);
+    assert.match(src, /FRAGILE/, 'the fixed-point tap is called out');
+    assert.match(src, /await swipe\("down"\)/);
+    assert.match(src, /TODO: assert/, 'no fake assertion');
+  });
+
+  test('the same kind of run exports as pytest that parses', async () => {
+    await resetFleet();
+    scripts.set('Export py', [
+      { tool: 'tap_element', input: { index: 0, why: 'email' } },
+      { tool: 'type_text', input: { text: 'a@b.co', submit: true, why: 'fill' } },
+      { tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', why: 'ok' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Export py', region: REGION });
+    await settle(body.aiRun.id);
+    const src = (await script(body.aiRun.id, 'python')).body;
+    assert.equal(pyParses(src), true);
+    assert.match(src, /AppiumBy\.ID, "com\.acme:id\/email"/);
+    assert.match(src, /send_keys\("a@b\.co"\)/);
+    assert.match(src, /press_keycode\(66\)/, 'submit=true presses Enter');
+    assert.match(src, /_AuthConnection\(HUB\)/, 'the header, never key@host userinfo');
+  });
+
+  test('a hostile prompt cannot break out of a comment or a string', async () => {
+    await resetFleet();
+    const evil = 'Hostile */ process.exit(1); /* """ \'\'\' \n import os; os.system("rm -rf /") #';
+    scripts.set('Hostile */', [
+      { tool: 'tap_element', input: { index: 1, why: 'x */ require("child_process") /*' } },
+      { tool: 'finish', input: { passed: true, summary: '"; drop', evidence: "'''", why: 'ok' } },
+    ]);
+    const { body } = await startRun({ prompt: evil, region: REGION });
+    await settle(body.aiRun.id);
+    const wdio = (await script(body.aiRun.id, 'webdriverio')).body;
+    assert.deepEqual(tsSyntaxErrors(wdio), []);
+    for (const line of wdio.split('\n').filter((l) => l.includes('process.exit(1)') || l.includes('child_process'))) {
+      assert.ok(/^\s*\/\//.test(line) || /"[^"]*(process\.exit\(1\)|child_process)/.test(line), `escaped into code: ${line}`);
+    }
+    const pySrc = (await script(body.aiRun.id, 'python')).body;
+    assert.equal(pyParses(pySrc), true);
+    for (const line of pySrc.split('\n').filter((l) => l.includes('os.system'))) {
+      assert.ok(/^\s*#/.test(line) || /"[^"]*os\.system/.test(line), `escaped into code: ${line}`);
+    }
+  });
+
+  test('another org cannot export a run it cannot see', async () => {
+    const id = (await withSystem(async (c) => (await c.query('SELECT id FROM ai_runs WHERE org_id = $1 LIMIT 1', [orgA])).rows[0]?.id)) as string;
+    const res = await app.inject({ method: 'GET', url: `/v1/ai/runs/${id}/script`, headers: auth(keyB) });
+    assert.equal(res.statusCode, 404);
+  });
+});
+
+describe('sharing an AI run (C10)', () => {
+  async function sharedRun(prompt: string, turns: Turn[]) {
+    scripts.set(prompt, turns);
+    const { body } = await startRun({ prompt, region: REGION });
+    const done = await settle(body.aiRun.id);
+    const results = (await app.inject({ method: 'GET', url: `/v1/sessions/${done.aiRun.sessionId}/results`, headers: auth(keyA) }))
+      .json() as { results: { id: string; name: string }[] };
+    const result = results.results.find((r) => r.name.startsWith('AI:'))!;
+    const share = (await app.inject({ method: 'POST', url: `/v1/results/${result.id}/shares`, headers: auth(keyA), payload: {} }))
+      .json() as { token: string };
+    return { token: share.token, sessionId: done.aiRun.sessionId! };
+  }
+
+  test('the public page gets the task, the verdict and each step — and never the text that was typed', async () => {
+    await resetFleet();
+    const { token } = await sharedRun('Share the login', [
+      { tool: 'tap_element', input: { index: 0, why: 'the email field' } },
+      { tool: 'type_text', input: { text: 'hunter2-secret', submit: false, why: 'the password' } },
+      { tool: 'finish', input: { passed: true, summary: 'Logged in', evidence: 'Welcome', why: 'done' } },
+    ]);
+    const res = await app.inject({ method: 'GET', url: `/v1/shares/${token}` });
+    assert.equal(res.statusCode, 200);
+    assert.doesNotMatch(res.body, /hunter2-secret/, 'a typed value must never reach a stranger');
+    const d = res.json() as { aiRun: { prompt: string; summary: string; steps: { tool: string; input: Record<string, unknown>; screenshot: boolean }[] } };
+    assert.equal(d.aiRun.prompt, 'Share the login');
+    assert.equal(d.aiRun.summary, 'Logged in');
+    assert.deepEqual(d.aiRun.steps.map((s) => s.tool), ['tap_element', 'type_text', 'finish']);
+    assert.equal(d.aiRun.steps[1]!.input.typedLength, 'hunter2-secret'.length);
+    assert.ok(d.aiRun.steps[0]!.screenshot);
+
+    const shot = await app.inject({ method: 'GET', url: `/v1/shares/${token}/ai-steps/1/screenshot` });
+    assert.equal(shot.statusCode, 200, 'reachable with the token and no credential');
+    assert.equal(shot.headers['content-type'], 'image/png');
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${token}/ai-steps/99/screenshot` })).statusCode, 404);
+  });
+
+  test('a token reaches its own run\'s screens and no other run\'s', async () => {
+    await resetFleet();
+    const a = await sharedRun('Share A', [{ tool: 'finish', input: { passed: true, summary: 'a', evidence: 'a', why: 'a' } }]);
+    await resetFleetKeepingRuns();
+    scripts.set('Share B', [
+      { tool: 'tap_element', input: { index: 1, why: 'b' } },
+      { tool: 'finish', input: { passed: true, summary: 'b', evidence: 'b', why: 'b' } },
+    ]);
+    const b = await startRun({ prompt: 'Share B', region: REGION });
+    await settle(b.body.aiRun.id);
+    // Run B has a step 2; run A (the shared one) does not. The token must not reach B's.
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${a.token}/ai-steps/2/screenshot` })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${a.token}/ai-steps/1/screenshot` })).statusCode, 200);
+  });
+
+  test('a revoked link reaches nothing, AI steps included', async () => {
+    await resetFleet();
+    const { token } = await sharedRun('Share then revoke', [{ tool: 'finish', input: { passed: true, summary: 'x', evidence: 'x', why: 'x' } }]);
+    await withSystem((c) => c.query('UPDATE result_shares SET revoked_at = now() WHERE prefix = $1', [token.slice(0, 12)]));
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/shares/${token}/ai-steps/1/screenshot` })).statusCode, 404);
   });
 });
 
