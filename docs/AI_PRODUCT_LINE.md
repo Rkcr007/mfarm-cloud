@@ -74,10 +74,10 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 | # | Capability | Status | PR | Notes |
 |---|---|---|---|---|
 | C1 | MCP server | Merged | #202 | `mfarm mcp`: 12 tools over `/wd/hub`; needs an npm publish to reach customers (2FA — owner runs it) |
-| C2 | AI run engine | Merged | | `src/ai/agent.ts` (loop) + `runner.ts` (claims, per-run key, hub via `inject`); `/v1/ai/*`; migration 061 |
-| C3 | Flash / Pro profiles | Merged | | Pro = a plan step + verdict re-confirmed on a fresh screen; effort `low`/`high` |
-| C4 | AI step metering | Merged | | `ai_steps` is the ledger (price at the time of the step, real tokens); step cap; monthly budget (`orgs.ai_monthly_budget_inr`, default ₹2000); screenshots expire with artifact retention |
-| C5 | Console AI section | Planned | | |
+| C2 | AI run engine | Merged | #203 | `src/ai/agent.ts` (loop) + `runner.ts` (claims, per-run key, hub via `inject`); `/v1/ai/*`; migration 061 |
+| C3 | Flash / Pro profiles | Merged | #203 | Pro = a plan step + verdict re-confirmed on a fresh screen; effort `low`/`high` |
+| C4 | AI step metering | Merged | #203 | `ai_steps` is the ledger (price at the time of the step, real tokens); step cap; monthly budget (`orgs.ai_monthly_budget_inr`, default ₹2000); screenshots expire with artifact retention |
+| C5 | Console AI section | Merged | | Farm › AI testing (`#/ai`, `G E`): prompt, Flash/Pro, build, region; recent runs; budget meter; run page with step trajectory + the screen at each step, Stop, Run again, link to the session's recording & log. Prices only from `/v1/ai/pricing` |
 | C6 | Saved AI tests | Planned | | |
 | C7 | Exploratory run on upload | Planned | | |
 | C8 | AI failure diagnosis | Planned | | |

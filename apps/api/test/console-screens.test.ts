@@ -201,6 +201,47 @@ function infraPayload(over: Record<string, unknown> = {}) {
   };
 }
 
+/** An AI run as `GET /v1/ai/runs` returns it (ADR-0043). */
+function aiRun(over: Record<string, unknown> = {}) {
+  return {
+    id: 'air-1', prompt: 'Log in and open the cart', profile: 'flash', platform: 'android',
+    region: 'lab', appRef: null, stepCap: 40, status: 'passed', stopReason: null,
+    summary: 'The cart opened with one item', evidence: 'Cart (1)', model: 'claude-opus-5',
+    sessionId: 'sess-1', runId: 'run-1', steps: 2, costInr: 8,
+    createdAt: new Date(Date.now() - 120_000).toISOString(),
+    startedAt: new Date(Date.now() - 110_000).toISOString(),
+    endedAt: new Date(Date.now() - 60_000).toISOString(),
+    cancelRequested: false, createdBy: 'someone@mfarm.local',
+    ...over,
+  };
+}
+
+function aiState(over: Record<string, unknown> = {}) {
+  const run = aiRun();
+  return {
+    runs: [run], loaded: true, loading: false, busy: false, stepN: null,
+    pricing: {
+      configured: true, currency: '₹', diagnosePriceInr: 12,
+      profiles: { flash: { priceInr: 4, stepCap: 40 }, pro: { priceInr: 9, stepCap: 80 } },
+      budget: { spentInr: 120, budgetInr: 2000 },
+    },
+    pricingLoading: false,
+    detail: {
+      aiRun: run,
+      steps: [
+        { n: 1, phase: 'act', thought: 'Open the login', action: { tool: 'tap_element', input: { index: 2 } }, result: 'ok',
+          screenshotUrl: '/v1/ai/runs/air-1/steps/1/screenshot', elementCount: 9, priceInr: 4 },
+        { n: 2, phase: 'act', thought: 'Cart shows one item', action: { tool: 'finish', input: { passed: true } }, result: 'passed',
+          screenshotUrl: '/v1/ai/runs/air-1/steps/2/screenshot', elementCount: 12, priceInr: 4 },
+      ],
+      fetchedAt: Date.now(),
+    },
+    detailLoading: false,
+    draft: { prompt: '', profile: 'flash', platform: 'android', appId: '', region: '' },
+    ...over,
+  };
+}
+
 /** Enough state for a screen to have something to draw. */
 function seed(route: { name: string; id?: string | null; lens?: string }) {
   const device = {
@@ -229,6 +270,7 @@ function seed(route: { name: string; id?: string | null; lens?: string }) {
     tests: { total: 8, passed: 6, failed: 1, skipped: 1, sessionsReporting: 3 },
   };
   Object.assign(mod.state, {
+    ai: aiState(),
     me: { user: { id: 'u1', email: 'someone@mfarm.local' }, org: { id: 'o1', name: 'Farm', slug: 'farm', maxConcurrent: 5 }, role: 'admin', operator: true },
     devices: [device],
     available: 1,
@@ -339,6 +381,8 @@ describe('every screen renders', () => {
     { name: 'team' },
     { name: 'settings' },
     { name: 'launching', id: 'sess-1' },
+    { name: 'ai' },
+    { name: 'airun', id: 'air-1' },
   ];
 
   for (const route of ROUTES) {
@@ -367,7 +411,7 @@ describe('every screen renders', () => {
 describe('screens survive an empty farm', () => {
   // The state a new install is in, and the one every "no devices yet" message exists for. A screen
   // that only works once data has arrived fails on the first morning somebody tries this.
-  for (const name of ['launch', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'infra', 'agents', 'team', 'settings']) {
+  for (const name of ['launch', 'devices', 'apps', 'sessions', 'runs', 'ai', 'queue', 'health', 'infra', 'agents', 'team', 'settings']) {
     test(`${name} renders with nothing in it`, () => {
       seed({ name });
       Object.assign(mod.state, { devices: [], available: 0, sessions: [], apps: [], actions: [], runs: [], runDetail: null, detail: null, held: null });
@@ -2224,6 +2268,21 @@ describe('a route fetches what its screen needs', () => {
     await mod.loadForRoute();
     assert.ok(urls.some((u) => u === '/v1/tunnels'),
       `arriving by bookmark or refresh must fetch: ${urls.join(', ')}`);
+  });
+
+  test('the AI screens ask for their data on arrival', async () => {
+    seed({ name: 'ai' });
+    mod.state.ai = aiState({ loaded: false, pricing: null });
+    let urls = recording();
+    await mod.loadForRoute();
+    assert.ok(urls.includes('/v1/ai/runs'), `the list: ${urls.join(', ')}`);
+    assert.ok(urls.includes('/v1/ai/pricing'), 'the prices, which the page must never write itself');
+    assert.ok(urls.includes('/v1/apps'), 'the build picker');
+
+    seed({ name: 'airun', id: 'air-9' });
+    urls = recording();
+    await mod.loadForRoute();
+    assert.ok(urls.includes('/v1/ai/runs/air-9'), `one run, by bookmark: ${urls.join(', ')}`);
   });
 
   test('a screen the poll already feeds asks for nothing, quietly', async () => {
@@ -5876,5 +5935,113 @@ describe('found on the deployed farm (2026-09-14)', () => {
     assert.equal(mod.clockOnly('09-14 07:24:51.444'), '07:24:51.444');
     assert.equal(mod.clockOnly('07:24:51.444'), '07:24:51.444', 'a stamp with no date is left alone');
     assert.equal(mod.clockOnly(undefined), '');
+  });
+});
+
+/**
+ * AI TESTING (ADR-0043, C5) — the screen a person who does not write Appium starts from.
+ *
+ * Tested through the controls, not by seeding the state a handler would have produced: the defect
+ * this file keeps finding is a control wired to nothing, and a Run button that renders is not a
+ * Run button that sends what was typed.
+ */
+describe('the AI testing screen', () => {
+  const realFetch = (globalThis as any).fetch;
+  after(() => { (globalThis as any).fetch = realFetch; });
+
+  function capture(answer: unknown = {}) {
+    const sent: { url: string; method: string; body: any }[] = [];
+    (globalThis as any).fetch = async (url: string, init: { method?: string; body?: string } = {}) => {
+      sent.push({ url: String(url), method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
+      return { ok: true, status: 201, text: async () => JSON.stringify(answer) };
+    };
+    return sent;
+  }
+
+  test('Run sends what was typed, the mode chosen and the build picked', async () => {
+    seed({ name: 'ai' });
+    let tree = mod.SCREENS.ai();
+    const box = findByClass(tree, 'ai-prompt');
+    box.value = 'Open the app and add a shirt to the cart';
+    box.dispatch('input');
+    findByText(mod.SCREENS.ai(), 'Pro').click();
+    tree = mod.SCREENS.ai();
+    const pick = findByText(tree, 'Acme', 'select');
+    pick.value = 'app-1';
+    pick.dispatch('change');
+
+    const sent = capture({ aiRun: aiRun({ id: 'air-new', status: 'queued' }) });
+    findByText(mod.SCREENS.ai(), 'Run').click();
+    await new Promise((r) => setTimeout(r, 0));
+    const post = sent.find((x) => x.method === 'POST');
+    assert.ok(post, 'pressing Run must reach the API');
+    assert.equal(post.url, '/v1/ai/runs');
+    assert.equal(post.body.prompt, 'Open the app and add a shirt to the cart');
+    assert.equal(post.body.profile, 'pro');
+    assert.equal(post.body.appId, 'app-1');
+    assert.equal(post.body.platform, 'android');
+  });
+
+  test('Run is refused with an empty prompt, and the whole form says so when AI is off', () => {
+    seed({ name: 'ai' });
+    assert.equal(findByText(mod.SCREENS.ai(), 'Run').disabled, true, 'nothing typed, nothing to run');
+
+    mod.state.ai = aiState({ pricing: { configured: false, profiles: {}, currency: '₹', budget: { spentInr: 0, budgetInr: 2000 } } });
+    mod.state.ai.draft.prompt = 'something';
+    const tree = mod.SCREENS.ai();
+    assert.equal(findByText(tree, 'Run').disabled, true);
+    assert.match(textOf(tree), /not switched on for this farm/);
+  });
+
+  test('every price on the page comes from the API, never from the page', () => {
+    seed({ name: 'ai' });
+    // Deliberately not the real prices: a literal in the console would show 4 and 40 here.
+    mod.state.ai = aiState();
+    mod.state.ai.pricing.profiles.flash = { priceInr: 7, stepCap: 11 };
+    const text = textOf(mod.SCREENS.ai());
+    assert.match(text, /₹7 per step, up to 11 steps \(at most ₹77\)/);
+    assert.match(text, /₹120 of ₹2,?000/);
+  });
+
+  test('"failed" and "no verdict" are different words — one is about the app, one is about the run', () => {
+    seed({ name: 'ai' });
+    mod.state.ai = aiState({ runs: [
+      aiRun({ id: 'a', status: 'failed', summary: 'Checkout shows an error' }),
+      aiRun({ id: 'b', status: 'error', stopReason: 'budget', summary: null }),
+    ] });
+    const text = textOf(mod.SCREENS.ai());
+    assert.match(text, /failed/);
+    assert.match(text, /no verdict/);
+
+    seed({ name: 'airun', id: 'b' });
+    const stopped = aiRun({ id: 'b', status: 'error', stopReason: 'budget', summary: null });
+    mod.state.ai = aiState({ detail: { aiRun: stopped, steps: [], fetchedAt: Date.now() } });
+    assert.match(textOf(mod.SCREENS.airun()), /monthly AI budget/);
+  });
+
+  test('the run page shows each step, and choosing one shows the screen the agent saw then', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    let tree = mod.SCREENS.airun();
+    const text = textOf(tree);
+    assert.match(text, /Tapped element \[2\]/);
+    assert.match(text, /Concluded: passed/);
+    assert.match(text, /Open the login/, 'the reason is shown with the action');
+    // The latest screen by default…
+    assert.equal(findByClass(tree, 'ai-shot').getAttribute('src'), '/v1/ai/runs/air-1/steps/2/screenshot');
+    // …and step 1 once it is chosen.
+    findByText(tree, 'Tapped element').click();
+    tree = mod.SCREENS.airun();
+    assert.equal(findByClass(tree, 'ai-shot').getAttribute('src'), '/v1/ai/runs/air-1/steps/1/screenshot');
+    assert.ok(findByText(tree, 'Recording & log'), 'the session behind it is one click away');
+  });
+
+  test('a running run offers Stop, and Stop reaches the API', async () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const running = aiRun({ status: 'running', steps: 1 });
+    mod.state.ai = aiState({ detail: { aiRun: running, steps: [], fetchedAt: Date.now() } });
+    const sent = capture({ status: 'running' });
+    findByText(mod.SCREENS.airun(), 'Stop').click();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(sent.some((x) => x.method === 'POST' && x.url === '/v1/ai/runs/air-1/cancel'));
   });
 });
