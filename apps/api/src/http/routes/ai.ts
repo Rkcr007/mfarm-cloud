@@ -7,7 +7,8 @@ import { requireTenant } from '../server.ts';
 import { badRequest, conflict, forbidden, notFound, unavailable } from '../errors.ts';
 import { AI_CURRENCY, AI_DIAGNOSE_PRICE_INR, AI_PROFILES } from '../../ai/pricing.ts';
 import { queueAiRun, spendThisMonth } from '../../ai/queue.ts';
-import { aiConfigured, aiStepStore } from '../../ai/runner.ts';
+import { aiConfigured, aiStepStore, anthropicModel } from '../../ai/runner.ts';
+import { diagnoseSession, diagnosisJson, DIAGNOSIS_SELECT } from '../../ai/diagnose.ts';
 import type { Model } from '../../ai/agent.ts';
 
 /**
@@ -87,6 +88,7 @@ async function readRun(orgId: string, id: string): Promise<RunRow> {
 export interface AiRouteOptions {
   /** Tests inject the model the runner uses, so "is AI configured" answers the same way. */
   aiModel?: Model;
+  aiModelId?: string;
 }
 
 export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Promise<void> {
@@ -215,6 +217,40 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       // Content-addressed and tenant-checked above: the bytes never change, the permission might.
       .header('cache-control', 'private, max-age=86400, immutable')
       .send(createReadStream(path));
+  });
+
+  /**
+   * C8 — explain a failed session. One billed model call; kept, so asking again shows the answer
+   * already paid for (`GET`) rather than buying a second one. `POST` always buys a fresh one — that is
+   * what a person pressing "Explain again" after new evidence arrived is asking for.
+   */
+  app.post<{ Body: { sessionId: string } }>('/ai/diagnoses', {
+    schema: {
+      body: {
+        type: 'object', required: ['sessionId'], additionalProperties: false,
+        properties: { sessionId: { type: 'string', minLength: 36, maxLength: 36 } },
+      },
+    },
+  }, async (req, reply) => {
+    const { orgId, userId } = requireSpender(req);
+    const sessionId = uuidParam(req.body.sessionId, 'Session');
+    const model = opts.aiModel ?? (configured() ? anthropicModel() : undefined);
+    const d = await diagnoseSession(orgId, sessionId, {
+      model, modelId: opts.aiModelId ?? cfg.aiModel, artifactDir: cfg.artifactDir, createdBy: userId,
+    });
+    return reply.code(201).send({ diagnosis: d });
+  });
+
+  app.get<{ Querystring: { sessionId: string } }>('/ai/diagnoses', {
+    schema: { querystring: { type: 'object', required: ['sessionId'], properties: { sessionId: { type: 'string' } } } },
+  }, async (req) => {
+    const { orgId } = requireTenant(req);
+    const sessionId = uuidParam(req.query.sessionId, 'Session');
+    const rows = await withTenant(orgId, async (c) => (await c.query(
+      `${DIAGNOSIS_SELECT} WHERE d.org_id = $1 AND d.session_id = $2 ORDER BY d.created_at DESC LIMIT 10`,
+      [orgId, sessionId],
+    )).rows);
+    return { diagnoses: rows.map((r) => diagnosisJson(r as Parameters<typeof diagnosisJson>[0])) };
   });
 
   /**

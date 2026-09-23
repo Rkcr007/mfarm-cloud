@@ -246,6 +246,7 @@ function aiState(over: Record<string, unknown> = {}) {
     }],
     testsLoaded: true, testsLoading: false,
     save: { open: false, name: '', runOnUpload: false, busy: false },
+    diag: {},
     ...over,
   };
 }
@@ -6099,5 +6100,40 @@ describe('the AI testing screen', () => {
     await new Promise((r) => setTimeout(r, 0));
     assert.ok(sent.some((x) => x.method === 'POST' && x.url === '/v1/ai/tests/aitest-1/run'),
       `Run on a saved test must run THAT test: ${sent.map((x) => x.url).join(', ')}`);
+  });
+
+  test('a failed test on the Run page offers "Explain", priced from the API, and it buys a diagnosis', async () => {
+    seed({ name: 'run', id: 'run-1' });
+    mod.state.ai.diag = { 'sess-1': { items: [], loaded: true, loading: false, busy: false } };
+    const tree = mod.SCREENS.run();
+    assert.match(textOf(tree), /₹12 from the AI budget/, 'the price is the API\'s, beside the button');
+    const sent = capture({ diagnosis: {
+      id: 'dg-1', sessionId: 'sess-1', verdict: 'test_bug', summary: 'The promo field id changed',
+      evidence: ['POST element → 404 no such element'], suggestedFix: 'Use the new accessibility id',
+      inputs: {}, model: 'claude-opus-5', priceInr: 12, createdAt: new Date().toISOString(), createdBy: null,
+    } });
+    findByText(tree, 'Explain this failure').click();
+    await new Promise((r) => setTimeout(r, 0));
+    const post = sent.find((x) => x.method === 'POST');
+    assert.equal(post?.url, '/v1/ai/diagnoses');
+    assert.deepEqual(post?.body, { sessionId: 'sess-1' });
+    const after = textOf(mod.SCREENS.run());
+    assert.match(after, /Looks like a test bug/);
+    assert.match(after, /The promo field id changed/);
+    assert.match(after, /Use the new accessibility id/);
+    assert.ok(!findByText(mod.SCREENS.run(), 'Explain this failure'), 'one bought diagnosis is shown, not offered again');
+  });
+
+  test('a diagnosis already bought is shown on arrival, and a farm with AI off offers nothing', () => {
+    seed({ name: 'run', id: 'run-1' });
+    mod.state.ai.diag = { 'sess-1': { loaded: true, loading: false, busy: false, items: [{
+      id: 'dg-0', sessionId: 'sess-1', verdict: 'unknown', summary: 'The log was empty', evidence: [],
+      suggestedFix: null, inputs: {}, model: 'm', priceInr: 12, createdAt: new Date().toISOString(), createdBy: null,
+    }] } };
+    assert.match(textOf(mod.SCREENS.run()), /Not enough evidence to say/, '"unknown" is said as unknown');
+
+    mod.state.ai = aiState({ pricing: { configured: false, profiles: {}, currency: '₹', budget: { spentInr: 0, budgetInr: 0 } } });
+    mod.state.ai.diag = { 'sess-1': { items: [], loaded: true, loading: false, busy: false } };
+    assert.ok(!findByText(mod.SCREENS.run(), 'Explain this failure'), 'a button that can only say "not configured" is noise');
   });
 });

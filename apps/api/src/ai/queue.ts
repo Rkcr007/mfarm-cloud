@@ -26,7 +26,10 @@ export interface QueueInput {
 export async function spendThisMonth(orgId: string): Promise<{ spentInr: number; budgetInr: number }> {
   return withTenant(orgId, async (c) => {
     const { rows } = await c.query<{ spent: string; budget: string }>(
+      // Steps AND diagnoses: one budget, whichever part of the AI line spent it (C4, C8).
       `SELECT (SELECT COALESCE(sum(price_inr), 0) FROM ai_steps
+                WHERE org_id = $1 AND created_at >= date_trunc('month', now()))
+            + (SELECT COALESCE(sum(price_inr), 0) FROM ai_diagnoses
                 WHERE org_id = $1 AND created_at >= date_trunc('month', now())) AS spent,
               (SELECT ai_monthly_budget_inr FROM orgs WHERE id = $1) AS budget`,
       [orgId],

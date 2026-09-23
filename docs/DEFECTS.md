@@ -759,3 +759,12 @@ raises the clean count and settles nothing, for the same reason.
 
 Three more clean full runs on 2026-09-09 on the migration-048 branch. Same reading as the sixth: it
 raises the clean count and settles nothing about a failure nobody has reproduced.
+
+**2026-09-24, one CI failure, passed on rerun: `workers/agent/test/agent.test.ts:917`** —
+*"an endpoint withdrawn at runtime strips `webdriver` on the next beat"*, assertion *"recovery needs
+no registration either"* (`back[0].capabilities` lacked `webdriver`). PR #205's `Test` job, run
+35925528980; the same commit passed the rerun, and 387/387 locally. The log line just before it is
+the agent's own *"what this host can do has changed since it registered — re-registering"*, so the
+likely shape is the re-registration and the next heartbeat racing on the same device row. Not
+investigated further — nothing in #205 touched the agent — and recorded rather than called a flake,
+because a race the product can hit is a defect whether or not a test catches it twice.

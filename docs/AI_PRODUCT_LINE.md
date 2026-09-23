@@ -78,9 +78,9 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 | C3 | Flash / Pro profiles | Merged | #203 | Pro = a plan step + verdict re-confirmed on a fresh screen; effort `low`/`high` |
 | C4 | AI step metering | Merged | #203 | `ai_steps` is the ledger (price at the time of the step, real tokens); step cap; monthly budget (`orgs.ai_monthly_budget_inr`, default ₹2000); screenshots expire with artifact retention |
 | C5 | Console AI section | Merged | #204 | Farm › AI testing (`#/ai`, `G E`): prompt, Flash/Pro, build, region; recent runs; budget meter; run page with step trajectory + the screen at each step, Stop, Run again, link to the session's recording & log. Prices only from `/v1/ai/pricing` |
-| C6 | Saved AI tests | Merged | | `ai_tests` (migration 062): name, prompt, mode, the app package it is about; Run = `<package>@latest`; last 10 verdicts on the row; archive keeps history |
-| C7 | Exploratory run on upload | Merged | | `run_on_upload` on a saved test: a NEW build of its package (not a re-upload) queues it against that build id. Best effort — an upload never fails for AI; the answer carries `aiRuns` / `aiRunsSkipped`; `mfarm app upload` prints them |
-| C8 | AI failure diagnosis | Planned | | |
+| C6 | Saved AI tests | Merged | #205 | `ai_tests` (migration 062): name, prompt, mode, the app package it is about; Run = `<package>@latest`; last 10 verdicts on the row; archive keeps history |
+| C7 | Exploratory run on upload | Merged | #205 | `run_on_upload` on a saved test: a NEW build of its package (not a re-upload) queues it against that build id. Best effort — an upload never fails for AI; the answer carries `aiRuns` / `aiRunsSkipped`; `mfarm app upload` prints them |
+| C8 | AI failure diagnosis | Merged | | `POST /v1/ai/diagnoses {sessionId}` (migration 063): the reported failure, last 40 WebDriver commands, the last 250 logcat lines, the last screenshot and any AI steps → one structured call → app_bug / test_bug / environment / unknown + evidence + fix. Billed from the same budget; kept, so it is shown rather than re-bought. "Explain this failure" under every failed result |
 | C9 | Export as script | Planned | | |
 | C10 | Share an AI run | Planned | | |
 

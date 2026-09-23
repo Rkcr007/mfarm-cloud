@@ -3398,3 +3398,8 @@ kbd {
 .ai-dot.failed { background: var(--bad-dot, #E0505F); }
 .ai-dot.error  { background: var(--warn, #E8A30E); }
 .ai-dot.queued, .ai-dot.running { background: var(--mf-accent, #755EB8); }
+
+/* C8: an AI diagnosis sits under the failure it explains. */
+.ai-diag { margin-top: 6px; }
+.ai-diag .glyph { color: var(--mf-accent, #755EB8); }
+.ai-evidence { margin: 0; padding-left: 16px; font: var(--ty-log); color: var(--t-body, #D4D4D4); overflow-wrap: anywhere; }
