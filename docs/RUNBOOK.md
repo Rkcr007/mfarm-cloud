@@ -362,6 +362,17 @@ problem is a migration, the rollback has not undone it. Read `~/autodeploy.log`,
 next tick picks it up; or clear the memory by hand with
 `rm ~/mfarm/deploy/.state/autodeploy/failed-sha`.
 
+**When the registry refuses.** `denied` means `docker manifest inspect` on the box was told `denied`
+by ghcr.io: the box's `docker login` has expired or been revoked, and nothing can deploy until it is
+renewed. Until 2026-09-24 this read as `waiting` and exited 0, which froze the farm on `5fa7034` for
+ten days while every tick reported success. Renew it as the repo owner, with a token that has
+`read:packages`:
+
+```sh
+$CP "sudo -u rkcr070707 bash -lc 'docker login ghcr.io -u <github user> --password-stdin'" < token.txt
+$CP 'sudo systemctl start mfarm-autodeploy.service'    # and the next tick deploys main
+```
+
 `MfarmDeployBlocked`, `MfarmDeployerNotRunning` and `MfarmFarmBehindMain` page on all of this.
 
 ### Deploying by hand

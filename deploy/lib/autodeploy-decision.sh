@@ -71,6 +71,13 @@ mfarm_autodeploy_decision() {
   # is one Release away from being fine when it is actually one human away.
   if mfarm_sha_eq "$want" "$failed"; then printf 'blocked'; return; fi
 
+  # THE REGISTRY SAID NO, which is not the same as "not yet". 2026-09-24: the box's `docker login`
+  # for ghcr.io expired, every manifest lookup came back `denied`, and this read it as `waiting` —
+  # for ten days and four releases, one cheerful log line every five minutes, a unit that reported
+  # success each time, and a farm quietly frozen on 5fa7034. Waiting is right for a Release that is
+  # minutes away; it is a lie about a credential that will never renew itself.
+  if [ "$released" = denied ]; then printf 'denied'; return; fi
+
   if [ -z "$released" ]; then printf 'waiting'; return; fi
 
   printf 'deploy'

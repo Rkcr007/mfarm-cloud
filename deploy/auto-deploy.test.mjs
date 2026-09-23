@@ -68,6 +68,21 @@ describe('the timer deploys main, and refuses in every case where it should not'
    * of what just happened — does the whole thing again. One bad merge becomes a restart every tick
    * until a human intervenes, which is strictly worse than the manual deploy this replaces.
    */
+  /**
+   * A REGISTRY THAT REFUSES IS NOT A RELEASE THAT HAS NOT HAPPENED. 2026-09-24: an expired ghcr.io
+   * login made every lookup `denied`, which read as `waiting` for ten days while four releases piled
+   * up. `denied` never deploys (there is nothing it could pull) and never reads as `waiting`.
+   */
+  test('a registry that refuses is denied, never waiting', () => {
+    assert.equal(decide(WANT, OLD, 'denied'), 'denied');
+    assert.notEqual(decide(WANT, OLD, 'denied'), 'deploy');
+  });
+
+  test('denied does not hide a current farm or a paused one', () => {
+    assert.equal(decide(WANT, WANT, 'denied'), 'current', 'nothing to pull, nothing wrong to report');
+    assert.equal(decide(WANT, OLD, 'denied', '', 'yes'), 'paused', 'the kill switch still wins');
+  });
+
   test('a commit that already failed its health gate is never retried', () => {
     assert.equal(decide(WANT, OLD, 'yes', WANT), 'blocked');
   });
