@@ -237,6 +237,22 @@ services:
       HOST_HOURLY_COST: ${HOST_HOURLY_COST:-}
       COST_CURRENCY: ${COST_CURRENCY:-₹}
 
+      # ---------------------------------------------------------------- AI runs (ADR-0043)
+      #
+      # MFARM pays the model provider and bills per AI step, so the credential is the farm's.
+      # UNSET MEANS AI IS OFF: `POST /v1/ai/runs` answers 503 and queues nothing, the runner never
+      # starts, and the console says AI is not configured — the honest state for a farm that has not
+      # opted in. An env var from `deploy/.env` rather than a docker secret on purpose: compose
+      # refuses to start when a declared secret has no file, and the deploy path does not create
+      # one, so a new secret would have broken the next auto-deploy on every existing farm.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MFARM_AI_MODEL: ${MFARM_AI_MODEL:-claude-opus-5}
+      # Each AI run holds a device for its whole length, so this also caps how much of the fleet AI
+      # can occupy at once.
+      AI_MAX_CONCURRENT_RUNS: ${AI_MAX_CONCURRENT_RUNS:-2}
+      # How often the runner looks for queued runs. The first step waits on a device either way.
+      AI_RUNNER_INTERVAL_MS: ${AI_RUNNER_INTERVAL_MS:-2000}
+
       # ---------------------------------------------------------------- power control (ADR-0038)
       #
       # WHICH MACHINES A BROWSER MAY SWITCH OFF, and the answer is "none" until somebody writes this

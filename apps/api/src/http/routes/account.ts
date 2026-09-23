@@ -437,7 +437,9 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
                 u.email AS created_by_email
            FROM api_keys k
            LEFT JOIN users u ON u.id = k.created_by
-          WHERE k.org_id = $1 ORDER BY k.revoked_at IS NOT NULL, k.created_at DESC`,
+          -- A key an AI run minted for itself (ADR-0043 §5) is not one anybody can use or revoke.
+          WHERE k.org_id = $1 AND k.ai_run_id IS NULL
+          ORDER BY k.revoked_at IS NOT NULL, k.created_at DESC`,
         [orgId],
       );
       return r.rows;

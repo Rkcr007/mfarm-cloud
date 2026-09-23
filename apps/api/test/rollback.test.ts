@@ -43,6 +43,13 @@ const BASELINE = '022_screenshot_action.sql';
  */
 const ACCEPTED_NEW_CHECKS: string[] = [
   /**
+   * Migration 061, the monthly AI budget (ADR-0043). Exactly the 046 shape below: it constrains
+   * ONLY `ai_monthly_budget_inr`, a column 061 itself adds to `orgs`, NOT NULL DEFAULT 2000. The
+   * previous release never names the column, so every row it writes takes 2000, which is >= 0.
+   */
+  'orgs.orgs_ai_monthly_budget_inr_check',
+
+  /**
    * Migration 046, evidence retention. Same shape as the two families below and safe for the same
    * reason: it constrains ONLY `evidence_retention_days`, a column 046 itself adds to `orgs`,
    * NOT NULL DEFAULT 3.

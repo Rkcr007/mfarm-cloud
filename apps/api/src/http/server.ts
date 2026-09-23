@@ -39,6 +39,10 @@ import type { Pool } from 'pg';
 import { TunnelRegistry, attachTunnel } from './tunnel.ts';
 import { CustomerTunnelRegistry, mountCustomerTunnel } from './customer-tunnel.ts';
 import { makeProxyRouter } from './proxy-router.ts';
+import { aiRoutes } from './routes/ai.ts';
+import { loadConfig } from '../config.ts';
+import { startAiRunner } from '../ai/runner.ts';
+import type { Model } from '../ai/agent.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -303,6 +307,16 @@ export interface ServerOptions {
    * to `isProduction` — the failure modes are not symmetric.
    */
   trustProxy?: boolean;
+  /**
+   * Drive queued AI runs every this many ms (ADR-0043). Off by default, like the reaper, and for the
+   * same reason: the runner claims queued runs fleet-wide, so a test suite sharing a database must
+   * opt in rather than have its runs collected by another suite's server.
+   */
+  aiRunnerIntervalMs?: number;
+  aiMaxConcurrentRuns?: number;
+  aiModelId?: string;
+  /** Tests inject a scripted model; production builds one from ANTHROPIC_API_KEY. */
+  aiModel?: Model;
 }
 
 export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInstance> {
@@ -646,6 +660,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(resultRoutes, { prefix: '/v1' });
   await app.register(shareRoutes, { prefix: '/v1' });
   await app.register(tunnelRoutes, { prefix: '/v1' });
+  await app.register(aiRoutes, { prefix: '/v1', aiModel: opts.aiModel });
   // Outside `/v1`: this one serves a page to a person, not JSON to a client, and its path is what
   // gets pasted into a chat window. See `sharePageRoutes`.
   await app.register(sharePageRoutes);
@@ -655,6 +670,18 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   // change whichever client the team is on, which is the entire promise of the endpoint.
   await app.register(webdriverRoutes, { prefix: '/wd/hub' });
   await app.register(webdriverRoutes);
+
+  // --- AI runs (ADR-0043) -------------------------------------------------------------------------
+  if (opts.aiRunnerIntervalMs && opts.aiRunnerIntervalMs > 0) {
+    startAiRunner(app, {
+      intervalMs: opts.aiRunnerIntervalMs,
+      maxConcurrent: opts.aiMaxConcurrentRuns ?? 2,
+      modelId: opts.aiModelId ?? 'claude-opus-5',
+      model: opts.aiModel,
+      artifactDir: loadConfig().artifactDir,
+      retentionHours: loadConfig().artifactRetentionHours,
+    });
+  }
 
   // --- reaper ------------------------------------------------------------------------------------
   if (opts.reaperIntervalMs && opts.reaperIntervalMs > 0) {

@@ -1,0 +1,456 @@
+/**
+ * AI runs end to end (ADR-0043): the real routes, the real runner, the real hub, a real database,
+ * a stub automation server behind a seeded host — and a SCRIPTED model in place of Anthropic.
+ *
+ * The model is the only fake that matters to the product's behaviour, and it is scripted rather than
+ * mocked per call so each test reads as the conversation it is: "tap Log in, then say it passed".
+ * Everything the model's choices cause — the tap reaching the device at the element's centre, the
+ * step being billed, the verdict landing on the session, the key being revoked, the device going
+ * back — runs through production code.
+ */
+process.env.RATE_LIMIT_MAX = '10000';
+process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
+
+import { test, before, after, describe } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer, type Server } from 'node:http';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+process.env.ARTIFACT_DIR = mkdtempSync(join(tmpdir(), 'mfarm-ai-test-'));
+
+import type { FastifyInstance } from 'fastify';
+import type Anthropic from '@anthropic-ai/sdk';
+import { buildServer } from '../src/http/server.ts';
+import { withSystem, closePools } from '../src/db.ts';
+import { createApiKey, generateWorkerToken } from '../src/auth.ts';
+import { upsertUser, cookieValue } from '../src/users.ts';
+import { AI_PROFILES } from '../src/ai/pricing.ts';
+import { expireAiScreenshots, aiStepStore } from '../src/ai/runner.ts';
+import type { Model } from '../src/ai/agent.ts';
+
+const REGION = 'ai-test';
+let app: FastifyInstance;
+let orgA: string, orgB: string, hostId: string;
+let keyA: string, keyB: string, automationKeyA: string;
+let adminCookie: string, adminCsrf: string;
+const ADMIN = `ai-admin-${randomUUID()}@example.test`;
+const PASSWORD = 'correct horse battery staple';
+
+// ---------------------------------------------------------------- the phone
+
+const SOURCE = `<hierarchy>
+  <android.widget.EditText class="android.widget.EditText" text="" resource-id="com.acme:id/email" content-desc="Email" clickable="true" focusable="true" bounds="[40,400][1040,520]" displayed="true"/>
+  <android.widget.Button class="android.widget.Button" text="Log in" resource-id="com.acme:id/login" clickable="true" bounds="[390,1160][690,1260]" displayed="true"/>
+</hierarchy>`;
+const PNG_B64 = Buffer.from('\x89PNG\r\n\x1a\nfake-screen').toString('base64');
+
+interface Recorded { method: string; url: string; body: unknown }
+let upstream: Server;
+let recorded: Recorded[] = [];
+/** When set, `element/active` answers the W3C 404 "no such element" — an ordinary miss. */
+let noFocusedField = false;
+
+function startUpstream(): Promise<string> {
+  upstream = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      recorded.push({ method: req.method!, url: req.url!, body: raw ? JSON.parse(raw) : undefined });
+      const json = (code: number, value: unknown) => {
+        res.writeHead(code, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ value }));
+      };
+      const u = req.url ?? '';
+      if (req.method === 'POST' && u === '/session') {
+        return json(200, { sessionId: 'up-1', capabilities: { platformName: 'android' } });
+      }
+      if (u.startsWith('/session/up-1')) {
+        if (req.method === 'DELETE' && u === '/session/up-1') return json(200, null);
+        if (u.endsWith('/screenshot')) return json(200, PNG_B64);
+        if (u.endsWith('/source')) return json(200, SOURCE);
+        if (u.endsWith('/window/rect')) return json(200, { x: 0, y: 0, width: 1080, height: 2400 });
+        if (u.endsWith('/actions')) return json(200, null);
+        if (u.endsWith('/element/active')) {
+          if (noFocusedField) return json(404, { error: 'no such element', message: 'nothing has focus' });
+          return json(200, { 'element-6066-11e4-a52e-4f735466cecf': 'el-1' });
+        }
+        if (u.endsWith('/value') || u.endsWith('/execute/sync')) return json(200, null);
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ value: { error: 'unknown command', message: u } }));
+    });
+  });
+  return new Promise((r) => upstream.listen(0, '127.0.0.1', () => {
+    r(`http://127.0.0.1:${(upstream.address() as { port: number }).port}`);
+  }));
+}
+
+// ---------------------------------------------------------------- the model
+
+type Turn =
+  | { tool: string; input: Record<string, unknown> }
+  | { text: string };
+
+/** Each run's conversation, keyed by the task text so concurrent runs cannot share a script. */
+const scripts = new Map<string, Turn[]>();
+const calls: Anthropic.Beta.MessageCreateParamsNonStreaming[] = [];
+
+const scriptedModel: Model = async (params) => {
+  calls.push(params);
+  const first = params.messages[0]!.content as Anthropic.Beta.BetaContentBlockParam[];
+  const prompt = (first[0] as { text: string }).text;
+  const key = [...scripts.keys()].find((k) => prompt.includes(k));
+  const turn = key ? scripts.get(key)!.shift() : undefined;
+  const t = turn ?? { text: 'I am not sure what to do.' };
+  const content = 'tool' in t
+    ? [{ type: 'text', text: 'Looking at the screen.' }, { type: 'tool_use', id: `tu_${randomUUID()}`, name: t.tool, input: t.input }]
+    : [{ type: 'text', text: t.text }];
+  return {
+    id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: params.model,
+    content, stop_reason: 'tool' in t ? 'tool_use' : 'end_turn', stop_sequence: null,
+    usage: { input_tokens: 1200, output_tokens: 80, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
+  } as unknown as Anthropic.Beta.BetaMessage;
+};
+
+// ---------------------------------------------------------------- fixtures
+
+const auth = (k: string) => ({ authorization: `Bearer ${k}` });
+
+async function seedDevice(): Promise<void> {
+  await withSystem((c) => c.query(
+    `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, capabilities,
+                          local_id, adb_serial, system_port, mjpeg_server_port)
+     VALUES ($1,$2,'android','cuttlefish','cf_x86_64','15','READY',$3::jsonb,$4,'0.0.0.0:6520',8200,7810)`,
+    [hostId, REGION, JSON.stringify(['screen-stream', 'input-datachannel', 'snapshot-reset', 'webdriver']), `ai-${randomUUID()}`],
+  ));
+}
+
+async function resetFleet(): Promise<void> {
+  await withSystem(async (c) => {
+    await c.query('DELETE FROM ai_runs WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM devices WHERE host_id = $1', [hostId]);
+    await c.query('UPDATE orgs SET ai_monthly_budget_inr = 2000 WHERE id = ANY($1)', [[orgA, orgB]]);
+  });
+  recorded = [];
+  calls.length = 0;
+  noFocusedField = false;
+  await seedDevice();
+}
+
+/** A fresh device for the next run without deleting the runs already recorded. */
+async function resetFleetKeepingRuns(): Promise<void> {
+  await withSystem(async (c) => {
+    await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('UPDATE ai_runs SET session_id = session_id WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM devices WHERE host_id = $1 AND state <> $2', [hostId, 'READY']);
+  });
+  const ready = await withSystem(async (c) => (await c.query(
+    `SELECT count(*)::int AS n FROM devices WHERE host_id = $1 AND state = 'READY'`, [hostId])).rows[0].n as number);
+  if (ready === 0) await seedDevice();
+}
+
+async function startRun(body: Record<string, unknown>, key = keyA) {
+  const res = await app.inject({ method: 'POST', url: '/v1/ai/runs', headers: auth(key), payload: body });
+  return { status: res.statusCode, body: res.json() as { aiRun: { id: string; status: string }; error?: { code: string } } };
+}
+
+async function settle(id: string, key = keyA) {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const res = await app.inject({ method: 'GET', url: `/v1/ai/runs/${id}`, headers: auth(key) });
+    const body = res.json() as {
+      aiRun: { status: string; steps: number; costInr: number; summary: string | null; stopReason: string | null; sessionId: string | null; runId: string | null };
+      steps: { n: number; phase: string; action: { tool: string } | null; result: string | null; screenshotUrl: string | null }[];
+    };
+    if (!['queued', 'running'].includes(body.aiRun.status)) return body;
+    if (Date.now() > deadline) throw new Error(`AI run ${id} never settled (still ${body.aiRun.status})`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+before(async () => {
+  const upstreamUrl = await startUpstream();
+  await withSystem(async (c) => {
+    await c.query(`INSERT INTO regions (code,name) VALUES ($1,'AI Test') ON CONFLICT (code) DO NOTHING`, [REGION]);
+    orgA = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent) VALUES ('ai-a','A',50) RETURNING id`)).rows[0].id;
+    orgB = (await c.query(`INSERT INTO orgs (slug,name,max_concurrent) VALUES ('ai-b','B',50) RETURNING id`)).rows[0].id;
+    const wt = generateWorkerToken();
+    hostId = (await c.query(
+      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,endpoint,automation_endpoint,
+                          token_prefix,token_hash,last_heartbeat_at)
+       VALUES ($1,'ai-test-host','UP',1,64,262144,'wss://ai-worker.example:8443',$2,$3,$4, now()) RETURNING id`,
+      [REGION, upstreamUrl, wt.prefix, wt.hash])).rows[0].id;
+  });
+  keyA = (await createApiKey(orgA, 'test fixture — ai', { scope: 'full' })).plaintext;
+  keyB = (await createApiKey(orgB, 'test fixture — ai', { scope: 'full' })).plaintext;
+  automationKeyA = (await createApiKey(orgA, 'test fixture — ai ci', { scope: 'automation' })).plaintext;
+  app = await buildServer({
+    logger: false, loginRateLimitMax: 10_000, aiRunnerIntervalMs: 25, aiModel: scriptedModel, aiModelId: 'claude-opus-5',
+  });
+  await upsertUser(ADMIN, PASSWORD, orgA, 'admin');
+  const login = await app.inject({ method: 'POST', url: '/v1/auth/login', payload: { email: ADMIN, password: PASSWORD } });
+  const raw = [login.headers['set-cookie']].flat()[0] as string;
+  adminCookie = `mfarm_session=${cookieValue(raw, 'mfarm_session')}`;
+  adminCsrf = (login.json() as { csrfToken: string }).csrfToken;
+});
+
+after(async () => {
+  await app.close();
+  await withSystem(async (c) => {
+    await c.query('DELETE FROM ai_runs WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM metering_events WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM devices WHERE host_id = $1', [hostId]);
+    await c.query('DELETE FROM api_keys WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM hosts WHERE id = $1', [hostId]);
+    await c.query('DELETE FROM users WHERE email = $1', [ADMIN]);
+    await c.query('DELETE FROM orgs WHERE id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM regions WHERE code = $1', [REGION]);
+  });
+  await new Promise<void>((r) => upstream.close(() => r()));
+  await closePools();
+});
+
+// ---------------------------------------------------------------- tests
+
+describe('an AI run', () => {
+  test('Flash: the model taps an element, the tap lands at its centre, the verdict lands on the session', async () => {
+    await resetFleet();
+    scripts.set('Log in to the app', [
+      { tool: 'tap_element', input: { index: 1, why: 'Open the login' } },
+      { tool: 'finish', input: { passed: true, summary: 'Logged in', evidence: 'Home screen shown', why: 'done' } },
+    ]);
+    const { status, body } = await startRun({ prompt: 'Log in to the app', region: REGION });
+    assert.equal(status, 201);
+    assert.equal(body.aiRun.status, 'queued');
+
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
+    assert.equal(done.aiRun.steps, 2);
+    assert.equal(done.aiRun.costInr, 2 * AI_PROFILES.flash.priceInr, 'every model call is one billed step');
+    assert.deepEqual(done.steps.map((s) => s.action?.tool), ['tap_element', 'finish']);
+
+    // The tap reached the device at the centre of element [1], "Log in" at [390,1160][690,1260].
+    const tap = recorded.find((r) => r.url.endsWith('/actions'))!;
+    const move = (tap.body as { actions: { actions: { x: number; y: number }[] }[] }).actions[0]!.actions[0]!;
+    assert.deepEqual([move.x, move.y], [540, 1210]);
+
+    // The model was shown the element list and the screenshot, and nothing it should not see.
+    const content = calls[0]!.messages[0]!.content as { type: string; text?: string }[];
+    assert.ok(content.some((b) => b.type === 'text' && b.text?.includes('[1] Button "Log in"')));
+    assert.ok(content.some((b) => b.type === 'image'));
+    assert.equal(calls[0]!.model, 'claude-opus-5');
+
+    // The device went back, and the verdict is on the session like any scripted test's.
+    assert.ok(recorded.some((r) => r.method === 'DELETE' && r.url === '/session/up-1'), 'device released');
+    const result = await withSystem(async (c) => (await c.query(
+      'SELECT status FROM test_results WHERE session_id = $1', [done.aiRun.sessionId],
+    )).rows[0]);
+    assert.equal(result?.status, 'passed');
+    assert.ok(done.aiRun.runId, 'the AI run is also a run in Runs');
+
+    // The step's screenshot is served, to this org only.
+    const url = done.steps[0]!.screenshotUrl!;
+    const png = await app.inject({ method: 'GET', url, headers: auth(keyA) });
+    assert.equal(png.statusCode, 200);
+    assert.equal(png.headers['content-type'], 'image/png');
+    assert.equal(png.rawPayload.toString('base64'), PNG_B64);
+    assert.equal((await app.inject({ method: 'GET', url, headers: auth(keyB) })).statusCode, 404);
+  });
+
+  test('its key is revoked when it ends and never appears in the org key list', async () => {
+    const keys = await withSystem(async (c) => (await c.query(
+      'SELECT revoked_at FROM api_keys WHERE org_id = $1 AND ai_run_id IS NOT NULL', [orgA],
+    )).rows);
+    assert.ok(keys.length >= 1);
+    assert.ok(keys.every((k) => k.revoked_at !== null), 'every AI-run key is revoked');
+
+    const list = await app.inject({ method: 'GET', url: '/v1/account/api-keys', headers: { cookie: adminCookie } });
+    assert.equal(list.statusCode, 200);
+    const labels = (list.json() as { keys: { label: string }[] }).keys.map((k) => k.label);
+    assert.ok(labels.includes('test fixture — ai'), 'the list does show the keys a person minted');
+    assert.ok(!labels.some((l) => l.startsWith('AI run')), `AI-run keys leaked into the list: ${labels.join(', ')}`);
+  });
+
+  test('Pro: plans first, and a verdict is confirmed on a fresh screen before it counts', async () => {
+    await resetFleet();
+    scripts.set('Check the login button exists', [
+      { text: '1. Find the Log in button.' },
+      { tool: 'finish', input: { passed: true, summary: 'It exists', evidence: '[1] Button "Log in"', why: 'visible' } },
+      { tool: 'finish', input: { passed: true, summary: 'It exists', evidence: '[1] Button "Log in"', why: 'confirmed' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Check the login button exists', profile: 'pro', region: REGION });
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'passed');
+    assert.deepEqual(done.steps.map((s) => s.phase), ['plan', 'act', 'verify']);
+    assert.equal(done.aiRun.costInr, 3 * AI_PROFILES.pro.priceInr);
+    assert.equal(calls[0]!.tools, undefined, 'the plan step offers no tools');
+    assert.deepEqual(calls[0]!.output_config, { effort: 'high' });
+  });
+
+  test('stops at the step that would overspend the monthly budget, and says so', async () => {
+    await resetFleet();
+    await withSystem((c) => c.query('UPDATE orgs SET ai_monthly_budget_inr = $2 WHERE id = $1',
+      [orgA, AI_PROFILES.flash.priceInr + 1]));
+    scripts.set('Scroll forever', Array.from({ length: 10 }, () => ({ tool: 'scroll', input: { direction: 'down', why: 'more' } })));
+    const { body } = await startRun({ prompt: 'Scroll forever', region: REGION });
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'error');
+    assert.equal(done.aiRun.stopReason, 'budget');
+    assert.equal(done.aiRun.steps, 1, 'one step fit in the budget, the second was never taken');
+
+    const refused = await startRun({ prompt: 'Scroll forever', region: REGION });
+    assert.equal(refused.status, 409, 'a run the budget cannot pay one step of is not queued at all');
+    assert.equal(refused.body.error?.code, 'ai_budget_exhausted');
+  });
+
+  test('an element miss is a step the agent recovers from, not the end of the run', async () => {
+    await resetFleet();
+    noFocusedField = true;
+    scripts.set('Type without a field', [
+      { tool: 'type_text', input: { text: 'hello', submit: false, why: 'type' } },
+      { tool: 'finish', input: { passed: false, summary: 'No field to type in', evidence: 'none focused', why: 'saw error' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Type without a field', region: REGION });
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'failed', `a 404 "no such element" must not read as a lost device: ${done.aiRun.stopReason}`);
+    assert.match(done.steps[0]!.result ?? '', /^failed:/);
+    assert.equal(done.steps.length, 2, 'the next turn saw the miss and reached a verdict');
+  });
+
+  test('a run that cannot get a device says so, and bills nothing', async () => {
+    await resetFleet();
+    const { body } = await startRun({ prompt: 'Somewhere else', region: 'no-such-region' });
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'error');
+    assert.equal(done.aiRun.stopReason, 'no_device');
+    assert.equal(done.aiRun.costInr, 0);
+    assert.ok(done.aiRun.summary, 'the hub\'s reason is carried through');
+  });
+
+  test('stops, inconclusive, at its step cap', async () => {
+    await resetFleet();
+    scripts.set('Wander', Array.from({ length: 10 }, () => ({ tool: 'press_key', input: { key: 'back', why: 'hm' } })));
+    const { body } = await startRun({ prompt: 'Wander', region: REGION, stepCap: 3 });
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'error');
+    assert.equal(done.aiRun.stopReason, 'step_cap');
+    assert.equal(done.aiRun.steps, 3);
+  });
+
+  test('a running run cancelled from the console stops before its next step', async () => {
+    await resetFleet();
+    scripts.set('Wait around', Array.from({ length: 20 }, () => ({ tool: 'wait', input: { seconds: 1, why: 'loading' } })));
+    const { body } = await startRun({ prompt: 'Wait around', region: REGION });
+    const id = body.aiRun.id;
+
+    const other = await app.inject({ method: 'POST', url: `/v1/ai/runs/${id}/cancel`, headers: auth(keyB) });
+    assert.equal(other.statusCode, 404, 'another org cannot cancel it');
+
+    for (let i = 0; i < 200; i++) {
+      const r = await app.inject({ method: 'GET', url: `/v1/ai/runs/${id}`, headers: auth(keyA) });
+      if ((r.json() as { aiRun: { steps: number } }).aiRun.steps >= 1) break;
+      await new Promise((res) => setTimeout(res, 25));
+    }
+    const res = await app.inject({
+      method: 'POST', url: `/v1/ai/runs/${id}/cancel`, headers: { cookie: adminCookie, 'x-mfarm-csrf': adminCsrf },
+    });
+    assert.equal(res.statusCode, 200);
+    const done = await settle(id);
+    assert.equal(done.aiRun.status, 'cancelled');
+    assert.equal(done.aiRun.stopReason, 'cancelled');
+    assert.ok(done.aiRun.steps < 20, 'it stopped rather than running its script out');
+    assert.ok(recorded.some((r) => r.method === 'DELETE' && r.url === '/session/up-1'), 'and gave the device back');
+  });
+});
+
+describe('screenshot retention', () => {
+  const quickPass = (prompt: string) => {
+    scripts.set(prompt, [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', why: 'ok' } }]);
+    return startRun({ prompt, region: REGION }).then((r) => settle(r.body.aiRun.id));
+  };
+  const age = (runId: string | undefined) => withSystem((c) => c.query(
+    `UPDATE ai_steps SET created_at = now() - interval '1000 hours' WHERE ai_run_id = (
+       SELECT id FROM ai_runs WHERE session_id = $1)`, [runId]));
+  const store = aiStepStore(process.env.ARTIFACT_DIR!);
+
+  test('an aged-out screenshot is deleted when no newer step shows the same screen; the step and its price stay', async () => {
+    await resetFleet();
+    const old = await quickPass('Retention solo');
+    await age(old.aiRun.sessionId!);
+    assert.equal(await expireAiScreenshots(store, 24), 1);
+    const again = await settle((await withSystem(async (c) => (await c.query(
+      'SELECT id FROM ai_runs WHERE session_id = $1', [old.aiRun.sessionId])).rows[0].id)) as string);
+    assert.equal(again.steps.length, 1, 'the ledger row survives');
+    assert.equal(again.steps[0]!.screenshotUrl, null);
+    assert.equal(again.aiRun.costInr, AI_PROFILES.flash.priceInr);
+  });
+
+  test('a blob a newer step still shows is kept — content addressing shares one file', async () => {
+    await resetFleet();
+    const old = await quickPass('Retention shared old');
+    await resetFleetKeepingRuns();
+    const fresh = await quickPass('Retention shared new');
+    await age(old.aiRun.sessionId!);
+    assert.equal(await expireAiScreenshots(store, 24), 0, 'the same screen is still referenced');
+    const png = await app.inject({ method: 'GET', url: fresh.steps[0]!.screenshotUrl!, headers: auth(keyA) });
+    assert.equal(png.statusCode, 200);
+  });
+});
+
+describe('who may start one', () => {
+  test('a signed-in person can, and is recorded as the one who did', async () => {
+    await resetFleet();
+    scripts.set('From the console', [
+      { tool: 'finish', input: { passed: false, summary: 'No such screen', evidence: 'Login only', why: 'absent' } },
+    ]);
+    const res = await app.inject({
+      method: 'POST', url: '/v1/ai/runs', headers: { cookie: adminCookie, 'x-mfarm-csrf': adminCsrf },
+      payload: { prompt: 'From the console', region: REGION },
+    });
+    assert.equal(res.statusCode, 201, res.body);
+    const done = await settle((res.json() as { aiRun: { id: string } }).aiRun.id);
+    assert.equal(done.aiRun.status, 'failed', 'the agent\'s verdict that the app cannot do it');
+    const again = await app.inject({ method: 'GET', url: '/v1/ai/runs', headers: auth(keyA) });
+    const mine = (again.json() as { aiRuns: { prompt: string; createdBy: string | null }[] }).aiRuns
+      .find((r) => r.prompt === 'From the console')!;
+    assert.equal(mine.createdBy, ADMIN);
+  });
+
+  test('an automation-scope key is refused — it is what a run itself drives the hub with', async () => {
+    const res = await startRun({ prompt: 'anything' }, automationKeyA);
+    assert.equal(res.status, 403);
+  });
+
+  test('another org sees none of it', async () => {
+    const mine = await app.inject({ method: 'GET', url: '/v1/ai/runs', headers: auth(keyB) });
+    assert.deepEqual((mine.json() as { aiRuns: unknown[] }).aiRuns, []);
+  });
+
+  test('the price list is the server constant, and says whether AI is available', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/ai/pricing', headers: auth(keyA) });
+    const body = res.json() as { configured: boolean; profiles: Record<string, { priceInr: number; stepCap: number }> };
+    assert.equal(body.configured, true);
+    assert.deepEqual(body.profiles.flash, { priceInr: AI_PROFILES.flash.priceInr, stepCap: AI_PROFILES.flash.stepCap });
+    assert.deepEqual(body.profiles.pro, { priceInr: AI_PROFILES.pro.priceInr, stepCap: AI_PROFILES.pro.stepCap });
+  });
+
+  test('with no model credential nothing is queued', async () => {
+    const saved = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    const bare = await buildServer({ logger: false });
+    try {
+      const res = await bare.inject({ method: 'POST', url: '/v1/ai/runs', headers: auth(keyA), payload: { prompt: 'x' } });
+      assert.equal(res.statusCode, 503);
+    } finally {
+      await bare.close();
+      if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
+    }
+  });
+});
