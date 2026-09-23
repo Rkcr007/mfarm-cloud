@@ -4952,3 +4952,21 @@ when the feature is broken. See issues 37 and 38.
     version could not reach: the withdrawal that never happened, the withdrawal that lasted ninety
     seconds, the meter that never stopped. Verify the LEDGER after a power change, not only the
     device states — the two are written by different mechanisms and only one of them is on screen.
+
+97. **MFARM AI — the Artemis-inspired product line, C1–C10 built.** 2026-09-24, ADR-0043, migrations
+    061–063, PRs #202–#209. Tracker and pricing: `docs/AI_PRODUCT_LINE.md` (the system of record).
+
+    Owner decisions: a NATIVE agent over our own `/wd/hub` rather than embedding Google's Python
+    Artemis (Android and iOS, our evidence and billing, no ADB for customers); MFARM pays the model
+    provider and bills per AI step. Built: `mfarm mcp` (C1), the AI run engine with Flash/Pro and a
+    per-step ledger with budget (C2–C4), Farm › AI testing in the console (C5), saved tests and runs
+    on every new build (C6–C7), "Explain this failure" (C8), export a passed run as WebdriverIO or
+    pytest (C9), and share links that carry the trajectory with typed text redacted (C10).
+
+    **State of the farm, which is the part that decays:** the farm is NOT serving any of it. The
+    control plane's ghcr.io login expired and auto-deploy read `denied` as `waiting` from 09-14 —
+    #206 makes that a loud `denied` verdict, but the login itself needs the owner (a token with
+    `read:packages`; commands in `docs/RUNBOOK.md`). AI is also OFF until `ANTHROPIC_API_KEY` is set
+    in `deploy/.env`. C1 was verified on hardware anyway (it only needs the hub, which the old build
+    serves) and that run found two defects fixed in #209. C2–C10 have never met a real model or a
+    real device; the prices in `ai/pricing.ts` are derived, not measured.
