@@ -663,7 +663,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(resultRoutes, { prefix: '/v1' });
   await app.register(shareRoutes, { prefix: '/v1' });
   await app.register(tunnelRoutes, { prefix: '/v1' });
-  await app.register(aiRoutes, { prefix: '/v1', aiModel: opts.aiModel });
+  await app.register(aiRoutes, { prefix: '/v1', aiModel: opts.aiModel, aiModelId: opts.aiModelId });
   await app.register(aiTestRoutes, { prefix: '/v1', aiModel: opts.aiModel });
   // Outside `/v1`: this one serves a page to a person, not JSON to a client, and its path is what
   // gets pasted into a chat window. See `sharePageRoutes`.

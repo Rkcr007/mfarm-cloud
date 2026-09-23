@@ -7,6 +7,7 @@ import { createApiKey, revokeApiKey } from '../auth.ts';
 import { appStore, type AppStore } from '../appstore.ts';
 import { release } from '../allocator.ts';
 import { AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
+import { spendThisMonth } from './queue.ts';
 import { runAgent, type AgentOutcome, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 
 /**
@@ -347,21 +348,15 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
       async beforeStep(): Promise<StopReason | null> {
         // A deploy is not a person pressing Cancel; the run reads as interrupted, like the boot sweep's.
         if (ctx.isClosing()) return 'interrupted';
-        return withTenant(orgId, async (c) => {
-          const { rows } = await c.query<{ cancelled: boolean; spent: string; budget: string }>(
-            `SELECT (r.cancel_requested_at IS NOT NULL) AS cancelled,
-                    (SELECT COALESCE(sum(price_inr), 0) FROM ai_steps
-                      WHERE org_id = $1 AND created_at >= date_trunc('month', now())) AS spent,
-                    o.ai_monthly_budget_inr AS budget
-               FROM ai_runs r JOIN orgs o ON o.id = r.org_id
-              WHERE r.org_id = $1 AND r.id = $2`,
-            [orgId, run.id],
-          );
-          const row = rows[0];
-          if (!row || row.cancelled) return 'cancelled';
-          if (Number(row.spent) + price > Number(row.budget)) return 'budget';
-          return null;
-        });
+        const cancelled = await withTenant(orgId, async (c) => (await c.query<{ cancelled: boolean }>(
+          'SELECT (cancel_requested_at IS NOT NULL) AS cancelled FROM ai_runs WHERE org_id = $1 AND id = $2',
+          [orgId, run.id],
+        )).rows[0]?.cancelled ?? true);
+        if (cancelled) return 'cancelled';
+        // The same sum the routes quote from — one definition of "spent this month" (queue.ts).
+        const { spentInr, budgetInr } = await spendThisMonth(orgId);
+        if (spentInr + price > budgetInr) return 'budget';
+        return null;
       },
       async record(step) {
         let sha: string | null = null;

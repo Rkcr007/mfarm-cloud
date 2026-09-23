@@ -301,6 +301,8 @@ export const state = {
     /** Saved tests (C6). `save` is the name box under the prompt — in state for the draft's reason. */
     tests: [], testsLoaded: false, testsLoading: false,
     save: { open: false, name: '', runOnUpload: false, busy: false },
+    /** Failure diagnoses (C8), by session id: `{ items, loaded, loading, busy }`. */
+    diag: {},
   },
   /**
    * Artifacts for the session detail screen, keyed by session id.
@@ -7048,6 +7050,7 @@ function sessionFailureCard(sess, live) {
          * button nobody finds. Always rendered, unlike `Watch`, which needs a recording with a
          * readable anchor: sharing depends on nothing but the result existing.
          */
+        aiExplainBlock(f.sessionId || state.detail?.id),
         h('p', { class: 'row tight' },
           btn('Share', 'tiny', () => shareDialog(f),
             { title: 'A link that shows this one failure to somebody with no account here' }),
@@ -8437,6 +8440,7 @@ function runFailuresCard(failures) {
         btn('Share link', 'tiny ghost', () => shareDialog(f),
           { title: 'A link that shows this one failure to somebody with no account here' }),
       ),
+      aiExplainBlock(f.sessionId),
       f.history ? h('p', { class: 'caption', text: historyLine(f.history) }) : null,
     ))),
   );
@@ -11448,6 +11452,78 @@ async function loadAiTests() {
     state.ai = { ...state.ai, tests: [], testsLoaded: true, testsLoading: false };
   }
   scheduleRender();
+}
+
+const AI_VERDICT_TEXT = {
+  app_bug: ['Looks like an app bug', 'bad'],
+  test_bug: ['Looks like a test bug', 'warn'],
+  environment: ['Looks like the device or network', 'warn'],
+  unknown: ['Not enough evidence to say', ''],
+};
+
+/**
+ * "Explain this failure" (C8), under a failed result — wherever a failure is shown.
+ *
+ * A diagnosis already bought for this session is SHOWN, never re-bought by rendering: the GET is
+ * free and runs once per session per page; only the button spends, and it says what it costs (from
+ * `/v1/ai/pricing`, like every price in the AI line). Hidden entirely on a farm with AI off, because
+ * a button that can only answer "not configured" is noise on every failure.
+ */
+function aiExplainBlock(sessionId) {
+  if (!sessionId) return null;
+  const ai = state.ai;
+  if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
+  if (ai.pricing && ai.pricing.configured === false) return null;
+  const d = ai.diag[sessionId] || (ai.diag[sessionId] = { items: [], loaded: false, loading: false, busy: false });
+  if (!d.loaded && !d.loading) void loadDiagnoses(sessionId);
+  const latest = d.items[0];
+  if (latest) {
+    const [label, tone] = AI_VERDICT_TEXT[latest.verdict] || AI_VERDICT_TEXT.unknown;
+    return h('div', { class: 'inset stack tight ai-diag' },
+      h('p', { class: 'row tight' }, h('span', { class: 'glyph' }, icon('ai', 14)), pill(label, tone),
+        h('span', { class: 'caption', text: `AI \u00b7 ${when(latest.createdAt)}` })),
+      h('p', { text: latest.summary }),
+      latest.evidence?.length
+        ? h('ul', { class: 'ai-evidence' }, latest.evidence.map((e) => h('li', { class: 'mono', text: e })))
+        : null,
+      latest.suggestedFix ? h('p', { class: 'caption' }, h('span', { class: 'micro', text: 'Suggested fix ' }), latest.suggestedFix) : null,
+    );
+  }
+  const price = ai.pricing?.diagnosePriceInr;
+  return h('p', { class: 'row tight' },
+    btn(d.busy ? 'Reading the evidence\u2026' : 'Explain this failure', 'tiny', () => void explainFailure(sessionId), {
+      disabled: d.busy || !d.loaded,
+      title: 'AI reads the failure, the last commands, the log and the screen, and says whose problem it is',
+    }),
+    price !== undefined ? h('span', { class: 'caption', text: `${aiMoney(price)} from the AI budget` }) : null);
+}
+
+async function loadDiagnoses(sessionId) {
+  const d = state.ai.diag[sessionId];
+  d.loading = true;
+  try {
+    const out = await api(`/v1/ai/diagnoses?sessionId=${encodeURIComponent(sessionId)}`);
+    Object.assign(d, { items: out.diagnoses || [], loaded: true, loading: false });
+  } catch {
+    Object.assign(d, { items: [], loaded: true, loading: false });
+  }
+  scheduleRender();
+}
+
+async function explainFailure(sessionId) {
+  const d = state.ai.diag[sessionId];
+  d.busy = true;
+  render();
+  try {
+    const out = await api('/v1/ai/diagnoses', { method: 'POST', body: { sessionId } });
+    d.items = [out.diagnosis, ...d.items];
+    state.ai.pricing = null; // the budget moved
+  } catch (e) {
+    toast('Could not explain this failure', e.message, 'bad');
+  } finally {
+    d.busy = false;
+    render();
+  }
 }
 
 async function startAiRun() {
