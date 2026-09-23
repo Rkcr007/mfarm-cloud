@@ -50,6 +50,13 @@ const ACCEPTED_NEW_CHECKS: string[] = [
   'orgs.orgs_ai_monthly_budget_inr_check',
 
   /**
+   * Migration 062, what started an AI run (ADR-0043 C6/C7). Constrains ONLY `ai_runs.trigger`, a
+   * column 062 adds NOT NULL DEFAULT 'manual'. The 061 release inserts ai_runs without naming it, so
+   * every row it writes is 'manual', which the CHECK allows.
+   */
+  'ai_runs.ai_runs_trigger_check',
+
+  /**
    * Migration 046, evidence retention. Same shape as the two families below and safe for the same
    * reason: it constrains ONLY `evidence_retention_days`, a column 046 itself adds to `orgs`,
    * NOT NULL DEFAULT 3.

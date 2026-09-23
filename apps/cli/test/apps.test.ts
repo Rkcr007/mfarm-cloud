@@ -62,6 +62,37 @@ describe('mfarm app upload', () => {
     }
   });
 
+  test('says when the upload started saved AI tests, and when the budget stopped them', async () => {
+    // It spends money, so it is said out loud — on stderr, with the test's name.
+    let cp = await startControlPlane({ uploadExtra: { aiRuns: [{ aiRunId: 'air-1', testId: 't', testName: 'Every build' }] } });
+    try {
+      const res = await withApk((path) => runCli(['app', 'upload', path, '--api', cp.url]));
+      assert.equal(res.code, 0, res.stderr);
+      assert.match(res.stderr, /started AI test "Every build" on this build \(air-1\)/);
+    } finally {
+      await cp.close();
+    }
+    cp = await startControlPlane({ uploadExtra: { aiRuns: [], aiRunsSkipped: 'budget' } });
+    try {
+      const res = await withApk((path) => runCli(['app', 'upload', path, '--api', cp.url]));
+      assert.equal(res.code, 0, 'the upload itself succeeded');
+      assert.match(res.stderr, /NOT started — the monthly AI budget is spent/);
+    } finally {
+      await cp.close();
+    }
+  });
+
+  test('an older control plane that sends no aiRuns field is not an error', async () => {
+    const cp = await startControlPlane();
+    try {
+      const res = await withApk((path) => runCli(['app', 'upload', path, '--api', cp.url, '--json']));
+      assert.equal(res.code, 0, res.stderr);
+      assert.deepEqual(JSON.parse(res.stdout).aiRuns, []);
+    } finally {
+      await cp.close();
+    }
+  });
+
   test('a missing file fails without touching the control plane', async () => {
     const cp = await startControlPlane();
     try {

@@ -30,6 +30,7 @@ import { upsertUser, cookieValue } from '../src/users.ts';
 import { AI_PROFILES } from '../src/ai/pricing.ts';
 import { expireAiScreenshots, aiStepStore } from '../src/ai/runner.ts';
 import type { Model } from '../src/ai/agent.ts';
+import { buildApk } from './fixtures/apk.ts';
 
 const REGION = 'ai-test';
 let app: FastifyInstance;
@@ -131,6 +132,7 @@ async function seedDevice(): Promise<void> {
 async function resetFleet(): Promise<void> {
   await withSystem(async (c) => {
     await c.query('DELETE FROM ai_runs WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM ai_tests WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM webdriver_sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM devices WHERE host_id = $1', [hostId]);
@@ -208,6 +210,7 @@ after(async () => {
     await c.query('DELETE FROM sessions WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM devices WHERE host_id = $1', [hostId]);
     await c.query('DELETE FROM api_keys WHERE org_id = ANY($1)', [[orgA, orgB]]);
+    await c.query('DELETE FROM app_builds WHERE org_id = ANY($1)', [[orgA, orgB]]);
     await c.query('DELETE FROM hosts WHERE id = $1', [hostId]);
     await c.query('DELETE FROM users WHERE email = $1', [ADMIN]);
     await c.query('DELETE FROM orgs WHERE id = ANY($1)', [[orgA, orgB]]);
@@ -401,6 +404,101 @@ describe('screenshot retention', () => {
     assert.equal(await expireAiScreenshots(store, 24), 0, 'the same screen is still referenced');
     const png = await app.inject({ method: 'GET', url: fresh.steps[0]!.screenshotUrl!, headers: auth(keyA) });
     assert.equal(png.statusCode, 200);
+  });
+});
+
+describe('saved AI tests (C6) and running them on every new build (C7)', () => {
+  const create = (body: Record<string, unknown>, key = keyA) =>
+    app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(key), payload: body });
+  const upload = (apk: Buffer) => app.inject({
+    method: 'POST', url: '/v1/apps?filename=app.apk',
+    headers: { ...auth(keyA), 'content-type': 'application/vnd.android.package-archive' }, payload: apk,
+  });
+  const runsOf = (testId: string) => withSystem(async (c) => (await c.query(
+    'SELECT trigger, app_ref, created_by FROM ai_runs WHERE ai_test_id = $1 ORDER BY created_at', [testId])).rows);
+
+  test('a saved test runs again in one call, against the latest build of its app', async () => {
+    await resetFleet();
+    const res = await create({ name: 'Checkout smoke', prompt: 'Add a shirt and check out', appPackage: 'dev.mfarm.shop' });
+    assert.equal(res.statusCode, 201, res.body);
+    const t = (res.json() as { aiTest: { id: string; runOnUpload: boolean } }).aiTest;
+    assert.equal(t.runOnUpload, false, 'off unless asked — an upload that spends money must be opted into');
+
+    const run = await app.inject({ method: 'POST', url: `/v1/ai/tests/${t.id}/run`, headers: auth(keyA) });
+    assert.equal(run.statusCode, 201, run.body);
+    const body = run.json() as { aiRun: { trigger: string; appRef: string; test: { name: string } } };
+    assert.equal(body.aiRun.trigger, 'test');
+    assert.equal(body.aiRun.appRef, 'dev.mfarm.shop@latest');
+    assert.equal(body.aiRun.test.name, 'Checkout smoke');
+
+    const list = await app.inject({ method: 'GET', url: '/v1/ai/tests', headers: auth(keyA) });
+    const saved = (list.json() as { aiTests: { id: string; recent: unknown[] }[] }).aiTests.find((x) => x.id === t.id)!;
+    assert.equal(saved.recent.length, 1, 'its history is on the test');
+  });
+
+  test('two live tests cannot share a name, and upload-listening needs a package', async () => {
+    await resetFleet();
+    assert.equal((await create({ name: 'Login', prompt: 'log in' })).statusCode, 201);
+    const dup = await create({ name: ' login ', prompt: 'log in again' });
+    assert.equal(dup.statusCode, 409);
+    const blind = await create({ name: 'Blind', prompt: 'x', runOnUpload: true });
+    assert.equal(blind.statusCode, 400);
+    assert.match((blind.json() as { error: { message: string } }).error.message, /package/);
+  });
+
+  test('archiving hides a test but its runs keep its name', async () => {
+    await resetFleet();
+    const t = (await create({ name: 'Old flow', prompt: 'x' })).json().aiTest as { id: string };
+    await app.inject({ method: 'POST', url: `/v1/ai/tests/${t.id}/run`, headers: auth(keyA) });
+    const arch = await app.inject({ method: 'POST', url: `/v1/ai/tests/${t.id}/archive`, headers: auth(keyA) });
+    assert.equal(arch.statusCode, 200);
+    const list = await app.inject({ method: 'GET', url: '/v1/ai/tests', headers: auth(keyA) });
+    assert.ok(!(list.json() as { aiTests: { id: string }[] }).aiTests.some((x) => x.id === t.id));
+    const runs = await app.inject({ method: 'GET', url: '/v1/ai/runs', headers: auth(keyA) });
+    const mine = (runs.json() as { aiRuns: { test: { name: string } | null }[] }).aiRuns.find((r) => r.test);
+    assert.equal(mine?.test?.name, 'Old flow');
+    assert.equal((await create({ name: 'Old flow', prompt: 'y' })).statusCode, 201, 'the name is free again');
+  });
+
+  test('a NEW build of a listened-for package queues the test against THAT build; a re-upload does not', async () => {
+    await resetFleet();
+    const t = (await create({
+      name: 'Every build', prompt: 'Open it and look around', appPackage: 'dev.mfarm.ai.upload', runOnUpload: true,
+    })).json().aiTest as { id: string };
+    await create({ name: 'Other app', prompt: 'x', appPackage: 'dev.mfarm.ai.other', runOnUpload: true });
+
+    const apk = buildApk({ packageName: 'dev.mfarm.ai.upload', versionName: `1.${Date.now()}` });
+    const first = await upload(apk);
+    assert.equal(first.statusCode, 201, first.body);
+    const out = first.json() as { app: { id: string }; aiRuns: { testName: string }[] };
+    assert.deepEqual(out.aiRuns.map((r) => r.testName), ['Every build'], 'only the test listening for this package');
+
+    const runs = await runsOf(t.id);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].trigger, 'upload');
+    assert.equal(runs[0].app_ref, out.app.id, 'the build just uploaded, by id — not @latest, which could move');
+    assert.equal(runs[0].created_by, null);
+
+    const again = await upload(apk);
+    assert.equal(again.statusCode, 200);
+    assert.deepEqual((again.json() as { aiRuns: unknown[] }).aiRuns, [], 'the same bytes are not a new build');
+    assert.equal((await runsOf(t.id)).length, 1);
+  });
+
+  test('an upload succeeds even when the AI budget cannot pay, and says the runs were skipped', async () => {
+    await resetFleet();
+    await withSystem((c) => c.query('UPDATE orgs SET ai_monthly_budget_inr = 0 WHERE id = $1', [orgA]));
+    await create({ name: 'Broke', prompt: 'x', appPackage: 'dev.mfarm.ai.broke', runOnUpload: true });
+    const res = await upload(buildApk({ packageName: 'dev.mfarm.ai.broke', versionName: `2.${Date.now()}` }));
+    assert.equal(res.statusCode, 201, 'the upload is the customer\'s to keep either way');
+    const out = res.json() as { aiRuns: unknown[]; aiRunsSkipped?: string };
+    assert.deepEqual(out.aiRuns, []);
+    assert.equal(out.aiRunsSkipped, 'budget');
+  });
+
+  test('an automation key cannot save a test that spends on every upload', async () => {
+    const res = await create({ name: 'CI', prompt: 'x' }, automationKeyA);
+    assert.equal(res.statusCode, 403);
   });
 });
 

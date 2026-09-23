@@ -5,9 +5,8 @@ import { withTenant } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import { requireTenant } from '../server.ts';
 import { badRequest, conflict, forbidden, notFound, unavailable } from '../errors.ts';
-import {
-  AI_CURRENCY, AI_DIAGNOSE_PRICE_INR, AI_PROFILES, isAiProfile, type AiProfile,
-} from '../../ai/pricing.ts';
+import { AI_CURRENCY, AI_DIAGNOSE_PRICE_INR, AI_PROFILES } from '../../ai/pricing.ts';
+import { queueAiRun, spendThisMonth } from '../../ai/queue.ts';
 import { aiConfigured, aiStepStore } from '../../ai/runner.ts';
 import type { Model } from '../../ai/agent.ts';
 
@@ -42,11 +41,13 @@ interface RunRow {
   summary: string | null; evidence: string | null; model: string | null; session_id: string | null;
   run_id: string | null; steps: number; cost_inr: string; created_at: Date; started_at: Date | null;
   ended_at: Date | null; cancel_requested_at: Date | null; created_by_email: string | null;
+  ai_test_id: string | null; trigger: string; test_name: string | null;
 }
 
 const RUN_COLUMNS = `r.id, r.prompt, r.profile, r.platform, r.region, r.app_ref, r.step_cap, r.status,
   r.stop_reason, r.summary, r.evidence, r.model, r.session_id, r.run_id, r.steps, r.cost_inr,
-  r.created_at, r.started_at, r.ended_at, r.cancel_requested_at, u.email AS created_by_email`;
+  r.created_at, r.started_at, r.ended_at, r.cancel_requested_at, u.email AS created_by_email,
+  r.ai_test_id, r.trigger, (SELECT t.name FROM ai_tests t WHERE t.id = r.ai_test_id) AS test_name`;
 
 function runJson(r: RunRow) {
   return {
@@ -71,19 +72,16 @@ function runJson(r: RunRow) {
     endedAt: r.ended_at?.toISOString() ?? null,
     cancelRequested: r.cancel_requested_at !== null,
     createdBy: r.created_by_email,
+    trigger: r.trigger,
+    test: r.ai_test_id ? { id: r.ai_test_id, name: r.test_name } : null,
   };
 }
 
-async function spend(orgId: string): Promise<{ spentInr: number; budgetInr: number }> {
-  return withTenant(orgId, async (c) => {
-    const { rows } = await c.query<{ spent: string; budget: string }>(
-      `SELECT (SELECT COALESCE(sum(price_inr), 0) FROM ai_steps
-                WHERE org_id = $1 AND created_at >= date_trunc('month', now())) AS spent,
-              (SELECT ai_monthly_budget_inr FROM orgs WHERE id = $1) AS budget`,
-      [orgId],
-    );
-    return { spentInr: Number(rows[0]?.spent ?? 0), budgetInr: Number(rows[0]?.budget ?? 0) };
-  });
+async function readRun(orgId: string, id: string): Promise<RunRow> {
+  return withTenant(orgId, async (c) => (await c.query<RunRow>(
+    `SELECT ${RUN_COLUMNS} FROM ai_runs r LEFT JOIN users u ON u.id = r.created_by WHERE r.org_id = $1 AND r.id = $2`,
+    [orgId, id],
+  )).rows[0]!);
 }
 
 export interface AiRouteOptions {
@@ -108,7 +106,7 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       profiles: Object.fromEntries(Object.entries(AI_PROFILES).map(([k, v]) =>
         [k, { priceInr: v.priceInr, stepCap: v.stepCap }])),
       diagnosePriceInr: AI_DIAGNOSE_PRICE_INR,
-      budget: await spend(orgId),
+      budget: await spendThisMonth(orgId),
     };
   });
 
@@ -138,32 +136,12 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       }
       const prompt = req.body.prompt.trim();
       if (!prompt) throw badRequest('The prompt is empty.');
-      const profile: AiProfile = isAiProfile(req.body.profile) ? req.body.profile : 'flash';
-      const spec = AI_PROFILES[profile];
-      const stepCap = Math.min(req.body.stepCap ?? spec.stepCap, spec.stepCap);
-
-      // Refused up front when the budget cannot pay for even one step. A run that would run out
-      // part-way is allowed to start and stops cleanly at the step that would overspend.
-      const { spentInr, budgetInr } = await spend(orgId);
-      if (spentInr + spec.priceInr > budgetInr) {
-        throw conflict('ai_budget_exhausted',
-          `This organisation has spent ${AI_CURRENCY}${spentInr} of its ${AI_CURRENCY}${budgetInr} monthly AI budget. `
-          + 'Raise the budget or wait for next month.');
-      }
-
-      const row = await withTenant(orgId, async (c) => {
-        const { rows } = await c.query<{ id: string }>(
-          `INSERT INTO ai_runs (org_id, created_by, prompt, profile, platform, region, app_ref, step_cap)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-          [orgId, userId, prompt, profile, req.body.platform ?? 'android', req.body.region ?? null,
-           req.body.appId ?? null, stepCap],
-        );
-        const r = await c.query<RunRow>(
-          `SELECT ${RUN_COLUMNS} FROM ai_runs r LEFT JOIN users u ON u.id = r.created_by WHERE r.id = $1`,
-          [rows[0]!.id],
-        );
-        return r.rows[0]!;
+      const id = await queueAiRun(orgId, {
+        prompt, profile: req.body.profile, platform: (req.body.platform as 'android' | 'ios') ?? 'android',
+        region: req.body.region ?? null, appRef: req.body.appId ?? null, stepCap: req.body.stepCap,
+        createdBy: userId,
       });
+      const row = await readRun(orgId, id);
       return reply.code(201).send({ aiRun: runJson(row) });
     },
   );
@@ -265,10 +243,152 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
   });
 }
 
+// ---------------------------------------------------------------- saved tests (C6, C7)
+
+interface TestRow {
+  id: string; name: string; prompt: string; profile: string; platform: string; region: string | null;
+  app_package: string | null; run_on_upload: boolean; created_at: Date; updated_at: Date;
+  created_by_email: string | null;
+  recent: { id: string; status: string; at: string }[] | null;
+}
+
+function testJson(t: TestRow) {
+  return {
+    id: t.id, name: t.name, prompt: t.prompt, profile: t.profile, platform: t.platform,
+    region: t.region, appPackage: t.app_package, runOnUpload: t.run_on_upload,
+    createdAt: t.created_at.toISOString(), updatedAt: t.updated_at.toISOString(),
+    createdBy: t.created_by_email,
+    // Newest first — a saved test's history is the question "has this been passing?".
+    recent: t.recent ?? [],
+  };
+}
+
+const TEST_SELECT = `SELECT t.id, t.name, t.prompt, t.profile, t.platform, t.region, t.app_package, t.run_on_upload,
+       t.created_at, t.updated_at, u.email AS created_by_email,
+       (SELECT json_agg(json_build_object('id', r.id, 'status', r.status, 'at', r.created_at) ORDER BY r.created_at DESC)
+          FROM (SELECT id, status, created_at FROM ai_runs WHERE ai_test_id = t.id
+                 ORDER BY created_at DESC LIMIT 10) r) AS recent
+  FROM ai_tests t LEFT JOIN users u ON u.id = t.created_by`;
+
+const TEST_BODY = {
+  name: { type: 'string', minLength: 1, maxLength: 120 },
+  prompt: { type: 'string', minLength: 1, maxLength: 4000 },
+  profile: { type: 'string', enum: ['flash', 'pro'] },
+  platform: { type: 'string', enum: ['android', 'ios'] },
+  region: { type: ['string', 'null'], minLength: 1, maxLength: 64 },
+  appPackage: { type: ['string', 'null'], minLength: 1, maxLength: 255 },
+  runOnUpload: { type: 'boolean' },
+} as const;
+
+type TestBody = {
+  name?: string; prompt?: string; profile?: string; platform?: string; region?: string | null;
+  appPackage?: string | null; runOnUpload?: boolean;
+};
+
+/** Postgres' refusals, as the sentences a person can act on. */
+function testWriteError(err: unknown): never {
+  const e = err as { code?: string; constraint?: string };
+  if (e.code === '23505') throw conflict('ai_test_name_taken', 'A saved AI test already has that name.');
+  if (e.constraint === 'ai_tests_upload_needs_package') {
+    throw badRequest('Running on every upload needs the app package this test is about.');
+  }
+  throw err;
+}
+
+export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): Promise<void> {
+  const configured = () => aiConfigured({ model: opts.aiModel });
+
+  app.get('/ai/tests', async (req) => {
+    const { orgId } = requireTenant(req);
+    const rows = await withTenant(orgId, async (c) => (await c.query<TestRow>(
+      `${TEST_SELECT} WHERE t.org_id = $1 AND t.archived_at IS NULL ORDER BY lower(t.name)`, [orgId],
+    )).rows);
+    return { aiTests: rows.map(testJson) };
+  });
+
+  app.post<{ Body: TestBody }>('/ai/tests', {
+    schema: { body: { type: 'object', required: ['name', 'prompt'], additionalProperties: false, properties: TEST_BODY } },
+  }, async (req, reply) => {
+    const { orgId, userId } = requireSpender(req);
+    const b = req.body;
+    const id = await withTenant(orgId, async (c) => (await c.query<{ id: string }>(
+      `INSERT INTO ai_tests (org_id, created_by, name, prompt, profile, platform, region, app_package, run_on_upload)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [orgId, userId, b.name!.trim(), b.prompt!.trim(), b.profile ?? 'flash', b.platform ?? 'android',
+       b.region ?? null, b.appPackage?.trim() || null, b.runOnUpload ?? false],
+    )).rows[0]!.id).catch(testWriteError);
+    const row = await withTenant(orgId, async (c) =>
+      (await c.query<TestRow>(`${TEST_SELECT} WHERE t.org_id = $1 AND t.id = $2`, [orgId, id])).rows[0]!);
+    return reply.code(201).send({ aiTest: testJson(row) });
+  });
+
+  app.patch<{ Params: { id: string }; Body: TestBody }>('/ai/tests/:id', {
+    schema: { body: { type: 'object', additionalProperties: false, properties: TEST_BODY } },
+  }, async (req) => {
+    const { orgId } = requireSpender(req);
+    const id = uuidParam(req.params.id, 'AI test');
+    const b = req.body;
+    const sets: string[] = [];
+    const vals: unknown[] = [orgId, id];
+    const put = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
+    if (b.name !== undefined) put('name', b.name.trim());
+    if (b.prompt !== undefined) put('prompt', b.prompt.trim());
+    if (b.profile !== undefined) put('profile', b.profile);
+    if (b.platform !== undefined) put('platform', b.platform);
+    if (b.region !== undefined) put('region', b.region);
+    if (b.appPackage !== undefined) put('app_package', b.appPackage?.trim() || null);
+    if (b.runOnUpload !== undefined) put('run_on_upload', b.runOnUpload);
+    if (sets.length === 0) throw badRequest('Nothing to change.');
+    const row = await withTenant(orgId, async (c) => {
+      const r = await c.query(
+        `UPDATE ai_tests SET ${sets.join(', ')}, updated_at = now()
+          WHERE org_id = $1 AND id = $2 AND archived_at IS NULL RETURNING id`, vals,
+      ).catch(testWriteError);
+      if (!r.rows[0]) throw notFound('AI test');
+      return (await c.query<TestRow>(`${TEST_SELECT} WHERE t.org_id = $1 AND t.id = $2`, [orgId, id])).rows[0]!;
+    });
+    return { aiTest: testJson(row) };
+  });
+
+  /** Archive. Its runs keep pointing at it, so their history keeps its name. */
+  app.post<{ Params: { id: string } }>('/ai/tests/:id/archive', async (req) => {
+    const { orgId } = requireSpender(req);
+    const id = uuidParam(req.params.id, 'AI test');
+    const ok = await withTenant(orgId, async (c) => (await c.query(
+      `UPDATE ai_tests SET archived_at = now(), run_on_upload = false, updated_at = now()
+        WHERE org_id = $1 AND id = $2 AND archived_at IS NULL`, [orgId, id],
+    )).rowCount);
+    if (!ok) throw notFound('AI test');
+    return { archived: true };
+  });
+
+  /** Run a saved test now. With no build given, the latest build of its package. */
+  app.post<{ Params: { id: string }; Body: { appId?: string } | undefined }>('/ai/tests/:id/run', {
+    schema: {
+      body: { type: ['object', 'null'], additionalProperties: false, properties: { appId: { type: 'string', minLength: 1, maxLength: 300 } } },
+    },
+  }, async (req, reply) => {
+    const { orgId, userId } = requireSpender(req);
+    if (!configured()) throw unavailable('AI runs are not configured on this farm (no model credential). Nothing was queued.');
+    const id = uuidParam(req.params.id, 'AI test');
+    const t = await withTenant(orgId, async (c) => (await c.query<{
+      prompt: string; profile: string; platform: 'android' | 'ios'; region: string | null; app_package: string | null;
+    }>('SELECT prompt, profile, platform, region, app_package FROM ai_tests WHERE org_id = $1 AND id = $2 AND archived_at IS NULL',
+      [orgId, id])).rows[0]);
+    if (!t) throw notFound('AI test');
+    const runId = await queueAiRun(orgId, {
+      prompt: t.prompt, profile: t.profile, platform: t.platform, region: t.region,
+      appRef: req.body?.appId ?? (t.app_package ? `${t.app_package}@latest` : null),
+      createdBy: userId, aiTestId: id, trigger: 'test',
+    });
+    return reply.code(201).send({ aiRun: runJson(await readRun(orgId, runId)) });
+  });
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** A malformed id is a 404 like an unknown one — never a Postgres cast error surfacing as a 500. */
-function uuidParam(v: string): string {
-  if (!UUID.test(v)) throw notFound('AI run');
+function uuidParam(v: string, what = 'AI run'): string {
+  if (!UUID.test(v)) throw notFound(what);
   return v;
 }

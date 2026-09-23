@@ -3388,3 +3388,13 @@ kbd {
 .ai-step.miss .ai-step-n { color: var(--warn, #E8A30E); }
 .ai-thought { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ai-shot { display: block; width: 100%; height: auto; border-radius: var(--r-lg, 12px); border: 1px solid var(--b-card, #1F1F22); }
+
+/* Saved-test history: one dot per recent run, newest first. The colours are the pills'. */
+.ai-dot {
+  width: 10px; height: 10px; padding: 0; border-radius: 50%; border: 0; cursor: pointer;
+  background: var(--t-label, #8A8A8A);
+}
+.ai-dot.passed { background: var(--ok-dot, #6FCB63); }
+.ai-dot.failed { background: var(--bad-dot, #E0505F); }
+.ai-dot.error  { background: var(--warn, #E8A30E); }
+.ai-dot.queued, .ai-dot.running { background: var(--mf-accent, #755EB8); }

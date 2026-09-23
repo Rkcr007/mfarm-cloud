@@ -238,6 +238,14 @@ function aiState(over: Record<string, unknown> = {}) {
     },
     detailLoading: false,
     draft: { prompt: '', profile: 'flash', platform: 'android', appId: '', region: '' },
+    tests: [{
+      id: 'aitest-1', name: 'Checkout smoke', prompt: 'Add a shirt and check out', profile: 'flash', platform: 'android',
+      region: null, appPackage: 'com.acme.app', runOnUpload: true, createdBy: 'someone@mfarm.local',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      recent: [{ id: 'air-1', status: 'passed', at: new Date().toISOString() }, { id: 'air-0', status: 'failed', at: new Date().toISOString() }],
+    }],
+    testsLoaded: true, testsLoading: false,
+    save: { open: false, name: '', runOnUpload: false, busy: false },
     ...over,
   };
 }
@@ -2278,6 +2286,7 @@ describe('a route fetches what its screen needs', () => {
     assert.ok(urls.includes('/v1/ai/runs'), `the list: ${urls.join(', ')}`);
     assert.ok(urls.includes('/v1/ai/pricing'), 'the prices, which the page must never write itself');
     assert.ok(urls.includes('/v1/apps'), 'the build picker');
+    assert.ok(urls.includes('/v1/ai/tests'), 'the saved tests');
 
     seed({ name: 'airun', id: 'air-9' });
     urls = recording();
@@ -5971,7 +5980,7 @@ describe('the AI testing screen', () => {
     pick.dispatch('change');
 
     const sent = capture({ aiRun: aiRun({ id: 'air-new', status: 'queued' }) });
-    findByText(mod.SCREENS.ai(), 'Run').click();
+    findByText(mod.SCREENS.ai(), 'Start AI run').click();
     await new Promise((r) => setTimeout(r, 0));
     const post = sent.find((x) => x.method === 'POST');
     assert.ok(post, 'pressing Run must reach the API');
@@ -5984,12 +5993,12 @@ describe('the AI testing screen', () => {
 
   test('Run is refused with an empty prompt, and the whole form says so when AI is off', () => {
     seed({ name: 'ai' });
-    assert.equal(findByText(mod.SCREENS.ai(), 'Run').disabled, true, 'nothing typed, nothing to run');
+    assert.equal(findByText(mod.SCREENS.ai(), 'Start AI run').disabled, true, 'nothing typed, nothing to run');
 
     mod.state.ai = aiState({ pricing: { configured: false, profiles: {}, currency: '₹', budget: { spentInr: 0, budgetInr: 2000 } } });
     mod.state.ai.draft.prompt = 'something';
     const tree = mod.SCREENS.ai();
-    assert.equal(findByText(tree, 'Run').disabled, true);
+    assert.equal(findByText(tree, 'Start AI run').disabled, true);
     assert.match(textOf(tree), /not switched on for this farm/);
   });
 
@@ -6043,5 +6052,52 @@ describe('the AI testing screen', () => {
     findByText(mod.SCREENS.airun(), 'Stop').click();
     await new Promise((r) => setTimeout(r, 0));
     assert.ok(sent.some((x) => x.method === 'POST' && x.url === '/v1/ai/runs/air-1/cancel'));
+  });
+
+  /** The first <input> matching `pred`, depth-first. `findByText` matches on text, which an input has none of. */
+  function findInput(node: any, pred: (n: any) => boolean): any {
+    if (!node) return null;
+    if (Array.isArray(node)) { for (const x of node) { const r = findInput(x, pred); if (r) return r; } return null; }
+    if (node.tagName === 'INPUT' && pred(node)) return node;
+    for (const c of node.children || []) { const r = findInput(c, pred); if (r) return r; }
+    return null;
+  }
+
+  test('Save as a test sends the prompt, the build\'s package and run-on-upload', async () => {
+    seed({ name: 'ai' });
+    mod.state.ai.draft = { ...mod.state.ai.draft, prompt: 'Log in and open settings', appId: 'app-1' };
+    findByText(mod.SCREENS.ai(), 'Save as a test').click();
+    const nameInput = findInput(mod.SCREENS.ai(), (n) => n.getAttribute('id') === 'ai-test-name');
+    nameInput.value = 'Settings smoke';
+    nameInput.dispatch('input');
+    const tree = mod.SCREENS.ai();
+    assert.match(textOf(tree), /Run it on every new build of com\.acme\.app/);
+    const box = findInput(tree, (n) => n.getAttribute('type') === 'checkbox');
+    box.checked = true;
+    box.dispatch('change');
+
+    const sent = capture({ aiTest: {} });
+    findByText(mod.SCREENS.ai(), 'Save test').click();
+    await new Promise((r) => setTimeout(r, 0));
+    const post = sent.find((x) => x.method === 'POST' && x.url === '/v1/ai/tests');
+    assert.ok(post, 'Save test must reach the API');
+    assert.deepEqual(
+      { name: post.body.name, prompt: post.body.prompt, appPackage: post.body.appPackage, runOnUpload: post.body.runOnUpload },
+      { name: 'Settings smoke', prompt: 'Log in and open settings', appPackage: 'com.acme.app', runOnUpload: true },
+    );
+  });
+
+  test('a saved test shows its recent verdicts, and Run starts it', async () => {
+    seed({ name: 'ai' });
+    const tree = mod.SCREENS.ai();
+    assert.match(textOf(tree), /Checkout smoke/);
+    assert.match(textOf(tree), /every upload/);
+    assert.ok(findByClass(tree, 'ai-dot'), 'one dot per recent run');
+    const sent = capture({ aiRun: aiRun({ id: 'air-7', status: 'queued' }) });
+    // The form's button is "Start AI run", so the only "Run" on the page is the saved test's.
+    findByText(tree, 'Run').click();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(sent.some((x) => x.method === 'POST' && x.url === '/v1/ai/tests/aitest-1/run'),
+      `Run on a saved test must run THAT test: ${sent.map((x) => x.url).join(', ')}`);
   });
 });

@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { queueUploadRuns } from '../../ai/queue.ts';
 import { basename } from 'node:path';
 import type { Readable } from 'node:stream';
 import { withTenant, withSystem } from '../../db.ts';
@@ -206,7 +207,27 @@ export async function appRoutes(app: FastifyInstance) {
       return { row: existing.rows[0]!, created: false };
     });
 
-    return reply.code(created ? 201 : 200).send({ app: appJson(row), deduplicated: !created });
+    /**
+     * C7 (ADR-0043): a NEW build starts every saved AI test listening for its package. Only a new
+     * one — a re-upload of bytes already in the library is not a new build, and re-running on it
+     * would bill for an answer the org already has. Best effort: the upload has succeeded either way.
+     */
+    let aiRuns: { aiRunId: string; testId: string; testName: string }[] = [];
+    let aiSkipped: string | null = null;
+    if (created && app.aiConfigured()) {
+      try {
+        const r = await queueUploadRuns(orgId, { id: row.id, packageName: row.package_name });
+        aiRuns = r.queued;
+        aiSkipped = r.skipped;
+      } catch (err) {
+        req.log.warn({ err }, 'could not queue AI runs for an upload');
+        aiSkipped = 'error';
+      }
+    }
+
+    return reply.code(created ? 201 : 200).send({
+      app: appJson(row), deduplicated: !created, aiRuns, ...(aiSkipped ? { aiRunsSkipped: aiSkipped } : {}),
+    });
   });
 
   /** The library. Newest first, optionally narrowed to one package. */
