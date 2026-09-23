@@ -11309,6 +11309,23 @@ function screenAiRun() {
         active && !r.cancelRequested ? btn('Stop', 'ghost', () => void cancelAiRun(r.id)) : null,
         r.sessionId ? btn('Recording & log', 'ghost', () => go(`#/sessions/${r.sessionId}`),
           { title: 'The device session this run used: video, logcat and every WebDriver command' }) : null,
+        // C9: the route this run took, as code — offered for a PASSED run, because that is the
+        // one known to work. A plain link, so the browser downloads with the session cookie.
+        r.status === 'passed' ? h('a', {
+          class: 'btn ghost', href: `/v1/ai/runs/${encodeURIComponent(r.id)}/script?lang=webdriverio&origin=${encodeURIComponent(location.origin)}`,
+          download: '', title: 'This run\u2019s steps as a WebdriverIO script for the hub \u2014 deterministic, and no AI cost to run',
+        }, 'Export WebdriverIO') : null,
+        r.status === 'passed' ? h('a', {
+          class: 'btn ghost', href: `/v1/ai/runs/${encodeURIComponent(r.id)}/script?lang=python&origin=${encodeURIComponent(location.origin)}`,
+          download: '', title: 'This run\u2019s steps as a pytest script for the hub',
+        }, 'Export pytest') : null,
+        // C10: the verdict is the session's test result, so it shares through the same links every
+        // result does — and the public page shows the task and each step's screen, never typed text.
+        (r.status === 'passed' || r.status === 'failed') && r.sessionId
+          ? btn('Share', 'ghost', () => void shareAiRun(r), {
+              title: 'A link anyone can open: the task, the verdict and each step\u2019s screen. Typed text is hidden.',
+            })
+          : null,
         btn('Run again', '', () => {
           state.ai.draft = { ...state.ai.draft, prompt: r.prompt, profile: r.profile, platform: r.platform, appId: '' };
           go('#/ai');
@@ -11523,6 +11540,21 @@ async function explainFailure(sessionId) {
   } finally {
     d.busy = false;
     render();
+  }
+}
+
+/** Share an AI run: its verdict is the session's result, and `shareDialog` shares results. */
+async function shareAiRun(r) {
+  try {
+    const out = await api(`/v1/sessions/${encodeURIComponent(r.sessionId)}/results`);
+    const result = (out.results || []).find((x) => String(x.name || '').startsWith('AI:')) || (out.results || [])[0];
+    if (!result) {
+      toast('Nothing to share yet', 'This run has not recorded its verdict on the session.', 'bad');
+      return;
+    }
+    shareDialog(result);
+  } catch (e) {
+    toast('Could not open sharing', e.message, 'bad');
   }
 }
 

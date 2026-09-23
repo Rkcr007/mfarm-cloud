@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { aiStepStore } from '../../ai/runner.ts';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -63,6 +64,49 @@ function shareUrl(req: { protocol: string; headers: Record<string, unknown> }, t
  *   THE IDS. No org id, no session id, no device id, no run id. They identify nothing to a person
  *   without an account and would be a map of this tenant's fleet to a person with one.
  */
+/**
+ * The AI run behind a shared result, shaped for a STRANGER (ADR-0043 C10).
+ *
+ * An AI run posts its verdict as the session's test result, so a share of that result is a share of
+ * the run — and the part a recipient needs is the part the command table cannot show: what the agent
+ * was asked, what it did, why, and what the screen looked like at each step.
+ *
+ * TYPED TEXT IS NOT SHOWN. An AI run types whatever its prompt told it to, which is often a test
+ * account's password; the step says a field was filled and how long the value was, never the value.
+ * The prompt itself IS shown — it is the test — and the share dialog says so before a link exists.
+ */
+async function aiRunFor(sessionId: string) {
+  return withSystem(async (c) => {
+    const run = (await c.query<{ id: string; prompt: string; profile: string; status: string; summary: string | null; evidence: string | null; steps: number }>(
+      'SELECT id, prompt, profile, status, summary, evidence, steps FROM ai_runs WHERE session_id = $1 LIMIT 1', [sessionId],
+    )).rows[0];
+    if (!run) return null;
+    const steps = (await c.query<{ n: number; phase: string; thought: string | null; action: { tool: string; input: Record<string, unknown> } | null; result: string | null; screenshot_sha256: string | null }>(
+      'SELECT n, phase, thought, action, result, screenshot_sha256 FROM ai_steps WHERE ai_run_id = $1 ORDER BY n LIMIT 200', [run.id],
+    )).rows;
+    return { run, steps };
+  });
+}
+
+export function publicAiStep(s: { n: number; phase: string; thought: string | null; action: { tool: string; input: Record<string, unknown> } | null; result: string | null; screenshot_sha256: string | null }, hasShot: boolean) {
+  const input = { ...(s.action?.input ?? {}) } as Record<string, unknown>;
+  if (s.action?.tool === 'type_text') {
+    const len = String(input.text ?? '').length;
+    delete input.text;
+    input.typedLength = len;
+  }
+  return {
+    n: s.n,
+    phase: s.phase,
+    tool: s.action?.tool ?? null,
+    input,
+    // The agent's stated reason is its own words about the screen, not the customer's data.
+    thought: s.thought,
+    result: s.result,
+    screenshot: hasShot,
+  };
+}
+
 function publicPayload(
   r: ResolvedShare,
   steps: Awaited<ReturnType<typeof windowedSteps>>,
@@ -71,6 +115,10 @@ function publicPayload(
     log: { sizeBytes: number } | null;
     recording: { sizeBytes: number; startedAt: string | null; failureAtSeconds: number | null; partial: boolean } | null;
   },
+  ai: {
+    prompt: string; profile: string; status: string; summary: string | null; evidence: string | null;
+    steps: ReturnType<typeof publicAiStep>[];
+  } | null = null,
 ) {
   return {
     test: {
@@ -130,6 +178,7 @@ function publicPayload(
     // Null unless the link includes it and the bytes exist — see the comment above and ADR-0040.
     log: evidence.log,
     recording: evidence.recording,
+    aiRun: ai,
     share: {
       expiresAt: r.share.expires_at.toISOString(),
       createdAt: r.share.created_at.toISOString(),
@@ -244,6 +293,8 @@ function publicHeaders(reply: FastifyReply): FastifyReply {
 
 export async function shareRoutes(app: FastifyInstance): Promise<void> {
   const store = appStore(loadConfig().artifactDir);
+  // AI step screenshots live in their own subdirectory (runner.ts `aiStepStore`).
+  const aiStore = aiStepStore(loadConfig().artifactDir);
 
   // ---------------------------------------------------------------- the authenticated half
 
@@ -350,6 +401,9 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
     // because video retention is shorter than the longest link.
     const onDisk = (b: { sha256: string } | null) => (b ? store.size(b.sha256) : Promise.resolve(null));
     const [shotSize, logSize, recSize] = await Promise.all([onDisk(shot), onDisk(log), onDisk(rec)]);
+    const ai = await aiRunFor(resolved.session.id);
+    const aiShots = ai ? await Promise.all(ai.steps.map((st) =>
+      st.screenshot_sha256 ? aiStore.size(st.screenshot_sha256).then((n) => n !== null) : Promise.resolve(false))) : [];
     return publicHeaders(reply).send(publicPayload(resolved, steps, shotSize !== null, {
       log: logSize !== null ? { sizeBytes: logSize } : null,
       recording: rec && recSize !== null
@@ -361,7 +415,34 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
             partial: rec.context.partial === true,
           }
         : null,
-    }));
+    }, ai ? {
+      prompt: ai.run.prompt, profile: ai.run.profile, status: ai.run.status,
+      summary: ai.run.summary, evidence: ai.run.evidence,
+      steps: ai.steps.map((st, i) => publicAiStep(st, aiShots[i] === true)),
+    } : null));
+  });
+
+  /**
+   * GET /v1/shares/:token/ai-steps/:n/screenshot — what the agent saw at one step (C10).
+   *
+   * Reached through the TOKEN and the step NUMBER only, for the same reason the failure screenshot
+   * is: the link must not be able to name a blob. The step is looked up under the AI run of the
+   * shared result's own session, so a token can reach exactly that run's screens and nothing else.
+   */
+  app.get<{ Params: { token: string; n: string } }>('/shares/:token/ai-steps/:n/screenshot', async (req, reply) => {
+    const resolved = await resolveShare(req.params.token);
+    if (!resolved) throw notFound('Share');
+    const n = Number(req.params.n);
+    if (!Number.isInteger(n) || n < 1) throw notFound('Screenshot');
+    const sha = await withSystem(async (c) => (await c.query<{ screenshot_sha256: string | null }>(
+      `SELECT st.screenshot_sha256 FROM ai_steps st JOIN ai_runs r ON r.id = st.ai_run_id
+        WHERE r.session_id = $1 AND st.n = $2`, [resolved.session.id, n],
+    )).rows[0]?.screenshot_sha256);
+    if (!sha || (await aiStore.size(sha)) === null) throw notFound('Screenshot');
+    return publicHeaders(reply)
+      .header('content-type', 'image/png')
+      .header('content-disposition', `inline; filename="step-${n}.png"`)
+      .send(aiStore.read(sha));
   });
 
   /**

@@ -232,6 +232,56 @@ function screenshotCard(d, token) {
   );
 }
 
+/**
+ * AN AI RUN, AS ITS RECIPIENT NEEDS IT (ADR-0043 C10): the task in plain words, the verdict, and
+ * each step with the screen the agent saw — the thing a command table cannot say about an AI run.
+ *
+ * Typed values never reach this page (the API sends only their length). The screenshots are reached
+ * through the token and a step number, like the failure screenshot above.
+ */
+function aiStepText(s) {
+  const i = s.input || {};
+  switch (s.tool) {
+    case 'tap_element': return `Tapped element [${i.index}]`;
+    case 'tap_point': return `Tapped at ${i.x}, ${i.y}`;
+    case 'type_text': return `Typed ${i.typedLength ?? 0} character${i.typedLength === 1 ? '' : 's'} into a field${i.submit ? ' and pressed Enter' : ''}`;
+    case 'scroll': return `Scrolled ${i.direction}`;
+    case 'press_key': return `Pressed ${i.key}`;
+    case 'launch_app': return `Opened ${i.app_id}`;
+    case 'wait': return `Waited ${i.seconds}s`;
+    case 'finish': return i.passed ? 'Concluded: passed' : 'Concluded: failed';
+    default: return s.tool ? s.tool : 'Planned the checkpoints';
+  }
+}
+
+function aiRunCard(d, token) {
+  const a = d.aiRun;
+  if (!a) return null;
+  return h('div', { class: 'sh-card' },
+    h('div', { class: 'sh-card-head' },
+      h('span', { class: 'sh-card-title', text: 'An AI run' }),
+      h('span', { class: 'sh-caption', text: `${a.steps.length} step${a.steps.length === 1 ? '' : 's'} · ${a.profile === 'pro' ? 'Pro' : 'Flash'}` })),
+    h('p', { class: 'sh-caption', text: 'This test was described in plain English, and an AI agent carried it out on a real device:' }),
+    h('blockquote', { class: 'sh-ai-prompt', text: a.prompt }),
+    a.summary ? h('p', { class: 'sh-mt' }, h('strong', { text: 'The agent concluded: ' }), a.summary) : null,
+    a.evidence ? h('p', { class: 'sh-caption' }, 'On screen: ', a.evidence) : null,
+    h('ol', { class: 'sh-ai-steps' }, a.steps.map((s) => h('li', { class: 'sh-ai-step' },
+      h('div', { class: 'sh-ai-step-body' },
+        h('strong', { text: `${s.n}. ${aiStepText(s)}` }),
+        s.thought ? h('p', { class: 'sh-caption', text: s.thought }) : null,
+        s.result && s.result !== 'ok' ? h('p', { class: 'sh-caption', text: s.result }) : null),
+      s.screenshot
+        ? h('img', {
+            class: 'sh-ai-thumb', loading: 'lazy',
+            src: `/v1/shares/${encodeURIComponent(token)}/ai-steps/${s.n}/screenshot`,
+            alt: `The device screen the agent saw at step ${s.n}`,
+          })
+        : null,
+    ))),
+    h('p', { class: 'sh-caption sh-mt', text: 'Text the agent typed is not shown on this page — only how long it was.' }),
+  );
+}
+
 function stepsCard(d) {
   const items = d.steps.items || [];
   const failed = items.filter((s) => s.failed).length;
@@ -442,6 +492,8 @@ async function main() {
 
   show(
     verdictCard(d),
+    // An AI run first after the verdict: its steps ARE how it got there, in words a reader can follow.
+    aiRunCard(d, token),
     // Ordered as a person reads a failure: what broke, what it looked like, how it got there.
     d.test.status === 'failed' ? stackCard(d) : null,
     screenshotCard(d, token),

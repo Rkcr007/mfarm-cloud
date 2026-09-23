@@ -6136,4 +6136,17 @@ describe('the AI testing screen', () => {
     mod.state.ai.diag = { 'sess-1': { items: [], loaded: true, loading: false, busy: false } };
     assert.ok(!findByText(mod.SCREENS.run(), 'Explain this failure'), 'a button that can only say "not configured" is noise');
   });
+
+  test('a passed run offers its steps as a script; a run that did not pass does not', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const link = findByText(mod.SCREENS.airun(), 'Export WebdriverIO', 'a');
+    assert.ok(link, 'the passed run offers the export');
+    assert.match(link.getAttribute('href'), /^\/v1\/ai\/runs\/air-1\/script\?lang=webdriverio&origin=/,
+      'the console sends its own origin, since the server behind its proxy cannot know it');
+    assert.ok(findByText(mod.SCREENS.airun(), 'Export pytest', 'a'));
+
+    const failed = aiRun({ status: 'failed', summary: 'nope' });
+    mod.state.ai = aiState({ detail: { aiRun: failed, steps: [], fetchedAt: Date.now() } });
+    assert.ok(!findByText(mod.SCREENS.airun(), 'Export WebdriverIO', 'a'), 'only a route known to work is offered as code');
+  });
 });
