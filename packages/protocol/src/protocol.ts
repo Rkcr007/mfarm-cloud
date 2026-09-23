@@ -1150,3 +1150,133 @@ export function classifyReason(reason: string): FailureClass | undefined {
 export function isFarmFault(cls: FailureClass): boolean {
   return cls !== 'test';
 }
+
+/* --- VENDORED REGION START: apps/cli/src/wire.ts ---------------------------------------------
+ *
+ * THE SCREEN AS AN AGENT READS IT (ADR-0043). Copied into the CLI for `mfarm mcp`, and imported by
+ * the API for the AI run engine — so an agent driving a device from a customer's IDE and the agent
+ * MFARM runs itself see the same numbered list, and an index means the same element in both.
+ *
+ * WHY NOT HAND THE MODEL THE RAW `/source`. A UiAutomator2 hierarchy of an ordinary screen is
+ * 30–80 KB of XML, almost all of it layout containers with no text, no id and no handler. Sent every
+ * step it is most of the bill and it buries the twelve things on the screen a person could touch.
+ * The compact list keeps an element only if it says something (text, label, id) or does something
+ * (clickable, focusable), and gives each a stable index and a centre point to tap.
+ *
+ * TEXT, NOT AN XML LIBRARY, because the CLI ships zero dependencies. Both automation servers emit
+ * one element per tag with double-quoted attributes and entity-escaped values, which a tag regex
+ * reads correctly; the one trap is a `>` inside an attribute value, which is always escaped.
+ */
+
+/** One element an agent could read or touch. Coordinates are device pixels (Android) or points (iOS). */
+export interface UiElement {
+  /** Position in this list. Stable only for this snapshot of the screen. */
+  index: number;
+  /** Short class: `Button`, `EditText`, `StaticText`. */
+  kind: string;
+  text: string | null;
+  /** Accessibility description (Android `content-desc`, iOS `label` when it differs from text). */
+  label: string | null;
+  /** Android `resource-id` or iOS `name`. */
+  id: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  clickable: boolean;
+  focused: boolean;
+}
+
+/** The element list is capped so a pathological screen (a 2,000-row list) cannot blow the budget. */
+export const UI_TREE_MAX_ELEMENTS = 150;
+
+const XML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+
+function decodeXml(value: string): string {
+  return value.replace(/&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (_m, e: string) => {
+    if (e.startsWith('#x')) return String.fromCodePoint(parseInt(e.slice(2), 16));
+    if (e.startsWith('#')) return String.fromCodePoint(parseInt(e.slice(1), 10));
+    return XML_ENTITIES[e] ?? _m;
+  });
+}
+
+/**
+ * Parse a UiAutomator2 or XCUITest page source into the elements worth showing an agent.
+ *
+ * Android carries geometry as `bounds="[x1,y1][x2,y2]"`; iOS as separate `x`/`y`/`width`/`height`.
+ * An element with no area, or one either server says is not displayed, is dropped — it cannot be
+ * tapped, and listing it invites the model to try.
+ */
+export function parseUiTree(xml: string, max: number = UI_TREE_MAX_ELEMENTS): UiElement[] {
+  const out: UiElement[] = [];
+  const tag = /<([A-Za-z][\w.]*)\s([^<>]*?)\/?>/g;
+  const attr = /([\w:-]+)="([^"]*)"/g;
+  for (let m = tag.exec(xml); m && out.length < max; m = tag.exec(xml)) {
+    const a: Record<string, string> = {};
+    for (let am = attr.exec(m[2]!); am; am = attr.exec(m[2]!)) a[am[1]!] = decodeXml(am[2]!);
+    attr.lastIndex = 0;
+
+    let x: number, y: number, width: number, height: number;
+    const b = /^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$/.exec(a.bounds ?? '');
+    if (b) {
+      x = Number(b[1]); y = Number(b[2]);
+      width = Number(b[3]) - x; height = Number(b[4]) - y;
+    } else if (a.width !== undefined && a.height !== undefined) {
+      x = Number(a.x ?? 0); y = Number(a.y ?? 0);
+      width = Number(a.width); height = Number(a.height);
+    } else {
+      continue;
+    }
+    if (!(width > 0 && height > 0)) continue;
+    if (a.displayed === 'false' || a.visible === 'false') continue;
+
+    const ios = m[1]!.startsWith('XCUIElementType');
+    const text = (ios ? a.value || a.label : a.text) || null;
+    const labelRaw = (ios ? a.label : a['content-desc']) || null;
+    const label = labelRaw && labelRaw !== text ? labelRaw : null;
+    const id = (ios ? a.name : a['resource-id']) || null;
+    const clickable = ios
+      ? /Button|Cell|Link|TextField|SecureTextField|Switch|Tab|SearchField|Key$/.test(m[1]!)
+      : a.clickable === 'true' || a['long-clickable'] === 'true';
+    const focused = a.focused === 'true' || a.hasFocus === 'true';
+    const focusable = a.focusable === 'true';
+    if (!text && !label && !id && !clickable && !focusable) continue;
+
+    const cls = ios ? m[1]!.slice('XCUIElementType'.length) : (a.class ?? m[1]!);
+    out.push({
+      index: out.length,
+      kind: cls.slice(cls.lastIndexOf('.') + 1),
+      text, label, id, x, y, width, height, clickable, focused,
+    });
+  }
+  return out;
+}
+
+/** The centre of an element — where a tap on it lands. */
+export function uiElementCenter(e: UiElement): { x: number; y: number } {
+  return { x: Math.round(e.x + e.width / 2), y: Math.round(e.y + e.height / 2) };
+}
+
+/**
+ * One line per element, the form both agents are shown:
+ * `[3] Button "Log in" id=login (540,1210 300x96) tap`
+ */
+export function formatUiTree(elements: UiElement[]): string {
+  if (elements.length === 0) return '(no readable elements — the screen may be a canvas; use the screenshot)';
+  return elements.map((e) => {
+    const c = uiElementCenter(e);
+    const parts = [`[${e.index}]`, e.kind];
+    if (e.text) parts.push(JSON.stringify(e.text.length > 80 ? `${e.text.slice(0, 80)}…` : e.text));
+    if (e.label) parts.push(`label=${JSON.stringify(e.label.slice(0, 80))}`);
+    if (e.id) parts.push(`id=${e.id.slice(e.id.lastIndexOf('/') + 1)}`);
+    parts.push(`(${c.x},${c.y} ${e.width}x${e.height})`);
+    if (e.clickable) parts.push('tap');
+    if (e.focused) parts.push('focused');
+    return parts.join(' ');
+  }).join('\n');
+}
+
+/* --- VENDORED REGION END ---------------------------------------------------------------------
+ *
+ * End of the UI tree region.
+ */
