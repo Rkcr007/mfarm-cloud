@@ -386,14 +386,33 @@ export class McpServer {
     this.opts.log(`mfarm mcp: allocating a${platform === 'ios' ? 'n iOS' : 'n Android'} device…`);
     const s = await this.hub.newSession(caps);
     this.active = { sessionId: s.sessionId, platform, elements: [] };
-    const c = s.capabilities;
-    const device = [c['appium:deviceName'] ?? c.deviceName, c['appium:platformVersion'] ?? c.platformVersion]
-      .filter(Boolean).join(' ');
+    const device = await this.describeDevice(s.sessionId, platform, s.capabilities);
     return text(
       `Session ${s.sessionId} is open on ${device || `an ${platform} device`}.`
       + `${str(a.appId) ? ` ${str(a.appId)} is installed and launched.` : ''}`
       + ' Next: ui_tree or screenshot. Call end_session when done.',
     );
+  }
+
+  /**
+   * "MFARM X1 · Android 17", from the control plane — not Appium's capabilities.
+   *
+   * Found on the farm, 2026-09-24: Appium's `deviceName` is the ADB serial and its `platformVersion`
+   * a bare number, so the first hardware run announced "open on 0.0.0.0:6520 17". The hub's session
+   * id IS the control plane's, so the device the allocator chose is one read away. Best effort — the
+   * session is open either way, and saying so matters more than naming it.
+   */
+  private async describeDevice(sessionId: string, platform: string, caps: Record<string, unknown>): Promise<string> {
+    const os = platform === 'ios' ? 'iOS' : 'Android';
+    try {
+      const { session } = await this.api.getSession(sessionId);
+      if (session.deviceId) {
+        const d = (await this.api.listDevices({})).devices.find((x) => x.id === session.deviceId);
+        if (d) return `${d.model ?? 'a device'} \u00b7 ${os} ${d.osVersion ?? ''}`.trim();
+      }
+    } catch { /* fall through to what Appium said */ }
+    const v = caps['appium:platformVersion'] ?? caps.platformVersion;
+    return v ? `an ${os} ${String(v)} device` : `an ${os} device`;
   }
 
   private requireActive(): Active {
