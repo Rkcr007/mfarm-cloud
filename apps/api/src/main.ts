@@ -63,6 +63,10 @@ export async function start(cfg: Config): Promise<Service> {
     // without this every anonymous caller shares one rate-limit key. Off unless TRUST_PROXY says
     // the proxy is the only way in.
     trustProxy: cfg.trustProxy,
+    // Only with a model credential: without one the routes refuse to queue, so there is nothing to drive.
+    aiRunnerIntervalMs: cfg.aiKeySource === 'none' ? 0 : cfg.aiRunnerIntervalMs,
+    aiMaxConcurrentRuns: cfg.aiMaxConcurrentRuns,
+    aiModelId: cfg.aiModel,
   });
 
   // The metrics listener binds BEFORE the API does, and that order is deliberate in both halves.

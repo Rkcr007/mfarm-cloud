@@ -73,10 +73,10 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 
 | # | Capability | Status | PR | Notes |
 |---|---|---|---|---|
-| C1 | MCP server | Merged | | `mfarm mcp`: 12 tools over `/wd/hub`; needs an npm publish to reach customers (2FA — owner runs it) |
-| C2 | AI run engine | Planned | | |
-| C3 | Flash / Pro profiles | Planned | | |
-| C4 | AI step metering | Planned | | |
+| C1 | MCP server | Merged | #202 | `mfarm mcp`: 12 tools over `/wd/hub`; needs an npm publish to reach customers (2FA — owner runs it) |
+| C2 | AI run engine | Merged | | `src/ai/agent.ts` (loop) + `runner.ts` (claims, per-run key, hub via `inject`); `/v1/ai/*`; migration 061 |
+| C3 | Flash / Pro profiles | Merged | | Pro = a plan step + verdict re-confirmed on a fresh screen; effort `low`/`high` |
+| C4 | AI step metering | Merged | | `ai_steps` is the ledger (price at the time of the step, real tokens); step cap; monthly budget (`orgs.ai_monthly_budget_inr`, default ₹2000); screenshots expire with artifact retention |
 | C5 | Console AI section | Planned | | |
 | C6 | Saved AI tests | Planned | | |
 | C7 | Exploratory run on upload | Planned | | |
@@ -90,4 +90,6 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 - **Which model.** Defaults to `claude-opus-5` for both profiles (effort `low` for Flash, `high` for
   Pro), overridable by `MFARM_AI_MODEL`. A cheaper model for Flash is a pricing decision for the
   owner, not an engineering default.
+- **Turning it on.** `ANTHROPIC_API_KEY` in `deploy/.env` on the control plane. Unset, `POST /v1/ai/runs`
+  answers 503 and the runner never starts — every farm is AI-off until its owner opts in.
 - **Determinism.** AI runs are not a CI gate. The console says so; C9 is the path to a gate.

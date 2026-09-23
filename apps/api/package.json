@@ -15,10 +15,11 @@
     "verify": "npm run db:up && npm run migrate && npm test"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "@fastify/rate-limit": "^11.2.0",
+    "@mfarm/protocol": "*",
     "fastify": "^5.12.0",
     "pg": "^8.13.1",
-    "@mfarm/protocol": "*",
     "ws": "^8.18.0"
   },
   "exports": {

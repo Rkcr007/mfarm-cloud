@@ -181,6 +181,17 @@ export interface Config {
    */
   turnUrls: string[];
   turnSecretSource: 'environment' | 'none';
+  /**
+   * AI runs (ADR-0043). The model credential itself is NOT on this object — the SDK reads
+   * ANTHROPIC_API_KEY from the environment and `describeConfig` gets logged — only whether one is set.
+   */
+  aiKeySource: 'environment' | 'none';
+  /** `MFARM_AI_MODEL`. A cheaper model is a pricing decision for the owner, not a default. */
+  aiModel: string;
+  /** How often the AI runner looks for queued runs. 0 turns AI runs off in this process. */
+  aiRunnerIntervalMs: number;
+  /** Runs driven at once. Each holds a device, so this is also a cap on devices AI can occupy. */
+  aiMaxConcurrentRuns: number;
   /** How long a minted TURN credential stays valid. Not the lease — see `turn.ts`. */
   turnTtlSeconds: number;
 }
@@ -498,6 +509,11 @@ export function parseConfig(env: Env): Config {
   }
 
   const signingKeySource = checkSigningKey(env, isProduction, problems);
+
+  const aiModel = (env.MFARM_AI_MODEL ?? '').trim() || 'claude-opus-5';
+  const aiRunnerIntervalMs = intVar(env.AI_RUNNER_INTERVAL_MS, 'AI_RUNNER_INTERVAL_MS', 2_000, 0, 600_000, problems);
+  const aiMaxConcurrentRuns = intVar(env.AI_MAX_CONCURRENT_RUNS, 'AI_MAX_CONCURRENT_RUNS', 2, 1, 64, problems);
+  const aiKeySource = (env.ANTHROPIC_API_KEY ?? '').trim() ? 'environment' as const : 'none' as const;
 
   const reaperIntervalMs = intVar(env.REAPER_INTERVAL_MS, 'REAPER_INTERVAL_MS', 30_000, 0, 3_600_000, problems);
   if (isProduction && reaperIntervalMs === 0) {
@@ -836,6 +852,10 @@ export function parseConfig(env: Env): Config {
     dataPlanePublicBase,
     turnUrls,
     turnSecretSource: turnSecret ? 'environment' as const : 'none' as const,
+    aiKeySource,
+    aiModel,
+    aiRunnerIntervalMs,
+    aiMaxConcurrentRuns,
     turnTtlSeconds,
   });
 }
@@ -915,6 +935,9 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     // "unset (no live view route)" was true and is not any more: unset now means the live-view
     // socket is same-origin on this console's own ingress, which is the recommended shape.
     dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (same-origin /dp on this console)',
+    ai: c.aiKeySource === 'none'
+      ? 'off (no ANTHROPIC_API_KEY)'
+      : `${c.aiModel}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms`,
     turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };
 }
