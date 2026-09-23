@@ -52,6 +52,8 @@ export interface FakeControlPlaneOptions {
   actionError?: string;
   /** Answer POST /v1/apps with this status instead of 201. 200 means "already in the library". */
   uploadStatus?: number;
+  /** Extra fields on the upload answer — `aiRuns` / `aiRunsSkipped` (ADR-0043 C7). */
+  uploadExtra?: Record<string, unknown>;
 }
 
 export interface FakeControlPlane {
@@ -143,6 +145,7 @@ export async function startControlPlane(opts: FakeControlPlaneOptions = {}): Pro
             filename: 'example.apk', platform: 'android', createdAt: '2026-08-19T00:00:00.000Z',
           },
           deduplicated: status === 200,
+          ...(opts.uploadExtra ?? {}),
         });
       }
       if (req.method === 'GET' && path.startsWith('/v1/apps')) {

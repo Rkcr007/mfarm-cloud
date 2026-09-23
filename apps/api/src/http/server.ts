@@ -39,9 +39,9 @@ import type { Pool } from 'pg';
 import { TunnelRegistry, attachTunnel } from './tunnel.ts';
 import { CustomerTunnelRegistry, mountCustomerTunnel } from './customer-tunnel.ts';
 import { makeProxyRouter } from './proxy-router.ts';
-import { aiRoutes } from './routes/ai.ts';
+import { aiRoutes, aiTestRoutes } from './routes/ai.ts';
 import { loadConfig } from '../config.ts';
-import { startAiRunner } from '../ai/runner.ts';
+import { startAiRunner, aiConfigured } from '../ai/runner.ts';
 import type { Model } from '../ai/agent.ts';
 
 declare module 'fastify' {
@@ -53,6 +53,8 @@ declare module 'fastify' {
     tunnels: TunnelRegistry;
     /** The customer tunnels this process is holding — migration 052, `customer-tunnel.ts`. */
     customerTunnels: CustomerTunnelRegistry;
+    /** Whether this process can drive AI runs (ADR-0043) — the one answer every route gives. */
+    aiConfigured: () => boolean;
     /** Whether to mark the session cookie `Secure`. See ServerOptions.secureCookies. */
     secureCookies: boolean;
   }
@@ -339,6 +341,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   });
 
   app.decorate('signingKey', loadSigningKey());
+  app.decorate('aiConfigured', () => aiConfigured({ model: opts.aiModel }));
 
   /**
    * The live data-plane tunnels, one per connected agent.
@@ -661,6 +664,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(shareRoutes, { prefix: '/v1' });
   await app.register(tunnelRoutes, { prefix: '/v1' });
   await app.register(aiRoutes, { prefix: '/v1', aiModel: opts.aiModel });
+  await app.register(aiTestRoutes, { prefix: '/v1', aiModel: opts.aiModel });
   // Outside `/v1`: this one serves a page to a person, not JSON to a client, and its path is what
   // gets pasted into a chat window. See `sharePageRoutes`.
   await app.register(sharePageRoutes);

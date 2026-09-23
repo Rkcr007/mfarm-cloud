@@ -421,8 +421,8 @@ async function appCommand(flags: Flags, rest: string[]): Promise<number> {
   if (sub === 'upload') {
     if (!target) throw new UsageError('mfarm app upload needs a path to an .apk file.');
     if (!g.quiet) process.stderr.write(`mfarm: uploading ${target}…\n`);
-    const { app, deduplicated } = await c.uploadApp(target);
-    if (g.json) process.stdout.write(`${JSON.stringify({ app, deduplicated })}\n`);
+    const { app, deduplicated, aiRuns, aiRunsSkipped } = await c.uploadApp(target);
+    if (g.json) process.stdout.write(`${JSON.stringify({ app, deduplicated, aiRuns, ...(aiRunsSkipped ? { aiRunsSkipped } : {}) })}\n`);
     else process.stdout.write(`${app.id}\n`);
     if (!g.quiet) {
       // Said out loud because it is the difference between "my upload did nothing" and "the server
@@ -432,6 +432,13 @@ async function appCommand(flags: Flags, rest: string[]): Promise<number> {
           ? `mfarm: already in the library — ${app.packageName} ${app.versionName ?? '?'}\n`
           : `mfarm: uploaded ${app.packageName} ${app.versionName ?? '?'} (${app.sizeBytes} bytes)\n`,
       );
+      // Said here because it spends money: a saved AI test listening for this package just started.
+      for (const r of aiRuns) process.stderr.write(`mfarm: started AI test "${r.testName}" on this build (${r.aiRunId})\n`);
+      if (aiRunsSkipped) {
+        process.stderr.write(aiRunsSkipped === 'budget'
+          ? 'mfarm: AI tests listening for this app were NOT started — the monthly AI budget is spent.\n'
+          : 'mfarm: AI tests listening for this app could not be started.\n');
+      }
     }
     return 0;
   }

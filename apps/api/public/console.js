@@ -298,6 +298,9 @@ export const state = {
     runs: [], loaded: false, loading: false, pricing: null, pricingLoading: false, busy: false,
     detail: null, detailLoading: false, stepN: null,
     draft: { prompt: '', profile: 'flash', platform: 'android', appId: '', region: '' },
+    /** Saved tests (C6). `save` is the name box under the prompt — in state for the draft's reason. */
+    tests: [], testsLoaded: false, testsLoading: false,
+    save: { open: false, name: '', runOnUpload: false, busy: false },
   },
   /**
    * Artifacts for the session detail screen, keyed by session id.
@@ -1997,7 +2000,7 @@ export function loadForRoute() {
    */
   if (name === 'tunnels') return loadTunnels();
   // AI testing, on arrival for the tunnels reason above. The app list feeds the build picker.
-  if (name === 'ai') return Promise.all([loadAiRuns(), loadAiPricing(), refreshApps().catch(() => {})]);
+  if (name === 'ai') return Promise.all([loadAiRuns(), loadAiPricing(), loadAiTests(), refreshApps().catch(() => {})]);
   if (name === 'airun') {
     state.ai.stepN = null;
     return loadAiRun(id);
@@ -11114,6 +11117,7 @@ function screenAi() {
   const ai = state.ai;
   if (!ai.loaded && !ai.loading) void loadAiRuns();
   if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
+  if (!ai.testsLoaded && !ai.testsLoading) void loadAiTests();
   const p = ai.pricing;
   const d = ai.draft;
 
@@ -11171,12 +11175,13 @@ function screenAi() {
             }, regions.map((r) => h('option', { value: r, selected: (d.region || regions[0]) === r, text: r }))))
         : null,
     ),
+    aiSaveRow(off),
     h('div', { class: 'row between mt-md' },
       h('p', { class: 'caption', text: profileSpec
         ? `${aiMoney(profileSpec.priceInr)} per step, up to ${profileSpec.stepCap} steps `
           + `(at most ${aiMoney(profileSpec.priceInr * profileSpec.stepCap)}), plus device time.`
         : ' ' }),
-      btn(ai.busy ? 'Starting…' : 'Run', 'primary', () => void startAiRun(),
+      btn(ai.busy ? 'Starting…' : 'Start AI run', 'primary', () => void startAiRun(),
         { disabled: off || ai.busy || !d.prompt.trim() }),
     ),
   );
@@ -11193,7 +11198,9 @@ function screenAi() {
           },
             h('div', { class: 'stack tight shrink' },
               h('span', { class: 'row tight' }, aiStatusPill(r),
-                h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' })),
+                h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' }),
+                r.test ? h('span', { class: 'chip', text: r.test.name }) : null,
+                r.trigger === 'upload' ? h('span', { class: 'chip', text: 'on upload', title: 'Started by a new build of the app' }) : null),
               h('p', { class: 'ai-row-prompt', text: r.prompt.length > 160 ? `${r.prompt.slice(0, 160)}…` : r.prompt }),
               h('p', { class: 'caption', text: [
                 `${r.steps} step${r.steps === 1 ? '' : 's'}`,
@@ -11203,7 +11210,7 @@ function screenAi() {
               ].filter(Boolean).join(' · ') }),
             ),
           )))
-        : empty('No AI runs yet.', 'Describe a test above and press Run.'),
+        : empty('No AI runs yet.', 'Describe a test above and press Start AI run.'),
   );
 
   const b = p?.budget;
@@ -11211,7 +11218,7 @@ function screenAi() {
     pageHead([{ label: 'Farm' }], 'AI testing',
       'Describe a test in plain English. A real device does it, and you get the recording, the log and every step.'),
     h('div', { class: 'split' },
-      h('div', { class: 'content' }, form, list),
+      h('div', { class: 'content' }, form, aiTestsCard(off), list),
       h('div', { class: 'rail' },
         b
           ? card('This month', {},
@@ -11262,6 +11269,8 @@ function screenAiRun() {
         : h('p', { text: aiStopText(r) }),
     kv([
       ['Mode', r.profile === 'pro' ? 'Pro' : 'Flash'],
+      ['Started by', r.trigger === 'upload' ? `a new build${r.test ? ` \u2014 ${r.test.name}` : ''}`
+        : r.test ? `saved test \u201c${r.test.name}\u201d` : (r.createdBy || '\u2014')],
       ['Steps', `${r.steps} of at most ${r.stepCap}`],
       ['Cost', `${aiMoney(r.costInr)} in AI steps`],
       ['Model', r.model, true],
@@ -11311,6 +11320,134 @@ function screenAiRun() {
       ),
     ),
   ];
+}
+
+/**
+ * "Save as a test" (C6), under the prompt. Collapsed to one link until asked for, because most runs
+ * are one-off questions and a name field on every one would make them feel like paperwork.
+ *
+ * The package a saved test is ABOUT comes from the build picked above — that is what "Run again"
+ * resolves to `@latest` and what an upload is matched against — so run-on-upload is offered only
+ * once a build is chosen, rather than as a checkbox that the server would refuse.
+ */
+function aiSaveRow(off) {
+  const sv = state.ai.save;
+  const d = state.ai.draft;
+  const build = state.apps.find((a) => a.id === d.appId) || null;
+  if (!sv.open) {
+    return h('p', { class: 'caption mt-sm' },
+      btn('Save as a test\u2026', 'tiny ghost', () => { state.ai.save = { ...sv, open: true }; render(); },
+        { disabled: off || !d.prompt.trim(), title: 'Keep this prompt as a named test you can run again in one click' }));
+  }
+  return h('div', { class: 'inset stack tight mt-sm' },
+    h('label', { class: 'micro', for: 'ai-test-name', text: 'Test name' }),
+    h('input', {
+      class: 'field', id: 'ai-test-name', maxlength: '120', autocomplete: 'off', value: sv.name,
+      placeholder: 'e.g. Checkout smoke',
+      oninput: (e) => { state.ai.save = { ...state.ai.save, name: e.target.value }; },
+    }),
+    build
+      ? h('label', { class: 'row tight caption' },
+          h('input', {
+            type: 'checkbox', checked: sv.runOnUpload,
+            onchange: (e) => { state.ai.save = { ...state.ai.save, runOnUpload: e.target.checked }; },
+          }),
+          `Run it on every new build of ${build.packageName}`)
+      : h('p', { class: 'caption', text: 'Pick an app build above to be able to run it on every new upload.' }),
+    h('span', { class: 'row tight' },
+      btn(sv.busy ? 'Saving\u2026' : 'Save test', '', () => void saveAiTest(), { disabled: sv.busy || !sv.name.trim() }),
+      btn('Cancel', 'ghost', () => { state.ai.save = { open: false, name: '', runOnUpload: false, busy: false }; render(); })),
+  );
+}
+
+function aiTestsCard(off) {
+  const ai = state.ai;
+  if (!ai.testsLoaded) return null;
+  if (!ai.tests.length) return null;
+  return card('Saved tests', { aside: h('span', { class: 'caption', text: `${ai.tests.length}` }) },
+    h('div', { class: 'stack' }, ai.tests.map((t) => h('div', { class: 'inset row between fit' },
+      h('div', { class: 'stack tight shrink' },
+        h('span', { class: 'row tight' },
+          h('strong', { text: t.name }),
+          h('span', { class: 'chip', text: t.profile === 'pro' ? 'Pro' : 'Flash' }),
+          t.runOnUpload ? h('span', { class: 'chip', text: 'every upload', title: `Runs on each new build of ${t.appPackage}` }) : null),
+        h('p', { class: 'caption ai-row-prompt', text: t.prompt.length > 140 ? `${t.prompt.slice(0, 140)}\u2026` : t.prompt }),
+        // The last ten verdicts, newest first — "has this been passing?" at a glance.
+        t.recent.length
+          ? h('span', { class: 'row tight', 'aria-label': 'Recent results, newest first' },
+              t.recent.map((r) => h('button', {
+                type: 'button', class: `ai-dot ${r.status}`, title: `${r.status} \u00b7 ${when(r.at)}`,
+                'aria-label': `${r.status}, ${when(r.at)}`, onclick: () => go(`#/ai/${r.id}`),
+              })))
+          : h('span', { class: 'caption', text: 'Never run' }),
+      ),
+      h('span', { class: 'row tight' },
+        btn('Run', '', () => void runAiTest(t), { disabled: off }),
+        btn('Archive', 'tiny ghost', () => void archiveAiTest(t), { title: 'Hide it; its past runs keep its name' })),
+    ))));
+}
+
+async function saveAiTest() {
+  const sv = state.ai.save;
+  const d = state.ai.draft;
+  const build = state.apps.find((a) => a.id === d.appId) || null;
+  state.ai.save = { ...sv, busy: true };
+  render();
+  try {
+    await api('/v1/ai/tests', {
+      method: 'POST',
+      body: {
+        name: sv.name.trim(), prompt: d.prompt.trim(), profile: d.profile, platform: d.platform,
+        ...(d.region ? { region: d.region } : {}),
+        ...(build ? { appPackage: build.packageName, runOnUpload: sv.runOnUpload } : {}),
+      },
+    });
+    toast('Test saved', sv.runOnUpload && build
+      ? `\u201c${sv.name.trim()}\u201d runs on every new build of ${build.packageName}.`
+      : `\u201c${sv.name.trim()}\u201d is in Saved tests.`, 'ok');
+    state.ai.save = { open: false, name: '', runOnUpload: false, busy: false };
+    state.ai.testsLoaded = false;
+    await loadAiTests();
+  } catch (e) {
+    state.ai.save = { ...state.ai.save, busy: false };
+    toast('Could not save the test', e.message, 'bad');
+  }
+  render();
+}
+
+async function runAiTest(t) {
+  try {
+    const out = await api(`/v1/ai/tests/${encodeURIComponent(t.id)}/run`, { method: 'POST', body: {} });
+    toast('AI run queued', `\u201c${t.name}\u201d starts as soon as a device is free.`, 'ok');
+    state.ai.loaded = false;
+    state.ai.testsLoaded = false;
+    go(`#/ai/${out.aiRun.id}`);
+  } catch (e) {
+    toast(`Could not run \u201c${t.name}\u201d`, e.message, 'bad');
+  }
+}
+
+async function archiveAiTest(t) {
+  try {
+    await api(`/v1/ai/tests/${encodeURIComponent(t.id)}/archive`, { method: 'POST' });
+    toast('Test archived', `\u201c${t.name}\u201d is hidden. Its past runs keep its name.`, '');
+    state.ai.testsLoaded = false;
+    await loadAiTests();
+  } catch (e) {
+    toast('Could not archive the test', e.message, 'bad');
+  }
+}
+
+async function loadAiTests() {
+  if (state.ai.testsLoading) return;
+  state.ai = { ...state.ai, testsLoading: true };
+  try {
+    const out = await api('/v1/ai/tests');
+    state.ai = { ...state.ai, tests: out.aiTests || [], testsLoaded: true, testsLoading: false };
+  } catch {
+    state.ai = { ...state.ai, tests: [], testsLoaded: true, testsLoading: false };
+  }
+  scheduleRender();
 }
 
 async function startAiRun() {

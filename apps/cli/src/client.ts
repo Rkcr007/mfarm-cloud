@@ -105,6 +105,13 @@ export interface UploadResult {
   app: AppSummary;
   /** True when this org had already uploaded these exact bytes. The upload is keyed on the digest. */
   deduplicated: boolean;
+  /**
+   * Saved AI tests this NEW build started (ADR-0043 C7). Empty for a re-upload, for an org with no
+   * listening tests, and from a control plane older than migration 062 — which sends no field at all.
+   */
+  aiRuns: { aiRunId: string; testName: string }[];
+  /** Why listening tests were not started: `budget` or `error`. Absent when nothing was skipped. */
+  aiRunsSkipped?: string;
 }
 
 export type AppActionKind = 'install' | 'launch' | 'uninstall';
@@ -339,11 +346,19 @@ export class ControlPlaneClient {
       const text = await res.text().catch(() => '');
       const body = parseJson(text);
       if (!res.ok) throw toApiError(res.status, body, text);
-      const payload = body as { app?: AppSummary; deduplicated?: boolean };
+      const payload = body as {
+        app?: AppSummary; deduplicated?: boolean;
+        aiRuns?: { aiRunId: string; testName: string }[]; aiRunsSkipped?: string;
+      };
       if (!payload?.app?.id) {
         throw new TransportError(`The control plane answered ${res.status} without an app. Body: ${snippet(text)}`, attempt + 1);
       }
-      return { app: payload.app, deduplicated: payload.deduplicated === true };
+      return {
+        app: payload.app,
+        deduplicated: payload.deduplicated === true,
+        aiRuns: Array.isArray(payload.aiRuns) ? payload.aiRuns : [],
+        ...(payload.aiRunsSkipped ? { aiRunsSkipped: payload.aiRunsSkipped } : {}),
+      };
     }
   }
 
