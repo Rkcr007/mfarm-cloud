@@ -104,6 +104,11 @@ export const ICON_MAP = {
   key:       'key',
   adduser:   'user-plus',
   host:      'server',
+
+  /* --- MFARM AI (ADR-0043) ---------------------------------------------------------------------- */
+  // The one nav item that is not a noun for a thing on the farm. Sparkles is the convention every
+  // product uses for "the model does this", so it reads without a legend.
+  ai:        'sparkles',
 };
 
 /**

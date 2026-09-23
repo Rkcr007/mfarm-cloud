@@ -290,6 +290,16 @@ export const state = {
    */
   tunnels: { items: [], loaded: false, loading: false },
   /**
+   * AI testing (ADR-0043). The DRAFT lives here, not in the textarea, for the reason `pair.code`
+   * does: the five-second poll re-renders the screen, and a half-typed test that vanishes is worse
+   * than no screen at all.
+   */
+  ai: {
+    runs: [], loaded: false, loading: false, pricing: null, pricingLoading: false, busy: false,
+    detail: null, detailLoading: false, stepN: null,
+    draft: { prompt: '', profile: 'flash', platform: 'android', appId: '', region: '' },
+  },
+  /**
    * Artifacts for the session detail screen, keyed by session id.
    *
    * Per session rather than one org-wide list: a session's evidence is only ever looked at from
@@ -1847,7 +1857,7 @@ function watchScrollShadow() {
 
 /* ---------------------------------------------------------------------------- router */
 
-const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'queue', 'health', 'launch', 'agents', 'tunnels', 'team', 'settings', 'infra']);
+const ROUTES = new Set(['fleet', 'devices', 'apps', 'sessions', 'runs', 'ai', 'queue', 'health', 'launch', 'agents', 'tunnels', 'team', 'settings', 'infra']);
 
 /**
  * THE OLD ROUTES ARE NOT DELETED, THEY ARE LENSES.
@@ -1904,6 +1914,8 @@ export function parseHash(hash = location.hash) {
   // `#/launch` picks; `#/launch/<sessionId>` watches one come up. The session id is in the URL so
   // that a reload mid-bring-up rejoins the same session rather than allocating a second device.
   if (name === 'launch' && id) return { name: 'launching', id };
+  // `#/ai/<id>` is one AI run; `#/ai` is the form and the list.
+  if (name === 'ai' && id) return { name: 'airun', id };
   return { name: ROUTES.has(name) ? name : 'fleet', id: null, lens: 'capacity' };
 }
 
@@ -1984,6 +1996,12 @@ export function loadForRoute() {
    * device screen — see `a route fetches what its screen needs` in `console-screens.test.ts`.
    */
   if (name === 'tunnels') return loadTunnels();
+  // AI testing, on arrival for the tunnels reason above. The app list feeds the build picker.
+  if (name === 'ai') return Promise.all([loadAiRuns(), loadAiPricing(), refreshApps().catch(() => {})]);
+  if (name === 'airun') {
+    state.ai.stepN = null;
+    return loadAiRun(id);
+  }
   /**
    * Infrastructure, on arrival as well as on the poll — and here for the reason the tunnels line
    * above spells out: `hashchange` is not the only way to arrive. `boot()` calls this too, so
@@ -2125,7 +2143,7 @@ function renderChrome() {
   // Nav highlight. The two detail routes keep their parent lit rather than lighting nothing.
   // Detail routes light their parent rather than lighting nothing. `device` and `cockpit` both
   // belong to Fleet now, because the three pages they came from are lenses on it.
-  const parent = { device: 'fleet', cockpit: 'fleet', run: 'runs', launching: 'launch' }[state.route.name] || state.route.name;
+  const parent = { device: 'fleet', cockpit: 'fleet', run: 'runs', launching: 'launch', airun: 'ai' }[state.route.name] || state.route.name;
   for (const item of document.querySelectorAll('.navitem')) {
     item.classList.toggle('is-active', item.dataset.route === parent);
   }
@@ -10764,7 +10782,7 @@ let gPending = 0;
  * through `parseHash`, onto the Fleet lens that used to be that page. A shortcut somebody has in
  * their fingers is not a thing to reclaim for tidiness.
  */
-const G_ROUTES = { f: 'fleet', d: 'devices', a: 'apps', r: 'sessions', u: 'runs', q: 'queue', h: 'health', l: 'launch', g: 'agents', n: 'tunnels', t: 'team', s: 'settings', i: 'infra' };
+const G_ROUTES = { f: 'fleet', d: 'devices', a: 'apps', r: 'sessions', u: 'runs', e: 'ai', q: 'queue', h: 'health', l: 'launch', g: 'agents', n: 'tunnels', t: 'team', s: 'settings', i: 'infra' };
 
 /**
  * Is this keystroke meant for something that takes typing, rather than for the console?
@@ -11024,6 +11042,348 @@ async function loadTunnels() {
     // Loaded-with-nothing rather than left unloaded: an unloaded screen re-fetches on every render,
     // so a failing endpoint would put this console into a request loop.
     state.tunnels = { items: [], loaded: true, loading: false };
+  }
+  scheduleRender();
+}
+
+/* ---------------------------------------------------------------------------- AI testing */
+
+/**
+ * AI TESTING — describe a test in plain English, and a real device does it (ADR-0043, C5).
+ *
+ * THE SELLABLE SURFACE FOR PEOPLE WHO DO NOT WRITE APPIUM. Everything else in this console assumes a
+ * suite; this is the one screen where the test IS the sentence somebody types. So it leads with the
+ * text box and the price, and it says plainly what an AI run is not — a CI gate — because a
+ * non-deterministic verdict presented like a scripted one is how a team stops trusting both.
+ *
+ * NO PRICE IS WRITTEN HERE. Every rupee on this screen comes from `GET /v1/ai/pricing`, which reads
+ * the constant the server bills from (`ai/pricing.ts`), so the quote and the meter cannot disagree.
+ */
+
+const AI_ACTIVE = new Set(['queued', 'running']);
+
+function aiStatusPill(r) {
+  if (r.status === 'passed') return pill('passed', 'ok');
+  if (r.status === 'failed') return pill('failed', 'bad');
+  // `error` is not `failed`, and the difference is the whole trust story: failed is the agent's
+  // verdict on the APP; error is that no verdict was reached. Different words, different colours.
+  if (r.status === 'error') return pill('no verdict', 'warn', { title: aiStopText(r) });
+  if (r.status === 'cancelled') return pill('cancelled', '', { dot: false });
+  if (r.status === 'running') return pill(r.cancelRequested ? 'stopping' : 'running', 'ok', { live: true });
+  return pill('queued', '', { live: true });
+}
+
+/** Why a run ended without a verdict, in words. The stop reasons are the runner's, one for one. */
+function aiStopText(r) {
+  return ({
+    budget: 'Stopped: the monthly AI budget would have been exceeded by the next step.',
+    step_cap: `Stopped after ${r.stepCap} steps without reaching a verdict.`,
+    no_action: 'The agent stopped choosing actions.',
+    model_refused: 'The model declined this task.',
+    model_error: 'The model could not be reached.',
+    device_lost: 'The device stopped answering during the run.',
+    no_device: 'No device could be given to this run.',
+    interrupted: 'The farm restarted while this run was in progress.',
+    not_configured: 'AI is not configured on this farm.',
+    cancelled: 'Cancelled.',
+  })[r.stopReason] || r.summary || 'Ended without a verdict.';
+}
+
+function aiActionText(action) {
+  if (!action) return 'Planned the checkpoints';
+  const i = action.input || {};
+  switch (action.tool) {
+    case 'tap_element': return `Tapped element [${i.index}]`;
+    case 'tap_point': return `Tapped at ${i.x}, ${i.y}`;
+    case 'type_text': return `Typed “${String(i.text ?? '').slice(0, 60)}”${i.submit ? ' and pressed Enter' : ''}`;
+    case 'scroll': return `Scrolled ${i.direction}`;
+    case 'press_key': return `Pressed ${i.key}`;
+    case 'launch_app': return `Opened ${i.app_id}`;
+    case 'wait': return `Waited ${i.seconds}s`;
+    case 'finish': return i.passed ? 'Concluded: passed' : 'Concluded: failed';
+    default: return action.tool;
+  }
+}
+
+function aiMoney(n) {
+  const cur = state.ai.pricing?.currency || '';
+  return `${cur}${Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function screenAi() {
+  const ai = state.ai;
+  if (!ai.loaded && !ai.loading) void loadAiRuns();
+  if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
+  const p = ai.pricing;
+  const d = ai.draft;
+
+  const regions = [...new Set(state.devices.map((x) => x.region))].sort();
+  const profileSpec = p?.profiles?.[d.profile];
+
+  const off = p && p.configured === false;
+  const form = card('New AI run', {},
+    off
+      ? h('p', { class: 'caption', text: 'AI runs are not switched on for this farm yet. An operator turns them '
+          + 'on by giving the control plane a model credential; until then nothing can be queued here.' })
+      : null,
+    h('label', { class: 'micro', for: 'ai-prompt', text: 'What should happen' }),
+    h('textarea', {
+      class: 'field ai-prompt', id: 'ai-prompt', rows: '5', maxlength: '4000', disabled: off,
+      placeholder: 'e.g. Open the app, log in as demo@acme.test with password demo1234, add any shirt '
+        + 'to the cart, and check the cart shows 1 item.',
+      oninput: (e) => { state.ai.draft = { ...state.ai.draft, prompt: e.target.value }; },
+    }, d.prompt),
+    h('div', { class: 'row wrap mt-sm' },
+      h('div', { class: 'stack tight' },
+        h('span', { class: 'micro', text: 'Mode' }),
+        h('div', { class: 'row lensrow', role: 'radiogroup', 'aria-label': 'Mode' },
+          ['flash', 'pro'].map((k) => h('button', {
+            type: 'button', role: 'radio', 'aria-checked': String(d.profile === k),
+            class: `lens${d.profile === k ? ' on' : ''}`, disabled: off,
+            title: k === 'flash'
+              ? 'Acts every turn. Fastest and cheapest per step.'
+              : 'Plans checkpoints first, and confirms its verdict on a fresh screen before it counts.',
+            onclick: () => { state.ai.draft = { ...state.ai.draft, profile: k }; render(); },
+          }, k === 'flash' ? 'Flash' : 'Pro')))),
+      h('div', { class: 'stack tight' },
+        h('span', { class: 'micro', text: 'Platform' }),
+        h('select', {
+          class: 'field', disabled: off,
+          onchange: (e) => { state.ai.draft = { ...state.ai.draft, platform: e.target.value }; },
+        }, ['android', 'ios'].map((v) => h('option', { value: v, selected: d.platform === v, text: v === 'ios' ? 'iOS' : 'Android' })))),
+      h('div', { class: 'stack tight' },
+        h('span', { class: 'micro', text: 'App build' }),
+        h('select', {
+          class: 'field', disabled: off,
+          onchange: (e) => { state.ai.draft = { ...state.ai.draft, appId: e.target.value }; },
+        },
+          h('option', { value: '', selected: !d.appId, text: 'None — use what is on the device' }),
+          state.apps.map((a) => h('option', {
+            value: a.id, selected: d.appId === a.id,
+            text: `${a.label || a.packageName} ${a.versionName || ''}`.trim(),
+          })))),
+      regions.length > 1
+        ? h('div', { class: 'stack tight' },
+            h('span', { class: 'micro', text: 'Region' }),
+            h('select', {
+              class: 'field', disabled: off,
+              onchange: (e) => { state.ai.draft = { ...state.ai.draft, region: e.target.value }; },
+            }, regions.map((r) => h('option', { value: r, selected: (d.region || regions[0]) === r, text: r }))))
+        : null,
+    ),
+    h('div', { class: 'row between mt-md' },
+      h('p', { class: 'caption', text: profileSpec
+        ? `${aiMoney(profileSpec.priceInr)} per step, up to ${profileSpec.stepCap} steps `
+          + `(at most ${aiMoney(profileSpec.priceInr * profileSpec.stepCap)}), plus device time.`
+        : ' ' }),
+      btn(ai.busy ? 'Starting…' : 'Run', 'primary', () => void startAiRun(),
+        { disabled: off || ai.busy || !d.prompt.trim() }),
+    ),
+  );
+
+  const runs = ai.runs;
+  const list = card('Recent AI runs', {
+    aside: h('span', { class: 'caption', text: ai.loaded ? `${runs.length}` : 'loading…' }),
+  },
+    !ai.loaded
+      ? h('p', { class: 'caption', text: 'Loading…' })
+      : runs.length
+        ? h('div', { class: 'stack' }, runs.map((r) => h('button', {
+            type: 'button', class: 'inset row between fit airow', onclick: () => go(`#/ai/${r.id}`),
+          },
+            h('div', { class: 'stack tight shrink' },
+              h('span', { class: 'row tight' }, aiStatusPill(r),
+                h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' })),
+              h('p', { class: 'ai-row-prompt', text: r.prompt.length > 160 ? `${r.prompt.slice(0, 160)}…` : r.prompt }),
+              h('p', { class: 'caption', text: [
+                `${r.steps} step${r.steps === 1 ? '' : 's'}`,
+                aiMoney(r.costInr),
+                r.createdBy ? `by ${r.createdBy}` : null,
+                when(r.createdAt),
+              ].filter(Boolean).join(' · ') }),
+            ),
+          )))
+        : empty('No AI runs yet.', 'Describe a test above and press Run.'),
+  );
+
+  const b = p?.budget;
+  return [
+    pageHead([{ label: 'Farm' }], 'AI testing',
+      'Describe a test in plain English. A real device does it, and you get the recording, the log and every step.'),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' }, form, list),
+      h('div', { class: 'rail' },
+        b
+          ? card('This month', {},
+              h('p', { class: 'ai-metric', text: `${aiMoney(b.spentInr)} of ${aiMoney(b.budgetInr)}` }),
+              h('div', { class: 'meter', role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': String(b.budgetInr),
+                'aria-valuenow': String(b.spentInr), 'aria-label': 'AI budget used' },
+                h('i', {
+                  class: b.spentInr >= b.budgetInr * 0.9 ? 'bad' : b.spentInr >= b.budgetInr * 0.7 ? 'warn' : 'ok',
+                  style: { width: `${Math.min(100, b.budgetInr ? (b.spentInr / b.budgetInr) * 100 : 100).toFixed(1)}%` },
+                })),
+              h('p', { class: 'caption mt-sm', text: 'A run stops before the step that would go past the budget, '
+                + 'so it can never be exceeded.' }))
+          : null,
+        card('From your own AI agent', {},
+          h('p', { class: 'caption', text: 'Claude Code, Cursor or any MCP client can borrow a device and drive '
+            + 'it itself. Register the MFARM server once:' }),
+          copyrow('claude mcp add mfarm --env MFARM_API_KEY=mfk_… -- npx -y @mfarm/cli mcp', 'Copy')),
+        card('What it is for', {},
+          h('p', { class: 'caption', text: 'Smoke checks, click-paths your team runs by hand, and exploring a new '
+            + 'build. The agent can take a different path each time, so an AI run is not a CI gate — for '
+            + 'that, keep a scripted suite on the hub.' })),
+      ),
+    ),
+  ];
+}
+
+function screenAiRun() {
+  const id = state.route.id;
+  const ai = state.ai;
+  const det = ai.detail?.aiRun?.id === id ? ai.detail : null;
+  if (!det && !ai.detailLoading) void loadAiRun(id);
+  if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
+  if (!det) {
+    return [pageHead([{ label: 'AI testing', to: '#/ai' }], 'AI run', null), h('p', { class: 'caption', text: 'Loading…' })];
+  }
+  const r = det.aiRun;
+  const steps = det.steps || [];
+  const chosen = steps.find((s) => s.n === ai.stepN) || [...steps].reverse().find((s) => s.screenshotUrl) || null;
+  const active = AI_ACTIVE.has(r.status);
+
+  const verdict = card('Verdict', { aside: aiStatusPill(r) },
+    r.status === 'passed' || r.status === 'failed'
+      ? [h('p', { text: r.summary || '' }),
+         r.evidence ? h('p', { class: 'caption mt-sm' }, h('span', { class: 'micro', text: 'Evidence ' }), r.evidence) : null]
+      : active
+        ? h('p', { class: 'caption', text: r.status === 'queued' ? 'Waiting for a device…'
+            : `Working — step ${r.steps} of at most ${r.stepCap}.` })
+        : h('p', { text: aiStopText(r) }),
+    kv([
+      ['Mode', r.profile === 'pro' ? 'Pro' : 'Flash'],
+      ['Steps', `${r.steps} of at most ${r.stepCap}`],
+      ['Cost', `${aiMoney(r.costInr)} in AI steps`],
+      ['Model', r.model, true],
+      ['Started', r.startedAt ? when(r.startedAt) : '—'],
+    ]),
+  );
+
+  const trajectory = card('Steps', { aside: h('span', { class: 'caption', text: `${steps.length}` }) },
+    steps.length
+      ? h('ol', { class: 'ai-steps' }, steps.map((s) => h('li', {
+          class: `ai-step ${chosen?.n === s.n ? 'on' : ''} ${String(s.result || '').startsWith('failed') ? 'miss' : ''}`.trim(),
+        },
+          h('button', {
+            type: 'button', class: 'ai-step-btn',
+            onclick: () => { state.ai.stepN = s.n; render(); },
+            'aria-label': `Show the screen at step ${s.n}`,
+          },
+            h('span', { class: 'ai-step-n', text: String(s.n) }),
+            h('span', { class: 'stack tight shrink' },
+              h('span', { class: 'row tight' },
+                h('strong', { text: aiActionText(s.action) }),
+                s.phase !== 'act' ? h('span', { class: 'chip', text: s.phase }) : null),
+              s.thought ? h('span', { class: 'caption ai-thought', text: s.thought }) : null,
+              s.result && s.result !== 'ok' ? h('span', { class: 'caption mono', text: s.result }) : null),
+          ))))
+      : h('p', { class: 'caption', text: active ? 'The first step appears once a device is ready.' : 'No steps were taken.' }),
+  );
+
+  return [
+    pageHead([{ label: 'AI testing', to: '#/ai' }], 'AI run', r.prompt,
+      h('span', { class: 'row tight' },
+        active && !r.cancelRequested ? btn('Stop', 'ghost', () => void cancelAiRun(r.id)) : null,
+        r.sessionId ? btn('Recording & log', 'ghost', () => go(`#/sessions/${r.sessionId}`),
+          { title: 'The device session this run used: video, logcat and every WebDriver command' }) : null,
+        btn('Run again', '', () => {
+          state.ai.draft = { ...state.ai.draft, prompt: r.prompt, profile: r.profile, platform: r.platform, appId: '' };
+          go('#/ai');
+        }),
+      )),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' }, verdict, trajectory),
+      h('div', { class: 'rail' },
+        card(chosen ? `Screen at step ${chosen.n}` : 'Screen', {},
+          chosen?.screenshotUrl
+            ? h('img', { class: 'ai-shot', src: chosen.screenshotUrl, alt: `The device screen at step ${chosen.n}`, loading: 'lazy' })
+            : h('p', { class: 'caption', text: 'No screenshot yet.' })),
+      ),
+    ),
+  ];
+}
+
+async function startAiRun() {
+  const d = state.ai.draft;
+  if (!d.prompt.trim() || state.ai.busy) return;
+  state.ai.busy = true;
+  render();
+  try {
+    const regions = [...new Set(state.devices.map((x) => x.region))].sort();
+    const region = d.region || regions[0];
+    const out = await api('/v1/ai/runs', {
+      method: 'POST',
+      body: {
+        prompt: d.prompt.trim(), profile: d.profile, platform: d.platform,
+        ...(region ? { region } : {}), ...(d.appId ? { appId: d.appId } : {}),
+      },
+    });
+    state.ai.draft = { ...state.ai.draft, prompt: '' };
+    toast('AI run queued', 'It starts as soon as a device is free. The steps appear as it works.', 'ok');
+    state.ai.loaded = false;
+    go(`#/ai/${out.aiRun.id}`);
+  } catch (e) {
+    toast('Could not start the AI run', e.message, 'bad');
+  } finally {
+    state.ai.busy = false;
+    render();
+  }
+}
+
+async function cancelAiRun(id) {
+  try {
+    await api(`/v1/ai/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+    toast('Stopping', 'The run stops before its next step. The step in progress still finishes.', '');
+    await loadAiRun(id);
+  } catch (e) {
+    toast('Could not stop the run', e.message, 'bad');
+  }
+}
+
+async function loadAiRuns() {
+  if (state.ai.loading) return;
+  state.ai = { ...state.ai, loading: true };
+  try {
+    const out = await api('/v1/ai/runs');
+    state.ai = { ...state.ai, runs: out.aiRuns || [], loaded: true, loading: false };
+  } catch {
+    // Loaded-with-nothing, not left unloaded — the Tunnels reason: an unloaded screen re-fetches on
+    // every render, so a failing endpoint would become a request loop.
+    state.ai = { ...state.ai, runs: [], loaded: true, loading: false };
+  }
+  scheduleRender();
+}
+
+async function loadAiPricing() {
+  if (state.ai.pricingLoading) return;
+  state.ai = { ...state.ai, pricingLoading: true };
+  try {
+    state.ai = { ...state.ai, pricing: await api('/v1/ai/pricing'), pricingLoading: false };
+  } catch {
+    state.ai = { ...state.ai, pricing: { configured: false, profiles: {}, currency: '' }, pricingLoading: false };
+  }
+  scheduleRender();
+}
+
+async function loadAiRun(id) {
+  if (state.ai.detailLoading) return;
+  state.ai = { ...state.ai, detailLoading: true };
+  try {
+    const out = await api(`/v1/ai/runs/${encodeURIComponent(id)}`);
+    state.ai = { ...state.ai, detail: { ...out, fetchedAt: Date.now() }, detailLoading: false };
+  } catch (e) {
+    state.ai = { ...state.ai, detailLoading: false,
+      detail: { aiRun: { id, status: 'error', stopReason: null, summary: e.message, prompt: '', steps: 0, stepCap: 0, costInr: 0 }, steps: [] } };
   }
   scheduleRender();
 }
@@ -11857,6 +12217,8 @@ export const SCREENS = {
   infra: () => screenInfra(),
   agents: () => screenAgents(),
   tunnels: () => screenTunnels(),
+  ai: () => screenAi(),
+  airun: () => screenAiRun(),
   team: () => screenTeam(),
   settings: () => screenSettings(),
 };
@@ -12045,6 +12407,16 @@ function startPoll() {
        * only once it exists — and the dot must not be the reason this runs.
        */
       if (state.route.name === 'infra') await refreshInfra();
+      /**
+       * AI runs, ONLY while one is moving and somebody is looking at it. A finished run never
+       * changes again, so a parked tab costs nothing; a running one gets a new step every few
+       * seconds, which is the thing a person opened the page to watch.
+       */
+      if (state.route.name === 'ai' && state.ai.runs.some((r) => AI_ACTIVE.has(r.status))) await loadAiRuns();
+      if (state.route.name === 'airun' && state.ai.detail?.aiRun?.id === state.route.id
+          && AI_ACTIVE.has(state.ai.detail.aiRun.status)) {
+        await loadAiRun(state.route.id);
+      }
       await refreshHeld();
       if (state.route.name === 'cockpit' && state.detail?.id === state.route.id
           && Date.now() - (state.detail.fetchedAt || 0) > 10_000) {
