@@ -7,7 +7,7 @@ import { requireTenant } from '../server.ts';
 import { badRequest, conflict, forbidden, notFound, unavailable } from '../errors.ts';
 import { AI_CURRENCY, AI_DIAGNOSE_PRICE_INR, AI_PROFILES } from '../../ai/pricing.ts';
 import { queueAiRun, spendThisMonth } from '../../ai/queue.ts';
-import { aiConfigured, aiStepStore, anthropicModel } from '../../ai/runner.ts';
+import { aiConfigured, aiStepStore, configuredModel } from '../../ai/runner.ts';
 import { diagnoseSession, diagnosisJson, DIAGNOSIS_SELECT } from '../../ai/diagnose.ts';
 import { exportScript, type ScriptLang, type ExportStep } from '../../ai/export.ts';
 import type { Model } from '../../ai/agent.ts';
@@ -281,7 +281,7 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
   }, async (req, reply) => {
     const { orgId, userId } = requireSpender(req);
     const sessionId = uuidParam(req.body.sessionId, 'Session');
-    const model = opts.aiModel ?? (configured() ? anthropicModel() : undefined);
+    const model = opts.aiModel ?? configuredModel();
     const d = await diagnoseSession(orgId, sessionId, {
       model, modelId: opts.aiModelId ?? cfg.aiModel, artifactDir: cfg.artifactDir, createdBy: userId,
     });

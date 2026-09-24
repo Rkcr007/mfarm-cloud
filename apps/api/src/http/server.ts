@@ -317,7 +317,7 @@ export interface ServerOptions {
   aiRunnerIntervalMs?: number;
   aiMaxConcurrentRuns?: number;
   aiModelId?: string;
-  /** Tests inject a scripted model; production builds one from ANTHROPIC_API_KEY. */
+  /** Tests inject a scripted model; production builds one from MFARM_AI_API_KEY (ai/provider.ts). */
   aiModel?: Model;
 }
 

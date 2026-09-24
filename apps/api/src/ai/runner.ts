@@ -1,6 +1,5 @@
 import { Readable } from 'node:stream';
 import { join } from 'node:path';
-import Anthropic from '@anthropic-ai/sdk';
 import type { FastifyInstance } from 'fastify';
 import { withSystem, withTenant } from '../db.ts';
 import { createApiKey, revokeApiKey } from '../auth.ts';
@@ -8,6 +7,7 @@ import { appStore, type AppStore } from '../appstore.ts';
 import { release } from '../allocator.ts';
 import { AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
+import { aiProviderConfig, buildModel } from './provider.ts';
 import { runAgent, type AgentOutcome, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 
 /**
@@ -33,24 +33,20 @@ export interface AiRunnerOptions {
   retentionHours: number;
   maxConcurrent: number;
   modelId: string;
-  /** Tests inject a scripted model. Production builds one from ANTHROPIC_API_KEY. */
+  /** Tests inject a scripted model. Production builds one from MFARM_AI_API_KEY (provider.ts). */
   model?: Model;
   artifactDir: string;
 }
 
-/** The Anthropic call, with server-side refusal fallback enabled (default routing by category). */
-export function anthropicModel(): Model {
-  const client = new Anthropic();
-  return (params) => client.beta.messages.create({
-    ...params,
-    betas: ['server-side-fallback-2026-07-01'],
-    fallbacks: 'default',
-  });
+/** The configured provider's model (provider.ts), or undefined when AI is not configured. */
+export function configuredModel(): Model | undefined {
+  const cfg = aiProviderConfig();
+  return cfg ? buildModel(cfg) : undefined;
 }
 
 /** True when this process can run AI at all. Checked at creation so a run is refused, not stranded. */
 export function aiConfigured(opts: { model?: Model } = {}): boolean {
-  return Boolean(opts.model) || Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+  return Boolean(opts.model) || aiProviderConfig() !== null;
 }
 
 export function aiStepStore(artifactDir: string): AppStore {
@@ -71,7 +67,7 @@ export interface ClaimedRun {
 }
 
 export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void {
-  const model = opts.model ?? (aiConfigured() ? anthropicModel() : undefined);
+  const model = opts.model ?? configuredModel();
   const store = aiStepStore(opts.artifactDir);
   const inFlight = new Set<Promise<void>>();
   let closing = false;
