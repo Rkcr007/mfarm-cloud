@@ -551,6 +551,8 @@ export class Agent {
   }
 
   private async registerWith(credential: string): Promise<AgentState> {
+    // Taken with the body, not after the reply: see `registered` below.
+    const fingerprint = this.capabilityFingerprint();
     const registration: WorkerRegistration = {
       protocolVersion: PROTOCOL_VERSION,
       hostname: this.opts.hostname,
@@ -627,8 +629,11 @@ export class Agent {
       sessionPublicKey: body.sessionPublicKey,
       deviceIds: this.resolveDeviceIds(body, registration),
       // Recorded AFTER the control plane accepted it, so a failed registration never leaves a state
-      // file claiming the fleet knows something it does not.
-      registered: this.capabilityFingerprint(),
+      // file claiming the fleet knows something it does not — and it is the fingerprint of what was
+      // SENT. Read after the reply, a capability that changed while the request was in flight was
+      // stamped as registered when the control plane had been told the old one, and nothing ever
+      // re-registered it (2026-09-25, the `recovery needs no registration` CI flake).
+      registered: fingerprint,
     };
   }
 
@@ -793,21 +798,34 @@ export class Agent {
    * Failures are swallowed. This is opportunistic repair on a liveness signal, and a control plane
    * that refuses a registration will be offered the same one ten seconds later.
    */
-  private republishing = false;
-  private async republishIfChanged(): Promise<void> {
-    if (this.republishing || !this.state) return;
-    const fingerprint = this.capabilityFingerprint();
-    if (fingerprint === this.state.registered) return;
-    this.republishing = true;
+  private republishing: Promise<void> | null = null;
+  private republishIfChanged(): Promise<void> {
+    if (!this.republishing) {
+      this.republishing = this.republishLoop().finally(() => { this.republishing = null; });
+    }
+    return this.republishing;
+  }
+
+  /**
+   * LOOPS until what was sent is what is true. A change that lands while a registration is in flight
+   * finds `republishing` set and is not published by its own beat; this loop is what publishes it,
+   * straight after, instead of leaving the stale registration standing until something changes again.
+   */
+  private async republishLoop(): Promise<void> {
     try {
-      console.log('[agent] what this host can do has changed since it registered — re-registering');
-      this.state = await this.register(this.state.workerToken);
-      await this.saveState(this.state);
+      while (this.state && this.capabilityFingerprint() !== this.state.registered) {
+        console.log('[agent] what this host can do has changed since it registered — re-registering');
+        this.state = await this.register(this.state.workerToken);
+        await this.saveState(this.state);
+      }
     } catch (err) {
       console.warn(`[agent] could not re-register after a capability change — ${(err as Error).message}`);
-    } finally {
-      this.republishing = false;
     }
+  }
+
+  /** Resolves once no capability re-registration is in flight. For tests, and for a clean stop. */
+  async republished(): Promise<void> {
+    while (this.republishing) await this.republishing;
   }
 
   startHeartbeat(intervalMs = 10_000): void {
