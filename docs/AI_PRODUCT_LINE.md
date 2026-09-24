@@ -90,6 +90,9 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 - **Which model.** Defaults to `claude-opus-5` for both profiles (effort `low` for Flash, `high` for
   Pro), overridable by `MFARM_AI_MODEL`. A cheaper model for Flash is a pricing decision for the
   owner, not an engineering default.
-- **Turning it on.** `ANTHROPIC_API_KEY` in `deploy/.env` on the control plane. Unset, `POST /v1/ai/runs`
-  answers 503 and the runner never starts — every farm is AI-off until its owner opts in.
+- **Turning it on.** `MFARM_AI_API_KEY` in `deploy/.env` on the control plane (runbook: "Turn on AI
+  runs"). Unset, `POST /v1/ai/runs` answers 503 and the runner never starts — every farm is AI-off
+  until its owner opts in. The key is provider-agnostic: `MFARM_AI_PROVIDER` picks the wire protocol
+  (`anthropic`, or `openai` for any OpenAI-compatible endpoint) and `MFARM_AI_BASE_URL` a gateway.
+  `ANTHROPIC_API_KEY` still works as a fallback.
 - **Determinism.** AI runs are not a CI gate. The console says so; C9 is the path to a gate.

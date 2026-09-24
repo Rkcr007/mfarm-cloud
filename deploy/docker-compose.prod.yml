@@ -245,8 +245,14 @@ services:
       # opted in. An env var from `deploy/.env` rather than a docker secret on purpose: compose
       # refuses to start when a declared secret has no file, and the deploy path does not create
       # one, so a new secret would have broken the next auto-deploy on every existing farm.
+      MFARM_AI_API_KEY: ${MFARM_AI_API_KEY:-}
+      MFARM_AI_PROVIDER: ${MFARM_AI_PROVIDER:-anthropic}
+      MFARM_AI_BASE_URL: ${MFARM_AI_BASE_URL:-}
+      # Unset rather than defaulted here: an Anthropic id is wrong for MFARM_AI_PROVIDER=openai, and
+      # the API supplies claude-opus-5 itself when the provider is anthropic.
+      MFARM_AI_MODEL: ${MFARM_AI_MODEL:-}
+      # Kept so a farm configured before the rename keeps its key.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      MFARM_AI_MODEL: ${MFARM_AI_MODEL:-claude-opus-5}
       # Each AI run holds a device for its whole length, so this also caps how much of the fleet AI
       # can occupy at once.
       AI_MAX_CONCURRENT_RUNS: ${AI_MAX_CONCURRENT_RUNS:-2}

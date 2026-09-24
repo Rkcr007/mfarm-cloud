@@ -648,3 +648,26 @@ describe('cloud rates and the power allow-list', () => {
       { instance: 'mfarm-lab', zone: 'asia-south1-c' });
   });
 });
+
+describe('AI provider (provider-agnostic key)', () => {
+  test('the generic key turns AI on, and the log line names protocol, gateway host and model — never the key', () => {
+    const c = parseConfig(prod({
+      MFARM_AI_API_KEY: 'sk-secret', MFARM_AI_PROVIDER: 'openai',
+      MFARM_AI_BASE_URL: 'https://openrouter.ai/api/v1', MFARM_AI_MODEL: 'google/gemini-x',
+    }));
+    assert.equal(c.aiKeySource, 'environment');
+    const line = String(describeConfig(c).ai);
+    assert.match(line, /^openai via openrouter\.ai google\/gemini-x/);
+    assert.ok(!JSON.stringify(describeConfig(c)).includes('sk-secret'));
+  });
+
+  test('a farm still on ANTHROPIC_API_KEY keeps AI on', () => {
+    assert.equal(parseConfig(prod({ ANTHROPIC_API_KEY: 'a' })).aiKeySource, 'environment');
+  });
+
+  test('an unknown protocol, an openai key with no model, and a non-URL base are each refused', () => {
+    assert.ok(mentions(refusal(prod({ MFARM_AI_PROVIDER: 'gemini' })), 'MFARM_AI_PROVIDER'));
+    assert.ok(mentions(refusal(prod({ MFARM_AI_PROVIDER: 'openai', MFARM_AI_API_KEY: 'k' })), 'needs MFARM_AI_MODEL'));
+    assert.ok(mentions(refusal(prod({ MFARM_AI_BASE_URL: 'openrouter.ai' })), 'MFARM_AI_BASE_URL'));
+  });
+});

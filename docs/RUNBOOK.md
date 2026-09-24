@@ -307,6 +307,44 @@ one. The Cloud section says `BILLED — not on a running instance` against exact
 Remove `MFARM_POWER_INSTANCES` and restart. The buttons disappear and the page goes back to saying
 power is a laptop operation. The IAM binding can stay or go; with no allow-list nothing uses it.
 
+## Turn on AI runs (any model provider)
+
+MFARM pays the provider and bills per step, so this is the farm's own key. It is not tied to a
+vendor: `MFARM_AI_PROVIDER` names the **wire protocol**, and `openai` means any OpenAI-compatible
+endpoint. The model must accept images and tool calls.
+
+| You have a key from | `MFARM_AI_PROVIDER` | `MFARM_AI_BASE_URL` | `MFARM_AI_MODEL` (example) |
+|---|---|---|---|
+| Anthropic | `anthropic` (or unset) | unset | `claude-opus-5` (default) |
+| OpenAI | `openai` | unset | `gpt-5` |
+| Google Gemini | `openai` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-pro` |
+| OpenRouter (any vendor behind one key) | `openai` | `https://openrouter.ai/api/v1` | `anthropic/claude-opus-5` |
+| Self-hosted (Ollama, vLLM, LiteLLM) | `openai` | your server's `/v1` URL | whatever it serves |
+
+Write the values without echoing the key into your shell history. `read -s` keeps it off the screen,
+and the key travels on stdin, never on a command line:
+
+```sh
+read -rs AI_KEY && printf '%s' "$AI_KEY" | $CP 'cd ~/mfarm/deploy && K=$(cat) && \
+  sed -i "/^MFARM_AI_\(API_KEY\|PROVIDER\|BASE_URL\|MODEL\)=/d; /^ANTHROPIC_API_KEY=/d" .env && \
+  { echo "MFARM_AI_API_KEY=$K"; echo "MFARM_AI_PROVIDER=anthropic"; echo "MFARM_AI_MODEL=claude-opus-5"; } >> .env && \
+  chmod 600 .env'; unset AI_KEY
+```
+
+Change the three `echo` lines to match the table (add `MFARM_AI_BASE_URL=...` if you need it). Then
+recreate the API so it reads `.env`. A plain restart keeps the old environment. Use the same command
+the deploy uses, pinned to the image already running:
+
+```sh
+$CP 'cd ~/mfarm && docker compose -f deploy/docker-compose.prod.yml up -d --no-deps api'
+$CP 'cd ~/mfarm && docker compose -f deploy/docker-compose.prod.yml logs api 2>&1 | grep -m1 "\"ai\""'
+```
+
+The log line should read something like `"ai":"anthropic claude-opus-5, 2 at once, every 2000ms"`.
+`off (no MFARM_AI_API_KEY)` means the key did not arrive. If the API refuses to start, the log names
+the variable at fault: an unknown provider, `openai` with no model, or a base URL that is not http(s).
+To turn AI off again, delete `MFARM_AI_API_KEY` (and any `ANTHROPIC_API_KEY`) and recreate the same way.
+
 ## Ship a change
 
 ```bash

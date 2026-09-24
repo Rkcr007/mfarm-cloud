@@ -65,5 +65,14 @@ suite.
   queued forever.
 - Model choice is `MFARM_AI_MODEL` (default `claude-opus-5`; effort `low` for Flash, `high` for Pro).
   A cheaper model is a pricing decision for the owner, not an engineering default.
+- **Addendum 2026-09-25 — the credential is provider-agnostic** (owner request). The key is
+  `MFARM_AI_API_KEY`; `MFARM_AI_PROVIDER` names the wire protocol — `anthropic` (default) or `openai`,
+  meaning any OpenAI-compatible Chat Completions endpoint (OpenAI, Gemini, OpenRouter, Mistral, Groq,
+  Ollama, vLLM, LiteLLM) — and `MFARM_AI_BASE_URL` points either at a gateway. The agent loop still
+  speaks the Anthropic shape internally; `ai/provider.ts` translates at that one boundary. Adaptive
+  thinking, effort and prompt caching are Anthropic features and are dropped on the `openai` path,
+  so Flash and Pro differ there only by step cap and the Pro plan/verify turns. `ANTHROPIC_API_KEY`
+  remains a fallback. The per-step prices were derived from `claude-opus-5` and do not change with
+  the provider: another model changes MFARM's cost per step, not what a customer is billed.
 - An AI run in flight when the API restarts is marked `error: interrupted`. It is not resumed: its
   in-memory key is gone and the device state is unknown.

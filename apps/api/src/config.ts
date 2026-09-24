@@ -1,6 +1,7 @@
 import { createPrivateKey, createPublicKey, sign, verify, type KeyObject } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { AI_PROVIDERS, aiApiKey, aiProviderOf, type AiProvider } from './ai/provider.ts';
 
 /**
  * The environment, read and judged once, at startup.
@@ -182,10 +183,14 @@ export interface Config {
   turnUrls: string[];
   turnSecretSource: 'environment' | 'none';
   /**
-   * AI runs (ADR-0043). The model credential itself is NOT on this object — the SDK reads
-   * ANTHROPIC_API_KEY from the environment and `describeConfig` gets logged — only whether one is set.
+   * AI runs (ADR-0043). The model credential itself is NOT on this object — ai/provider.ts reads
+   * MFARM_AI_API_KEY from the environment and `describeConfig` gets logged — only whether one is set.
    */
   aiKeySource: 'environment' | 'none';
+  /** `MFARM_AI_PROVIDER`: the wire protocol (`anthropic` | `openai`-compatible), not the vendor. */
+  aiProvider: AiProvider;
+  /** `MFARM_AI_BASE_URL`, when a gateway or self-hosted endpoint stands in for the vendor's own. */
+  aiBaseUrl: string | null;
   /** `MFARM_AI_MODEL`. A cheaper model is a pricing decision for the owner, not a default. */
   aiModel: string;
   /** How often the AI runner looks for queued runs. 0 turns AI runs off in this process. */
@@ -510,10 +515,23 @@ export function parseConfig(env: Env): Config {
 
   const signingKeySource = checkSigningKey(env, isProduction, problems);
 
-  const aiModel = (env.MFARM_AI_MODEL ?? '').trim() || 'claude-opus-5';
+  const aiProvider = aiProviderOf(env);
+  if (!aiProvider) {
+    problems.push(`MFARM_AI_PROVIDER=${env.MFARM_AI_PROVIDER} is not one of ${AI_PROVIDERS.join(', ')}. It names the `
+      + 'wire protocol: `openai` covers any OpenAI-compatible endpoint (OpenAI, Gemini, OpenRouter, Ollama, vLLM).');
+  }
+  const aiBaseUrl = (env.MFARM_AI_BASE_URL ?? '').trim() || null;
+  if (aiBaseUrl && !/^https?:\/\/[^/]/.test(aiBaseUrl)) {
+    problems.push(`MFARM_AI_BASE_URL=${aiBaseUrl} is not an http(s) URL.`);
+  }
+  const aiModelSet = (env.MFARM_AI_MODEL ?? '').trim();
+  if (aiProvider === 'openai' && aiApiKey(env) && !aiModelSet) {
+    problems.push('MFARM_AI_PROVIDER=openai needs MFARM_AI_MODEL: the default, claude-opus-5, is an Anthropic model id.');
+  }
+  const aiModel = aiModelSet || 'claude-opus-5';
   const aiRunnerIntervalMs = intVar(env.AI_RUNNER_INTERVAL_MS, 'AI_RUNNER_INTERVAL_MS', 2_000, 0, 600_000, problems);
   const aiMaxConcurrentRuns = intVar(env.AI_MAX_CONCURRENT_RUNS, 'AI_MAX_CONCURRENT_RUNS', 2, 1, 64, problems);
-  const aiKeySource = (env.ANTHROPIC_API_KEY ?? '').trim() ? 'environment' as const : 'none' as const;
+  const aiKeySource = aiApiKey(env) ? 'environment' as const : 'none' as const;
 
   const reaperIntervalMs = intVar(env.REAPER_INTERVAL_MS, 'REAPER_INTERVAL_MS', 30_000, 0, 3_600_000, problems);
   if (isProduction && reaperIntervalMs === 0) {
@@ -853,6 +871,8 @@ export function parseConfig(env: Env): Config {
     turnUrls,
     turnSecretSource: turnSecret ? 'environment' as const : 'none' as const,
     aiKeySource,
+    aiProvider: aiProvider ?? 'anthropic',
+    aiBaseUrl,
     aiModel,
     aiRunnerIntervalMs,
     aiMaxConcurrentRuns,
@@ -936,8 +956,8 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     // socket is same-origin on this console's own ingress, which is the recommended shape.
     dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (same-origin /dp on this console)',
     ai: c.aiKeySource === 'none'
-      ? 'off (no ANTHROPIC_API_KEY)'
-      : `${c.aiModel}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms`,
+      ? 'off (no MFARM_AI_API_KEY)'
+      : `${c.aiProvider}${c.aiBaseUrl ? ` via ${new URL(c.aiBaseUrl).host}` : ''} ${c.aiModel}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms`,
     turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };
 }

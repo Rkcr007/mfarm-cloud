@@ -799,15 +799,16 @@ describe('who may start one', () => {
   });
 
   test('with no model credential nothing is queued', async () => {
-    const saved = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    const names = ['MFARM_AI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY'] as const;
+    const saved = names.map((n) => process.env[n]);
+    for (const n of names) delete process.env[n];
     const bare = await buildServer({ logger: false });
     try {
       const res = await bare.inject({ method: 'POST', url: '/v1/ai/runs', headers: auth(keyA), payload: { prompt: 'x' } });
       assert.equal(res.statusCode, 503);
     } finally {
       await bare.close();
-      if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
+      names.forEach((n, i) => { if (saved[i] !== undefined) process.env[n] = saved[i]; });
     }
   });
 });
