@@ -41,9 +41,18 @@ async function startHub(): Promise<{ url: string; requests: Recorded[]; close: (
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(JSON.stringify(status < 300 && !(path.startsWith('/v1/')) ? { value } : value));
       };
-      if (path === '/v1/devices') return send(200, { devices: [], available: 0 });
+      if (path.startsWith('/v1/devices')) {
+        return send(200, { available: 1, devices: [{
+          id: 'dev-1', state: 'ALLOCATED', platform: 'android', tier: 'cuttlefish', model: 'MFARM X1 Pro',
+          osVersion: '17', region: 'us-east', dedicated: false,
+        }] });
+      }
+      if (path === `/v1/sessions/${WD_SESSION}`) {
+        return send(200, { session: { id: WD_SESSION, state: 'ACTIVE', deviceId: 'dev-1', region: 'us-east' } });
+      }
       if (path === '/wd/hub/session' && req.method === 'POST') {
-        return send(200, { sessionId: WD_SESSION, capabilities: { 'appium:deviceName': 'MFARM X1 Pro', 'appium:platformVersion': '15' } });
+        // What Appium on the farm really answers: the ADB serial as the device name (2026-09-24).
+        return send(200, { sessionId: WD_SESSION, capabilities: { 'appium:deviceName': '0.0.0.0:6520', 'appium:platformVersion': '17' } });
       }
       const s = `/wd/hub/session/${WD_SESSION}`;
       if (path === s && req.method === 'DELETE') return send(200, null);
@@ -98,7 +107,9 @@ function connect(child: ChildProcessWithoutNullStreams) {
 
 function spawnMcp(hubUrl: string): ChildProcessWithoutNullStreams {
   return spawn(process.execPath, ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', BIN, 'mcp'], {
-    env: { ...process.env, MFARM_API_KEY: API_KEY, MFARM_API_URL: `${hubUrl}/v1`, MFARM_REGION: 'us-east' },
+    // The bare origin, as a user configures it (`mfarm` appends `/v1/...` itself). The hub is found at
+    // the origin regardless — `HubClient` takes `URL.origin`, so a base with a path cannot move it.
+    env: { ...process.env, MFARM_API_KEY: API_KEY, MFARM_API_URL: hubUrl, MFARM_REGION: 'us-east' },
     stdio: 'pipe',
   });
 }
@@ -124,7 +135,8 @@ describe('mfarm mcp', () => {
 
       const started = await rpc.call('start_session', { appId: 'com.acme@latest' });
       assert.ok(!started.isError, started.content[0]?.text);
-      assert.match(started.content[0]!.text!, /MFARM X1 Pro 15/);
+      assert.match(started.content[0]!.text!, /open on MFARM X1 Pro · Android 17/, 'named by the control plane');
+      assert.doesNotMatch(started.content[0]!.text!, /0\.0\.0\.0:6520/, 'never the ADB serial Appium calls it');
 
       // The allocation is the hub's: Basic `key:` (empty password = allocate), and the MFARM
       // capabilities the hub knows, with the region from the environment.
@@ -236,6 +248,17 @@ describe('parseUiTree', () => {
     assert.equal(button.clickable, true);
     assert.ok(!els.some((e) => e.text === 'Offscreen'), 'invisible elements are dropped');
     assert.match(formatUiTree(els), /Button "Log in" id=login \(195,622 200x44\) tap/);
+  });
+
+  /** The launcher tree the first hardware run returned, 2026-09-24 — trimmed, attributes verbatim. */
+  test('an id alone does not make a layout container worth listing', () => {
+    const els = parseUiTree(`<hierarchy>
+      <android.widget.FrameLayout class="android.widget.FrameLayout" text="" resource-id="android:id/content" content-desc="" clickable="false" focusable="false" bounds="[0,0][720,1280]" displayed="true">
+      <android.widget.FrameLayout class="android.widget.FrameLayout" text="" resource-id="com.android.launcher3:id/launcher" content-desc="" clickable="false" focusable="false" bounds="[0,0][720,1280]" displayed="true">
+      <android.widget.ImageView class="android.widget.ImageView" text="" resource-id="com.android.gallery3d:id/home" content-desc="" clickable="false" focusable="false" bounds="[24,64][88,128]" displayed="true"/>
+      <android.widget.TextView class="android.widget.TextView" text="Gallery" resource-id="" content-desc="Gallery" clickable="true" focusable="true" bounds="[188,700][360,910]" displayed="true"/>
+      </android.widget.FrameLayout></android.widget.FrameLayout></hierarchy>`);
+    assert.deepEqual(els.map((e) => e.text ?? e.label ?? e.id), ['Gallery'], 'containers and an inert icon are not things to tap');
   });
 
   test('an empty screen says to use the screenshot rather than printing nothing', () => {

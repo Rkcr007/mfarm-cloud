@@ -73,7 +73,7 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 
 | # | Capability | Status | PR | Notes |
 |---|---|---|---|---|
-| C1 | MCP server | Merged | #202 | `mfarm mcp`: 12 tools over `/wd/hub`; needs an npm publish to reach customers (2FA — owner runs it) |
+| C1 | MCP server | **Verified on hardware** | #202, #209 | `mfarm mcp`: 12 tools over `/wd/hub`. 2026-09-24 a real MCP client drove a real MFARM X1 Pro on the farm end to end (allocate, tree, screenshot, tap opened Gallery, swipe, keys, logcat, release; 0 stray stdout lines). That run found two defects, fixed in #209. Customers get it after `npm publish` (2FA — owner runs it) |
 | C2 | AI run engine | Merged | #203 | `src/ai/agent.ts` (loop) + `runner.ts` (claims, per-run key, hub via `inject`); `/v1/ai/*`; migration 061 |
 | C3 | Flash / Pro profiles | Merged | #203 | Pro = a plan step + verdict re-confirmed on a fresh screen; effort `low`/`high` |
 | C4 | AI step metering | Merged | #203 | `ai_steps` is the ledger (price at the time of the step, real tokens); step cap; monthly budget (`orgs.ai_monthly_budget_inr`, default ₹2000); screenshots expire with artifact retention |

@@ -245,7 +245,11 @@ export function parseUiTree(xml: string, max: number = UI_TREE_MAX_ELEMENTS): Ui
       : a.clickable === 'true' || a['long-clickable'] === 'true';
     const focused = a.focused === 'true' || a.hasFocus === 'true';
     const focusable = a.focusable === 'true';
-    if (!text && !label && !id && !clickable && !focusable) continue;
+    // AN ID ALONE IS NOT ENOUGH. Found on the farm, 2026-09-24: the launcher's `content`, `launcher`,
+    // `drag_layer` and `workspace` are full-screen containers that all carry resource ids, and the
+    // first real tree led with five of them before the first thing a person could read or touch.
+    // An element is kept for what it SAYS or DOES; the id is carried on the ones that qualify.
+    if (!text && !label && !clickable && !focusable) continue;
 
     const cls = ios ? m[1]!.slice('XCUIElementType'.length) : (a.class ?? m[1]!);
     out.push({
