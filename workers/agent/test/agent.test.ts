@@ -913,6 +913,9 @@ describe('per-device automation endpoints', () => {
     // And it comes back on its own, with nothing restarted.
     agent.setAutomationEndpoint('cf-1', 'https://worker.example:8443/automation/cf-1');
     await agent.heartbeat();
+    // Let every re-registration the two beats started land. Before 2026-09-25 the first one — built
+    // while cf-1 was withdrawn — could land AFTER this beat and un-say the recovery for good.
+    await agent.republished();
     const back = await read();
     assert.ok(back[0].capabilities.includes('webdriver'), 'recovery needs no registration either');
     assert.equal(back[0].automation_endpoint, 'https://worker.example:8443/automation/cf-1');
