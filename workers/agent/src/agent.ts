@@ -119,6 +119,13 @@ interface ActiveSession {
   orgId: string;
   startedAt: number;
   ticksEmitted: number;
+  /**
+   * When THIS stretch of metering began, and part of every tick's event id. A session can be
+   * metered in more than one stretch — a viewer disconnects, then the hub drives it again — and each
+   * stretch counts `ticksEmitted` from zero; without this their first ticks shared an id, and the
+   * idempotent ingest dropped the second as a "retry". Unbilled, silently.
+   */
+  segment: number;
 }
 
 /**
@@ -842,10 +849,38 @@ export class Agent {
   // ---------------------------------------------------------------- metering
 
   beginSession(sessionId: string, deviceId: string, orgId: string, fence?: number): void {
-    this.active.set(sessionId, { sessionId, deviceId, orgId, startedAt: Date.now(), ticksEmitted: 0 });
+    // Already metered — the hub has been driving it (`meterAutomation`) and a viewer has now joined.
+    // Keep the running meter: replacing it would drop the seconds since its last tick.
+    if (!this.active.has(sessionId)) {
+      const now = Date.now();
+      this.active.set(sessionId, { sessionId, deviceId, orgId, startedAt: now, ticksEmitted: 0, segment: now });
+    }
     // A client attached. Queued, never sent inline — see `pendingAttaches`.
     if (typeof fence === 'number' && !this.pendingAttaches.some((a) => a.sessionId === sessionId && a.fence === fence)) {
       this.pendingAttaches.push({ sessionId, fence });
+    }
+  }
+
+  /**
+   * A HUB REQUEST FOR A SESSION ON ONE OF THIS HOST'S DEVICES — its grant already verified by the
+   * automation gateway (gateway.ts `automationGatewayFor`).
+   *
+   * Metering used to begin only when a live-view socket connected (dataplane.ts). A session driven
+   * purely over WebDriver never opens one, so every CI suite and every AI run went unbilled: on the
+   * farm, 42 of 42 such sessions in the month to 2026-09-26 carried no device-seconds at all. The
+   * first authorized request starts the meter; the reset that ends the lease stops it
+   * (`runRequestedResets`). A suite idle between commands is still holding the device, and is still
+   * billed for it — the same rule a live session has always had.
+   */
+  meterAutomation(sessionId: string, deviceId: string, orgId: string): void {
+    if (this.active.has(sessionId)) return;
+    this.beginSession(sessionId, deviceId, orgId);
+  }
+
+  /** The lease on this device is over: stop whatever was metering it, with its last seconds. */
+  private endMeteringOn(deviceId: string, sessionId?: string): void {
+    for (const [sid, s] of [...this.active]) {
+      if (s.deviceId === deviceId || sid === sessionId) this.endSession(sid);
     }
   }
 
@@ -862,7 +897,7 @@ export class Agent {
     const alreadyBilled = s.ticksEmitted;
     const quantity = Math.max(0, elapsed - alreadyBilled);
     if (quantity <= 0) return;
-    const eventId = deterministicUuid(`${s.sessionId}:${s.ticksEmitted}`);
+    const eventId = deterministicUuid(`${s.sessionId}:${s.segment}:${s.ticksEmitted}`);
     // `orgId` is still sent for older control planes, but it no longer decides anything: since
     // migration 008 the control plane derives the paying org from the session and ignores this
     // field. Do not add logic that assumes a worker's opinion about billing carries weight.
@@ -1306,6 +1341,9 @@ export class Agent {
         continue;
       }
       this.resetsInFlight.add(deviceId);
+      // A reset is the end of a lease, whichever way the session was driven — the one moment both a
+      // live-view session and a WebDriver-only one are certainly over.
+      this.endMeteringOn(deviceId, sessionId);
       try {
         // A QUARANTINE RECOVERY IS THE SAME RESET WITH A VERDICT ATTACHED (ADR-0024). It takes the
         // in-flight guard and the same backend as any other reset — that reuse is the point, and a

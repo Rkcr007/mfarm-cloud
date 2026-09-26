@@ -22,7 +22,7 @@ const RECORDING_MAX_AGE_MS = Number(process.env.RECORDING_MAX_AGE_MS ?? 6 * 60 *
 import { automationIsTunnelled, dataPlaneEndpoint, gatewayBase, tunnelEnabled } from './automation-endpoint.ts';
 import { Agent, persistedWorkerToken } from './agent.ts';
 import { AppiumSupervisor, derivePort } from './appium.ts';
-import { AutomationGateway } from './gateway.ts';
+import { automationGatewayFor } from './gateway.ts';
 import { DataPlane } from './dataplane.ts';
 import { AgentTunnel } from './tunnel.ts';
 import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.ts';
@@ -886,10 +886,7 @@ async function main(): Promise<void> {
     || (automationIsTunnelled() ? '127.0.0.1' : undefined);
 
   const gateway = supervisors.length > 0
-    ? new AutomationGateway({
-        agent,
-        targets: new Map(supervisors.map((s) => [s.localId, s.port])),
-      })
+    ? automationGatewayFor(agent, new Map(supervisors.map((s) => [s.localId, s.port])))
     : undefined;
   if (gateway) {
     // AUTOMATION_BIND_HOST, falling back to the older shared BIND_HOST.

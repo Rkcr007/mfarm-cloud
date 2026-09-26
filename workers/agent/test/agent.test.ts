@@ -302,6 +302,75 @@ describe('metering', () => {
     await agent.shutdown();
   });
 
+  test('a WebDriver-only session is billed: from its first hub request to the reset that ends its lease', async () => {
+    const b = fakeBackend(`hubm-${randomUUID().slice(0, 8)}`);
+    const agent = makeAgent([b], `hubmeter-${randomUUID().slice(0, 8)}`);
+    const registered = await agent.start();
+    const deviceId = registered.deviceIds[b.control.info.localId];
+    const sessionId = await withSystem(async (c) => {
+      const id = (await c.query(
+        `INSERT INTO sessions (org_id, device_id, state, region, fence, started_at)
+         VALUES ($1,$2,'ACTIVE',$3,1, now()) RETURNING id`, [orgId, deviceId, REGION])).rows[0].id as string;
+      await c.query(`UPDATE devices SET state = 'SESSION_ACTIVE', fence = 1 WHERE id = $1`, [deviceId]);
+      return id;
+    });
+    const billed = async () => withSystem(async (c) => Number((await c.query(
+      'SELECT coalesce(sum(quantity), 0)::float8 AS t FROM metering_events WHERE session_id = $1', [sessionId])).rows[0].t));
+
+    // What the gateway does on each verified command (gateway.ts `automationGatewayFor`).
+    agent.meterAutomation(sessionId, deviceId, orgId);
+    await new Promise((r) => setTimeout(r, 200));
+    agent.meterAutomation(sessionId, deviceId, orgId); // a second command is the same stretch, not a restart
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The hub releases: the device goes to CLEANING and the next beat asks for the reset.
+    await withSystem(async (c) => {
+      await c.query(`UPDATE sessions SET state = 'ENDED', ended_at = now() WHERE id = $1`, [sessionId]);
+      await c.query(`UPDATE devices SET state = 'CLEANING' WHERE id = $1`, [deviceId]);
+    });
+    await agent.heartbeat();
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !b.control.calls.includes('reset')) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(b.control.calls.includes('reset'));
+    await agent.flush();
+    const total = await billed();
+    assert.ok(total >= 0.35, `billed ${total}s for a device held about 0.4s — it used to be 0`);
+
+    // And nothing after the lease: the reset stopped the meter.
+    await new Promise((r) => setTimeout(r, 250));
+    await agent.flush();
+    assert.equal(await billed(), total, 'no seconds billed after the reset');
+    await agent.shutdown();
+  });
+
+  test('a session metered in two stretches is billed for both — the second is not dropped as a "retry"', async () => {
+    const agent = makeAgent([fakeBackend()], `twice-${randomUUID().slice(0, 8)}`);
+    const state = await agent.start();
+    const sessionId = randomUUID();
+    const deviceId = await withSystem(async (c) => {
+      const d = await c.query(
+        `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, local_id)
+         VALUES ($1,$2,'android','cuttlefish','fake','15','SESSION_ACTIVE',$3) RETURNING id`,
+        [state.hostId, REGION, `twice-dev-${randomUUID().slice(0, 8)}`]);
+      await c.query(`INSERT INTO sessions (id, org_id, state, region, device_id) VALUES ($1,$2,'ACTIVE',$3,$4)`,
+        [sessionId, orgId, REGION, d.rows[0].id]);
+      return d.rows[0].id as string;
+    });
+    // A viewer watches, leaves; the hub drives it again. Each stretch counts its ticks from zero.
+    agent.beginSession(sessionId, deviceId, orgId);
+    await new Promise((r) => setTimeout(r, 150));
+    agent.endSession(sessionId);
+    agent.meterAutomation(sessionId, deviceId, orgId);
+    await new Promise((r) => setTimeout(r, 150));
+    agent.endSession(sessionId);
+    await agent.flush();
+    const rows = await withSystem(async (c) => (await c.query(
+      'SELECT count(*)::int AS n, coalesce(sum(quantity), 0)::float8 AS t FROM metering_events WHERE session_id = $1', [sessionId])).rows[0]);
+    assert.equal(rows.n, 2, 'one event per stretch — the ids used to collide');
+    assert.ok(rows.t >= 0.25, `billed ${rows.t}s for two stretches of about 0.15s`);
+    await agent.shutdown();
+  });
+
   test('a failed flush retains events for the next attempt', async () => {
     const agent = new Agent({
       controlPlaneUrl: 'http://127.0.0.1:1',   // nothing listening
