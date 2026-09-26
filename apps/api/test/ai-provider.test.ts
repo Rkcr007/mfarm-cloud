@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AGENT_TOOLS } from '../src/ai/agent.ts';
-import { aiApiKey, aiProviderConfig, buildModel, fromOpenAiResponse, toOpenAiRequest } from '../src/ai/provider.ts';
+import { aiApiKey, aiProviderConfig, buildModel, DEFAULT_RETRY, fromOpenAiResponse, retryAfterMs, toOpenAiRequest } from '../src/ai/provider.ts';
 
 test('the generic key wins; the vendor names are fallbacks for their own protocol only', () => {
   assert.equal(aiApiKey({ MFARM_AI_API_KEY: 'g', ANTHROPIC_API_KEY: 'a' }), 'g');
@@ -78,4 +78,78 @@ test('the openai provider really posts to <base>/chat/completions with the key a
   } finally {
     srv.close();
   }
+});
+
+/** A chat-completions server that answers from a script: one [status, headers, body] per request. */
+async function scripted(replies: Array<[number, Record<string, string>, string]>) {
+  let hits = 0;
+  const srv = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      const [status, headers, body] = replies[Math.min(hits, replies.length - 1)];
+      hits++;
+      res.writeHead(status, { 'content-type': 'application/json', ...headers });
+      res.end(body);
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const { port } = srv.address() as AddressInfo;
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, hits: () => hits, close: () => srv.close() };
+}
+
+const OK: [number, Record<string, string>, string] =
+  [200, {}, JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'ok' } }] })];
+const FAST = { baseMs: 5, maxSingleWaitMs: 200, maxTotalWaitMs: 400 };
+const ask = { model: 'm', max_tokens: 10, messages: [{ role: 'user' as const, content: 'hi' }] };
+
+test('a 429 is waited out, not reported as a broken model — Retry-After first, then backoff', async () => {
+  const s = await scripted([[429, { 'retry-after': '0' }, '{}'], [429, {}, '{}'], [503, {}, '{}'], OK]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    const m = await model(ask);
+    assert.equal(m.stop_reason, 'end_turn');
+    assert.equal(s.hits(), 4);
+  } finally { s.close(); }
+});
+
+test('a daily cap ("come back in an hour") fails at once instead of holding the device', async () => {
+  const s = await scripted([[429, { 'retry-after': '3600' }, '{"error":"daily limit"}'], OK]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    await assert.rejects(model(ask), /429 .*daily limit.*asked to wait 3600s/);
+    assert.equal(s.hits(), 1);
+  } finally { s.close(); }
+});
+
+test('a provider that keeps refusing is given up on inside the total budget', async () => {
+  const s = await scripted([[503, {}, 'busy']]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    const t0 = Date.now();
+    await assert.rejects(model(ask), /503 .*busy.*still refused after \d+ attempts/);
+    assert.ok(Date.now() - t0 < 2_000);
+    assert.ok(s.hits() > 1);
+  } finally { s.close(); }
+});
+
+test('a client error is not retried — a bad request stays bad', async () => {
+  const s = await scripted([[400, {}, '{"error":"bad schema"}'], OK]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    await assert.rejects(model(ask), /400 .*bad schema/);
+    assert.equal(s.hits(), 1);
+  } finally { s.close(); }
+});
+
+test('retry hints are read from a seconds header, a date header, and Gemini\'s RetryInfo body', () => {
+  const hdr = (v: string | null) => ({ headers: { get: () => v } });
+  assert.equal(retryAfterMs(hdr('7'), ''), 7_000);
+  assert.equal(retryAfterMs(hdr(new Date(1_000_000 + 30_000).toUTCString()), '', 1_000_000), 30_000);
+  assert.equal(retryAfterMs(hdr(null), '{"details":[{"retryDelay": "37s"}]}'), 37_000);
+  assert.equal(retryAfterMs(hdr(null), '{}'), null);
+});
+
+test('the default retry budget stays under the runner\'s appium:newCommandTimeout of 300s', () => {
+  // A model call that outwaits the session loses the phone it was about to drive (runner.ts).
+  assert.ok(DEFAULT_RETRY.maxTotalWaitMs + DEFAULT_RETRY.maxSingleWaitMs < 300_000);
 });

@@ -345,6 +345,18 @@ The log line should read something like `"ai":"anthropic claude-opus-5, 2 at onc
 the variable at fault: an unknown provider, `openai` with no model, or a base URL that is not http(s).
 To turn AI off again, delete `MFARM_AI_API_KEY` (and any `ANTHROPIC_API_KEY`) and recreate the same way.
 
+**A rate-limited key is fine; an empty one is not.** On a free or low tier the `openai` provider waits
+out a `429`/`5xx`: it honours `Retry-After` (or Gemini's `retryDelay`), else backs off 1s, 2s, 4s…,
+at most 60s a wait and 120s a call, because the run's device session drops after 300s idle. A
+provider that asks for longer (a daily cap) fails the step at once with its number in the message.
+A `402` ("prepayment credits are depleted") is not retried: the key is valid but the account needs
+money, and every run will stop on its first step as `model_error`. Probe a key before installing it:
+
+```sh
+curl -s -H "Authorization: Bearer $AI_KEY" -H 'content-type: application/json' \
+  "$MFARM_AI_BASE_URL/chat/completions" -d "{\"model\":\"$MFARM_AI_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"say ok\"}]}"
+```
+
 ## Ship a change
 
 ```bash

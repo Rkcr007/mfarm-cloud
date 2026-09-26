@@ -96,3 +96,12 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
   (`anthropic`, or `openai` for any OpenAI-compatible endpoint) and `MFARM_AI_BASE_URL` a gateway.
   `ANTHROPIC_API_KEY` still works as a fallback.
 - **Determinism.** AI runs are not a CI gate. The console says so; C9 is the path to a gate.
+- **Verifying without a paid key (2026-09-26).** The owner wants C2–C10 exercised on the farm before
+  paying for model calls. The first key tried (Gemini, prepaid project) was valid but out of credit —
+  402 on every current model; 2.5-series ids answer 404 to new users. Free OpenAI-compatible tiers
+  (GitHub Models, Groq, a Gemini project with no billing) are the path; the `openai` adapter now waits
+  out their per-minute 429s instead of failing the run. Caveat: a free model's token counts do NOT
+  calibrate the price of the model we will sell on.
+- **Flash and Pro on a non-Anthropic provider are the same model.** `effort` is Anthropic-only and is
+  dropped by the `openai` adapter, so the only Pro difference there is the plan step and the verdict
+  re-check. Open: a separate Pro model id before Pro is sold on such a provider.

@@ -49,8 +49,8 @@ export function aiProviderConfig(env: Env = process.env): AiProviderConfig | nul
   return { provider, apiKey, baseUrl: (env.MFARM_AI_BASE_URL ?? '').trim() || null };
 }
 
-export function buildModel(cfg: AiProviderConfig): Model {
-  return cfg.provider === 'openai' ? openaiModel(cfg) : anthropicModel(cfg);
+export function buildModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
+  return cfg.provider === 'openai' ? openaiModel(cfg, retry) : anthropicModel(cfg);
 }
 
 // ---------------------------------------------------------------- anthropic
@@ -167,17 +167,68 @@ export function fromOpenAiResponse(r: OaResponse, model: string): Message {
   } as unknown as Message;
 }
 
-function openaiModel(cfg: AiProviderConfig): Model {
+/**
+ * A 429 IS "SLOW DOWN", NOT "BROKEN". Free and low tiers (GitHub Models, Groq, Gemini free) answer
+ * 429 on a per-minute cap several times a run; without a retry the run stopped as `model_error` on
+ * its first busy minute and read as a product defect. The Anthropic SDK already retries these; this
+ * gives the openai adapter the same manners.
+ *
+ * The waiting is BOUNDED BY THE DEVICE, not by patience: the runner's session has
+ * `appium:newCommandTimeout: 300`, so a model call that waits too long loses the phone it was about
+ * to drive. One wait is capped at `maxSingleWaitMs` and all waits at `maxTotalWaitMs`, well under
+ * 300s. A server asking for longer than one wait (a daily cap says "come back in 6 hours") fails
+ * now, with its number in the message, rather than holding a device for nothing.
+ */
+export interface RetryPolicy {
+  baseMs: number;
+  maxSingleWaitMs: number;
+  maxTotalWaitMs: number;
+}
+export const DEFAULT_RETRY: RetryPolicy = Object.freeze({ baseMs: 1_000, maxSingleWaitMs: 60_000, maxTotalWaitMs: 120_000 });
+
+const RETRYABLE = (status: number) => status === 429 || status >= 500;
+
+/** How long the server asked us to wait, in ms, or null when it did not say. */
+export function retryAfterMs(res: { headers: { get(name: string): string | null } }, body: string, now = Date.now()): number | null {
+  const h = res.headers.get('retry-after');
+  if (h) {
+    const secs = Number(h);
+    if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+    const at = Date.parse(h);
+    if (Number.isFinite(at)) return Math.max(0, at - now);
+  }
+  // Gemini says it in the body: google.rpc.RetryInfo { "retryDelay": "37s" }.
+  const m = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(body);
+  return m ? Number(m[1]) * 1000 : null;
+}
+
+function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY): Model {
   const url = `${(cfg.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')}/chat/completions`;
+  const host = new URL(url).host;
   return async (params) => {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify(toOpenAiRequest(params)),
-      signal: AbortSignal.timeout(600_000),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`${res.status} from ${new URL(url).host}: ${text.slice(0, 300)}`);
-    return fromOpenAiResponse(JSON.parse(text) as OaResponse, params.model);
+    const body = JSON.stringify(toOpenAiRequest(params));
+    let waited = 0;
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.apiKey}` },
+        body,
+        signal: AbortSignal.timeout(600_000),
+      });
+      const text = await res.text();
+      if (res.ok) return fromOpenAiResponse(JSON.parse(text) as OaResponse, params.model);
+      const failure = `${res.status} from ${host}: ${text.slice(0, 300)}`;
+      if (!RETRYABLE(res.status)) throw new Error(failure);
+      const asked = retryAfterMs(res, text);
+      if (asked !== null && asked > retry.maxSingleWaitMs) {
+        throw new Error(`${failure} (the provider asked to wait ${Math.ceil(asked / 1000)}s — longer than a device can be held idle)`);
+      }
+      const wait = asked ?? Math.min(retry.maxSingleWaitMs, retry.baseMs * 2 ** attempt);
+      if (waited + wait > retry.maxTotalWaitMs) {
+        throw new Error(`${failure} (still refused after ${attempt + 1} attempts and ${Math.round(waited / 1000)}s of waiting)`);
+      }
+      waited += wait;
+      await new Promise((r) => setTimeout(r, wait));
+    }
   };
 }
