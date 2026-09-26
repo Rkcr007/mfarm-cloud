@@ -249,25 +249,6 @@ after(async () => {
 // ---------------------------------------------------------------- tests
 
 describe('an AI run', () => {
-  test('a run that names no region takes the farm default — on the farm it was accepted, then died at allocation', async () => {
-    await resetFleet();
-    scripts.set('Open it with no region', [
-      { tool: 'finish', input: { passed: true, summary: 'Open', evidence: 'Shown', why: 'done' } },
-    ]);
-    const prior = process.env.MFARM_DEFAULT_REGION;
-    process.env.MFARM_DEFAULT_REGION = REGION;
-    let started: Awaited<ReturnType<typeof startRun>>;
-    try {
-      started = await startRun({ prompt: 'Open it with no region' });
-    } finally {
-      if (prior === undefined) delete process.env.MFARM_DEFAULT_REGION; else process.env.MFARM_DEFAULT_REGION = prior;
-    }
-    assert.equal(started.status, 201);
-    assert.equal((started.body.aiRun as { region?: string }).region, REGION, 'resolved when queued, not left for the hub to refuse');
-    const done = await settle(started.body.aiRun.id);
-    assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
-  });
-
   test('Flash: the model taps an element, the tap lands at its centre, the verdict lands on the session', async () => {
     await resetFleet();
     scripts.set('Log in to the app', [
@@ -326,6 +307,27 @@ describe('an AI run', () => {
     const labels = (list.json() as { keys: { label: string }[] }).keys.map((k) => k.label);
     assert.ok(labels.includes('test fixture — ai'), 'the list does show the keys a person minted');
     assert.ok(!labels.some((l) => l.startsWith('AI run')), `AI-run keys leaked into the list: ${labels.join(', ')}`);
+  });
+
+  // AFTER the key-list test, not before it: the next test's resetFleet() deletes this run, and
+  // `api_keys.ai_run_id` is ON DELETE SET NULL — its (revoked) key would then show in that list.
+  test('a run that names no region takes the farm default — on the farm it was accepted, then died at allocation', async () => {
+    await resetFleet();
+    scripts.set('Open it with no region', [
+      { tool: 'finish', input: { passed: true, summary: 'Open', evidence: 'Shown', why: 'done' } },
+    ]);
+    const prior = process.env.MFARM_DEFAULT_REGION;
+    process.env.MFARM_DEFAULT_REGION = REGION;
+    let started: Awaited<ReturnType<typeof startRun>>;
+    try {
+      started = await startRun({ prompt: 'Open it with no region' });
+    } finally {
+      if (prior === undefined) delete process.env.MFARM_DEFAULT_REGION; else process.env.MFARM_DEFAULT_REGION = prior;
+    }
+    assert.equal(started.status, 201);
+    assert.equal((started.body.aiRun as { region?: string }).region, REGION, 'resolved when queued, not left for the hub to refuse');
+    const done = await settle(started.body.aiRun.id);
+    assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
   });
 
   test('Pro: plans first, and a verdict is confirmed on a fresh screen before it counts', async () => {
