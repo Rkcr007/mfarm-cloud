@@ -372,6 +372,40 @@ curl -s -H "Authorization: Bearer $AI_KEY" -H 'content-type: application/json' \
   "$MFARM_AI_BASE_URL/chat/completions" -d "{\"model\":\"$MFARM_AI_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"say ok\"}]}"
 ```
 
+### A fallback provider, and what "not ready" means (ADR-0044)
+
+Every model call reports to a health tracker. While the provider is down or rate-limited the console's
+**Start AI run**, each saved test's **Run** and **Explain this failure** are disabled with the reason and
+the time it lifts, and the API refuses the same way (`503 ai_not_ready`). A run started by an **upload**
+waits in the queue instead and starts by itself when the provider is back (given up after 6 hours, with
+the reason, nothing billed). Check it from anywhere:
+
+```sh
+curl -s -H "Authorization: Bearer $KEY" "https://farm.mfarm.dev/v1/ai/readiness?platform=android" | jq '.blocking, .message'
+```
+
+| It says | What it means | What to do |
+|---|---|---|
+| *daily allowance … is used up* | The provider's free tier cap (429 with a long wait) | Wait for the time shown, or add a fallback |
+| *is rate-limiting* | A per-minute cap | Nothing; it lifts within a minute |
+| *no credit left* / *rejected* / *not available to this key* | 402 / 401 / 404 — the key itself | Fix the key or model; re-checked every 15 minutes |
+| *device host is stopped* | Every device of that platform is quarantined by a stop | Start it: Infrastructure › Hosts |
+| *budget is used up* | The org's monthly AI budget | Wait for the 1st, or raise `orgs.ai_monthly_budget_inr` |
+
+**A fallback provider** is used only while the primary cannot serve. Four more lines in `deploy/.env`,
+the same meanings as the primary's (a different vendor is the useful kind — a second key on the same
+provider shares its outage and its free allowance):
+
+```
+MFARM_AI_FALLBACK_API_KEY=…
+MFARM_AI_FALLBACK_PROVIDER=openai
+MFARM_AI_FALLBACK_BASE_URL=https://openrouter.ai/api/v1
+MFARM_AI_FALLBACK_MODEL=…
+```
+
+Recreate the API as above; its `"ai"` log line then ends `…, fallback openai via openrouter.ai …`.
+Each step of a run records the model that answered it, so a run half-served by the fallback says so.
+
 ## Ship a change
 
 ```bash

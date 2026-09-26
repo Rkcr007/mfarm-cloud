@@ -261,6 +261,12 @@ services:
       # A provider's per-request input cap (Groq's free tier: 7000). Unset = no trimming. Named here
       # or it never arrives — see VIDEO_RECORDING below for the day that was learned.
       MFARM_AI_MAX_INPUT_TOKENS: ${MFARM_AI_MAX_INPUT_TOKENS:-}
+      # The fallback provider (ADR-0044), used only while the primary cannot serve. Unset: none.
+      # A different vendor is the useful kind — a second key on the same one shares its outage.
+      MFARM_AI_FALLBACK_API_KEY: ${MFARM_AI_FALLBACK_API_KEY:-}
+      MFARM_AI_FALLBACK_PROVIDER: ${MFARM_AI_FALLBACK_PROVIDER:-}
+      MFARM_AI_FALLBACK_BASE_URL: ${MFARM_AI_FALLBACK_BASE_URL:-}
+      MFARM_AI_FALLBACK_MODEL: ${MFARM_AI_FALLBACK_MODEL:-}
 
       # ---------------------------------------------------------------- power control (ADR-0038)
       #

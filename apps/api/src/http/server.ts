@@ -42,6 +42,7 @@ import { makeProxyRouter } from './proxy-router.ts';
 import { aiRoutes, aiTestRoutes } from './routes/ai.ts';
 import { loadConfig } from '../config.ts';
 import { startAiRunner, aiConfigured } from '../ai/runner.ts';
+import { configuredSlots, type ModelSlot } from '../ai/provider.ts';
 import type { Model } from '../ai/agent.ts';
 
 declare module 'fastify' {
@@ -55,6 +56,8 @@ declare module 'fastify' {
     customerTunnels: CustomerTunnelRegistry;
     /** Whether this process can drive AI runs (ADR-0043) — the one answer every route gives. */
     aiConfigured: () => boolean;
+    /** The providers a door checks before it queues a run (ADR-0044) — `queue.ts` `QueueGate`. */
+    aiGate: () => { slots: ModelSlot[]; injected: boolean };
     /** Whether to mark the session cookie `Secure`. See ServerOptions.secureCookies. */
     secureCookies: boolean;
   }
@@ -319,6 +322,14 @@ export interface ServerOptions {
   aiModelId?: string;
   /** Tests inject a scripted model; production builds one from MFARM_AI_API_KEY (ai/provider.ts). */
   aiModel?: Model;
+  /**
+   * Tests only: providers the RUNNER consults before it claims a run (ADR-0044), so its hold-until-
+   * the-model-is-back behaviour can be driven without a real provider. The model it calls is still
+   * `aiModel`. Production reads the configured providers itself.
+   */
+  aiSlots?: ModelSlot[];
+  /** Tests only: how long a queued run waits for the model before it is given up. */
+  aiQueueMaxWaitMs?: number;
 }
 
 export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInstance> {
@@ -342,6 +353,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
 
   app.decorate('signingKey', loadSigningKey());
   app.decorate('aiConfigured', () => aiConfigured({ model: opts.aiModel }));
+  app.decorate('aiGate', () => ({ slots: opts.aiModel ? [] : configuredSlots(), injected: Boolean(opts.aiModel) }));
 
   /**
    * The live data-plane tunnels, one per connected agent.
@@ -682,6 +694,8 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
       maxConcurrent: opts.aiMaxConcurrentRuns ?? 2,
       modelId: opts.aiModelId ?? 'claude-opus-5',
       model: opts.aiModel,
+      ...(opts.aiSlots ? { slots: opts.aiSlots } : {}),
+      ...(opts.aiQueueMaxWaitMs !== undefined ? { queueMaxWaitMs: opts.aiQueueMaxWaitMs } : {}),
       artifactDir: loadConfig().artifactDir,
       retentionHours: loadConfig().artifactRetentionHours,
     });

@@ -11,6 +11,9 @@ import { aiConfigured, aiStepStore, configuredModel } from '../../ai/runner.ts';
 import { diagnoseSession, diagnosisJson, DIAGNOSIS_SELECT } from '../../ai/diagnose.ts';
 import { exportScript, type ScriptLang, type ExportStep } from '../../ai/export.ts';
 import type { Model } from '../../ai/agent.ts';
+import { configuredSlots } from '../../ai/provider.ts';
+import { aiReadiness } from '../../ai/readiness.ts';
+import type { QueueGate } from '../../ai/queue.ts';
 
 /**
  * `/v1/ai` — AI runs: describe a test in English, a real device does it (ADR-0043, C2–C5).
@@ -92,10 +95,40 @@ export interface AiRouteOptions {
   aiModelId?: string;
 }
 
+/** What a door hands the queue so it can refuse a run whose dependencies are down (ADR-0044). */
+export function gateFor(opts: AiRouteOptions, mode: QueueGate['mode']): QueueGate {
+  return { slots: opts.aiModel ? [] : configuredSlots(), injected: Boolean(opts.aiModel), mode };
+}
+
 export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Promise<void> {
   const cfg = loadConfig();
   const store = aiStepStore(cfg.artifactDir);
   const configured = () => aiConfigured({ model: opts.aiModel });
+
+  /**
+   * GO / NO-GO FOR STARTING A RUN (ADR-0044): is AI configured, is the model provider answering, can a
+   * device of this platform take it, can the budget pay a step. The console polls this while a person
+   * is on an AI screen and gates its buttons on it; the doors below apply the same answer, so a button
+   * that is enabled is never refused by the server for a reason the page could have shown.
+   */
+  app.get<{ Querystring: { platform?: string; region?: string } }>('/ai/readiness', {
+    schema: {
+      querystring: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          platform: { type: 'string', enum: ['android', 'ios'] },
+          region: { type: 'string', minLength: 1, maxLength: 64 },
+        },
+      },
+    },
+  }, async (req) => {
+    const { orgId } = requireTenant(req);
+    const gate = gateFor(opts, 'require');
+    return aiReadiness(orgId, {
+      platform: (req.query.platform as 'android' | 'ios' | undefined) ?? 'android',
+      region: req.query.region ?? null, slots: gate.slots, injected: gate.injected,
+    });
+  });
 
   /**
    * THE PRICE LIST, as the server bills it. The console renders this and never a literal, so the
@@ -143,7 +176,7 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
         prompt, profile: req.body.profile, platform: (req.body.platform as 'android' | 'ios') ?? 'android',
         region: req.body.region ?? null, appRef: req.body.appId ?? null, stepCap: req.body.stepCap,
         createdBy: userId,
-      });
+      }, gateFor(opts, 'require'));
       const row = await readRun(orgId, id);
       return reply.code(201).send({ aiRun: runJson(row) });
     },
@@ -463,7 +496,7 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
       prompt: t.prompt, profile: t.profile, platform: t.platform, region: t.region,
       appRef: req.body?.appId ?? (t.app_package ? `${t.app_package}@latest` : null),
       createdBy: userId, aiTestId: id, trigger: 'test',
-    });
+    }, gateFor(opts, 'require'));
     return reply.code(201).send({ aiRun: runJson(await readRun(orgId, runId)) });
   });
 }
