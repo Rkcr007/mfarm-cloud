@@ -59,7 +59,8 @@ async function startHub(): Promise<{ url: string; requests: Recorded[]; close: (
       if (path === `${s}/screenshot`) return send(200, 'iVBORw0KGgo=');
       if (path === `${s}/source`) return send(200, ANDROID_SOURCE);
       if (path === `${s}/actions`) return send(200, null);
-      if (path === `${s}/element/active`) return send(200, { 'element-6066-11e4-a52e-4f735466cecf': 'el-7' });
+      // Only the W3C GET, as Appium 2 does — accepting POST here is how a broken type_text tested green.
+      if (path === `${s}/element/active` && req.method === 'GET') return send(200, { 'element-6066-11e4-a52e-4f735466cecf': 'el-7' });
       if (path === `${s}/element/el-7/value`) return send(200, null);
       if (path === `${s}/execute/sync`) return send(200, null);
       if (path === `${s}/se/log`) {

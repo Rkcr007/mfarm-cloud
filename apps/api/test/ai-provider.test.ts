@@ -141,6 +141,32 @@ test('a client error is not retried — a bad request stays bad', async () => {
   } finally { s.close(); }
 });
 
+test('a structured answer the server failed to validate is asked for once more — and only once', async () => {
+  const invalid: [number, Record<string, string>, string] =
+    [400, {}, '{"error":{"message":"Failed to generate JSON.","code":"json_validate_failed"}}'];
+  const schema = { output_config: { format: { type: 'json_schema' as const, schema: { type: 'object' } } } };
+  const s = await scripted([invalid, OK]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    assert.equal((await model({ ...ask, ...schema } as never)).stop_reason, 'end_turn');
+    assert.equal(s.hits(), 2);
+  } finally { s.close(); }
+
+  const twice = await scripted([invalid, invalid, OK]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: twice.baseUrl }, FAST);
+    await assert.rejects(model({ ...ask, ...schema } as never), /400 .*json_validate_failed/);
+    assert.equal(twice.hits(), 2, 'a second identical refusal is the answer');
+  } finally { twice.close(); }
+
+  const plain = await scripted([invalid, OK]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: plain.baseUrl }, FAST);
+    await assert.rejects(model(ask), /400/, 'without a schema it is an ordinary bad request');
+    assert.equal(plain.hits(), 1);
+  } finally { plain.close(); }
+});
+
 test('retry hints are read from a seconds header, a date header, and Gemini\'s RetryInfo body', () => {
   const hdr = (v: string | null) => ({ headers: { get: () => v } });
   assert.equal(retryAfterMs(hdr('7'), ''), 7_000);

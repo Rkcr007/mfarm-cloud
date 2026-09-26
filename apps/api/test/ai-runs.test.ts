@@ -82,6 +82,8 @@ function startUpstream(): Promise<string> {
         if (u.endsWith('/window/rect')) return json(200, { x: 0, y: 0, width: 1080, height: 2400 });
         if (u.endsWith('/actions')) return json(200, null);
         if (u.endsWith('/element/active')) {
+          // As Appium 2 does: only the W3C GET. The fake used to take POST too, which hid the defect.
+          if (req.method !== 'GET') return json(404, { error: 'unknown command', message: `${req.method} ${u} is not supported` });
           if (noFocusedField) return json(404, { error: 'no such element', message: 'nothing has focus' });
           return json(200, { 'element-6066-11e4-a52e-4f735466cecf': 'el-1' });
         }
@@ -374,6 +376,22 @@ describe('an AI run', () => {
     assert.equal(done.aiRun.status, 'failed', `a 404 "no such element" must not read as a lost device: ${done.aiRun.stopReason}`);
     assert.match(done.steps[0]!.result ?? '', /^failed:/);
     assert.equal(done.steps.length, 2, 'the next turn saw the miss and reached a verdict');
+  });
+
+  test('typing reaches the focused field — found via the W3C GET, which is all Appium 2 answers', async () => {
+    await resetFleet();
+    scripts.set('Type into the focused field', [
+      { tool: 'type_text', input: { text: 'a@b.co', submit: false, why: 'fill' } },
+      { tool: 'finish', input: { passed: true, summary: 'Typed', evidence: 'a@b.co shown', why: 'done' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Type into the focused field', region: REGION });
+    const done = await settle(body.aiRun.id);
+    // On the farm this step was `failed: The requested resource could not be found…` seven times out
+    // of seven, and the run still reached a verdict — so a passed run proves nothing about typing.
+    assert.equal(done.steps[0]!.result, 'ok', done.steps[0]!.result ?? '');
+    assert.ok(recorded.some((r) => r.method === 'GET' && r.url.endsWith('/element/active')), 'the focused field, asked for by GET');
+    const value = recorded.find((r) => r.url.endsWith('/element/el-1/value'));
+    assert.deepEqual((value?.body as { text?: string } | undefined)?.text, 'a@b.co');
   });
 
   test('a run that cannot get a device says so, and bills nothing', async () => {

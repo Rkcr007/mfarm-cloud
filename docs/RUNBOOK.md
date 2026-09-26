@@ -355,7 +355,9 @@ MFARM_AI_MAX_INPUT_TOKENS=6000    # a request over the provider's cap is refused
 ```
 
 Expect about one step every 35 seconds: the model answers in under a second, and the rest is the
-retry below waiting out the per-minute cap. GitHub Models is not an option — it was retired
+retry below waiting out the per-minute cap. **And about 45 steps a DAY**: Groq's free tier also caps
+200,000 tokens per day, and past it every run stops on its first step with `model_error` naming
+"tokens per day (TPD)" until the window rolls forward. GitHub Models is not an option — it was retired
 2026-07-30, and `models.github.ai` answers a plain `200 OK` to every path, so a probe looks healthy.
 
 **A rate-limited key is fine; an empty one is not.** On a free or low tier the `openai` provider waits
