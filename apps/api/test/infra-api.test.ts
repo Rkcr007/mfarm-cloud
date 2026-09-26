@@ -24,6 +24,7 @@ import { buildServer } from '../src/http/server.ts';
 import { withSystem, closePools } from '../src/db.ts';
 import { createApiKey } from '../src/auth.ts';
 import { upsertUser, cookieValue } from '../src/users.ts';
+import { healthComponents, hostSnapshots, overallHealth } from '../src/infra/snapshot.ts';
 
 let app: FastifyInstance;
 let orgId: string, key: string;
@@ -353,5 +354,66 @@ describe('the filters refuse nonsense instead of 500ing', () => {
     });
     assert.equal(res.statusCode, 200, res.body);
     assert.ok(res.json().events.length <= 200);
+  });
+});
+
+describe('switched off is not down (2026-09-26)', () => {
+  // The farm is put away between sessions, and the overview called that "Infrastructure down" with a
+  // CRITICAL "No heartbeat for 75 minutes" — for a host somebody had switched off to save money.
+  test('a host stopped in this console is "stopped", and not an alert', async () => {
+    const id = await seedHost(`downed-${REGION}`, { beatSecondsAgo: 4_500, statsSecondsAgo: 4_500, upHoursAgo: 30, state: 'DOWN' });
+    const h = (await hostSnapshots(() => false)).find((x) => x.id === id)!;
+    assert.equal(h.power, 'stopped');
+    assert.deepEqual(h.alerts.map((a) => a.code), [], 'no host-silent, no stale-stats warning');
+  });
+
+  test('a host the PROVIDER reports stopped is "stopped" too — a stop made from a laptop', async () => {
+    const id = await seedHost(`laptop-stopped-${REGION}`, { beatSecondsAgo: 4_500, statsSecondsAgo: 4_500, upHoursAgo: 30 });
+    const unknown = (await hostSnapshots(() => false)).find((x) => x.id === id)!;
+    assert.equal(unknown.power, 'unknown', 'without the provider it cannot tell off from crashed');
+    assert.ok(unknown.alerts.some((a) => a.code === 'host-silent' && a.severity === 'critical'),
+      'and a silence nobody explained still IS critical');
+
+    const off = (await hostSnapshots(() => false, new Set([id]))).find((x) => x.id === id)!;
+    assert.equal(off.power, 'stopped');
+    assert.ok(!off.alerts.some((a) => a.severity === 'critical'), 'switched off is not an emergency');
+  });
+
+  test('a host that is TALKING is running, whatever a cached inventory says', async () => {
+    const h = (await hostSnapshots(() => false, new Set([liveHost]))).find((x) => x.id === liveHost)!;
+    assert.equal(h.power, 'running');
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const host = (over: Record<string, any>) => ({
+    hostname: 'h', power: 'running', reachability: 'live', tunnelConnected: true,
+    maintenance: { drained: false }, machine: { status: 'live', diskUsedPct: 30 }, ...over,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any;
+  const fleet = (ready: number, total: number) => ({
+    devices: { ready, allocated: 0, total, quarantined: total - ready },
+    sessions: { queued: 0, oldestQueuedSeconds: null },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any;
+
+  test('every host off: hosts, agents, network and devices say "off", and the headline does too', async () => {
+    const lab = host({ hostname: 'mfarm-lab', power: 'stopped', reachability: 'unavailable', tunnelConnected: false });
+    const components = await healthComponents([lab], fleet(0, 4), 3);
+    const by = Object.fromEntries(components.map((c) => [c.id, c]));
+    for (const id of ['hosts', 'agents', 'network', 'devices']) assert.equal(by[id]!.status, 'off', `${id}: ${by[id]!.detail}`);
+    assert.match(by.hosts!.detail, /mfarm-lab switched off, costing nothing/);
+    assert.match(by.devices!.detail, /return when a host is started/);
+    // Storage may be unknown where the test runs; the rule itself is below.
+    assert.equal(overallHealth([{ id: 'a', label: 'A', status: 'off', detail: '' }, { id: 'b', label: 'B', status: 'healthy', detail: '' }]), 'off');
+  });
+
+  test('off never hides a real problem: a silent host that was NOT switched off is still down', async () => {
+    const off = host({ hostname: 'lab-a', power: 'stopped', reachability: 'unavailable', tunnelConnected: false });
+    const crashed = host({ hostname: 'lab-b', power: 'unknown', reachability: 'unavailable', tunnelConnected: false });
+    const hosts = Object.fromEntries((await healthComponents([off, crashed], fleet(0, 8), 3)).map((c) => [c.id, c]));
+    assert.equal(hosts.hosts!.status, 'down');
+    assert.match(hosts.hosts!.detail, /lab-b not answering/);
+    assert.equal(overallHealth([{ id: 'a', label: 'A', status: 'off', detail: '' }, { id: 'b', label: 'B', status: 'degraded', detail: '' }]), 'degraded');
+    assert.equal(overallHealth([{ id: 'a', label: 'A', status: 'off', detail: '' }, { id: 'b', label: 'B', status: 'down', detail: '' }]), 'down');
   });
 });

@@ -139,12 +139,38 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
    * on whether its stream is connected is a console with two rendering paths and one of them
    * untested. The stream diffs what comes out of here; the route sends it.
    */
+  /**
+   * HOSTS THE CLOUD PROVIDER REPORTS STOPPED — a stop made anywhere but this console (2026-09-26).
+   *
+   * The farm is put away between sessions, usually from a laptop, and the overview called that
+   * "Infrastructure down" with a CRITICAL alert: a silent host looked exactly like a crashed one. The
+   * provider knows the difference. Read from the same cached inventory the Cloud tab uses (60s), and
+   * never allowed to hold the page: a provider that is slow or refuses is "don't know", which is what
+   * this page said before.
+   */
+  async function providerStopped(): Promise<Set<string>> {
+    if (!powerConfigured()) return new Set();
+    const hosts = await withSystem(async (c) => (await c.query<{ id: string; hostname: string }>(
+      'SELECT id, hostname FROM hosts WHERE retired_at IS NULL')).rows);
+    const inventory = await Promise.race([
+      cloudInventory(new Set(hosts.map((h) => h.hostname))).catch(() => null),
+      new Promise<null>((resolve) => { setTimeout(() => resolve(null), 3_000).unref?.(); }),
+    ]);
+    if (!inventory) return new Set();
+    const stopped = new Set(inventory.instances
+      .filter((i) => i.status === 'TERMINATED' || i.status === 'SUSPENDED').map((i) => i.name));
+    return new Set(hosts.filter((h) => {
+      const target = instanceFor(h.hostname);
+      return target !== null && stopped.has(target.instance);
+    }).map((h) => h.id));
+  }
+
   async function overviewPayload() {
     // Sequential on purpose: `probeDatabase` is a latency measurement, and running it beside four
     // other queries on the same pool would measure the contention this page creates rather than the
     // database's own health.
     const dbLatencyMs = await probeDatabase();
-    const [hosts, fleet] = await Promise.all([hostSnapshots(reachable), fleetSnapshot()]);
+    const [hosts, fleet] = await Promise.all([hostSnapshots(reachable, await providerStopped()), fleetSnapshot()]);
     const [cost, components, events] = await Promise.all([
       costSnapshot(hosts),
       healthComponents(hosts, fleet, dbLatencyMs),

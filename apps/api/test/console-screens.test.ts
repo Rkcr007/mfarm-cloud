@@ -417,6 +417,21 @@ describe('every screen renders', () => {
   });
 });
 
+describe('a farm put away is not a farm that is down (2026-09-26)', () => {
+  test('the overview says "switched off", in a neutral colour, and the empty alerts say why', () => {
+    seed({ name: 'infra' });
+    const data = mod.state.infra.data;
+    data.health = { overall: 'off', components: [
+      { id: 'hosts', label: 'Hosts', status: 'off', detail: '0 of 1 powered on · mfarm-lab switched off, costing nothing' },
+    ] };
+    data.hosts = (data.hosts || []).map((h: any) => ({ ...h, power: 'stopped', alerts: [] }));
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /Infrastructure switched off/);
+    assert.doesNotMatch(text, /Infrastructure down|Infrastructure off\b/);
+    assert.match(text, /not expected to report/, 'not "every host is beating"');
+  });
+});
+
 describe('screens survive an empty farm', () => {
   // The state a new install is in, and the one every "no devices yet" message exists for. A screen
   // that only works once data has arrived fails on the first morning somebody tries this.

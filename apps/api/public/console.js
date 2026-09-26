@@ -9445,7 +9445,12 @@ const FRESHNESS = {
   unknown:     { tone: '',     label: 'unknown',     note: 'it has never reported this' },
 };
 
-const HEALTH_TONE = { healthy: 'ok', degraded: 'warn', down: 'bad', unknown: '' };
+const HEALTH_TONE = { healthy: 'ok', degraded: 'warn', down: 'bad', unknown: '', off: '' };
+/**
+ * `off` in words. A farm put away between sessions is the normal state — it used to read "Infrastructure
+ * down" in red (2026-09-26). Neutral, not green: nothing is serving, and nothing is wrong either.
+ */
+const HEALTH_WORD = { off: 'switched off' };
 
 /** Money, with the farm's own currency and no decimals. Null renders as a dash, never as zero. */
 function cost(value, rate) {
@@ -9503,7 +9508,10 @@ function infraHeadline(data) {
     return `${list} ${bad.length === 1 ? 'is' : 'are'} ${data.health.overall}. `
       + `${running.length} of ${data.hosts.length} hosts powered on${spend}.`;
   }
-  if (!running.length) return `Nothing is powered on. ${data.hosts.length} hosts known to the farm.`;
+  if (!running.length) {
+    const n = data.hosts.length;
+    return `Nothing is powered on, so nothing is costing compute. ${n} host${n === 1 ? '' : 's'} known to the farm.`;
+  }
   return `${running.length} of ${data.hosts.length} hosts powered on${spend}. Everything reporting.`;
 }
 
@@ -9550,7 +9558,7 @@ function infraHealthBoard(data) {
   return card(null, { class: `healthboard ${HEALTH_TONE[overall] ? `hb-${HEALTH_TONE[overall]}` : ''}` },
     h('div', { class: 'row tight' },
       h('span', { class: `dot ${HEALTH_TONE[overall]} live`.trim() }),
-      h('h2', { class: 'page-title', text: `Infrastructure ${overall}` }),
+      h('h2', { class: 'page-title', text: `Infrastructure ${HEALTH_WORD[overall] || overall}` }),
       h('span', { class: 'spacer' }),
       h('span', { class: 'caption', text: `as of ${ago(data.generatedAt)}` }),
     ),
@@ -9560,7 +9568,7 @@ function infraHealthBoard(data) {
           h('span', { class: `dot ${HEALTH_TONE[c.status] || ''}`.trim() }),
           h('strong', { text: c.label }),
           h('span', { class: 'spacer' }),
-          h('span', { class: 'micro', text: c.status }),
+          h('span', { class: 'micro', text: HEALTH_WORD[c.status] || c.status }),
         ),
         h('p', { class: 'caption', text: c.detail }),
       ))),
@@ -9575,8 +9583,13 @@ function infraAlerts(data) {
   }
   rows.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'critical' ? -1 : 1));
   if (!rows.length) {
+    const off = (data.hosts || []).filter((h) => h.power === 'stopped').length;
     return card('Alerts', {},
-      empty('Nothing is complaining.', 'Every host is beating, reporting and within its thresholds.'));
+      empty('Nothing is complaining.', off
+        // It used to say every host was beating while one was switched off.
+        ? `${off === 1 ? 'The switched-off host is' : `${off} switched-off hosts are`} not expected to report. `
+          + 'Start one from Hosts when you need its devices.'
+        : 'Every host is beating, reporting and within its thresholds.'));
   }
   return card('Alerts', {},
     h('div', { class: 'stack mt-md' }, rows.map((r) =>

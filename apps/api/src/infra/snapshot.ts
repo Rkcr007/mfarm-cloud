@@ -158,7 +158,13 @@ export interface Alert {
   message: string;
 }
 
-export type ComponentStatus = 'healthy' | 'degraded' | 'down' | 'unknown';
+/**
+ * `off` (2026-09-26): switched off ON PURPOSE — every host behind this component is stopped, by this
+ * console or by its cloud provider. It is the farm's normal state between sessions (the device host
+ * is ~95% of the cost), and it used to be reported as `down`: a red "Infrastructure down" and a
+ * CRITICAL "No heartbeat for 75 minutes" for a machine somebody had just switched off to save money.
+ */
+export type ComponentStatus = 'healthy' | 'degraded' | 'down' | 'unknown' | 'off';
 
 export interface HealthComponent {
   id: string;
@@ -221,7 +227,15 @@ const LOAD_WARN_PER_CORE = 1.5;
 const LOAD_CRIT_PER_CORE = 2.5;
 const MEM_WARN_PCT = 88;
 
-export async function hostSnapshots(reachable: (hostId: string) => boolean): Promise<HostSnapshot[]> {
+/**
+ * `providerStopped`: hosts whose machine the CLOUD PROVIDER reports stopped (infra/inventory.ts), for
+ * a stop made anywhere but this console — the cloud console, `gcloud`, a laptop script. Without it such
+ * a host was indistinguishable from one that crashed.
+ */
+export async function hostSnapshots(
+  reachable: (hostId: string) => boolean,
+  providerStopped: ReadonlySet<string> = new Set(),
+): Promise<HostSnapshot[]> {
   const cfg = loadConfig();
   const hourly = cfg.hostHourlyCost;
 
@@ -368,6 +382,9 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         : stopPending && (reach === 'live' || reach === 'stale') ? 'stopping'
           : h.state === 'DOWN' ? 'stopped'
         : reach === 'live' || reach === 'stale' ? 'running'
+          // Beats win over the provider: a machine that is talking is running, whatever a cached
+          // inventory says. Silence plus a provider that says STOPPED is a machine switched off.
+          : providerStopped.has(h.id) ? 'stopped'
           : 'unknown';
 
     /**
@@ -453,6 +470,9 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         severity: 'warning', code: 'host-starting',
         message: 'Starting. Its devices return to the pool when its agent reports in, a few minutes after boot.',
       });
+    } else if (power === 'stopped') {
+      // Switched off on purpose, here or at the provider. Not an alert: nothing is wrong, and it is
+      // costing nothing. The Hosts card says "stopped" and carries Start.
     } else if (reach === 'unavailable') {
       alerts.push({
         severity: 'critical', code: 'host-silent',
@@ -468,7 +488,8 @@ export async function hostSnapshots(reachable: (hostId: string) => boolean): Pro
         // one place where the difference between 12 and 53 seconds is the whole message.
       });
     }
-    if (machineStatus === 'unavailable' || machineStatus === 'unknown') {
+    // A stopped machine's figures are old because it is off — expected, not a warning.
+    if (power !== 'stopped' && (machineStatus === 'unavailable' || machineStatus === 'unknown')) {
       alerts.push({
         severity: 'warning', code: 'machine-stats-stale',
         message: machineStatus === 'unknown'
@@ -804,17 +825,22 @@ export async function healthComponents(
 
   /* -------- hosts */
   const running = hosts.filter((h) => h.power === 'running');
-  const silent = hosts.filter((h) => h.reachability === 'unavailable');
+  const off = hosts.filter((h) => h.power === 'stopped');
+  // Silent and NOT switched off: the only silence worth a red light.
+  const silent = hosts.filter((h) => h.reachability === 'unavailable' && h.power !== 'stopped');
   const drained = hosts.filter((h) => h.maintenance.drained);
+  const allOff = hosts.length > 0 && off.length === hosts.length;
   out.push({
     id: 'hosts', label: 'Hosts',
     status: hosts.length === 0 ? 'unknown'
-      : silent.length === hosts.length ? 'down'
-        : silent.length > 0 || drained.length > 0 ? 'degraded' : 'healthy',
+      : allOff ? 'off'
+        : silent.length && silent.length === hosts.length - off.length ? 'down'
+          : silent.length > 0 || drained.length > 0 ? 'degraded' : 'healthy',
     detail: hosts.length === 0
       ? 'No host has ever registered with this control plane.'
       : [
           `${running.length} of ${hosts.length} powered on`,
+          off.length ? `${someOf(off.map((h) => h.hostname))} switched off, costing nothing` : null,
           silent.length ? `${someOf(silent.map((h) => h.hostname))} not answering` : null,
           drained.length ? `${someOf(drained.map((h) => h.hostname))} drained for maintenance` : null,
         ].filter(Boolean).join(' · '),
@@ -825,7 +851,7 @@ export async function healthComponents(
   const tunnelless = running.filter((h) => !h.tunnelConnected);
   out.push({
     id: 'agents', label: 'Worker agents',
-    status: running.length === 0 ? 'unknown'
+    status: allOff ? 'off' : running.length === 0 ? 'unknown'
       : beating.length === 0 ? 'down'
         : tunnelless.length > 0 || beating.length < running.length ? 'degraded' : 'healthy',
     detail: running.length === 0
@@ -852,10 +878,14 @@ export async function healthComponents(
   out.push({
     id: 'devices', label: 'Device farm',
     status: fleet.devices.total === 0 ? 'unknown'
-      : usable === 0 ? 'down'
+      // Every device is out because every host is off: that is the farm put away, not broken.
+      : usable === 0 && allOff ? 'off'
+        : usable === 0 ? 'down'
         : fleet.devices.quarantined > 0 || fleet.sessions.queued > 0 ? 'degraded' : 'healthy',
     detail: fleet.devices.total === 0
       ? 'No devices are registered.'
+      : usable === 0 && allOff
+        ? `${fleet.devices.total} devices, all on switched-off hosts. They return when a host is started.`
       : [
           `${fleet.devices.ready} ready, ${fleet.devices.allocated} in use of ${fleet.devices.total}`,
           fleet.devices.quarantined ? `${fleet.devices.quarantined} quarantined` : null,
@@ -869,7 +899,7 @@ export async function healthComponents(
   /* -------- the network between here and the hosts */
   out.push({
     id: 'network', label: 'Network',
-    status: running.length === 0 ? 'unknown'
+    status: allOff ? 'off' : running.length === 0 ? 'unknown'
       : tunnelless.length === running.length ? 'down'
         : tunnelless.length > 0 ? 'degraded' : 'healthy',
     detail: running.length === 0
@@ -919,6 +949,9 @@ export async function healthComponents(
 export function overallHealth(components: HealthComponent[]): ComponentStatus {
   if (components.some((c) => c.status === 'down')) return 'down';
   if (components.some((c) => c.status === 'degraded')) return 'degraded';
+  // Put away: the hosts are off on purpose and everything that IS on is fine.
+  if (components.some((c) => c.status === 'off')
+    && components.every((c) => c.status === 'off' || c.status === 'healthy')) return 'off';
   // Every light unknown means the page has measured nothing, which is not a healthy farm — it is a
   // farm nobody can see. Reported as such rather than rounded up.
   if (components.every((c) => c.status === 'unknown')) return 'unknown';
