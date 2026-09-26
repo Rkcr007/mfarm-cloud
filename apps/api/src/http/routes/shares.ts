@@ -101,7 +101,7 @@ export function publicAiStep(s: { n: number; phase: string; thought: string | nu
     phase: s.phase,
     tool: s.action?.tool ?? null,
     // Every argument the agent gave — its "why", and a finish step's own summary — can repeat what it
-    // was told (caught by the share test: "enter 0987", "Welcome qa@example.com").
+    // was told (caught by the share test: "enter 4812", "Welcome qa@example.com").
     input: redactDeepForStrangers(input, secrets),
     // The agent's stated reason is its own words about the screen — but a model repeats what it was
     // told, so the task's secrets and any e-mail address are masked out of it (secrets.ts), and

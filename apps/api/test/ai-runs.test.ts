@@ -1065,14 +1065,14 @@ describe('nothing is started that cannot finish (ADR-0044)', () => {
 
 describe('what an AI run shows, and to whom (2026-09-26)', () => {
   // The shape of the task that leaked on the farm: an account, a PIN, a passcode.
-  const TASK = 'Log in with pin : 0987 and passcode as : 268426 on the account qa@example.com, then open Settings';
-  const leaks = /0987|268426/;
+  const TASK = 'Log in with pin : 4812 and passcode as : 539176 on the account qa@example.com, then open Settings';
+  const leaks = /4812|539176/;
 
   async function maskedRun() {
     scripts.set('Log in with pin', [
       { tool: 'tap_element', input: { index: 0, why: 'the pin field' } },
-      { tool: 'type_text', input: { text: '0987', submit: false, why: 'enter 0987' } },
-      { tool: 'finish', input: { passed: true, summary: 'Logged in with 0987', evidence: 'Welcome qa@example.com', why: 'done' } },
+      { tool: 'type_text', input: { text: '4812', submit: false, why: 'enter 4812' } },
+      { tool: 'finish', input: { passed: true, summary: 'Logged in with 4812', evidence: 'Welcome qa@example.com', why: 'done' } },
     ]);
     const { body } = await startRun({ prompt: TASK, region: REGION });
     return settle(body.aiRun.id);
@@ -1123,7 +1123,7 @@ describe('what an AI run shows, and to whom (2026-09-26)', () => {
       .json() as { token: string };
     const page = await app.inject({ method: 'GET', url: `/v1/shares/${share.token}` });
     assert.equal(page.statusCode, 200);
-    assert.doesNotMatch(page.body, /0987|268426/, 'the public page — where the PIN used to be printed in full');
+    assert.doesNotMatch(page.body, /4812|539176/, 'the public page — where the PIN used to be printed in full');
     assert.doesNotMatch(page.body, /qa@example\.com/, 'nor the account it logs into');
     assert.match(page.body, /Log in with pin/, 'the task itself is still the test, and is shown');
   });

@@ -1,7 +1,7 @@
 /**
  * WHAT AN AI RUN'S TASK MAY SHOW, AND WHERE — found on the farm 2026-09-26.
  *
- * A person wrote an account's PIN and passcode into a task ("pin : 0987, passcode as : 268426"). The
+ * A person wrote an account's PIN and passcode into a task ("pin : 4812, passcode as : 539176"). The
  * agent needs them — it types them — but they were then printed on the AI run list, the run page, the
  * Runs page and the PUBLIC share page. The task stays whole where it is USED (the model, the runner,
  * the owner's own edit box); everywhere it is SHOWN, the values are masked.
