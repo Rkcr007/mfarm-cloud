@@ -106,7 +106,8 @@ function startUpstream(): Promise<string> {
 
 type Turn =
   | { tool: string; input: Record<string, unknown> }
-  | { text: string };
+  | { text: string }
+  | { fail: Error };
 
 /** Each run's conversation, keyed by the task text so concurrent runs cannot share a script. */
 const scripts = new Map<string, Turn[]>();
@@ -135,6 +136,7 @@ const scriptedModel: Model = async (params) => {
   const prompt = (first[0] as { text: string }).text;
   const key = [...scripts.keys()].find((k) => prompt.includes(k));
   const turn = key ? scripts.get(key)!.shift() : undefined;
+  if (turn && 'fail' in turn) throw turn.fail;
   const t = turn ?? { text: 'I am not sure what to do.' };
   const content = 'tool' in t
     ? [{ type: 'text', text: 'Looking at the screen.' }, { type: 'tool_use', id: `tu_${randomUUID()}`, name: t.tool, input: t.input }]
@@ -1211,5 +1213,25 @@ describe('what an AI run shows, and to whom (2026-09-26)', () => {
     const again = await withSystem(async (c) => (await c.query(
       'SELECT name FROM runs WHERE id = (SELECT run_id FROM ai_runs WHERE session_id = $1)', [done.aiRun.sessionId])).rows[0].name);
     assert.equal(again, after.run, 'idempotent: a second boot changes nothing');
+  });
+});
+
+describe('a model call refused for its size (D54)', () => {
+  test('the run ends saying the key\'s tier refused it — not "could not be reached"', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    const refusal = new ModelError('429 from api.groq.com: Request too large … (TPM): Limit 7000, Requested 17500 (larger than this key\'s tier allows — no wait changes that)', {
+      status: 429, body: 'Request too large', tooLarge: { limit: 7000, requested: 17500, output: false },
+    });
+    scripts.set('A task too large for this tier', [{ fail: refusal }]);
+    const { body } = await startRun({ prompt: 'A task too large for this tier', region: REGION });
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'error');
+    assert.equal(done.aiRun.stopReason, 'model_error');
+    assert.match(done.aiRun.summary!, /^The model provider refused the request as larger than this farm's key allows/);
+    assert.doesNotMatch(done.aiRun.summary!, /could not be reached/);
+
+    // That the go / no-go stays go is ai-health.test.ts's: this server injects its model, so readiness here
+    // answers "Ready." without consulting health at all and could not fail.
   });
 });

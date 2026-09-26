@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Model } from './agent.ts';
-import { ModelError, ModelUnavailableError } from './model-error.ts';
+import { ModelError, ModelUnavailableError, type TooLarge } from './model-error.ts';
 import {
   modelHalfOpen, modelUsable, providerHealth, recordModelFailure, recordModelOk, type ProviderSlot,
 } from './health.ts';
@@ -14,6 +14,8 @@ import {
  *                      Mistral, Groq, Together, Ollama, vLLM, LiteLLM all speak it).
  *   MFARM_AI_BASE_URL  optional; points either protocol at a gateway or a self-hosted server.
  *   MFARM_AI_MODEL     the model id that endpoint knows.
+ *   MFARM_AI_MAX_OUTPUT_TOKENS  optional; the longest answer asked for. Unset, nothing is sent until
+ *                      the provider's own refusal says what its tier allows (D54).
  *
  * ANTHROPIC_API_KEY / OPENAI_API_KEY are still read as fallbacks, so a farm configured before the
  * rename keeps working. The agent loop keeps speaking the Anthropic shape internally; the `openai`
@@ -27,9 +29,16 @@ export interface AiProviderConfig {
   provider: AiProvider;
   apiKey: string;
   baseUrl: string | null;
+  /** A cap on each answer, when the operator set one (`MFARM_AI_MAX_OUTPUT_TOKENS`). */
+  maxOutputTokens?: number;
 }
 
 type Env = Record<string, string | undefined>;
+
+function positiveInt(v: string | undefined): number | null {
+  const n = Number((v ?? '').trim());
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
 
 export function aiProviderOf(env: Env = process.env): AiProvider | null {
   const p = (env.MFARM_AI_PROVIDER ?? '').trim().toLowerCase() || 'anthropic';
@@ -50,7 +59,8 @@ export function aiProviderConfig(env: Env = process.env): AiProviderConfig | nul
   const provider = aiProviderOf(env);
   const apiKey = aiApiKey(env);
   if (!provider || !apiKey) return null;
-  return { provider, apiKey, baseUrl: (env.MFARM_AI_BASE_URL ?? '').trim() || null };
+  const maxOutputTokens = positiveInt(env.MFARM_AI_MAX_OUTPUT_TOKENS);
+  return { provider, apiKey, baseUrl: (env.MFARM_AI_BASE_URL ?? '').trim() || null, ...(maxOutputTokens ? { maxOutputTokens } : {}) };
 }
 
 /** The model id the primary provider is asked for — the one name config.ts and the runner share. */
@@ -72,6 +82,7 @@ export function buildModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
  *   MFARM_AI_FALLBACK_PROVIDER  its wire protocol, `anthropic` (default) or `openai`.
  *   MFARM_AI_FALLBACK_BASE_URL  optional gateway or self-hosted endpoint.
  *   MFARM_AI_FALLBACK_MODEL     required for `openai`; defaults to claude-opus-5 for `anthropic`.
+ *   MFARM_AI_FALLBACK_MAX_OUTPUT_TOKENS  optional, as for the primary.
  *
  * A different VENDOR is the useful kind: a second key on the same provider shares its outage, and on
  * a free tier usually its allowance too.
@@ -87,7 +98,11 @@ export function aiFallbackConfig(env: Env = process.env): AiSlotConfig | null {
   if (!(AI_PROVIDERS as readonly string[]).includes(provider)) return null;
   const model = (env.MFARM_AI_FALLBACK_MODEL ?? '').trim() || (provider === 'anthropic' ? 'claude-opus-5' : '');
   if (!model) return null;
-  return { provider: provider as AiProvider, apiKey, baseUrl: (env.MFARM_AI_FALLBACK_BASE_URL ?? '').trim() || null, model };
+  const maxOutputTokens = positiveInt(env.MFARM_AI_FALLBACK_MAX_OUTPUT_TOKENS);
+  return {
+    provider: provider as AiProvider, apiKey, baseUrl: (env.MFARM_AI_FALLBACK_BASE_URL ?? '').trim() || null, model,
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+  };
 }
 
 /** One provider the farm may use: its place in the order, the model it is asked for, and how to call it. */
@@ -219,9 +234,10 @@ function anthropicModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
   const create: Model = cfg.baseUrl
     ? (params) => client.beta.messages.create(params)
     : (params) => client.beta.messages.create({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' });
+  const cap = cfg.maxOutputTokens;
   return async (params) => {
     try {
-      return await create(params);
+      return await create(cap && params.max_tokens > cap ? { ...params, max_tokens: cap } : params);
     } catch (err) {
       throw fromAnthropicError(err);
     }
@@ -254,10 +270,11 @@ interface OaResponse {
  * send is mapped: a system prompt, ONE user turn of text and base64 images, strict tools with a
  * single tool call per turn, and an optional JSON-schema output. Anthropic-only knobs (adaptive
  * thinking, effort, cache_control) have no portable equivalent and are dropped, not guessed at.
- * No token cap is sent: `max_tokens` vs `max_completion_tokens` differs by server, and the step cap
- * is what bounds a run's cost.
+ * A cap on the answer is sent only when one is KNOWN — `MFARM_AI_MAX_OUTPUT_TOKENS`, or what the
+ * provider's own refusal taught (D54) — as `max_completion_tokens`, the name OpenAI and Groq use today.
+ * Otherwise none: servers disagree on the name, and the step cap is what bounds a run's cost.
  */
-export function toOpenAiRequest(params: Params): Record<string, unknown> {
+export function toOpenAiRequest(params: Params, maxOutput: number | null = null): Record<string, unknown> {
   const system = typeof params.system === 'string'
     ? params.system
     : (params.system ?? []).map((b) => b.text).join('\n');
@@ -277,6 +294,7 @@ export function toOpenAiRequest(params: Params): Record<string, unknown> {
   }
 
   const body: Record<string, unknown> = { model: params.model, messages };
+  if (maxOutput) body.max_completion_tokens = Math.min(params.max_tokens ?? maxOutput, maxOutput);
   if (params.tools?.length) {
     body.tools = params.tools.map((t) => {
       if (!('input_schema' in t)) throw new Error('the openai provider supports only custom tools');
@@ -368,14 +386,42 @@ export function retryAfterMs(res: { headers: { get(name: string): string | null 
   return m ? Number(m[1]) * 1000 : null;
 }
 
+/**
+ * A REFUSAL FOR SIZE, read from the provider's words once, here, so nothing downstream matches prose
+ * (D54). Groq, 2026-09-27: 429 "Request too large for model `…` … on output tokens per minute (OTPM):
+ * Limit 1000, Requested 1748". OpenAI words its input limit the same way ("… on tokens per min (TPM):
+ * Limit 10000, Requested 12000").
+ */
+export function tooLargeOf(status: number, body: string): TooLarge | null {
+  if ((status !== 429 && status !== 413) || !/request too large/i.test(body)) return null;
+  const m = /Limit:?\s*(\d+),\s*Requested:?\s*(\d+)/i.exec(body);
+  return { limit: m ? Number(m[1]) : null, requested: m ? Number(m[2]) : null, output: /output tokens|\bOTPM\b/i.test(body) };
+}
+
+/**
+ * THE CAP SENT AFTER AN OUTPUT REFUSAL: half the tier's per-minute limit, so two steps fit in one
+ * minute. Measured on the farm (48 steps of qwen/qwen3.8-27b, 2026-09-26): an answer is 60 tokens at
+ * the median and 236 at the most, so 500 of a 1,000 limit never cuts one short.
+ */
+export const outputCapFor = (limit: number): number => Math.max(64, Math.floor(limit / 2));
+
+/** Per endpoint and model, the cap a provider's refusal taught. In memory, like health.ts: one request re-learns it. */
+const learnedOutputCaps = new Map<string, number>();
+
 function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY): Model {
   const url = `${(cfg.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')}/chat/completions`;
   const host = new URL(url).host;
   return async (params) => {
-    const request = toOpenAiRequest(params);
-    const body = JSON.stringify(request);
+    const capKey = `${url} ${params.model}`;
+    const capNow = () => {
+      const caps = [cfg.maxOutputTokens, learnedOutputCaps.get(capKey)].filter((n): n is number => typeof n === 'number' && n > 0);
+      return caps.length ? Math.min(...caps) : null;
+    };
+    let request = toOpenAiRequest(params, capNow());
+    let body = JSON.stringify(request);
     let waited = 0;
     let regenerated = false;
+    let resized = 0;
     for (let attempt = 0; ; attempt++) {
       const last = attempt + 1 >= (retry.maxAttempts ?? Infinity);
       let res: Response;
@@ -401,6 +447,23 @@ function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY):
       const text = await res.text();
       if (res.ok) return fromOpenAiResponse(JSON.parse(text) as OaResponse, params.model);
       const failure = `${res.status} from ${host}: ${text.slice(0, 300)}`;
+      const big = tooLargeOf(res.status, text);
+      if (big) {
+        // The answer is ours to cap: learn the tier's limit and send the same call smaller, at once —
+        // before any attempt or wait budget is consulted, so a probe (one attempt) learns it too. The
+        // input is not ours to shrink here: that one fails.
+        const cap = big.output && big.limit ? outputCapFor(big.limit) : null;
+        const sent = request.max_completion_tokens as number | undefined;
+        if (cap && resized < 2 && (sent === undefined || cap < sent)) {
+          learnedOutputCaps.set(capKey, Math.min(learnedOutputCaps.get(capKey) ?? Infinity, cap));
+          request = toOpenAiRequest(params, capNow());
+          body = JSON.stringify(request);
+          resized++;
+          continue;
+        }
+        throw new ModelError(`${failure} (larger than this key's tier allows — no wait changes that)`,
+          { status: res.status, body: text, tooLarge: big });
+      }
       // A structured answer the server's own validator rejected (Groq: `json_validate_failed`). It is
       // the model's sampling, not the request: the same diagnosis parsed on 2 of 2 re-sends. Once.
       if (res.status === 400 && !regenerated && !last && request.response_format && /json_validate_failed/.test(text)) {

@@ -109,7 +109,13 @@ before(async () => {
   downHost = await seedHost(`down-${REGION}`, { org: null, state: 'DOWN', upHoursAgo: 96 });
 });
 
-after(async () => { await app?.close(); await closePools(); });
+after(async () => {
+  // Its hosts and their devices go with it. Left behind, they piled up across local runs in regions no
+  // other file knows, and a saved AI test with no region then refused to pick one (ai-runs, 2026-09-27).
+  await withSystem((c) => c.query('DELETE FROM hosts WHERE region = $1', [REGION]));
+  await app?.close();
+  await closePools();
+});
 
 describe('what a machine costs to leave on', () => {
   test('AN IDLE HOST STILL BILLS — the case the meter cannot see', async () => {

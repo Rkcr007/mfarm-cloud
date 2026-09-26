@@ -131,6 +131,9 @@ before(async () => {
 });
 
 after(async () => {
+  // Its hosts and their devices go with it. Left behind, they piled up across local runs in regions no
+  // other file knows, and a saved AI test with no region then refused to pick one (ai-runs, 2026-09-27).
+  if (hostId) await withSystem((c) => c.query('DELETE FROM hosts WHERE id = $1', [hostId]));
   await app?.close();
   await closePools();
 });

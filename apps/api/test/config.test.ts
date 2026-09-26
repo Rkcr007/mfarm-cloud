@@ -539,7 +539,10 @@ describe('the production compose file passes through what the API reads', () => 
      * comment describes from 2026-09-07 — and a hand-kept list cannot catch the next one either,
      * because the thing that goes wrong is forgetting.
      */
-    const configSrc = await readFile(join(root, 'apps', 'api', 'src', 'config.ts'), 'utf8');
+    // And the AI provider's settings, which it reads itself (provider.ts, diagnose.ts): on 2026-09-27
+    // (D54) `MFARM_AI_MAX_OUTPUT_TOKENS` was added there, where this guard did not look.
+    const configSrc = (await Promise.all(['config.ts', 'ai/provider.ts', 'ai/diagnose.ts']
+      .map((f) => readFile(join(root, 'apps', 'api', 'src', f), 'utf8')))).join('\n');
     /**
      * COMMENTS STRIPPED FIRST. `config.ts` explains its own helpers using `env.X` as a placeholder,
      * and matching that reported a variable called "X" as undeclared — a guard's first false
