@@ -375,6 +375,10 @@
 
 <div class="dialog" id="dialog" hidden role="alertdialog" aria-labelledby="dialog-title"></div>
 
+<!-- An AI run's recording and log, beside the run (2026-09-27). Outside #main on purpose: a render
+     replaces #main wholesale, and a <video> taken out of the document stops playing. -->
+<aside class="ai-panel" id="ai-panel" hidden aria-label="This run's recording and log"></aside>
+
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
 <script type="module" src="/console.js"></script>

@@ -753,6 +753,20 @@ describe('export as a script (C9)', () => {
     assert.equal(done.steps[0]!.action!.target!.text, 'Log in');
   });
 
+  test('each step records the screen its coordinates are measured on — the run page marks the tap with it', async () => {
+    await resetFleet();
+    scripts.set('Mark where the tap landed', [
+      { tool: 'tap_point', input: { x: 540, y: 1210, why: 'log in' } },
+      { tool: 'finish', input: { passed: true, summary: 'Logged in', evidence: 'Welcome', why: 'done' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Mark where the tap landed', region: REGION });
+    const done = await settle(body.aiRun.id) as unknown as { steps: { action: { screen?: { width: number; height: number } } | null }[] };
+    // The stub device's window is 1080 × 2400. On iOS that is points and the screenshot is 2-3× larger,
+    // so the mark needs the size the agent measured against — not the image's.
+    assert.equal(done.steps.length, 2);
+    for (const s of done.steps) assert.deepEqual(s.action!.screen, { width: 1080, height: 2400 });
+  });
+
   test('a passed run exports as a WebdriverIO file that parses, authenticates by header, and finds by id', async () => {
     await resetFleet();
     scripts.set('Export me', [
@@ -1126,6 +1140,54 @@ describe('what an AI run shows, and to whom (2026-09-26)', () => {
     assert.doesNotMatch(page.body, /4812|539176/, 'the public page — where the PIN used to be printed in full');
     assert.doesNotMatch(page.body, /qa@example\.com/, 'nor the account it logs into');
     assert.match(page.body, /Log in with pin/, 'the task itself is still the test, and is shown');
+  });
+
+  test('a saved test\'s task is masked on the list and read back whole by its org — the edit box starts from that', async () => {
+    await resetFleet();
+    const res = await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA), payload: { name: 'Settings with pin', prompt: TASK } });
+    assert.equal(res.statusCode, 201, res.body);
+    const t = (res.json() as { aiTest: { id: string; prompt: string; secretsHidden: boolean } }).aiTest;
+    assert.doesNotMatch(t.prompt, leaks, 'the saved-tests list');
+    assert.equal(t.secretsHidden, true);
+
+    const url = `/v1/ai/tests/${t.id}/prompt`;
+    const whole = await app.inject({ method: 'GET', url, headers: auth(keyA) });
+    assert.equal(whole.statusCode, 200, whole.body);
+    assert.equal((whole.json() as { prompt: string }).prompt, TASK, 'Edit starts from the real values');
+    assert.equal((await app.inject({ method: 'GET', url, headers: auth(keyB) })).statusCode, 404, 'and only for the org that owns it');
+    assert.equal((await app.inject({ method: 'GET', url, headers: auth(automationKeyA) })).statusCode, 403,
+      'nor for the key a run drives the hub with');
+
+    await app.inject({ method: 'POST', url: `/v1/ai/tests/${t.id}/archive`, headers: auth(keyA) });
+    assert.equal((await app.inject({ method: 'GET', url, headers: auth(keyA) })).statusCode, 404, 'an archived test has no task to edit');
+  });
+
+  test('a task that still holds the mask is refused wherever a task is written, and nothing is saved', async () => {
+    await resetFleet();
+    // What a copy from the run page, or a tab older than the read-back, would send.
+    const masked = TASK.replace(/4812|539176/g, '••••');
+    const refused = (res: { statusCode: number; body: string }, where: string) => {
+      assert.equal(res.statusCode, 400, `${where}: ${res.body}`);
+      assert.match((JSON.parse(res.body) as { error: { message: string } }).error.message, /••••.*Type the value again/, where);
+    };
+
+    const before = await runCount();
+    refused(await app.inject({ method: 'POST', url: '/v1/ai/runs', headers: auth(keyA), payload: { prompt: masked, region: REGION } }), 'New run');
+    assert.equal(await runCount(), before, 'no run was queued to type the dots into a PIN field');
+
+    refused(await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA), payload: { name: 'Dots', prompt: masked } }), 'Save as test');
+
+    const t = (await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA), payload: { name: 'Real', prompt: TASK } }))
+      .json().aiTest as { id: string };
+    refused(await app.inject({ method: 'PATCH', url: `/v1/ai/tests/${t.id}`, headers: auth(keyA), payload: { prompt: masked } }), 'Edit');
+    const kept = await app.inject({ method: 'GET', url: `/v1/ai/tests/${t.id}/prompt`, headers: auth(keyA) });
+    assert.equal((kept.json() as { prompt: string }).prompt, TASK, 'the refused edit left the PIN where it was');
+
+    const renamed = await app.inject({ method: 'PATCH', url: `/v1/ai/tests/${t.id}`, headers: auth(keyA), payload: { name: 'Real, renamed' } });
+    assert.equal(renamed.statusCode, 200, 'an edit that leaves the task alone is not refused for what the list shows');
+
+    const tests = (await app.inject({ method: 'GET', url: '/v1/ai/tests', headers: auth(keyA) })).json() as { aiTests: { name: string }[] };
+    assert.deepEqual(tests.aiTests.map((x) => x.name), ['Real, renamed'], 'nothing else was saved');
   });
 
   test('names written before this fix are masked and re-clipped when the server starts', async () => {

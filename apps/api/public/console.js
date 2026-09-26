@@ -309,6 +309,14 @@ export const state = {
     cameFrom: null,
     /** GO / NO-GO for starting a run (ADR-0044), as `GET /v1/ai/readiness` answers it. */
     readiness: null, readinessLoading: false,
+    /** The list's address with its filters — see `setRoute`. */
+    listHash: null,
+    /** The run page's More menu (the run id it is open for), and its recording & log panel. */
+    menu: null, panel: null,
+    /** Runs this tab started or watched, by id → a label — see `checkWatchedRuns`. */
+    watch: {},
+    /** A saved test being edited: `{ id, name, prompt, profile, runOnUpload, busy, loading }`. */
+    edit: null,
   },
   /**
    * Artifacts for the session detail screen, keyed by session id.
@@ -939,6 +947,13 @@ function toast(title, body, kind = '', opts = {}) {
   const el = h('div', { class: `toast ${kind}`.trim() },
     h('p', { class: 't-title', text: title }),
     body ? h('p', { class: 't-body', text: body }) : null,
+    // ONE action at most, and it takes the toast with it: "Open" on a run that just finished.
+    opts.action
+      ? h('p', { class: 't-act' }, h('button', {
+          class: 'btn tiny', type: 'button',
+          onclick: () => { el.remove(); opts.action.onclick(); },
+        }, opts.action.label))
+      : null,
   );
   if (opts.key) el.dataset.toastKey = opts.key;
 
@@ -957,7 +972,8 @@ function toast(title, body, kind = '', opts = {}) {
       onclick: () => el.remove(),
     }, icon('x', 14)));
   } else {
-    setTimeout(() => el.remove(), 4200);
+    // Longer when it offers something to press: four seconds is enough to read, not to reach.
+    setTimeout(() => el.remove(), opts.action ? 10_000 : 4200);
   }
   box.append(el);
   return el;
@@ -1092,6 +1108,14 @@ export function closeOverlays() {
 }
 
 $('scrim').addEventListener('click', closeOverlays);
+
+// The run page's More menu closes on a click anywhere outside it, like every menu people know.
+document.addEventListener('click', (e) => {
+  if (state.ai.menu && !(e.target instanceof Element && e.target.closest('.menu-wrap'))) {
+    state.ai.menu = null;
+    render();
+  }
+});
 
 /* ---------------------------------------------------------------------------- derived state */
 
@@ -1347,7 +1371,8 @@ function capturedLogCard(sess) {
       ...['ALL', 'E', 'W', 'I', 'D'].map((lv) => chip(lv, st.level === lv,
         () => { state.capturedLog = { ...st, level: lv }; scheduleRender(); })),
       h('input', {
-        class: 'field mono', type: 'search', placeholder: 'contains…', value: st.query,
+        // The id is what lets `render()` give the keyboard back after each letter re-draws the log.
+        class: 'field mono', id: 'captured-log-query', type: 'search', placeholder: 'contains…', value: st.query,
         oninput: (e) => { state.capturedLog = { ...st, query: e.target.value }; scheduleRender(); },
       }),
     ),
@@ -1925,8 +1950,16 @@ export function parseHash(hash = location.hash) {
   // `#/launch` picks; `#/launch/<sessionId>` watches one come up. The session id is in the URL so
   // that a reload mid-bring-up rejoins the same session rather than allocating a second device.
   if (name === 'launch' && id) return { name: 'launching', id };
-  // `#/ai/<id>` is one AI run; `#/ai` is the form and the list.
-  if (name === 'ai' && id) return { name: 'airun', id };
+  /**
+   * `#/ai` is the list, `#/ai/new` the form and `#/ai/tests` the saved tests (2026-09-27); `#/ai/<id>`
+   * is one run. The list's filters ride in the query — `#/ai?status=failed&q=login` — see
+   * `aiListFilter`. "new" and "tests" can never be a run: a run's id is a uuid.
+   */
+  if (name === 'ai') {
+    if (id === 'new' || id === 'tests') return { name: 'ai', id: null, lens: id, intent };
+    if (id) return { name: 'airun', id, intent };
+    return { name: 'ai', id: null, lens: 'runs', intent };
+  }
   return { name: ROUTES.has(name) ? name : 'fleet', id: null, lens: 'capacity' };
 }
 
@@ -1941,6 +1974,9 @@ export function parseHash(hash = location.hash) {
 function setRoute() {
   state.route = parseHash();
   state.lens = state.route.lens || null;
+  // The AI list's address WITH its filters, so every way back to it — the run page's Back, the
+  // Runs tab, Esc — returns to the list as it was left rather than to an unfiltered one.
+  if (state.route.name === 'ai' && state.route.lens === 'runs') state.ai.listHash = location.hash || '#/ai';
   return state.route;
 }
 
@@ -2011,7 +2047,7 @@ export function loadForRoute() {
   if (name === 'ai') return Promise.all([loadAiRuns(), loadAiPricing(), loadAiTests(), loadAiReadiness(), refreshApps().catch(() => {})]);
   if (name === 'airun') {
     state.ai.stepN = null;
-    return loadAiRun(id);
+    return Promise.all([loadAiRun(id), state.ai.loaded ? null : loadAiRuns()]);
   }
   /**
    * Infrastructure, on arrival as well as on the poll — and here for the reason the tunnels line
@@ -2035,10 +2071,25 @@ export function loadForRoute() {
   return Promise.resolve();
 }
 
+/**
+ * BACK KEEPS YOUR PLACE (2026-09-27, proposal 1). A list left for one of its items is scrolled back to
+ * where it was on the way back. It used to open at the top — above the form and the saved tests, on
+ * the AI page — so reading five failures meant finding your place five times.
+ *
+ * Only list → item → the same list. Anything else is a new screen, and a new screen starts at the top.
+ */
+const LIST_OF = { airun: 'ai', run: 'runs' };
+const listScroll = new Map();
+const listKey = (route) => `${route.name}:${route.lens || ''}`;
+
 window.addEventListener('hashchange', () => {
   const previous = state.route;
+  const scroller = document.querySelector('.main');
+  if (scroller && Object.values(LIST_OF).includes(previous.name)) listScroll.set(listKey(previous), scroller.scrollTop);
   setRoute();
   state.action = null;
+  state.ai.menu = null;
+  if (state.route.name !== 'airun' || state.route.id !== previous.id) state.ai.panel = null;
   closeOverlays();
   // Leaving the cockpit — or opening a DIFFERENT session's cockpit — closes the socket and the peer
   // connection. Without this a person who clicks through three sessions is relaying three video
@@ -2055,10 +2106,16 @@ window.addEventListener('hashchange', () => {
    */
   if (previous.name === 'infra' && state.route.name !== 'infra') closeInfraStream();
   render();
-  // A new screen starts at the top — see `resetScroll`. After `render()`, because it is the render
-  // that replaces the content whose height the scroll position was relative to.
-  resetScroll();
-  loadForRoute().then(render);
+  // A new screen starts at the top — see `resetScroll` — unless this is the way back to a list. After
+  // `render()`, because it is the render that replaces the content whose height the scroll position
+  // was relative to; and again once the route's data lands, if the first paint was too short to hold it.
+  const back = LIST_OF[previous.name] === state.route.name ? listScroll.get(listKey(state.route)) : undefined;
+  if (back === undefined) resetScroll();
+  else if (scroller) { scroller.scrollTop = back; syncScrollShadow(); }
+  loadForRoute().then(() => {
+    render();
+    if (back !== undefined && scroller && scroller.scrollTop < back) scroller.scrollTop = back;
+  });
   if (state.route.name === 'launching') watchBringup(state.route.id);
 });
 
@@ -10867,8 +10924,23 @@ function inField(e) {
   return t.classList.contains('dev-video');
 }
 
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { closeOverlays(); return; }
+/**
+ * THE CONSOLE'S KEYBOARD. Named and exported so a test can press a key: the DOM shim keeps no
+ * document listeners, and a shortcut nobody can press in a test is one nobody knows still works.
+ */
+export function onKeydown(e) {
+  /**
+   * ESCAPE CLOSES THE NEAREST THING, ONE PER PRESS: an overlay, then the run page's menu, then its
+   * panel — and only then does it leave the run for the list (2026-09-27, proposal 4).
+   */
+  if (e.key === 'Escape') {
+    if (!$('palette').hidden || dialogOpen) { closeOverlays(); return; }
+    if (state.ai.menu) { state.ai.menu = null; render(); return; }
+    if (state.ai.panel && state.route.name === 'airun') { closeAiPanel(); return; }
+    if (state.route.name === 'airun' && !inField(e)) { go(state.ai.listHash || '#/ai'); return; }
+    closeOverlays();
+    return;
+  }
   if (e.key === 'Tab' && trapFocus(e)) return;
   if (!state.me) return;
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -10888,6 +10960,21 @@ document.addEventListener('keydown', (e) => {
   }
   if (k === 'g') { gPending = Date.now(); return; }
   gPending = 0;
+
+  // The AI run page (proposal 4): ← and → walk its screens, J and K the runs either side of it —
+  // older and newer, in the order of the list it was opened from.
+  if (state.route.name === 'airun') {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      aiStepBy(e.key === 'ArrowLeft' ? -1 : 1);
+      return;
+    }
+    if (k === 'j' || k === 'k') {
+      const next = aiNeighbours(state.route.id)[k === 'j' ? 'older' : 'newer'];
+      if (next) { e.preventDefault(); go(`#/ai/${next.id}`); }
+      return;
+    }
+  }
 
   // Release, only from the cockpit and only for a session that holds a device — the same guard the
   // button has, because a shortcut that is more powerful than the control it mirrors is a trap.
@@ -10909,7 +10996,8 @@ document.addEventListener('keydown', (e) => {
       setDockTab(tab);
     }
   }
-});
+}
+document.addEventListener('keydown', onKeydown);
 
 /* ---------------------------------------------------------------------------- render */
 
@@ -11293,21 +11381,253 @@ function aiMoney(n) {
   return `${cur}${Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
+/* ----------------------------------------------- the AI testing page, redesigned (2026-09-27) */
+
+/**
+ * THREE SECTIONS, THE LIST FIRST (proposal 2).
+ *
+ * The page used to be one column — the form, then the saved tests, then the runs — so the list began
+ * about 770px down, and a person who opened a run and pressed Back landed on an empty text box. The
+ * list is what people come back to, so it is the page; the form and the saved tests are a click away.
+ *
+ * IN THE URL, like Infrastructure's sections — `#/ai`, `#/ai/new`, `#/ai/tests` — so each one can be
+ * linked, bookmarked, and reached with the browser's own Back.
+ */
+const AI_SECTIONS = [['runs', 'Runs'], ['new', 'New run'], ['tests', 'Saved tests']];
+
+/** How many runs the list asks for. The search reads these, so the page says when it is only these. */
+const AI_LIST_LIMIT = 100;
+
+/**
+ * THE LIST'S FILTERS LIVE IN THE URL (proposal 5) — `#/ai?status=failed&q=login` — and nowhere else,
+ * so Back, Forward, a reload and a pasted link all show the same list. The run page reads the list it
+ * was opened from (`listHash`), which is what makes Newer and Older walk the runs the person was
+ * looking at rather than every run there is.
+ */
+function aiListFilter() {
+  const onList = state.route.name === 'ai' && (state.route.lens || 'runs') === 'runs';
+  const q = (onList ? state.route.intent : parseHash(state.ai.listHash || '#/ai').intent) || {};
+  return {
+    status: AI_FILTERS.some(([k]) => k === q.status) ? q.status : 'all',
+    q: String(q.q || ''),
+    test: String(q.test || ''),
+    build: String(q.build || ''),
+  };
+}
+
+/**
+ * A filter changed. The address is REPLACED, never pushed: a filter is a way of looking at the page,
+ * not a page, and pushing made Back step through every chip pressed and every letter typed before it
+ * ever left the list.
+ */
+function setAiList(patch) {
+  const f = { ...aiListFilter(), ...patch };
+  const qs = new URLSearchParams();
+  if (f.status && f.status !== 'all') qs.set('status', f.status);
+  if (f.q) qs.set('q', f.q);
+  if (f.test) qs.set('test', f.test);
+  if (f.build) qs.set('build', f.build);
+  const query = qs.toString();
+  history.replaceState(null, '', `#/ai${query ? `?${query}` : ''}`);
+  setRoute();
+  render();
+}
+
+function aiMatches(r, f) {
+  if (f.test === 'none' && r.test) return false;
+  if (f.test && f.test !== 'none' && r.test?.id !== f.test) return false;
+  if (f.build && r.appRef !== f.build) return false;
+  if (f.q && !`${r.prompt} ${r.test?.name || ''}`.toLowerCase().includes(f.q.toLowerCase())) return false;
+  return true;
+}
+
+/** Every run the filters let through, newest first — the order Newer and Older walk. */
+function aiFiltered(f = aiListFilter()) {
+  return state.ai.runs.filter((r) => aiMatches(r, f) && aiFilterMatches(f.status, r));
+}
+
+/**
+ * The list as SHOWN: runs still moving are pinned above the rest (proposal 10). The run somebody just
+ * started is the one they are watching, and under "newest first" alone it could sit below a batch of
+ * runs a new upload queued a second later.
+ */
+function aiShownRuns(f = aiListFilter()) {
+  const hits = aiFiltered(f);
+  return [...hits.filter((r) => AI_ACTIVE.has(r.status)), ...hits.filter((r) => !AI_ACTIVE.has(r.status))];
+}
+
+/** A build as a filter names it. A saved test's `<package>@latest` is "the newest build" of it. */
+function aiRefLabel(ref) {
+  const b = aiBuildOf(ref);
+  const latest = /^(.+)@latest$/.exec(String(ref));
+  if (latest) return `${b ? (b.label || b.packageName) : latest[1]} · newest build`;
+  return b ? aiBuildLabel(b) : 'a build no longer in the library';
+}
+
+const aiOneLine = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+
+/** `text` in at most `max` characters, cut at a word where one is near. */
+function aiClip(text, max) {
+  const one = aiOneLine(text);
+  if (one.length <= max) return one;
+  const cut = one.slice(0, max - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,;:.-]+$/, '')}…`;
+}
+
+/** How far a run has got, in the words the list and the run page share. */
+function aiProgress(r) {
+  if (r.status === 'queued') return 'waiting to start';
+  if (AI_ACTIVE.has(r.status)) return `step ${r.steps} of up to ${r.stepCap}`;
+  return `${r.steps} step${r.steps === 1 ? '' : 's'}`;
+}
+
 function screenAi() {
   const ai = state.ai;
   if (!ai.loaded && !ai.loading) void loadAiRuns();
   if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
   if (!ai.testsLoaded && !ai.testsLoading) void loadAiTests();
+  const section = AI_SECTIONS.some(([k]) => k === state.route.lens) ? state.route.lens : 'runs';
+  const off = Boolean(ai.pricing && ai.pricing.configured === false);
+  const moving = ai.runs.filter((r) => AI_ACTIVE.has(r.status)).length;
+  const b = ai.pricing?.budget;
+
+  return [
+    pageHead([{ label: 'Farm' }], 'AI testing',
+      'Describe a test in plain English. A real device does it, and you get the recording, the log and every step.'),
+    h('div', { class: 'row tight mb-gap lensrow', role: 'tablist', 'aria-label': 'AI testing' },
+      AI_SECTIONS.map(([key, label]) => h('button', {
+        type: 'button', role: 'tab', 'aria-selected': String(section === key),
+        class: `lens${section === key ? ' on' : ''}`,
+        // Back to the list AS IT WAS LEFT: its filters are in the address it was left at.
+        onclick: () => go(key === 'runs' ? (ai.listHash || '#/ai') : `#/ai/${key}`),
+      },
+        label,
+        // A count only where it answers a question: what is moving, and how many tests there are.
+        key === 'runs' && moving ? h('span', { class: 'lens-n', title: 'In progress', text: String(moving) }) : null,
+        key === 'tests' && ai.testsLoaded && ai.tests.length ? h('span', { class: 'lens-n', text: String(ai.tests.length) }) : null,
+      ))),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' },
+        section === 'new' ? aiNewRun(off) : section === 'tests' ? aiTestsSection(off) : aiRunsSection()),
+      // The budget is the one side card that changes what somebody does next (proposal 19). "What
+      // it is for" and the MCP pitch were the same paragraphs on every visit; they are under New run.
+      h('div', { class: 'rail' }, b ? aiBudgetCard(b) : null)),
+  ];
+}
+
+function aiBudgetCard(b) {
+  return card('This month', {},
+    h('p', { class: 'ai-metric', text: `${aiMoney(b.spentInr)} of ${aiMoney(b.budgetInr)}` }),
+    h('div', { class: 'meter', role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': String(b.budgetInr),
+      'aria-valuenow': String(b.spentInr), 'aria-label': 'AI budget used' },
+      h('i', {
+        class: b.spentInr >= b.budgetInr * 0.9 ? 'bad' : b.spentInr >= b.budgetInr * 0.7 ? 'warn' : 'ok',
+        style: { width: `${Math.min(100, b.budgetInr ? (b.spentInr / b.budgetInr) * 100 : 100).toFixed(1)}%` },
+      })),
+    h('p', { class: 'caption mt-sm', text: 'A run stops before the step that would go past the budget, '
+      + 'so it can never be exceeded.' }));
+}
+
+/**
+ * THE LIST (proposals 7–10): one line per run, the moving ones first, and a search and two filters
+ * above it that say how many each would show.
+ */
+function aiRunsSection() {
+  const ai = state.ai;
+  if (!ai.loaded) return card(null, {}, h('p', { class: 'caption', text: 'Loading…' }));
+  if (!ai.runs.length) {
+    return card(null, {},
+      empty('No AI runs yet.', 'Describe a test in plain English, and a real device does it.'),
+      h('p', { class: 'mt-sm' }, btn('Start an AI run', 'primary', () => go('#/ai/new'))));
+  }
+  const runs = ai.runs;
+  const f = aiListFilter();
+  // Counted over everything BUT the status, so each chip says how many it would show if pressed.
+  const pool = runs.filter((r) => aiMatches(r, f));
+  const shown = aiShownRuns(f);
+  const tests = [...new Map(runs.filter((r) => r.test).map((r) => [r.test.id, r.test.name])).entries()];
+  const builds = [...new Set(runs.map((r) => r.appRef).filter(Boolean))];
+  const narrowed = f.status !== 'all' || Boolean(f.q || f.test || f.build);
+
+  return card(null, { class: 'ai-list' },
+    h('div', { class: 'row wrap ai-toolbar' },
+      h('div', { class: 'row tight wrap', role: 'group', 'aria-label': 'Show runs' },
+        AI_FILTERS.map(([k, label]) => h('button', {
+          type: 'button', class: `levelchip${f.status === k ? ' on' : ''}`, 'aria-pressed': String(f.status === k),
+          onclick: () => setAiList({ status: k }),
+        }, `${label} ${pool.filter((r) => aiFilterMatches(k, r)).length}`))),
+      h('span', { class: 'spacer' }),
+      h('input', {
+        class: 'field ai-search', id: 'ai-search', type: 'search', placeholder: 'Search tasks',
+        'aria-label': 'Search tasks', autocomplete: 'off', spellcheck: 'false', value: f.q,
+        oninput: (e) => setAiList({ q: e.target.value }),
+      }),
+      tests.length
+        ? h('select', {
+            class: 'field', id: 'ai-filter-test', 'aria-label': 'Saved test',
+            onchange: (e) => setAiList({ test: e.target.value }),
+          },
+            h('option', { value: '', selected: !f.test, text: 'Any saved test' }),
+            tests.map(([id, name]) => h('option', { value: id, selected: f.test === id, text: name })),
+            h('option', { value: 'none', selected: f.test === 'none', text: 'Not a saved test' }))
+        : null,
+      builds.length > 1
+        ? h('select', {
+            class: 'field', id: 'ai-filter-build', 'aria-label': 'App build',
+            onchange: (e) => setAiList({ build: e.target.value }),
+          },
+            h('option', { value: '', selected: !f.build, text: 'Any build' }),
+            builds.map((ref) => h('option', { value: ref, selected: f.build === ref, text: aiRefLabel(ref) })))
+        : null,
+    ),
+    shown.length
+      ? h('div', { class: 'ai-rows', role: 'list' }, shown.map(aiRunRow))
+      : empty('No runs match.', 'Clear the search, or pick All.'),
+    h('div', { class: 'row between mt-sm' },
+      h('span', { class: 'caption', text: `${shown.length} of ${runs.length}${runs.length >= AI_LIST_LIMIT ? ' most recent' : ''} `
+        + `run${runs.length === 1 ? '' : 's'}` }),
+      narrowed ? btn('Clear filters', 'tiny ghost', () => setAiList({ status: 'all', q: '', test: '', build: '' })) : null),
+  );
+}
+
+/**
+ * ONE RUN, ONE LINE (proposals 7 and 8): status · task · build · progress · how long · when — about
+ * 40px where a row used to be 90. What it cost and who started it are on the run's own page; on the
+ * list they were two more things to read past on every row to find the one wanted.
+ *
+ * A LINK, not a button: a run opens in a new tab like any other page, and its address is the run.
+ */
+function aiRunRow(r) {
+  const active = AI_ACTIVE.has(r.status);
+  const build = aiBuildOf(r.appRef);
+  // Why a run has no verdict stays ON the row. It was a tooltip once, and a run that died at once
+  // looked like a run that had never happened (2026-09-26).
+  const why = r.status === 'error' ? aiStopText(r) : null;
+  const from = r.test ? r.test.name : build ? aiBuildLabel(build) : '';
+  return h('a', { class: `airow${active ? ' live' : ''}`, href: `#/ai/${r.id}`, role: 'listitem', title: r.prompt },
+    h('span', { class: 'airow-status' }, aiStatusPill(r)),
+    h('span', { class: 'airow-main' },
+      h('span', { class: 'airow-task', text: aiOneLine(r.prompt) }),
+      why ? h('span', { class: 'airow-why', text: why }) : null),
+    h('span', { class: 'airow-cell airow-from', text: from, title: r.test ? `Saved test · ${r.appRef || 'no build'}` : (build?.packageName || null) }),
+    h('span', { class: 'airow-cell', text: aiProgress(r) }),
+    h('span', { class: 'airow-cell', text: r.startedAt ? lengthInWords(r.startedAt, r.endedAt) : '' }),
+    h('span', { class: 'airow-cell airow-when', text: ago(r.createdAt), title: when(r.createdAt) }),
+  );
+}
+
+/** NEW RUN: the form, the go / no-go, and — collapsed — what an AI run is and the other way in. */
+function aiNewRun(off) {
+  const ai = state.ai;
   const p = ai.pricing;
   const d = ai.draft;
-
   const regions = aiRegionsFor(d.platform);
   const profileSpec = p?.profiles?.[d.profile];
   // A platform this farm has no devices for is shown, and not offered: a run for it would queue
   // until its timeout and end "no device" — a control on a false premise.
   const hasPlatform = (v) => state.devices.some((x) => x.platform === v);
 
-  const off = p && p.configured === false;
   const form = card('New AI run', {},
     off
       ? h('p', { class: 'caption', text: 'AI runs are not switched on for this farm yet. An operator turns them '
@@ -11374,87 +11694,75 @@ function screenAi() {
     ),
   );
 
-  const runs = ai.runs;
-  const filter = AI_FILTERS.some(([k]) => k === ai.filter) ? ai.filter : 'all';
-  const shown = runs.filter((r) => aiFilterMatches(filter, r));
-  const list = card('Recent AI runs', {
-    aside: h('span', { class: 'caption', text: ai.loaded ? `${shown.length} of ${runs.length}` : 'loading…' }),
-  },
-    ai.loaded && runs.length
-      ? h('div', { class: 'row tight wrap mb-sm', role: 'group', 'aria-label': 'Show runs' },
-          AI_FILTERS.map(([k, label]) => h('button', {
-            type: 'button', class: `levelchip${filter === k ? ' on' : ''}`, 'aria-pressed': String(filter === k),
-            onclick: () => { state.ai.filter = k; render(); },
-          }, `${label} ${runs.filter((r) => aiFilterMatches(k, r)).length}`)))
-      : null,
-    !ai.loaded
-      ? h('p', { class: 'caption', text: 'Loading…' })
-      : shown.length
-        ? h('div', { class: 'stack' }, shown.map((r) => {
-            const build = aiBuildOf(r.appRef);
-            return h('button', {
-              type: 'button', class: 'inset row between fit airow', onclick: () => go(`#/ai/${r.id}`),
-            },
-              h('div', { class: 'stack tight shrink' },
-                h('span', { class: 'row tight wrap' }, aiStatusPill(r),
-                  h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' }),
-                  build ? h('span', { class: 'chip', text: aiBuildLabel(build), title: build.packageName }) : null,
-                  r.test ? h('span', { class: 'chip', text: r.test.name }) : null,
-                  r.trigger === 'upload' ? h('span', { class: 'chip', text: 'on upload', title: 'Started by a new build of the app' }) : null),
-                h('p', { class: 'ai-row-prompt', text: r.prompt.length > 160 ? `${r.prompt.slice(0, 160)}…` : r.prompt }),
-                // Why a run has no verdict, on the row — it used to be a tooltip on the pill, so a
-                // run that died at once looked like a run that had never happened.
-                r.status === 'error' ? h('p', { class: 'caption ai-row-why', text: aiStopText(r) }) : null,
-                h('p', { class: 'caption', text: [
-                  `${r.steps} step${r.steps === 1 ? '' : 's'}`,
-                  aiMoney(r.costInr),
-                  `by ${aiStartedBy(r)}`,
-                  when(r.createdAt),
-                ].filter(Boolean).join(' · ') }),
-              ),
-            );
-          }))
-        : runs.length
-          ? empty('No runs match this filter.', 'Pick All to see every run.')
-          : empty('No AI runs yet.', 'Describe a test above and press Start AI run.'),
-  );
+  const about = h('details', { class: 'card ai-about' },
+    h('summary', { class: 'caption', text: 'What an AI run is for, and driving a device from your own AI agent' }),
+    h('p', { class: 'caption mt-sm', text: 'Smoke checks, click-paths your team runs by hand, and exploring a new '
+      + 'build. The agent can take a different path each time, so an AI run is not a CI gate — for that, keep a '
+      + 'scripted suite on the hub.' }),
+    h('p', { class: 'caption mt-sm', text: 'Claude Code, Cursor or any MCP client can borrow a device and drive '
+      + 'it itself. Register the MFARM server once:' }),
+    copyrow('claude mcp add mfarm --env MFARM_API_KEY=mfk_… -- npx -y @mfarm/cli mcp', 'Copy'));
 
-  const b = p?.budget;
-  return [
-    pageHead([{ label: 'Farm' }], 'AI testing',
-      'Describe a test in plain English. A real device does it, and you get the recording, the log and every step.'),
-    h('div', { class: 'split' },
-      h('div', { class: 'content' }, form, aiTestsCard(off), list),
-      h('div', { class: 'rail' },
-        b
-          ? card('This month', {},
-              h('p', { class: 'ai-metric', text: `${aiMoney(b.spentInr)} of ${aiMoney(b.budgetInr)}` }),
-              h('div', { class: 'meter', role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': String(b.budgetInr),
-                'aria-valuenow': String(b.spentInr), 'aria-label': 'AI budget used' },
-                h('i', {
-                  class: b.spentInr >= b.budgetInr * 0.9 ? 'bad' : b.spentInr >= b.budgetInr * 0.7 ? 'warn' : 'ok',
-                  style: { width: `${Math.min(100, b.budgetInr ? (b.spentInr / b.budgetInr) * 100 : 100).toFixed(1)}%` },
-                })),
-              h('p', { class: 'caption mt-sm', text: 'A run stops before the step that would go past the budget, '
-                + 'so it can never be exceeded.' }))
-          : null,
-        card('From your own AI agent', {},
-          h('p', { class: 'caption', text: 'Claude Code, Cursor or any MCP client can borrow a device and drive '
-            + 'it itself. Register the MFARM server once:' }),
-          copyrow('claude mcp add mfarm --env MFARM_API_KEY=mfk_… -- npx -y @mfarm/cli mcp', 'Copy')),
-        card('What it is for', {},
-          h('p', { class: 'caption', text: 'Smoke checks, click-paths your team runs by hand, and exploring a new '
-            + 'build. The agent can take a different path each time, so an AI run is not a CI gate — for '
-            + 'that, keep a scripted suite on the hub.' })),
-      ),
-    ),
-  ];
+  return [form, about];
 }
 
-/** Back to the list, where a person expects it: first on the page, in words (2026-09-26). */
-function aiBackLink() {
-  return h('p', { class: 'backrow' },
-    btn('← All AI runs', 'ghost tiny', () => go('#/ai'), { title: 'Back to AI testing: the form and every run' }));
+function aiTestsSection(off) {
+  const ai = state.ai;
+  if (!ai.testsLoaded) return card(null, {}, h('p', { class: 'caption', text: 'Loading…' }));
+  if (!ai.tests.length) {
+    return card(null, {},
+      empty('No saved tests yet.', 'Write a task under New run and press “Save as a test”: it then runs in one '
+        + 'click, or on every new build of the app.'),
+      h('p', { class: 'mt-sm' }, btn('New run', '', () => go('#/ai/new'))));
+  }
+  return aiTestsCard(off);
+}
+
+/* ------------------------------------------------------------------------------ one AI run */
+
+/**
+ * BACK, AND THE RUNS EITHER SIDE (proposals 1 and 3). Back goes to the list as it was left — its
+ * filters are in the address it was left at, and the scroll position is put back on arrival (see the
+ * `hashchange` handler) — so opening a run and returning costs nothing. Newer and Older walk the same
+ * filtered list, so nobody has to bounce off it to read the next failure.
+ */
+function aiRunNav(r) {
+  const { newer, older } = r ? aiNeighbours(r.id) : { newer: null, older: null };
+  return h('div', { class: 'row between backrow' },
+    btn('← All AI runs', 'ghost tiny', () => go(state.ai.listHash || '#/ai'),
+      { title: 'Back to the list, as you left it (Esc)' }),
+    newer || older
+      ? h('span', { class: 'row tight' },
+          btn('← Newer', 'ghost tiny', () => go(`#/ai/${newer.id}`),
+            { disabled: !newer, title: newer ? `${aiClip(newer.prompt, 80)} (K)` : 'The newest run in the list' }),
+          btn('Older →', 'ghost tiny', () => go(`#/ai/${older.id}`),
+            { disabled: !older, title: older ? `${aiClip(older.prompt, 80)} (J)` : 'The oldest run in the list' }))
+      : null);
+}
+
+function aiNeighbours(id) {
+  const list = aiFiltered(aiListFilter());
+  const i = list.findIndex((x) => x.id === id);
+  return i < 0 ? { newer: null, older: null } : { newer: list[i - 1] || null, older: list[i + 1] || null };
+}
+
+/** The step on show: the one chosen, else the last that has a screen. */
+function aiChosenStep(steps) {
+  return steps.find((s) => s.n === state.ai.stepN) || [...steps].reverse().find((s) => s.screenshotUrl) || null;
+}
+
+/** Previous / Next screen, from the buttons and from ← / →. Only steps WITH a screen, so neither lands on a blank. */
+function aiStepBy(delta) {
+  const det = state.ai.detail;
+  if (!det || det.aiRun?.id !== state.route.id) return;
+  const steps = det.steps || [];
+  const shots = steps.filter((s) => s.screenshotUrl);
+  const i = shots.indexOf(aiChosenStep(steps));
+  const next = shots[i + delta];
+  if (i >= 0 && next) {
+    state.ai.stepN = next.n;
+    render();
+  }
 }
 
 function screenAiRun() {
@@ -11463,11 +11771,13 @@ function screenAiRun() {
   const det = ai.detail?.aiRun?.id === id ? ai.detail : null;
   if (!det && !ai.detailLoading) void loadAiRun(id);
   if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
+  // For Newer / Older on a run opened straight from a link.
+  if (!ai.loaded && !ai.loading) void loadAiRuns();
   if (!det) {
-    return [aiBackLink(), pageHead(null, 'AI run', null), h('p', { class: 'caption', text: 'Loading…' })];
+    return [aiRunNav(null), pageHead(null, 'AI run', null), h('p', { class: 'caption', text: 'Loading…' })];
   }
   if (det.missing) {
-    return [aiBackLink(), pageHead(null, 'AI run', null),
+    return [aiRunNav(null), pageHead(null, 'AI run', null),
       card(null, {}, det.missing === 'not_found'
         ? empty('There is no AI run at this address.',
             'It may belong to another organisation — the API answers those the same way, on purpose — or the link is mistyped.')
@@ -11475,24 +11785,102 @@ function screenAiRun() {
   }
   const r = det.aiRun;
   const steps = det.steps || [];
-  const chosen = steps.find((s) => s.n === ai.stepN) || [...steps].reverse().find((s) => s.screenshotUrl) || null;
+  const chosen = aiChosenStep(steps);
   const active = AI_ACTIVE.has(r.status);
   const concluded = r.status === 'passed' || r.status === 'failed';
-  const detail = !active && !concluded ? aiStopDetail(r) : null;
   const build = aiBuildOf(r.appRef);
 
-  const task = card('Task', {
-    aside: h('span', { class: 'row tight' },
-      h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' }),
-      h('span', { class: 'chip', text: r.platform === 'ios' ? 'iOS' : 'Android' }),
-      build ? h('span', { class: 'chip', text: aiBuildLabel(build), title: build.packageName }) : null),
-  }, h('p', { class: 'ai-task', text: r.prompt }),
-    r.secretsHidden
-      ? h('p', { class: 'caption mt-sm', text: 'Values given as a password, PIN, passcode or code are hidden here and on shared links. '
-          + 'The agent still uses them, and Run again copies them back.' })
-      : null);
+  return [
+    aiRunNav(r),
+    // Proposal 11: the TASK is the title. "AI run" told nobody which run they were looking at, and
+    // the one thing that identifies a run was in a card further down.
+    h('div', { class: 'ai-head' },
+      pageHead(null, aiClip(r.prompt, 180), null, aiRunActions(r, active)),
+      aiFactsLine(r, build),
+      r.secretsHidden
+        ? h('p', { class: 'caption', text: 'Values given as a password, PIN, passcode or code are hidden here and on shared '
+            + 'links (••••). The agent still uses them, and Run again copies them back.' })
+        : null),
+    h('div', { class: 'split' },
+      h('div', { class: 'content' }, aiVerdictCard(r, active, concluded), aiTimeline(steps, chosen, active), aiDetailsCard(r, build)),
+      // Sticky: the steps are a long list and the screen is what choosing one is FOR. It used to
+      // scroll away, so picking step 3 at the bottom changed a picture nobody could see.
+      h('div', { class: 'rail ai-rail' }, aiScreenCard(r, steps, chosen, active))),
+  ];
+}
 
-  const verdict = card('Verdict', { aside: aiStatusPill(r) },
+/** One line under the title: what kind of run, on what, how far and how long (proposal 11). */
+function aiFactsLine(r, build) {
+  const facts = [
+    r.profile === 'pro' ? 'Pro' : 'Flash',
+    r.platform === 'ios' ? 'iOS' : 'Android',
+    build ? aiBuildLabel(build) : r.appRef ? aiRefLabel(r.appRef) : null,
+    aiProgress(r),
+    r.startedAt ? lengthInWords(r.startedAt, r.endedAt) : null,
+    ago(r.createdAt),
+  ].filter(Boolean);
+  return h('p', { class: 'row tight wrap ai-facts' }, aiStatusPill(r), h('span', { class: 'caption', text: facts.join(' · ') }));
+}
+
+/**
+ * THE HEADER'S BUTTONS (proposal 15): Run again, and everything else under More. There were up to
+ * six buttons of equal weight here, and the one pressed most sat last in the row.
+ */
+function aiRunActions(r, active) {
+  return h('span', { class: 'row tight wrap' },
+    active && !r.cancelRequested ? btn('Stop', 'ghost', () => void cancelAiRun(r.id)) : null,
+    btn('Run again', 'primary', () => void aiRunAgain(r), { title: 'A new run with this task, mode and app build — you can edit it first' }),
+    aiMoreMenu(r));
+}
+
+/**
+ * MORE: each entry only when it can work — the exports only for a PASSED run, the one route known to
+ * work; Share only for a verdict. Built only while open, and closed by a choice, a click elsewhere or
+ * Esc (see the document listeners).
+ */
+function aiMoreMenu(r) {
+  const concluded = r.status === 'passed' || r.status === 'failed';
+  const open = state.ai.menu === r.id;
+  const close = () => { state.ai.menu = null; };
+  const item = (label, onclick, title) => h('button', {
+    type: 'button', class: 'menu-item', role: 'menuitem', title: title || null,
+    onclick: () => { close(); onclick(); render(); },
+  }, label);
+  // Plain links for the exports, so the browser downloads with the session cookie.
+  const link = (label, href, title) => h('a', {
+    class: 'menu-item', role: 'menuitem', href, download: '', title,
+    onclick: () => { close(); scheduleRender(); },
+  }, label);
+  const script = (lang) => `/v1/ai/runs/${encodeURIComponent(r.id)}/script?lang=${lang}&origin=${encodeURIComponent(location.origin)}`;
+  const items = [
+    // C10: the verdict is the session's test result, so it shares through the same links every
+    // result does — and the public page shows the task and each step's screen, never typed text.
+    concluded && r.sessionId
+      ? item('Share', () => void shareAiRun(r), 'A link anyone can open: the task, the verdict and each step’s screen. Typed text is hidden.')
+      : null,
+    // C9: the route this run took, as code.
+    r.status === 'passed' ? link('Export WebdriverIO', script('webdriverio'), 'This run’s steps as a WebdriverIO script for the hub — deterministic, and no AI cost to run') : null,
+    r.status === 'passed' ? link('Export pytest', script('python'), 'This run’s steps as a pytest script for the hub') : null,
+    r.sessionId
+      ? item('Open the device session', () => {
+          // Remembered so the session page can lead back here — see `aiRunOfSession`.
+          state.ai.cameFrom = { sessionId: r.sessionId, runId: r.id, prompt: r.prompt };
+          go(`#/sessions/${r.sessionId}`);
+        }, 'The session this run used: every WebDriver command, the log and the recording')
+      : null,
+  ].filter(Boolean);
+  if (!items.length) return null;
+  return h('span', { class: 'menu-wrap' },
+    h('button', {
+      type: 'button', class: `btn ghost${open ? ' on' : ''}`, 'aria-haspopup': 'menu', 'aria-expanded': String(open),
+      onclick: () => { state.ai.menu = open ? null : r.id; render(); },
+    }, 'More'),
+    open ? h('div', { class: 'menu', role: 'menu' }, items) : null);
+}
+
+function aiVerdictCard(r, active, concluded) {
+  const detail = !active && !concluded ? aiStopDetail(r) : null;
+  return card('Verdict', { aside: aiStatusPill(r) },
     concluded
       ? [h('p', { text: r.summary || '' }),
          r.evidence ? h('p', { class: 'caption mt-sm' }, h('span', { class: 'micro', text: 'Evidence ' }), r.evidence) : null]
@@ -11510,8 +11898,24 @@ function screenAiRun() {
                  h('summary', { class: 'caption', text: 'What the server recorded' }),
                  h('p', { class: 'mono caption', text: r.summary }))
              : null],
-    // C8 where the failure is being read. It used to be offered only under results on other pages.
+    // C8 where the failure is being read.
     r.status === 'failed' || (r.status === 'error' && r.steps > 0) ? aiExplainBlock(r.sessionId) : null,
+  );
+}
+
+/**
+ * EVERYTHING ELSE ABOUT THE RUN, COLLAPSED (proposal 11) — the whole task, who started it, the model,
+ * the times and the cost. It was a seven-row table between the verdict and the steps, read by almost
+ * nobody and scrolled past by everybody.
+ */
+function aiDetailsCard(r, build) {
+  const active = AI_ACTIVE.has(r.status);
+  return h('details', { class: 'card ai-details' },
+    h('summary', { class: 'row between' },
+      h('span', { class: 'micro', text: 'Details' }),
+      h('span', { class: 'caption', text: `${aiMoney(r.costInr)} in AI steps · started by ${aiStartedBy(r)}` })),
+    h('p', { class: 'micro mt-md', text: 'Task' }),
+    h('p', { class: 'ai-task', text: r.prompt }),
     kv([
       ['Started by', aiStartedBy(r)],
       ['App build', build ? `${aiBuildLabel(build)} · ${build.packageName}` : (r.appRef || 'None — what was on the device')],
@@ -11520,85 +11924,276 @@ function screenAiRun() {
       ['Model', r.model, true],
       ['Started', r.startedAt ? when(r.startedAt) : '—'],
       ['Ended', r.endedAt ? `${when(r.endedAt)} · took ${lengthInWords(r.startedAt || r.createdAt, r.endedAt)}` : (active ? 'still running' : '—')],
-    ]),
-  );
+    ]));
+}
 
-  const trajectory = card('Steps', { aside: h('span', { class: 'caption', text: `${steps.length}` }) },
+/**
+ * THE STEPS, ONE LINE EACH (proposal 12). Every step's reasoning at once was a wall of prose; it is
+ * shown for the CHOSEN step, under its line, with an error in plain words and the device's own text
+ * one click further. Choosing a step is also what moves the screen beside it.
+ */
+function aiTimeline(steps, chosen, active) {
+  return card('Steps', { aside: h('span', { class: 'caption', text: steps.length ? '← → walk the screens' : '' }) },
     steps.length
       ? h('ol', { class: 'ai-steps' }, steps.map((s) => {
           const failed = aiStepFailed(s);
-          const thought = aiThought(s.thought);
-          return h('li', { class: `ai-step ${chosen?.n === s.n ? 'on' : ''} ${failed ? 'miss' : ''}`.trim() },
+          const on = chosen?.n === s.n;
+          const said = aiActionText(s.action, failed);
+          return h('li', { class: `ai-step${on ? ' on' : ''}${failed ? ' miss' : ''}` },
             h('button', {
-              type: 'button', class: 'ai-step-btn',
+              type: 'button', class: 'ai-step-btn', 'aria-current': on ? 'step' : null,
+              'aria-label': `Step ${s.n}: ${said}`,
               onclick: () => { state.ai.stepN = s.n; render(); },
-              'aria-label': `Show the screen at step ${s.n}`,
             },
               h('span', { class: 'ai-step-n', text: String(s.n) }),
-              h('span', { class: 'stack tight shrink' },
-                h('span', { class: 'row tight' },
-                  h('strong', { text: aiActionText(s.action, failed) }),
-                  failed ? pill('did not work', 'warn', { dot: false }) : null,
-                  s.phase !== 'act' ? h('span', { class: 'chip', text: s.phase }) : null),
-                thought ? h('span', { class: 'caption ai-thought', text: thought }) : null,
-                s.result && s.result !== 'ok'
-                  ? h('span', { class: `caption mono ${failed ? 'ai-step-err' : ''}`.trim(), text: s.result })
-                  : null),
-            ));
+              h('span', { class: 'row tight shrink' },
+                h('strong', { text: said }),
+                failed ? pill('did not work', 'warn', { dot: false }) : null,
+                s.phase !== 'act' ? h('span', { class: 'chip', text: s.phase }) : null)),
+            on ? aiStepBody(s, failed) : null);
         }))
       : h('p', { class: 'caption', text: active ? 'The first step appears once a device is ready.' : 'No steps were taken.' }),
   );
+}
 
+function aiStepBody(s, failed) {
+  const thought = aiThought(s.thought);
+  const raw = String(s.result || '').replace(/^failed:\s*/, '');
+  const words = failed ? aiStepErrorWords(s) : null;
+  const note = !failed && s.result && !['ok', 'passed', 'failed'].includes(s.result) ? s.result : null;
+  return h('div', { class: 'ai-step-body' },
+    thought ? h('p', { class: 'caption ai-thought', text: thought }) : null,
+    words ? h('p', { class: 'ai-step-err', text: words }) : null,
+    failed && raw && raw !== words
+      ? h('details', { class: 'ai-raw' },
+          h('summary', { class: 'caption', text: 'What the device said' }),
+          h('p', { class: 'mono caption', text: raw }))
+      : null,
+    note ? h('p', { class: 'caption mono', text: note }) : null);
+}
+
+/**
+ * A STEP'S FAILURE IN WORDS. The device answers in WebDriver — "The requested resource could not be
+ * found" — which is true and tells a person nothing about their app. Read by the step's tool as well
+ * as the text, because the same 404 means "not on the screen" for a tap and "no field to type into"
+ * for typing (the farm's first typing runs, 2026-09-26). The device's own words stay one click away.
+ */
+function aiStepErrorWords(s) {
+  const raw = String(s?.result || '').replace(/^failed:\s*/, '');
+  const tool = s?.action?.tool;
+  if (/could not be found|no such element|\b404\b/i.test(raw)) {
+    return tool === 'type_text' ? 'There was no text field ready to type into.' : 'What it tried to use was not on the screen.';
+  }
+  if (/stale element/i.test(raw)) return 'The screen changed before the step could act on it.';
+  if (/invalid session id|session (?:is )?(?:ended|deleted|not found)/i.test(raw)) return 'The device session had ended.';
+  if (/timed? ?out/i.test(raw)) return 'The device took too long to answer.';
+  if (/not interactable|not clickable|intercepted/i.test(raw)) return 'It was on the screen, but could not be used.';
+  if (/is off the \d+x\d+ screen/.test(raw)) return 'It aimed outside the screen.';
+  if (/there is no element \[/.test(raw)) return 'It named an element this screen does not have.';
+  return raw.split(/(?<=[.!?])\s/)[0] || 'The step did not work.';
+}
+
+/** The screen at the chosen step, where the agent touched it, and the way to the recording. */
+function aiScreenCard(r, steps, chosen, active) {
   // Previous / Next walk the steps that HAVE a screen, so neither ever lands on a blank panel.
   const shots = steps.filter((s) => s.screenshotUrl);
   const at = chosen ? shots.indexOf(chosen) : -1;
   const stepper = shots.length > 1
     ? h('span', { class: 'row tight' },
-        btn('Previous', 'tiny ghost', () => { state.ai.stepN = shots[at - 1].n; render(); }, { disabled: at <= 0 }),
-        btn('Next', 'tiny ghost', () => { state.ai.stepN = shots[at + 1].n; render(); }, { disabled: at < 0 || at >= shots.length - 1 }))
+        btn('Previous', 'tiny ghost', () => aiStepBy(-1), { disabled: at <= 0, title: 'The screen before (←)' }),
+        btn('Next', 'tiny ghost', () => aiStepBy(1), { disabled: at < 0 || at >= shots.length - 1, title: 'The screen after (→)' }))
     : null;
+  const legend = chosen?.screenshotUrl ? aiMarkLegend(chosen.action, r.platform) : null;
+  return card(chosen ? `Screen at step ${chosen.n}` : 'Screen', { aside: stepper },
+    chosen?.screenshotUrl
+      ? aiShot(chosen, r.platform)
+      : h('p', { class: 'caption', text: active ? 'No screenshot yet.' : 'No screenshot was taken.' }),
+    legend ? h('p', { class: 'caption mt-sm', text: legend }) : null,
+    // Proposal 14: in a panel beside the steps, not a jump to the session cockpit.
+    r.sessionId
+      ? h('p', { class: 'mt-sm' }, btn('Recording & log', 'tiny', () => openAiPanel(r, 'recording'),
+          { title: 'The recording and the device log, in a panel beside the steps' }))
+      : null);
+}
 
-  return [
-    aiBackLink(),
-    pageHead(null, 'AI run', null,
-      h('span', { class: 'row tight wrap' },
-        active && !r.cancelRequested ? btn('Stop', 'ghost', () => void cancelAiRun(r.id)) : null,
-        r.sessionId ? btn('Recording & log', 'ghost', () => {
-          // Remembered so the session page can lead back here — see `aiRunOfSession`.
-          state.ai.cameFrom = { sessionId: r.sessionId, runId: r.id, prompt: r.prompt };
-          go(`#/sessions/${r.sessionId}`);
-        }, { title: 'The device session this run used: video, logcat and every WebDriver command' }) : null,
-        // C9: the route this run took, as code — offered for a PASSED run, because that is the
-        // one known to work. A plain link, so the browser downloads with the session cookie.
-        r.status === 'passed' ? h('a', {
-          class: 'btn ghost', href: `/v1/ai/runs/${encodeURIComponent(r.id)}/script?lang=webdriverio&origin=${encodeURIComponent(location.origin)}`,
-          download: '', title: 'This run’s steps as a WebdriverIO script for the hub — deterministic, and no AI cost to run',
-        }, 'Export WebdriverIO') : null,
-        r.status === 'passed' ? h('a', {
-          class: 'btn ghost', href: `/v1/ai/runs/${encodeURIComponent(r.id)}/script?lang=python&origin=${encodeURIComponent(location.origin)}`,
-          download: '', title: 'This run’s steps as a pytest script for the hub',
-        }, 'Export pytest') : null,
-        // C10: the verdict is the session's test result, so it shares through the same links every
-        // result does — and the public page shows the task and each step's screen, never typed text.
-        concluded && r.sessionId
-          ? btn('Share', 'ghost', () => void shareAiRun(r), {
-              title: 'A link anyone can open: the task, the verdict and each step’s screen. Typed text is hidden.',
-            })
-          : null,
-        btn('Run again', '', () => void aiRunAgain(r), { title: 'A new run with this task, mode and app build — you can edit it first' }),
-      )),
-    h('div', { class: 'split' },
-      h('div', { class: 'content' }, task, verdict, trajectory),
-      // Sticky: the steps are a long list and the screen is what choosing one is FOR. It used to
-      // scroll away, so picking step 3 at the bottom changed a picture nobody could see.
-      h('div', { class: 'rail ai-rail' },
-        card(chosen ? `Screen at step ${chosen.n}` : 'Screen', { aside: stepper },
-          chosen?.screenshotUrl
-            ? h('img', { class: 'ai-shot', src: chosen.screenshotUrl, alt: `The device screen at step ${chosen.n}` })
-            : h('p', { class: 'caption', text: active ? 'No screenshot yet.' : 'No screenshot was taken.' })),
-      ),
-    ),
-  ];
+/**
+ * WHERE THE AGENT TOUCHED THE SCREEN (proposal 13): the element it chose, outlined, and the point
+ * its tap landed, dotted — in the screenshot's own proportions, so the marks sit on the pixels the
+ * step talks about.
+ *
+ * THE COORDINATES ARE THE DEVICE'S: pixels on Android, POINTS on iOS, where the image is two or three
+ * times larger. A step recorded since 2026-09-27 carries the size they are measured against
+ * (`action.screen`); an older Android step is measured against the image itself, which is the same
+ * thing there. An older iOS step gets no marks rather than marks in the wrong place.
+ */
+function aiShot(step, platform) {
+  const img = h('img', { class: 'ai-shot', src: step.screenshotUrl, alt: `The device screen at step ${step.n}` });
+  const marks = aiMarks(step.action);
+  if (!marks.length) return img;
+  const wrap = h('div', { class: 'ai-shot-wrap' }, img);
+  const place = (w, hh) => { for (const m of marks) wrap.append(aiMarkNode(m, w, hh)); };
+  const screen = step.action?.screen;
+  if (screen?.width > 0 && screen?.height > 0) place(screen.width, screen.height);
+  else if (platform !== 'ios') {
+    img.addEventListener('load', () => { if (img.naturalWidth) place(img.naturalWidth, img.naturalHeight); });
+  }
+  return h('div', { class: 'ai-shot-frame' }, wrap);
+}
+
+/** What a step touched, as shapes in the device's coordinates. Empty for steps that touch nothing. */
+export function aiMarks(action) {
+  if (!action) return [];
+  const t = action.target;
+  const i = action.input || {};
+  const out = [];
+  const box = t && Number(t.width) > 0 && Number(t.height) > 0;
+  if (box && (action.tool === 'tap_element' || action.tool === 'type_text')) {
+    out.push({ kind: 'box', x: Number(t.x), y: Number(t.y), w: Number(t.width), h: Number(t.height) });
+  }
+  if (action.tool === 'tap_element' && box) {
+    out.push({ kind: 'tap', x: Number(t.x) + Number(t.width) / 2, y: Number(t.y) + Number(t.height) / 2 });
+  }
+  if (action.tool === 'tap_point' && Number.isFinite(Number(i.x)) && Number.isFinite(Number(i.y))) {
+    out.push({ kind: 'tap', x: Number(i.x), y: Number(i.y) });
+  }
+  return out;
+}
+
+function aiMarkNode(m, width, height) {
+  const pct = (v, of) => `${Math.max(0, Math.min(100, (v / of) * 100)).toFixed(2)}%`;
+  return m.kind === 'box'
+    ? h('span', { class: 'ai-mark-box', 'aria-hidden': 'true',
+        style: { left: pct(m.x, width), top: pct(m.y, height), width: pct(m.w, width), height: pct(m.h, height) } })
+    : h('span', { class: 'ai-mark-tap', 'aria-hidden': 'true', style: { left: pct(m.x, width), top: pct(m.y, height) } });
+}
+
+/** One sentence saying what the marks are — only when there are marks, and only ones that are placed. */
+function aiMarkLegend(action, platform) {
+  const marks = aiMarks(action);
+  if (!marks.length || (platform === 'ios' && !action?.screen)) return null;
+  const name = aiTargetName(action);
+  if (action.tool === 'type_text') return `Outlined: the field it typed into${name ? `, “${name}”` : ''}.`;
+  if (action.tool === 'tap_point') return 'The dot is where it tapped.';
+  return `Outlined: ${name ? `“${name}”, ` : ''}the element it chose. The dot is where its tap landed.`;
+}
+
+/* ----------------------------------------------------- recording & log, beside the run (14) */
+
+function openAiPanel(r, tab) {
+  state.ai.panel = { runId: r.id, sessionId: r.sessionId, tab };
+  if (state.artifacts.sessionId !== r.sessionId || !state.artifacts.loaded) void loadArtifacts(r.sessionId).then(scheduleRender);
+  render();
+}
+
+function closeAiPanel() {
+  state.ai.panel = null;
+  render();
+}
+
+/**
+ * RECORDING & LOG IN A PANEL BESIDE THE RUN (proposal 14). "Recording & log" used to leave for the
+ * session cockpit, which is built for driving a device and is a great deal to take in for a run
+ * that has finished.
+ *
+ * PAINTED OUTSIDE `#main`, into slots `render()` never replaces. A render rebuilds the page wholesale,
+ * and a `<video>` taken out of the document PAUSES — so choosing a step while the recording played
+ * would have stopped it. The recording is rebuilt only when what it shows changes; the log is cheap
+ * and is rebuilt on every paint, so its filters answer as they are typed.
+ */
+const aiPanelSlots = { head: null, body: null, foot: null, key: '' };
+
+export function paintAiPanel() {
+  const box = $('ai-panel');
+  const p = state.ai.panel;
+  const run = state.route.name === 'airun' && p && state.ai.detail?.aiRun?.id === p.runId ? state.ai.detail.aiRun : null;
+  if (!run) {
+    if (!box.hidden) {
+      box.hidden = true;
+      box.replaceChildren();
+      Object.assign(aiPanelSlots, { head: null, body: null, foot: null, key: '' });
+    }
+    return;
+  }
+  if (!aiPanelSlots.head) {
+    aiPanelSlots.head = h('div', { class: 'ai-panel-head' });
+    aiPanelSlots.body = h('div', { class: 'ai-panel-body' });
+    aiPanelSlots.foot = h('div', { class: 'ai-panel-foot' });
+    box.replaceChildren(aiPanelSlots.head, aiPanelSlots.body, aiPanelSlots.foot);
+  }
+  box.hidden = false;
+
+  aiPanelSlots.head.replaceChildren(
+    h('p', { class: 'micro', text: 'This run’s device session' }),
+    h('div', { class: 'row tight lensrow', role: 'tablist', 'aria-label': 'Recording and log' },
+      [['recording', 'Recording'], ['log', 'Log']].map(([k, label]) => h('button', {
+        type: 'button', role: 'tab', 'aria-selected': String(p.tab === k), class: `lens${p.tab === k ? ' on' : ''}`,
+        onclick: () => { state.ai.panel = { ...p, tab: k }; render(); },
+      }, label))),
+    h('span', { class: 'spacer' }),
+    h('button', { type: 'button', class: 'btn tiny ghost', title: 'Close (Esc)', 'aria-label': 'Close', onclick: closeAiPanel }, icon('x', 14)));
+
+  const mine = state.artifacts.sessionId === p.sessionId && state.artifacts.loaded;
+  if (p.tab === 'recording') {
+    const video = mine ? state.artifacts.items.find((a) => a.kind === 'video') : null;
+    const key = `rec:${p.sessionId}:${video ? video.id : mine ? 'none' : 'loading'}`;
+    if (key !== aiPanelSlots.key) {
+      aiPanelSlots.key = key;
+      aiPanelSlots.body.replaceChildren(!mine
+        ? h('p', { class: 'caption', text: 'Loading…' })
+        : video
+          ? videoPlayer(video, [])
+          : h('p', { class: 'caption', text: 'No recording was kept for this run — recording may be off on this farm, '
+              + 'or it has passed its retention window. The log may still be there.' }));
+    }
+  } else {
+    aiPanelSlots.key = '';
+    aiPanelSlots.body.replaceChildren(mine ? capturedLogCard({ id: p.sessionId }) : h('p', { class: 'caption', text: 'Loading…' }));
+  }
+
+  aiPanelSlots.foot.replaceChildren(btn('Open the whole device session', 'tiny ghost', () => {
+    state.ai.cameFrom = { sessionId: p.sessionId, runId: run.id, prompt: run.prompt };
+    state.ai.panel = null;
+    go(`#/sessions/${p.sessionId}`);
+  }, { title: 'Every WebDriver command, the log and the recording, in the session view' }));
+}
+
+/* --------------------------------------------------------------- a run finished elsewhere (20) */
+
+/**
+ * A RUN SOMEBODY STARTED, FINISHING WHILE THEY LOOK AT SOMETHING ELSE (proposal 20).
+ *
+ * A run takes minutes. Nobody should have to sit on its page, or keep going back to the list, to learn
+ * how it ended — so the runs this tab started, or watched while they were moving, are checked on the
+ * poll wherever the person is, and each one's end is said once, with a way to it. On the run's own
+ * page the verdict is already on screen, so nothing is said there.
+ */
+function watchAiRun(id, label) {
+  if (id) state.ai.watch[id] = aiClip(label, 90);
+}
+
+export async function checkWatchedRuns() {
+  const ids = Object.keys(state.ai.watch);
+  if (!ids.length) return;
+  let runs = state.ai.runs;
+  // The list is already fresh on its own page — the poll just reloaded it. Anywhere else, one read.
+  if (state.route.name !== 'ai') {
+    try {
+      runs = (await api('/v1/ai/runs?limit=25')).aiRuns || [];
+    } catch {
+      return;
+    }
+  }
+  for (const id of ids) {
+    const r = runs.find((x) => x.id === id);
+    if (!r || AI_ACTIVE.has(r.status)) continue;
+    const label = state.ai.watch[id];
+    delete state.ai.watch[id];
+    if (state.route.name === 'airun' && state.route.id === id) continue;
+    const [verdict, tone] = {
+      passed: ['passed', 'ok'], failed: ['failed', 'bad'], cancelled: ['was cancelled', ''],
+    }[r.status] || ['ended without a verdict', 'warn'];
+    toast(`AI run ${verdict}`, label, tone, { key: `ai-done-${id}`, action: { label: 'Open', onclick: () => go(`#/ai/${id}`) } });
+  }
 }
 
 /**
@@ -11622,7 +12217,7 @@ async function aiRunAgain(r) {
     appId: build ? build.id : '', region: r.region || '',
   };
   toast('Copied into a new run', 'Check the task, then press Start AI run.', '');
-  go('#/ai');
+  go('#/ai/new');
   setTimeout(() => document.getElementById('ai-prompt')?.focus(), 0);
 }
 
@@ -11666,32 +12261,112 @@ function aiSaveRow(off) {
 
 function aiTestsCard(off) {
   const ai = state.ai;
-  if (!ai.testsLoaded) return null;
-  if (!ai.tests.length) return null;
+  if (!ai.testsLoaded || !ai.tests.length) return null;
   // One sentence for the whole card, not a tooltip on each button: the reason is the same for all.
   const blocked = aiBlocked();
   return card('Saved tests', { aside: h('span', { class: 'caption', text: `${ai.tests.length}` }) },
     blocked ? h('p', { class: 'caption ai-row-why mb-sm', text: `Paused: ${blocked.message}` }) : null,
-    h('div', { class: 'stack' }, ai.tests.map((t) => h('div', { class: 'inset row between fit' },
+    h('div', { class: 'stack' }, ai.tests.map((t) => (ai.edit?.id === t.id ? aiTestEditor(t) : h('div', { class: 'inset row between fit' },
       h('div', { class: 'stack tight shrink' },
         h('span', { class: 'row tight' },
           h('strong', { text: t.name }),
           h('span', { class: 'chip', text: t.profile === 'pro' ? 'Pro' : 'Flash' }),
           t.runOnUpload ? h('span', { class: 'chip', text: 'every upload', title: `Runs on each new build of ${t.appPackage}` }) : null),
-        h('p', { class: 'caption ai-row-prompt', text: t.prompt.length > 140 ? `${t.prompt.slice(0, 140)}\u2026` : t.prompt }),
+        h('p', { class: 'caption ai-row-prompt', text: t.prompt.length > 140 ? `${t.prompt.slice(0, 140)}…` : t.prompt }),
         // The last ten verdicts, newest first — "has this been passing?" at a glance.
         t.recent.length
           ? h('span', { class: 'row tight', 'aria-label': 'Recent results, newest first' },
               t.recent.map((r) => h('button', {
-                type: 'button', class: `ai-dot ${r.status}`, title: `${r.status} \u00b7 ${when(r.at)}`,
+                type: 'button', class: `ai-dot ${r.status}`, title: `${r.status} · ${when(r.at)}`,
                 'aria-label': `${r.status}, ${when(r.at)}`, onclick: () => go(`#/ai/${r.id}`),
               })))
           : h('span', { class: 'caption', text: 'Never run' }),
       ),
       h('span', { class: 'row tight' },
         btn('Run', '', () => void runAiTest(t), { disabled: off || Boolean(blocked), title: blocked?.message || null }),
+        btn('Edit', 'tiny ghost', () => void editAiTest(t), { disabled: off || Boolean(ai.edit), title: 'Change its name, task, mode or run-on-upload' }),
         btn('Archive', 'tiny ghost', () => void archiveAiTest(t), { title: 'Hide it; its past runs keep its name' })),
-    ))));
+    )))));
+}
+
+/**
+ * EDITING A SAVED TEST IN PLACE (2026-09-27, proposal 18). It could only be Run or Archived, so a
+ * typo in a task meant archiving the test — and its history with it — and saving a new one.
+ *
+ * A task with hidden values is read back WHOLE before the box opens: the list shows it masked, and a
+ * box started from the masked text would save "••••" over the PIN. The server refuses that too.
+ */
+function aiTestEditor(t) {
+  const ed = state.ai.edit;
+  const set = (patch) => { state.ai.edit = { ...state.ai.edit, ...patch }; };
+  return h('div', { class: 'inset stack tight' },
+    h('label', { class: 'micro', for: 'ai-edit-name', text: 'Test name' }),
+    h('input', {
+      class: 'field', id: 'ai-edit-name', maxlength: '120', autocomplete: 'off', value: ed.name,
+      oninput: (e) => set({ name: e.target.value }),
+    }),
+    h('label', { class: 'micro mt-sm', for: 'ai-edit-prompt', text: 'What should happen' }),
+    ed.loading
+      ? h('p', { class: 'caption', text: 'Reading the whole task…' })
+      : h('textarea', {
+          class: 'field ai-prompt', id: 'ai-edit-prompt', rows: '4', maxlength: '4000',
+          oninput: (e) => set({ prompt: e.target.value }),
+        }, ed.prompt),
+    h('div', { class: 'row lensrow mt-sm', role: 'radiogroup', 'aria-label': 'Mode' },
+      ['flash', 'pro'].map((k) => h('button', {
+        type: 'button', role: 'radio', 'aria-checked': String(ed.profile === k), class: `lens${ed.profile === k ? ' on' : ''}`,
+        onclick: () => { set({ profile: k }); render(); },
+      }, k === 'flash' ? 'Flash' : 'Pro'))),
+    t.appPackage
+      ? h('label', { class: 'row tight caption' },
+          h('input', { type: 'checkbox', checked: ed.runOnUpload, onchange: (e) => set({ runOnUpload: e.target.checked }) }),
+          `Run it on every new build of ${t.appPackage}`)
+      : null,
+    h('span', { class: 'row tight mt-sm' },
+      btn(ed.busy ? 'Saving…' : 'Save changes', 'primary', () => void saveAiTestEdit(t),
+        { disabled: ed.busy || ed.loading || !ed.name.trim() || !ed.prompt.trim() }),
+      btn('Cancel', 'ghost', () => { state.ai.edit = null; render(); })),
+    h('p', { class: 'caption', text: 'Its past runs keep the task they ran; the next run uses this one.' }),
+  );
+}
+
+async function editAiTest(t) {
+  state.ai.edit = { id: t.id, name: t.name, prompt: t.prompt, profile: t.profile, runOnUpload: t.runOnUpload,
+    busy: false, loading: Boolean(t.secretsHidden) };
+  render();
+  if (!t.secretsHidden) return;
+  try {
+    const out = await api(`/v1/ai/tests/${encodeURIComponent(t.id)}/prompt`);
+    if (state.ai.edit?.id === t.id) state.ai.edit = { ...state.ai.edit, prompt: out.prompt, loading: false };
+  } catch (e) {
+    state.ai.edit = null;
+    toast('Could not open the test for editing', `${e.message} Its task has hidden values, and editing the `
+      + 'masked text would save the dots in place of them.', 'bad');
+  }
+  render();
+}
+
+async function saveAiTestEdit(t) {
+  const ed = state.ai.edit;
+  state.ai.edit = { ...ed, busy: true };
+  render();
+  try {
+    await api(`/v1/ai/tests/${encodeURIComponent(t.id)}`, {
+      method: 'PATCH',
+      body: {
+        name: ed.name.trim(), prompt: ed.prompt.trim(), profile: ed.profile,
+        ...(t.appPackage ? { runOnUpload: ed.runOnUpload } : {}),
+      },
+    });
+    toast('Test saved', `“${ed.name.trim()}” is updated. Its next run uses the new task.`, 'ok');
+    state.ai.edit = null;
+    state.ai.testsLoaded = false;
+    await loadAiTests();
+  } catch (e) {
+    if (state.ai.edit) state.ai.edit = { ...state.ai.edit, busy: false };
+    toast('Could not save the test', e.message, 'bad');
+  }
+  render();
 }
 
 async function saveAiTest() {
@@ -11726,6 +12401,7 @@ async function runAiTest(t) {
   try {
     const out = await api(`/v1/ai/tests/${encodeURIComponent(t.id)}/run`, { method: 'POST', body: {} });
     toast('AI run queued', `\u201c${t.name}\u201d starts as soon as a device is free.`, 'ok');
+    watchAiRun(out.aiRun.id, t.name);
     state.ai.loaded = false;
     state.ai.testsLoaded = false;
     go(`#/ai/${out.aiRun.id}`);
@@ -11864,6 +12540,7 @@ async function startAiRun() {
     });
     state.ai.draft = { ...state.ai.draft, prompt: '' };
     toast('AI run queued', 'It starts as soon as a device is free. The steps appear as it works.', 'ok');
+    watchAiRun(out.aiRun.id, d.prompt);
     state.ai.loaded = false;
     go(`#/ai/${out.aiRun.id}`);
   } catch (e) {
@@ -11985,7 +12662,7 @@ async function loadAiRuns() {
   if (state.ai.loading) return;
   state.ai = { ...state.ai, loading: true };
   try {
-    const out = await api('/v1/ai/runs');
+    const out = await api(`/v1/ai/runs?limit=${AI_LIST_LIMIT}`);
     state.ai = { ...state.ai, runs: out.aiRuns || [], loaded: true, loading: false };
   } catch {
     // Loaded-with-nothing, not left unloaded — the Tunnels reason: an unloaded screen re-fetches on
@@ -12022,6 +12699,7 @@ async function loadAiRun(id) {
   try {
     const out = await api(`/v1/ai/runs/${encodeURIComponent(id)}`);
     state.ai = { ...state.ai, detail: { ...out, fetchedAt: Date.now() }, detailLoading: false };
+    if (AI_ACTIVE.has(out.aiRun?.status)) watchAiRun(out.aiRun.id, out.aiRun.prompt);
   } catch (e) {
     // NOT a run. This used to fabricate one — "no verdict", "Started by an API key", a Run again that
     // would copy an empty task — for a link that named no run at all (found 2026-09-26).
@@ -12892,6 +13570,42 @@ for (const ev of ['pointerup', 'pointercancel']) {
  * when `render` is on both ends of it, so a test that calls screen functions cannot see it — which
  * is exactly how a tab-pinning loop shipped in `screenInfra` and was found by opening the page.
  */
+/**
+ * WHAT THE BROWSER TAB SAYS (2026-09-27, proposal 6). Every tab of this console read "MFARM Console",
+ * so three runs open side by side were three identical tabs, and the history menu was a column of the
+ * same words. A page's own name first, then the product — the part a narrow tab keeps is the useful one.
+ */
+const PAGE_TITLES = {
+  fleet: 'Fleet', devices: 'Devices', apps: 'Apps', sessions: 'Sessions', runs: 'Runs', queue: 'Queue',
+  health: 'Health', launch: 'Start a device', launching: 'Starting a device', agents: 'Agents',
+  tunnels: 'Tunnels', team: 'Team', settings: 'Settings', infra: 'Infrastructure', ai: 'AI testing',
+};
+
+export function documentTitle() {
+  const r = state.route || {};
+  let title = PAGE_TITLES[r.name] || 'Console';
+  if (r.name === 'airun') {
+    const run = state.ai.detail?.aiRun?.id === r.id ? state.ai.detail.aiRun : null;
+    // Masked by the API before it ever gets here, so a PIN in a task never reaches a tab or history.
+    title = run?.prompt ? `AI run · ${aiClip(run.prompt, 60)}` : 'AI run';
+  } else if (r.name === 'ai') {
+    title = r.lens === 'new' ? 'New AI run' : r.lens === 'tests' ? 'Saved AI tests' : 'AI testing';
+  } else if (r.name === 'run') {
+    title = `Run ${state.runDetail?.run?.runId || String(r.id || '').slice(0, 8)}`;
+  } else if (r.name === 'cockpit') {
+    const sess = state.sessions.find((x) => x.id === r.id) || (state.detail?.id === r.id ? state.detail : null);
+    title = sess ? `Session · ${deviceLabel(sess)}` : 'Session';
+  } else if (r.name === 'device') {
+    const d = deviceById(r.id);
+    title = d ? `Device · ${deviceName(d)}` : 'Device';
+  } else if (r.name === 'infra' && r.lens && r.lens !== 'overview') {
+    title = `Infrastructure · ${(INFRA_SECTIONS.find(([k]) => k === r.lens) || [])[1] || r.lens}`;
+  } else if (r.name === 'fleet' && r.lens && r.lens !== 'capacity') {
+    title = `Fleet · ${(LENSES.find(([k]) => k === r.lens) || [])[1] || r.lens}`;
+  }
+  return `${title} · MFARM`;
+}
+
 export function render() {
   if (!state.me) return;
   if (pointerDown) { renderQueued = true; return; }
@@ -12926,6 +13640,8 @@ export function render() {
   paintLog();
   paintVitals();
   paintHighlight();
+  paintAiPanel();
+  document.title = documentTitle();
 
   // Put the keyboard back where it was. `preventScroll` because the device panel may sit below the
   // fold on a short window, and yanking the page to it every five seconds is its own bug.
@@ -13096,6 +13812,8 @@ function startPoll() {
           && AI_ACTIVE.has(state.ai.detail.aiRun.status)) {
         await loadAiRun(state.route.id);
       }
+      // Proposal 20: a run this tab started or watched, finishing while the person is elsewhere.
+      await checkWatchedRuns();
       await refreshHeld();
       if (state.route.name === 'cockpit' && state.detail?.id === state.route.id
           && Date.now() - (state.detail.fetchedAt || 0) > 10_000) {
