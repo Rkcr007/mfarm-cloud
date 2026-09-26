@@ -11453,6 +11453,13 @@ function screenAiRun() {
   if (!det) {
     return [aiBackLink(), pageHead(null, 'AI run', null), h('p', { class: 'caption', text: 'Loading…' })];
   }
+  if (det.missing) {
+    return [aiBackLink(), pageHead(null, 'AI run', null),
+      card(null, {}, det.missing === 'not_found'
+        ? empty('There is no AI run at this address.',
+            'It may belong to another organisation — the API answers those the same way, on purpose — or the link is mistyped.')
+        : empty('This AI run could not be loaded.', det.message || 'Try again in a moment.'))];
+  }
   const r = det.aiRun;
   const steps = det.steps || [];
   const chosen = steps.find((s) => s.n === ai.stepN) || [...steps].reverse().find((s) => s.screenshotUrl) || null;
@@ -11466,7 +11473,11 @@ function screenAiRun() {
       h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' }),
       h('span', { class: 'chip', text: r.platform === 'ios' ? 'iOS' : 'Android' }),
       build ? h('span', { class: 'chip', text: aiBuildLabel(build), title: build.packageName }) : null),
-  }, h('p', { class: 'ai-task', text: r.prompt }));
+  }, h('p', { class: 'ai-task', text: r.prompt }),
+    r.secretsHidden
+      ? h('p', { class: 'caption mt-sm', text: 'Values given as a password, PIN, passcode or code are hidden here and on shared links. '
+          + 'The agent still uses them, and Run again copies them back.' })
+      : null);
 
   const verdict = card('Verdict', { aside: aiStatusPill(r) },
     concluded
@@ -11561,7 +11572,7 @@ function screenAiRun() {
               title: 'A link anyone can open: the task, the verdict and each step’s screen. Typed text is hidden.',
             })
           : null,
-        btn('Run again', '', () => aiRunAgain(r), { title: 'A new run with this task, mode and app build — you can edit it first' }),
+        btn('Run again', '', () => void aiRunAgain(r), { title: 'A new run with this task, mode and app build — you can edit it first' }),
       )),
     h('div', { class: 'split' },
       h('div', { class: 'content' }, task, verdict, trajectory),
@@ -11582,10 +11593,19 @@ function screenAiRun() {
  * It used to clear the build, so a run against an uploaded app came back as a run against whatever
  * happened to be on the device — the one thing the person was testing, silently gone.
  */
-function aiRunAgain(r) {
+async function aiRunAgain(r) {
   const build = aiBuildOf(r.appRef);
+  // The page shows the task MASKED; the edit box needs it whole, or the new run would type "••••".
+  let prompt = r.prompt;
+  if (r.secretsHidden) {
+    try {
+      prompt = (await api(`/v1/ai/runs/${encodeURIComponent(r.id)}/prompt`)).prompt;
+    } catch (e) {
+      toast('Could not copy the hidden values', `${e.message} The task is copied with them masked — type them again.`, 'bad');
+    }
+  }
   state.ai.draft = {
-    ...state.ai.draft, prompt: r.prompt, profile: r.profile, platform: r.platform,
+    ...state.ai.draft, prompt, profile: r.profile, platform: r.platform,
     appId: build ? build.id : '', region: r.region || '',
   };
   toast('Copied into a new run', 'Check the task, then press Start AI run.', '');
@@ -11990,8 +12010,10 @@ async function loadAiRun(id) {
     const out = await api(`/v1/ai/runs/${encodeURIComponent(id)}`);
     state.ai = { ...state.ai, detail: { ...out, fetchedAt: Date.now() }, detailLoading: false };
   } catch (e) {
+    // NOT a run. This used to fabricate one — "no verdict", "Started by an API key", a Run again that
+    // would copy an empty task — for a link that named no run at all (found 2026-09-26).
     state.ai = { ...state.ai, detailLoading: false,
-      detail: { aiRun: { id, status: 'error', stopReason: null, summary: e.message, prompt: '', steps: 0, stepCap: 0, costInr: 0 }, steps: [] } };
+      detail: { aiRun: { id }, missing: e.status === 404 ? 'not_found' : 'error', message: e.message, steps: [] } };
   }
   scheduleRender();
 }

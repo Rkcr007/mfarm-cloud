@@ -28,7 +28,7 @@ import { withSystem, closePools } from '../src/db.ts';
 import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { upsertUser, cookieValue } from '../src/users.ts';
 import { AI_PROFILES } from '../src/ai/pricing.ts';
-import { expireAiScreenshots, aiStepStore } from '../src/ai/runner.ts';
+import { expireAiScreenshots, aiStepStore, renameStoredAiRuns } from '../src/ai/runner.ts';
 import { AI_DIAGNOSE_PRICE_INR } from '../src/ai/pricing.ts';
 import { appStore } from '../src/appstore.ts';
 import { drainCommandLog } from '../src/commandLog.ts';
@@ -1060,5 +1060,94 @@ describe('nothing is started that cannot finish (ADR-0044)', () => {
     } finally {
       resetProviderHealth();
     }
+  });
+});
+
+describe('what an AI run shows, and to whom (2026-09-26)', () => {
+  // The shape of the task that leaked on the farm: an account, a PIN, a passcode.
+  const TASK = 'Log in with pin : 0987 and passcode as : 268426 on the account qa@example.com, then open Settings';
+  const leaks = /0987|268426/;
+
+  async function maskedRun() {
+    scripts.set('Log in with pin', [
+      { tool: 'tap_element', input: { index: 0, why: 'the pin field' } },
+      { tool: 'type_text', input: { text: '0987', submit: false, why: 'enter 0987' } },
+      { tool: 'finish', input: { passed: true, summary: 'Logged in with 0987', evidence: 'Welcome qa@example.com', why: 'done' } },
+    ]);
+    const { body } = await startRun({ prompt: TASK, region: REGION });
+    return settle(body.aiRun.id);
+  }
+
+  test('the task, the typed step, the summary and the names are masked; the owner reads the task back whole', async () => {
+    await resetFleet();
+    const done = await maskedRun();
+    assert.equal(done.aiRun.status, 'passed');
+    const id = (done.aiRun as unknown as { id: string }).id ?? (await withSystem(async (c) =>
+      (await c.query('SELECT id FROM ai_runs WHERE session_id = $1', [done.aiRun.sessionId])).rows[0].id));
+
+    const list = (await app.inject({ method: 'GET', url: '/v1/ai/runs', headers: auth(keyA) })).json() as { aiRuns: { id: string; prompt: string; secretsHidden: boolean }[] };
+    const row = list.aiRuns.find((r) => r.id === id)!;
+    assert.doesNotMatch(row.prompt, leaks, 'the list');
+    assert.equal(row.secretsHidden, true, 'and it says something was hidden');
+
+    const detail = (await app.inject({ method: 'GET', url: `/v1/ai/runs/${id}`, headers: auth(keyA) })).json() as {
+      aiRun: { prompt: string; summary: string }; steps: { thought: string | null; action: unknown }[] };
+    assert.doesNotMatch(detail.aiRun.prompt, leaks, 'the run page');
+    assert.doesNotMatch(detail.aiRun.summary, leaks, 'the summary — the model repeated it');
+    assert.doesNotMatch(JSON.stringify(detail.steps), leaks, 'the typed step and the reasoning');
+
+    const whole = await app.inject({ method: 'GET', url: `/v1/ai/runs/${id}/prompt`, headers: auth(keyA) });
+    assert.equal(whole.statusCode, 200);
+    assert.equal((whole.json() as { prompt: string }).prompt, TASK, 'Run again copies the real values back');
+    assert.equal((await app.inject({ method: 'GET', url: `/v1/ai/runs/${id}/prompt`, headers: auth(keyB) })).statusCode, 404,
+      'and only to the org that owns it');
+
+    const names = await withSystem(async (c) => (await c.query(
+      `SELECT (SELECT name FROM runs WHERE id = r.run_id) AS run, (SELECT name FROM sessions WHERE id = r.session_id) AS session,
+              (SELECT name FROM test_results WHERE session_id = r.session_id LIMIT 1) AS result
+         FROM ai_runs r WHERE r.id = $1`, [id])).rows[0]);
+    for (const [where, name] of Object.entries(names)) {
+      assert.ok(name, `${where} has a name`);
+      assert.doesNotMatch(String(name), leaks, `the ${where} name — the Runs page shows it`);
+      assert.match(String(name), /^AI: /);
+    }
+  });
+
+  test('a stranger holding a share link sees neither the secrets nor the account\'s e-mail', async () => {
+    await resetFleet();
+    const done = await maskedRun();
+    const results = (await app.inject({ method: 'GET', url: `/v1/sessions/${done.aiRun.sessionId}/results`, headers: auth(keyA) }))
+      .json() as { results: { id: string; name: string }[] };
+    const result = results.results.find((r) => r.name.startsWith('AI:'))!;
+    const share = (await app.inject({ method: 'POST', url: `/v1/results/${result.id}/shares`, headers: auth(keyA), payload: {} }))
+      .json() as { token: string };
+    const page = await app.inject({ method: 'GET', url: `/v1/shares/${share.token}` });
+    assert.equal(page.statusCode, 200);
+    assert.doesNotMatch(page.body, /0987|268426/, 'the public page — where the PIN used to be printed in full');
+    assert.doesNotMatch(page.body, /qa@example\.com/, 'nor the account it logs into');
+    assert.match(page.body, /Log in with pin/, 'the task itself is still the test, and is shown');
+  });
+
+  test('names written before this fix are masked and re-clipped when the server starts', async () => {
+    await resetFleet();
+    const done = await maskedRun();
+    // Put back what the old runner wrote: the task's first 80 characters, verbatim, cut mid-word.
+    const old = `AI: ${TASK.slice(0, 80)}`;
+    await withSystem(async (c) => {
+      const r = (await c.query('SELECT run_id, session_id FROM ai_runs WHERE session_id = $1', [done.aiRun.sessionId])).rows[0];
+      await c.query('UPDATE runs SET name = $2 WHERE id = $1', [r.run_id, old]);
+      await c.query('UPDATE sessions SET name = $2 WHERE id = $1', [r.session_id, old]);
+      await c.query(`UPDATE test_results SET name = $2 WHERE session_id = $1 AND name LIKE 'AI:%'`, [r.session_id, old]);
+    });
+    assert.ok((await renameStoredAiRuns()) >= 3, 'three names rewritten');
+    const after = await withSystem(async (c) => (await c.query(
+      `SELECT (SELECT name FROM runs WHERE id = r.run_id) AS run, (SELECT name FROM sessions WHERE id = r.session_id) AS session
+         FROM ai_runs r WHERE r.session_id = $1`, [done.aiRun.sessionId])).rows[0]);
+    assert.doesNotMatch(after.run, leaks);
+    assert.doesNotMatch(after.session, leaks);
+    assert.equal(await renameStoredAiRuns() >= 0, true);
+    const again = await withSystem(async (c) => (await c.query(
+      'SELECT name FROM runs WHERE id = (SELECT run_id FROM ai_runs WHERE session_id = $1)', [done.aiRun.sessionId])).rows[0].name);
+    assert.equal(again, after.run, 'idempotent: a second boot changes nothing');
   });
 });

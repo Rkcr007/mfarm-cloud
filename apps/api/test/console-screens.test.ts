@@ -6399,6 +6399,29 @@ describe('the AI testing screen', () => {
     assert.equal(findByText(tree, 'Start AI run').disabled, false, 'the doors still check, server-side');
   });
 
+  test('a link to no AI run says so — it used to draw a fake run with a verdict and a Run again', () => {
+    seed({ name: 'airun', id: 'no-such-run' });
+    mod.state.ai = aiState({ detail: { aiRun: { id: 'no-such-run' }, missing: 'not_found', message: 'AI run not found.', steps: [] } });
+    const tree = mod.SCREENS.airun();
+    const text = textOf(tree);
+    assert.match(text, /There is no AI run at this address/);
+    assert.doesNotMatch(text, /no verdict|Started by|Run again/i, 'nothing that describes a run that does not exist');
+    assert.ok(findByText(tree, 'All AI runs'), 'and the way back is still there');
+  });
+
+  test('a task with hidden values says so, and Run again copies the real values back', async () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const run = aiRun({ prompt: 'Log in with pin : ••••', secretsHidden: true });
+    mod.state.ai = aiState({ detail: { aiRun: run, steps: [], fetchedAt: Date.now() } });
+    assert.match(textOf(mod.SCREENS.airun()), /hidden here and on shared links/);
+
+    const sent = capture({ prompt: 'Log in with pin : 0987' });
+    findByText(mod.SCREENS.airun(), 'Run again').click();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(sent.some((x) => x.url === '/v1/ai/runs/air-1/prompt'), 'the whole task, asked for');
+    assert.equal(mod.state.ai.draft.prompt, 'Log in with pin : 0987', 'not "••••", which the app would have been typed');
+  });
+
   test('a platform this farm has no devices for is shown, and cannot be picked', () => {
     seed({ name: 'ai' });
     const ios = findByText(mod.SCREENS.ai(), 'iOS', 'option');

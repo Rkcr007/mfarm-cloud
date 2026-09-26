@@ -13,6 +13,7 @@ import { exportScript, type ScriptLang, type ExportStep } from '../../ai/export.
 import type { Model } from '../../ai/agent.ts';
 import { configuredSlots } from '../../ai/provider.ts';
 import { aiReadiness } from '../../ai/readiness.ts';
+import { redact, redactDeep, secretsIn, stripToolMarkup } from '../../ai/secrets.ts';
 import type { QueueGate } from '../../ai/queue.ts';
 
 /**
@@ -54,10 +55,17 @@ const RUN_COLUMNS = `r.id, r.prompt, r.profile, r.platform, r.region, r.app_ref,
   r.created_at, r.started_at, r.ended_at, r.cancel_requested_at, u.email AS created_by_email,
   r.ai_test_id, r.trigger, (SELECT t.name FROM ai_tests t WHERE t.id = r.ai_test_id) AS test_name`;
 
+/**
+ * A run as the API shows it: the task and everything the agent said about it MASKED (secrets.ts).
+ * The whole task is read back only through `GET /v1/ai/runs/:id/prompt`, by the org that owns it.
+ */
 function runJson(r: RunRow) {
+  const secrets = secretsIn(r.prompt);
   return {
     id: r.id,
-    prompt: r.prompt,
+    prompt: redact(r.prompt, secrets),
+    /** True when values in the task are masked here — the page says so, so nobody thinks it broke. */
+    secretsHidden: secrets.length > 0,
     profile: r.profile,
     platform: r.platform,
     region: r.region,
@@ -65,8 +73,8 @@ function runJson(r: RunRow) {
     stepCap: r.step_cap,
     status: r.status,
     stopReason: r.stop_reason,
-    summary: r.summary,
-    evidence: r.evidence,
+    summary: redact(r.summary, secrets),
+    evidence: redact(r.evidence, secrets),
     model: r.model,
     sessionId: r.session_id,
     runId: r.run_id,
@@ -214,14 +222,17 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
                 input_tokens, output_tokens, started_at, duration_ms
            FROM ai_steps WHERE org_id = $1 AND ai_run_id = $2 ORDER BY n`, [orgId, id],
       )).rows;
+      // What the agent said and typed, masked with the task's own secrets: a model repeats what it
+      // was told, and a type_text step carries the value itself.
+      const secrets = secretsIn(run.prompt);
       return {
         aiRun: runJson(run),
         steps: steps.map((s) => ({
           n: s.n,
           phase: s.phase,
-          thought: s.thought,
-          action: s.action,
-          result: s.result,
+          thought: redact(stripToolMarkup(s.thought), secrets),
+          action: redactDeep(s.action, secrets),
+          result: redact(s.result, secrets),
           screenshotUrl: s.screenshot_sha256 ? `/v1/ai/runs/${id}/steps/${s.n}/screenshot` : null,
           elementCount: s.element_count,
           priceInr: Number(s.price_inr),
@@ -231,6 +242,20 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
         })),
       };
     });
+  });
+
+  /**
+   * THE WHOLE TASK, secrets included — for the owner's own edit box ("Run again"), and nowhere else.
+   * Everything that SHOWS a run masks it (secrets.ts); this is the one read that must not, or a run
+   * copied back into the form would type "••••" into the app.
+   */
+  app.get<{ Params: { id: string } }>('/ai/runs/:id/prompt', async (req) => {
+    const { orgId } = requireSpender(req);
+    const id = uuidParam(req.params.id);
+    const row = await withTenant(orgId, async (c) => (await c.query<{ prompt: string }>(
+      'SELECT prompt FROM ai_runs WHERE org_id = $1 AND id = $2', [orgId, id])).rows[0]);
+    if (!row) throw notFound('AI run');
+    return { prompt: row.prompt };
   });
 
   app.get<{ Params: { id: string; n: string } }>('/ai/runs/:id/steps/:n/screenshot', async (req, reply) => {
@@ -370,7 +395,9 @@ interface TestRow {
 
 function testJson(t: TestRow) {
   return {
-    id: t.id, name: t.name, prompt: t.prompt, profile: t.profile, platform: t.platform,
+    // Masked like a run's task: a saved test is listed on the same page, to the same people.
+    id: t.id, name: t.name, prompt: redact(t.prompt, secretsIn(t.prompt)), secretsHidden: secretsIn(t.prompt).length > 0,
+    profile: t.profile, platform: t.platform,
     region: t.region, appPackage: t.app_package, runOnUpload: t.run_on_upload,
     createdAt: t.created_at.toISOString(), updatedAt: t.updated_at.toISOString(),
     createdBy: t.created_by_email,

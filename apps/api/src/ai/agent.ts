@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { parseUiTree, formatUiTree, uiElementCenter, type UiElement } from '@mfarm/protocol';
 import { AI_PROFILES, type AiProfile } from './pricing.ts';
+import { stripToolMarkup } from './secrets.ts';
 
 /**
  * THE AI RUN LOOP — observe, decide, act, record (ADR-0043, capabilities C2 and C3).
@@ -297,7 +298,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
       ...observationBlocks(first, screen),
     ], false);
     if ('status' in r) return r;
-    plan = textOf(r.message) || null;
+    plan = stripToolMarkup(textOf(r.message)) || null;
     await sink.record({
       n, phase: 'plan', thought: plan, action: null, result: null,
       screenshotB64: first.screenshotB64, elementCount: first.elements.length,
@@ -330,7 +331,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     const r = await call(phase, [{ type: 'text', text: prompt }, ...observationBlocks(obs, screen)], true);
     if ('status' in r) return r;
     const m = r.message;
-    const thoughtText = textOf(m);
+    const thoughtText = stripToolMarkup(textOf(m));
     const use = m.content.find((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use');
 
     if (m.stop_reason === 'refusal' || !use) {
