@@ -75,11 +75,22 @@ export interface ActionTarget {
   y: number;
   width: number;
   height: number;
+  /**
+   * Which of id / label / text name ONLY this element on the screen it was tapped on. Absent on
+   * steps recorded before 2026-09-26. Found on hardware: every row of Android Settings carries
+   * `android:id/title`, so "the id" of the Display row exported as a script that taps whichever
+   * row comes first. A locator that is not unique is not a locator.
+   */
+  unique?: { id: boolean; label: boolean; text: boolean };
 }
 
-function targetOf(el: UiElement | undefined): ActionTarget | null {
+function targetOf(el: UiElement | undefined, elements: UiElement[]): ActionTarget | null {
   if (!el) return null;
-  return { kind: el.kind, text: el.text, label: el.label, id: el.id, x: el.x, y: el.y, width: el.width, height: el.height };
+  const only = (k: 'id' | 'label' | 'text') => el[k] != null && elements.filter((e) => e[k] === el[k]).length === 1;
+  return {
+    kind: el.kind, text: el.text, label: el.label, id: el.id, x: el.x, y: el.y, width: el.width, height: el.height,
+    unique: { id: only('id'), label: only('label'), text: only('text') },
+  };
 }
 
 /**
@@ -87,8 +98,8 @@ function targetOf(el: UiElement | undefined): ActionTarget | null {
  * on the screen the decision was made on. Null for actions that touch no element.
  */
 export function actionTarget(name: string, input: Record<string, unknown>, elements: UiElement[]): ActionTarget | null {
-  if (name === 'tap_element') return targetOf(elements[Number(input.index)]);
-  if (name === 'type_text') return targetOf(elements.find((e) => e.focused));
+  if (name === 'tap_element') return targetOf(elements[Number(input.index)], elements);
+  if (name === 'type_text') return targetOf(elements.find((e) => e.focused), elements);
   return null;
 }
 

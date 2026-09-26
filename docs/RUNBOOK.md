@@ -319,6 +319,7 @@ endpoint. The model must accept images and tool calls.
 | OpenAI | `openai` | unset | `gpt-5` |
 | Google Gemini | `openai` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-pro` |
 | OpenRouter (any vendor behind one key) | `openai` | `https://openrouter.ai/api/v1` | `anthropic/claude-opus-5` |
+| **Groq free tier** (no card; what the farm verified on, 2026-09-26) | `openai` | `https://api.groq.com/openai/v1` | `qwen/qwen3.8-27b` — its only model with image + tools |
 | Self-hosted (Ollama, vLLM, LiteLLM) | `openai` | your server's `/v1` URL | whatever it serves |
 
 Write the values without echoing the key into your shell history. `read -s` keeps it off the screen,
@@ -344,6 +345,18 @@ The log line should read something like `"ai":"anthropic claude-opus-5, 2 at onc
 `off (no MFARM_AI_API_KEY)` means the key did not arrive. If the API refuses to start, the log names
 the variable at fault: an unknown provider, `openai` with no model, or a base URL that is not http(s).
 To turn AI off again, delete `MFARM_AI_API_KEY` (and any `ANTHROPIC_API_KEY`) and recreate the same way.
+
+**On a free tier, set two more lines** — measured on Groq's (7,000 input tokens a minute; a step
+counts ~4.4k, a diagnosis ~17.5k before trimming):
+
+```
+AI_MAX_CONCURRENT_RUNS=1          # two runs at once starved each other into model_error
+MFARM_AI_MAX_INPUT_TOKENS=6000    # a request over the provider's cap is refused outright (413)
+```
+
+Expect about one step every 35 seconds: the model answers in under a second, and the rest is the
+retry below waiting out the per-minute cap. GitHub Models is not an option — it was retired
+2026-07-30, and `models.github.ai` answers a plain `200 OK` to every path, so a probe looks healthy.
 
 **A rate-limited key is fine; an empty one is not.** On a free or low tier the `openai` provider waits
 out a `429`/`5xx`: it honours `Retry-After` (or Gemini's `retryDelay`), else backs off 1s, 2s, 4s…,

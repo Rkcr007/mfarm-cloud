@@ -437,7 +437,9 @@ async function appCommand(flags: Flags, rest: string[]): Promise<number> {
       if (aiRunsSkipped) {
         process.stderr.write(aiRunsSkipped === 'budget'
           ? 'mfarm: AI tests listening for this app were NOT started — the monthly AI budget is spent.\n'
-          : 'mfarm: AI tests listening for this app could not be started.\n');
+          : aiRunsSkipped === 'region'
+            ? 'mfarm: AI tests listening for this app were NOT started — the farm has several regions; give each saved test one.\n'
+            : 'mfarm: AI tests listening for this app could not be started.\n');
       }
     }
     return 0;

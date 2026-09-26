@@ -1,5 +1,5 @@
 import { withTenant } from '../db.ts';
-import { conflict } from '../http/errors.ts';
+import { ApiError, conflict } from '../http/errors.ts';
 import { AI_CURRENCY, AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
 
 /**
@@ -38,11 +38,46 @@ export async function spendThisMonth(orgId: string): Promise<{ spentInr: number;
   });
 }
 
+/**
+ * THE REGION A RUN THAT NAMED NONE WILL USE — found on hardware 2026-09-26.
+ *
+ * The hub requires a region (Model A: the customer chooses where their devices are). The AI doors
+ * made it optional and passed the absence through, so a run queued without one was ACCEPTED and then
+ * died at allocation with "A region is required". Worse, the console's Save sends a region only when
+ * its picker is shown — which is only when the fleet has more than one — so on a one-region farm every
+ * saved test, and every run-on-upload of it, could never run.
+ *
+ * Resolved at QUEUE time, per run, so a saved test with no region follows the fleet: the farm's
+ * `MFARM_DEFAULT_REGION` (the hub's own default), else the one region this org's devices of that
+ * platform are in. More than one and none chosen is the caller's decision to make, so it is refused
+ * with the list rather than guessed at.
+ */
+export async function resolveRegion(orgId: string, platform: 'android' | 'ios', asked: string | null | undefined): Promise<string> {
+  if (asked) return asked;
+  const fallback = (process.env.MFARM_DEFAULT_REGION ?? '').trim() || null;
+  const regions = fallback ? [] : await withTenant(orgId, async (c) => (await c.query<{ region: string }>(
+    'SELECT DISTINCT region FROM devices WHERE platform = $1 ORDER BY region', [platform],
+  )).rows.map((r) => r.region));
+  return pickRegion(platform, asked, fallback, regions);
+}
+
+/** The decision itself, pure: what was asked, the farm's default, and the regions the org can see. */
+export function pickRegion(platform: 'android' | 'ios', asked: string | null | undefined, fallback: string | null, regions: string[]): string {
+  if (asked) return asked;
+  if (fallback) return fallback;
+  const os = platform === 'ios' ? 'iOS' : 'Android';
+  if (regions.length === 1) return regions[0]!;
+  if (regions.length === 0) throw new ApiError(400, 'no_region', `This farm has no ${os} devices, so there is nowhere to run this.`);
+  throw new ApiError(400, 'region_required', `Choose a region: this farm has ${os} devices in ${regions.join(', ')}.`);
+}
+
 /** Queue one run. Throws `ai_budget_exhausted` (409) when the budget cannot pay for a single step. */
 export async function queueAiRun(orgId: string, input: QueueInput): Promise<string> {
   const profile: AiProfile = isAiProfile(input.profile) ? input.profile : 'flash';
   const spec = AI_PROFILES[profile];
   const stepCap = Math.min(input.stepCap ?? spec.stepCap, spec.stepCap);
+  const platform = input.platform ?? 'android';
+  const region = await resolveRegion(orgId, platform, input.region);
 
   // Refused up front when the budget cannot pay for even one step. A run that would run out
   // part-way is allowed to start and stops cleanly at the step that would overspend.
@@ -58,8 +93,8 @@ export async function queueAiRun(orgId: string, input: QueueInput): Promise<stri
       `INSERT INTO ai_runs (org_id, created_by, prompt, profile, platform, region, app_ref, step_cap,
                             ai_test_id, trigger)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-      [orgId, input.createdBy ?? null, input.prompt.trim(), profile, input.platform ?? 'android',
-       input.region ?? null, input.appRef ?? null, stepCap, input.aiTestId ?? null, input.trigger ?? 'manual'],
+      [orgId, input.createdBy ?? null, input.prompt.trim(), profile, platform,
+       region, input.appRef ?? null, stepCap, input.aiTestId ?? null, input.trigger ?? 'manual'],
     );
     return rows[0]!.id;
   });
@@ -97,7 +132,7 @@ export async function queueUploadRuns(
       queued.push({ aiRunId, testId: t.id, testName: t.name });
     } catch (err) {
       const code = (err as { code?: string }).code;
-      return { queued, skipped: code === 'ai_budget_exhausted' ? 'budget' : 'error' };
+      return { queued, skipped: code === 'ai_budget_exhausted' ? 'budget' : code === 'region_required' || code === 'no_region' ? 'region' : 'error' };
     }
   }
   return { queued, skipped: null };

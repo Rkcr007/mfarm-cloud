@@ -47,10 +47,13 @@ const ANDROID_KEYCODES: Record<string, number> = { back: 4, home: 3, enter: 66, 
 
 function locatorFor(t: ActionTarget | null | undefined, platform: 'android' | 'ios'): Locator | null {
   if (!t) return null;
+  // Only a value that named this element alone on its screen. Steps recorded before `unique`
+  // existed keep the old best-first order: there is no screen left to check them against.
+  const usable = (k: 'id' | 'label' | 'text') => Boolean(t[k]) && (t.unique ? t.unique[k] : true);
   // iOS `name` IS the accessibility identifier, so on iOS the id and the label strategies collapse.
-  if (t.id) return platform === 'ios' ? { by: 'accessibility', value: t.id } : { by: 'id', value: t.id };
-  if (t.label) return { by: 'accessibility', value: t.label };
-  if (t.text) return { by: 'text', value: t.text };
+  if (usable('id')) return platform === 'ios' ? { by: 'accessibility', value: t.id! } : { by: 'id', value: t.id! };
+  if (usable('label')) return { by: 'accessibility', value: t.label! };
+  if (usable('text')) return { by: 'text', value: t.text! };
   return { by: 'point', x: Math.round(t.x + t.width / 2), y: Math.round(t.y + t.height / 2) };
 }
 
@@ -97,7 +100,7 @@ function stepLines(lang: ScriptLang, s: ExportStep, platform: 'android' | 'ios')
         : loc;
       if (!l) return [head, comment(lang, 'The element this tapped was not recorded; re-run to capture it.')];
       if (l.by === 'point') {
-        return [head, comment(lang, `FRAGILE: no id, label or text to find this by — a tap at a fixed point.`),
+        return [head, comment(lang, `FRAGILE: no id, label or text names only this element — a tap at a fixed point.`),
           W ? `driver.tap([(${l.x}, ${l.y})])`
             : `await driver.action('pointer').move({ x: ${l.x}, y: ${l.y} }).down().up().perform();`];
       }
