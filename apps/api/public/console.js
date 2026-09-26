@@ -11136,6 +11136,8 @@ function aiStatusPill(r) {
 
 /** Why a run ended without a verdict, in words. The stop reasons are the runner's, one for one. */
 function aiStopText(r) {
+  // A provider's usage cap is not an outage. "Could not be reached" sent a person looking for one.
+  if (r.stopReason === 'model_error' && aiRateLimited(r.summary)) return 'The AI model provider\u2019s usage limit was reached.';
   return ({
     budget: 'Stopped: the monthly AI budget would have been exceeded by the next step.',
     step_cap: `Stopped after ${r.stepCap} steps without reaching a verdict.`,
@@ -11160,20 +11162,34 @@ function aiStopText(r) {
 function aiStopDetail(r) {
   const s = String(r.summary || '');
   if (!s) return null;
-  if (r.stopReason === 'model_error' && /\b429\b|rate limit/i.test(s)) {
-    const wait = aiRetryIn(s);
-    return `The AI model's provider is rate-limiting this farm${/per day|\bTPD\b|\bRPD\b/i.test(s) ? ' — today’s allowance is used up' : ''}. `
-      + (wait ? `It asked to wait ${wait}; start the run again after that.` : 'Start the run again in a few minutes.')
-      + ' Nothing was billed for the step that could not run.';
+  if (r.stopReason === 'model_error' && aiRateLimited(s)) {
+    const daily = /per day|\bTPD\b|\bRPD\b/i.test(s) ? ' — today’s allowance is used up' : '';
+    const secs = aiRetrySeconds(s);
+    // A CLOCK TIME, anchored to when the run stopped. "Wait about 6 minutes" read hours later is a
+    // lie: the wait began then, not when the page was opened.
+    let then = 'Start the run again in a few minutes.';
+    if (secs !== null) {
+      const at = new Date(new Date(r.endedAt || r.createdAt).getTime() + secs * 1000);
+      const clockAt = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      then = at.getTime() <= Date.now()
+        ? `It asked to wait until ${clockAt}, which has passed — you can start the run again now.`
+        : `It asked to wait until ${clockAt} (${aiWaitWords(secs)}); start the run again after that.`;
+    }
+    return `The provider is rate-limiting this farm’s AI key${daily}. ${then} Nothing was billed for the step that could not run.`;
   }
   return s === aiStopText(r) ? null : s;
 }
 
-/** "Please try again in 6m0.288s" → "about 6 minutes". Null when the provider named no time. */
-function aiRetryIn(s) {
+const aiRateLimited = (s) => /\b429\b|rate limit/i.test(String(s || ''));
+
+/** "Please try again in 6m0.288s" → 360. Null when the provider named no time. */
+function aiRetrySeconds(s) {
   const m = /try again in\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?/i.exec(s);
   if (!m || !(m[1] || m[2] || m[3])) return null;
-  const secs = Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0);
+  return Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0);
+}
+
+function aiWaitWords(secs) {
   if (secs < 90) return `about ${Math.max(1, Math.round(secs))} seconds`;
   const mins = Math.round(secs / 60);
   return mins < 90 ? `about ${mins} minutes` : `about ${Math.round(mins / 60)} hours`;
@@ -11307,7 +11323,8 @@ function screenAi() {
           onchange: (e) => { state.ai.draft = { ...state.ai.draft, platform: e.target.value }; },
         }, ['android', 'ios'].map((v) => h('option', {
           value: v, selected: d.platform === v, disabled: !hasPlatform(v) && d.platform !== v,
-          text: `${v === 'ios' ? 'iOS' : 'Android'}${hasPlatform(v) ? '' : ' \u2014 no devices on this farm'}`,
+          // Short, because a select is as wide as its longest option.
+          text: `${v === 'ios' ? 'iOS' : 'Android'}${hasPlatform(v) ? '' : ' (no devices)'}`,
         })))),
       h('div', { class: 'stack tight' },
         h('span', { class: 'micro', text: 'App build' }),
