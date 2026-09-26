@@ -16,14 +16,29 @@ export class ModelError extends Error {
   readonly retryAfterMs: number | null;
   /** What the provider itself said — for an operator, never parsed for decisions. */
   readonly body: string;
+  /**
+   * Set when the provider refused the request for its SIZE against this key's tier ("Request too
+   * large … Limit 1000, Requested 1748") — read once, in the adapter that saw the words (D54). No
+   * wait can change the answer to the same request, so it is the request's fault, not an outage.
+   */
+  readonly tooLarge: TooLarge | null;
 
-  constructor(message: string, opts: { status: number | null; retryAfterMs?: number | null; body?: string }) {
+  constructor(message: string, opts: { status: number | null; retryAfterMs?: number | null; body?: string; tooLarge?: TooLarge | null }) {
     super(message);
     this.name = 'ModelError';
     this.status = opts.status;
     this.retryAfterMs = opts.retryAfterMs ?? null;
     this.body = opts.body ?? '';
+    this.tooLarge = opts.tooLarge ?? null;
   }
+}
+
+/** A size refusal: the tier's limit and what the request asked for, and whether it is OUTPUT tokens. */
+export interface TooLarge {
+  limit: number | null;
+  requested: number | null;
+  /** Output tokens can be capped by the caller; input tokens cannot be un-sent. */
+  output: boolean;
 }
 
 /**
@@ -39,4 +54,15 @@ export class ModelUnavailableError extends ModelError {
     this.name = 'ModelUnavailableError';
     this.retryAt = retryAt;
   }
+}
+
+/**
+ * A failed model call, in the sentence a run or a diagnosis ends with. A request refused for its size
+ * was said as "could not be reached" (D54) — which sent people looking for an outage, not a tier.
+ */
+export function modelFailureWords(err: unknown): string {
+  const message = (err as Error)?.message ?? String(err);
+  return err instanceof ModelError && err.tooLarge
+    ? `The model provider refused the request as larger than this farm's key allows: ${message}`
+    : `The model could not be reached: ${message}`;
 }

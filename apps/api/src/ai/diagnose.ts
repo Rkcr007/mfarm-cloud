@@ -6,6 +6,7 @@ import { conflict, notFound, unavailable } from '../http/errors.ts';
 import { AI_CURRENCY, AI_DIAGNOSE_PRICE_INR } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
 import type { Model } from './agent.ts';
+import { modelFailureWords } from './model-error.ts';
 
 /**
  * WHY DID THIS FAIL — one model call over what the farm already recorded (ADR-0043, C8).
@@ -229,7 +230,7 @@ export async function diagnoseSession(
   } catch (err) {
     // Found on hardware: this used to escape as a bare 500 "Internal error". A provider that is
     // down, rate-limited or refusing the request size is not our crash — say what it said.
-    throw unavailable(`The model could not be reached: ${(err as Error).message.slice(0, 400)} Nothing was billed.`);
+    throw unavailable(`${modelFailureWords(err).slice(0, 480)} Nothing was billed.`);
   }
 
   if (message.stop_reason === 'refusal') throw unavailable('The model declined to diagnose this session. Nothing was billed.');

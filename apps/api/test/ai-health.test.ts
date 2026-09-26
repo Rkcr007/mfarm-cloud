@@ -222,3 +222,19 @@ test('the Anthropic SDK\'s failures are read the same way: its status, and the p
     assert.equal(s.hits(), 1, 'the SDK\'s own retries are off for a probe');
   } finally { s.close(); }
 });
+
+test('a request refused for its SIZE is not an outage — not recorded, and the go / no-go stays go (D54)', async () => {
+  const tooLarge = new ModelError('429 from api.groq.com: Request too large … (OTPM): Limit 1000, Requested 1748', {
+    status: 429, body: 'Request too large', tooLarge: { limit: 1000, requested: 1748, output: true },
+  });
+  // A 429 without the flag is still "slow down" — the flag, not the status, is what changed.
+  assert.equal(classifyModelFailure(tooLarge, NOW), null);
+  assert.equal(classifyModelFailure(e(429), NOW)!.state, 'limited');
+
+  const p = { calls: [] as string[], fail: tooLarge as ModelError | undefined };
+  const f = { calls: [] as string[] };
+  await assert.rejects(resilientModel([slot('primary', p), slot('fallback', f)])(ask), /Request too large/);
+  assert.equal(providerHealth('primary').state, 'unknown', 'it went green a minute later and the next run died the same way');
+  assert.equal(f.calls.length, 0, 'another provider is not asked to take a request that is the request\'s own fault');
+  assert.equal(modelCheck({ slots: [slot('primary', { calls: [] })] }).ok, true, 'readiness: go');
+});

@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AGENT_TOOLS } from '../src/ai/agent.ts';
-import { aiApiKey, aiProviderConfig, buildModel, DEFAULT_RETRY, fromOpenAiResponse, retryAfterMs, toOpenAiRequest } from '../src/ai/provider.ts';
+import {
+  aiApiKey, aiFallbackConfig, aiProviderConfig, buildModel, DEFAULT_RETRY, fromOpenAiResponse, NO_RETRY, outputCapFor,
+  retryAfterMs, toOpenAiRequest, tooLargeOf,
+} from '../src/ai/provider.ts';
+import { ModelError, modelFailureWords } from '../src/ai/model-error.ts';
 
 test('the generic key wins; the vendor names are fallbacks for their own protocol only', () => {
   assert.equal(aiApiKey({ MFARM_AI_API_KEY: 'g', ANTHROPIC_API_KEY: 'a' }), 'g');
@@ -178,4 +182,103 @@ test('retry hints are read from a seconds header, a date header, and Gemini\'s R
 test('the default retry budget stays under the runner\'s appium:newCommandTimeout of 300s', () => {
   // A model call that outwaits the session loses the phone it was about to drive (runner.ts).
   assert.ok(DEFAULT_RETRY.maxTotalWaitMs + DEFAULT_RETRY.maxSingleWaitMs < 300_000);
+});
+
+// ---------------------------------------------------------------- D54: refused for its size
+
+/** Groq's words on 2026-09-27, for a request that sent no cap on its answer. */
+const OTPM = (requested: number) => JSON.stringify({ error: {
+  message: `Request too large for model \`qwen/qwen3.8-27b\` in organization \`org_test\` service tier \`on_demand\` on output tokens per minute (OTPM): Limit 1000, Requested ${requested}. The request's expected output tokens exceed the enforced limit; reduce max_tokens (or the request's expected output) and try again.`,
+  type: 'tokens', code: 'rate_limit_exceeded' } });
+
+/** A server with Groq's rule: an answer allowed more than 1,000 tokens is refused, not queued. */
+async function groqLike() {
+  const bodies: Array<{ max_completion_tokens?: number }> = [];
+  const srv = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const body = JSON.parse(raw) as { max_completion_tokens?: number };
+      bodies.push(body);
+      const cap = body.max_completion_tokens;
+      res.writeHead(cap === undefined || cap > 1000 ? 429 : 200, { 'content-type': 'application/json' });
+      res.end(cap === undefined || cap > 1000 ? OTPM(cap ?? 1748) : OK[2]);
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const { port } = srv.address() as AddressInfo;
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, bodies, close: () => srv.close() };
+}
+
+test('an answer refused for its size is asked for again at once, capped at half the tier\'s limit — and stays capped', async () => {
+  const s = await groqLike();
+  try {
+    // NO_RETRY: one attempt, no waiting. A smaller request is a new request, so even a probe learns it.
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, NO_RETRY);
+    const big = { ...ask, max_tokens: 16000 };
+    const t0 = Date.now();
+    assert.equal((await model(big)).stop_reason, 'end_turn');
+    assert.ok(Date.now() - t0 < 1_000, 'nothing was waited on');
+    assert.deepEqual(s.bodies.map((b) => b.max_completion_tokens), [undefined, 500]);
+
+    assert.equal((await model(big)).stop_reason, 'end_turn');
+    assert.deepEqual(s.bodies.slice(2).map((b) => b.max_completion_tokens), [500], 'the next call starts capped: one request');
+
+    await model({ ...ask, max_tokens: 8 });
+    assert.equal(s.bodies.at(-1)!.max_completion_tokens, 8, 'a smaller ask than the cap is sent as asked — the probe');
+  } finally { s.close(); }
+});
+
+test('the cap is learned per endpoint and model, never guessed for another', async () => {
+  const a = await groqLike();
+  const b = await groqLike();
+  try {
+    await buildModel({ provider: 'openai', apiKey: 'k', baseUrl: a.baseUrl }, NO_RETRY)({ ...ask, model: 'qwen' });
+    await buildModel({ provider: 'openai', apiKey: 'k', baseUrl: b.baseUrl }, NO_RETRY)({ ...ask, model: 'qwen' });
+    assert.equal(b.bodies[0]!.max_completion_tokens, undefined, 'another server was not told a limit it never set');
+    await buildModel({ provider: 'openai', apiKey: 'k', baseUrl: a.baseUrl }, NO_RETRY)({ ...ask, model: 'other' });
+    assert.equal(a.bodies.at(-2)!.max_completion_tokens, undefined, 'nor another model on the same server');
+  } finally { a.close(); b.close(); }
+});
+
+test('MFARM_AI_MAX_OUTPUT_TOKENS caps the first request; nonsense is ignored', async () => {
+  assert.equal(aiProviderConfig({ MFARM_AI_API_KEY: 'k', MFARM_AI_MAX_OUTPUT_TOKENS: '800' })!.maxOutputTokens, 800);
+  for (const v of ['', 'abc', '0', '-5', '12.5']) {
+    assert.equal(aiProviderConfig({ MFARM_AI_API_KEY: 'k', MFARM_AI_MAX_OUTPUT_TOKENS: v })!.maxOutputTokens, undefined, v);
+  }
+  assert.equal(aiFallbackConfig({ MFARM_AI_FALLBACK_API_KEY: 'k', MFARM_AI_FALLBACK_MAX_OUTPUT_TOKENS: '300' })!.maxOutputTokens, 300);
+  const s = await groqLike();
+  try {
+    await buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl, maxOutputTokens: 800 }, NO_RETRY)({ ...ask, max_tokens: 16000 });
+    assert.deepEqual(s.bodies.map((b) => b.max_completion_tokens), [800]);
+  } finally { s.close(); }
+  assert.equal((toOpenAiRequest({ ...ask, max_tokens: 16000 }, 700) as { max_completion_tokens: number }).max_completion_tokens, 700);
+  assert.equal((toOpenAiRequest({ ...ask, max_tokens: 16000 }) as { max_completion_tokens?: number }).max_completion_tokens, undefined,
+    'no cap known: none sent — servers disagree on its name');
+});
+
+test('a request too large for its INPUT fails at once — no waiting, no re-send — and says so', async () => {
+  const tpm = JSON.stringify({ error: { message: 'Request too large for model `m` on tokens per minute (TPM): Limit 7000, Requested 17500, please reduce your message size and try again.', code: 'rate_limit_exceeded' } });
+  const s = await scripted([[429, {}, tpm], OK]);
+  try {
+    // FAST retries every 429; this one it must not.
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    const err = await model(ask).then(() => null, (e: unknown) => e as ModelError);
+    assert.ok(err instanceof ModelError);
+    assert.deepEqual(err.tooLarge, { limit: 7000, requested: 17500, output: false });
+    assert.match(err.message, /no wait changes that/);
+    assert.equal(s.hits(), 1);
+    assert.match(modelFailureWords(err), /^The model provider refused the request as larger than this farm's key allows/);
+    assert.match(modelFailureWords(new ModelError('503 from x', { status: 503 })), /^The model could not be reached/);
+  } finally { s.close(); }
+});
+
+test('a size refusal is read from the provider\'s words once, and an ordinary 429 is not one', () => {
+  assert.deepEqual(tooLargeOf(429, OTPM(1748)), { limit: 1000, requested: 1748, output: true });
+  assert.equal(tooLargeOf(429, '{"error":{"message":"Rate limit reached for model on tokens per minute (TPM): Limit 7000, Used 6500, Requested 900. Please try again in 3.4s."}}'), null,
+    'slow down, not too large');
+  assert.equal(tooLargeOf(400, OTPM(1748)), null);
+  assert.deepEqual(tooLargeOf(413, 'Request too large'), { limit: null, requested: null, output: false });
+  assert.equal(outputCapFor(1000), 500);
+  assert.equal(outputCapFor(60), 64, 'never a cap too small to hold a tool call');
 });

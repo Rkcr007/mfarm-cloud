@@ -354,6 +354,13 @@ AI_MAX_CONCURRENT_RUNS=1          # two runs at once starved each other into mod
 MFARM_AI_MAX_INPUT_TOKENS=6000    # a request over the provider's cap is refused outright (413)
 ```
 
+**Output is capped for you.** Groq's free tier also allows only 1,000 OUTPUT tokens a minute and refuses
+outright a request that might need more; one that names no cap is assumed to need ~1,750, so every call
+was refused (D54, 2026-09-27). The `openai` provider now learns the tier's limit from that refusal and
+asks again at once for at most half of it (500 — a step's answer is 60 tokens at the median, 236 at
+most). Nothing to set. `MFARM_AI_MAX_OUTPUT_TOKENS=<n>` caps it from the first call instead, for a
+provider that refuses without saying its limit.
+
 Expect about one step every 35 seconds: the model answers in under a second, and the rest is the
 retry below waiting out the per-minute cap. **And about 45 steps a DAY**: Groq's free tier also caps
 200,000 tokens per day, and past it every run stops on its first step with `model_error` naming

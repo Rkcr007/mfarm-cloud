@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { parseUiTree, formatUiTree, uiElementCenter, type UiElement } from '@mfarm/protocol';
 import { AI_PROFILES, type AiProfile } from './pricing.ts';
 import { stripToolMarkup } from './secrets.ts';
+import { modelFailureWords } from './model-error.ts';
 
 /**
  * THE AI RUN LOOP — observe, decide, act, record (ADR-0043, capabilities C2 and C3).
@@ -281,7 +282,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
       });
     } catch (err) {
       n--; // a call that never returned was not billed and did not happen
-      return stop('model_error', `The model could not be reached: ${(err as Error).message}`);
+      return stop('model_error', modelFailureWords(err));
     }
     void phase;
     return { message, startedAt, t0 };

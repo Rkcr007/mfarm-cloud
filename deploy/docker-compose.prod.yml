@@ -251,8 +251,9 @@ services:
       # Unset rather than defaulted here: an Anthropic id is wrong for MFARM_AI_PROVIDER=openai, and
       # the API supplies claude-opus-5 itself when the provider is anthropic.
       MFARM_AI_MODEL: ${MFARM_AI_MODEL:-}
-      # Kept so a farm configured before the rename keeps its key.
+      # Kept so a farm configured before the rename keeps its key — either protocol's.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # Each AI run holds a device for its whole length, so this also caps how much of the fleet AI
       # can occupy at once.
       AI_MAX_CONCURRENT_RUNS: ${AI_MAX_CONCURRENT_RUNS:-2}
@@ -261,12 +262,16 @@ services:
       # A provider's per-request input cap (Groq's free tier: 7000). Unset = no trimming. Named here
       # or it never arrives — see VIDEO_RECORDING below for the day that was learned.
       MFARM_AI_MAX_INPUT_TOKENS: ${MFARM_AI_MAX_INPUT_TOKENS:-}
+      # The longest answer asked for. Unset is right for most farms: a provider that refuses an uncapped
+      # request for its size (Groq's 1,000 output tokens a minute, D54) teaches the cap on its first call.
+      MFARM_AI_MAX_OUTPUT_TOKENS: ${MFARM_AI_MAX_OUTPUT_TOKENS:-}
       # The fallback provider (ADR-0044), used only while the primary cannot serve. Unset: none.
       # A different vendor is the useful kind — a second key on the same one shares its outage.
       MFARM_AI_FALLBACK_API_KEY: ${MFARM_AI_FALLBACK_API_KEY:-}
       MFARM_AI_FALLBACK_PROVIDER: ${MFARM_AI_FALLBACK_PROVIDER:-}
       MFARM_AI_FALLBACK_BASE_URL: ${MFARM_AI_FALLBACK_BASE_URL:-}
       MFARM_AI_FALLBACK_MODEL: ${MFARM_AI_FALLBACK_MODEL:-}
+      MFARM_AI_FALLBACK_MAX_OUTPUT_TOKENS: ${MFARM_AI_FALLBACK_MAX_OUTPUT_TOKENS:-}
 
       # ---------------------------------------------------------------- power control (ADR-0038)
       #

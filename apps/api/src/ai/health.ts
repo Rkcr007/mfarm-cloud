@@ -99,6 +99,11 @@ export function classifyModelFailure(err: unknown, now = Date.now()): Verdict | 
   const detail = String(e?.body || (err as Error)?.message || err || '').slice(0, 600) || null;
   const wait = (fallbackMs: number) => now + (e?.retryAfterMs ?? fallbackMs);
 
+  // Refused for its SIZE (D54): Groq answers it as a 429, but no wait changes the answer to the same
+  // request. Read as "limited", readiness went green again a minute later and the next run died the
+  // same way — every run on the farm, while the strip said go.
+  if (e?.tooLarge) return null;
+
   if (status === 429) {
     const daily = /per day|\bTPD\b|\bRPD\b|daily/i.test(`${e?.body ?? ''} ${e?.message ?? ''}`);
     return {
