@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createPrivateKey, generateKeyPairSync, sign } from 'node:crypto';
 import { TOKEN_ALG, type SessionClaims } from '@mfarm/protocol';
-import { AutomationGateway, type GrantAuthority } from '../src/gateway.ts';
+import { readFile } from 'node:fs/promises';
+import { AutomationGateway, automationGatewayFor, type GrantAuthority } from '../src/gateway.ts';
 
 /**
  * The automation gateway — ADR-0004, worker half.
@@ -259,6 +260,60 @@ describe('automation gateway', () => {
     );
     assert.equal(res.status, 413);
     assert.equal(seen, undefined);
+  });
+
+  // ------------------------------------------------------------------ metering (2026-09-26)
+
+  /** The authority above, plus the metering hook the agent really has. */
+  const meteringAgent = (meter: (sid: string, did: string, org: string) => void) => ({
+    get hostId() { return authority.hostId; },
+    get sessionPublicKey() { return authority.sessionPublicKey; },
+    deviceIdFor: (id: string) => authority.deviceIdFor(id),
+    acceptFence: (d: string, f: number) => authority.acceptFence(d, f),
+    meterAutomation: meter,
+  });
+
+  test('the gateway the agent runs reports every VERIFIED request for billing, and no refused one', async () => {
+    // On the farm, 42 of 42 WebDriver-only sessions in a month had no device-seconds: the meter
+    // started only on a live-view socket, and the hub never opens one.
+    const metered: string[] = [];
+    const real = automationGatewayFor(meteringAgent((sid, did, org) => { metered.push(`${sid}|${did}|${org}`); }),
+      new Map([['cf-1', upstreamPort]]));
+    const p = await real.listen(0);
+    try {
+      const ok = await fetch(`http://127.0.0.1:${p}/automation/cf-1/session`, withGrant(mint({ sid: 'hub-9', org: 'org-7' })));
+      assert.equal(ok.status, 200);
+      assert.deepEqual(metered, [`hub-9|${DEVICE_1}|org-7`], 'billed to the session and org the GRANT names');
+
+      const forged = await fetch(`http://127.0.0.1:${p}/automation/cf-1/session`, withGrant(mint({ sid: 'forged' }, OTHER_PRIVATE_PEM)));
+      assert.equal(forged.status, 403);
+      const noGrant = await fetch(`http://127.0.0.1:${p}/automation/cf-1/session`);
+      assert.equal(noGrant.status, 401);
+      assert.equal(metered.length, 1, 'a refused request is never billed to anyone');
+    } finally {
+      await real.close();
+    }
+  });
+
+  test('a metering failure never fails the command it was metering', async () => {
+    const real = automationGatewayFor(meteringAgent(() => { throw new Error('the meter broke'); }),
+      new Map([['cf-1', upstreamPort]]));
+    const p = await real.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${p}/automation/cf-1/session`, withGrant(mint({})));
+      assert.equal(res.status, 200, 'the command went through');
+      assert.ok(seen, 'and reached Appium');
+    } finally {
+      await real.close();
+    }
+  });
+
+  test('the agent builds its gateway the metering way, and no other way', async () => {
+    // D47's shape: a feature with a passing test and no caller. The metering lives in the factory,
+    // so the process has to be built through it.
+    const src = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+    assert.match(src, /automationGatewayFor\(agent, /);
+    assert.doesNotMatch(src, /new AutomationGateway\(/, 'a second construction path would be unmetered');
   });
 
   test('an unreachable Appium is a 502, not a hang', async () => {

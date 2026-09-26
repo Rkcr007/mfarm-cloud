@@ -40,8 +40,21 @@ export interface GrantAuthority {
   acceptFence(deviceId: string, fence: number): boolean;
 }
 
+/** What the gateway reports a verified request to, for billing — kept apart from `GrantAuthority`. */
+export interface AutomationMeter {
+  meterAutomation(sessionId: string, deviceId: string, orgId: string): void;
+}
+
 export interface GatewayOptions {
   agent: GrantAuthority;
+  /**
+   * Told of every request whose grant verified, before it is proxied. It is how a session driven
+   * only over WebDriver gets metered (agent.ts `meterAutomation`). A callback rather than a member of
+   * `GrantAuthority` on purpose: that interface is this listener's authorization surface and stays
+   * four members wide. Whatever it throws is logged and dropped — billing must never be the reason a
+   * command fails.
+   */
+  onAuthorized?: (claims: SessionClaims) => void;
   /** localId -> the loopback port of that device's Appium. A device absent here is not served. */
   targets: Map<string, number>;
   port?: number;
@@ -139,6 +152,11 @@ export class AutomationGateway {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const authorized = this.authorize(req, res);
     if (!authorized) return; // authorize() has already answered
+    try {
+      this.opts.onAuthorized?.(authorized.claims);
+    } catch (e) {
+      console.warn(`[gateway] metering a verified request failed: ${(e as Error).message}`);
+    }
     this.proxy(req, res, authorized.port, authorized.rest);
   }
 
@@ -308,4 +326,20 @@ export class AutomationGateway {
 
     req.pipe(upstream);
   }
+}
+
+/**
+ * THE GATEWAY AS THE AGENT RUNS IT: grants checked by the agent, and every verified request metered
+ * by it. `index.ts` builds the gateway through this and nothing else, so the metering cannot be left
+ * unwired by a caller that forgot it — the D47 shape, where a feature had a test and no caller.
+ */
+export function automationGatewayFor(
+  agent: GrantAuthority & AutomationMeter,
+  targets: Map<string, number>,
+): AutomationGateway {
+  return new AutomationGateway({
+    agent,
+    targets,
+    onAuthorized: (claims) => agent.meterAutomation(claims.sid, claims.did, claims.org),
+  });
 }
