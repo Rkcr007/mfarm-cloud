@@ -11873,8 +11873,18 @@ async function loadAiReadiness() {
     answer = { ready: null, blocking: null, message: null, checks: null, failed: e.message };
   }
   // After the await, never `{ ...state.ai, x: await … }` — that was D49.
+  const changed = readinessSignature(state.ai.readiness) !== readinessSignature({ ...answer, platform });
   state.ai = { ...state.ai, readiness: { ...answer, platform, at: Date.now() }, readinessLoading: false };
-  scheduleRender();
+  // Only when the answer MOVED. This runs every five seconds, and a render rebuilds the page under
+  // the person typing into it — the same answer twice is not worth their cursor.
+  if (changed) scheduleRender();
+}
+
+/** What a readiness answer SAYS, without when it was fetched — the thing worth re-rendering for. */
+export function readinessSignature(r) {
+  if (!r) return '';
+  const { at: _at, ...rest } = r;
+  return JSON.stringify(rest);
 }
 
 /** The readiness answer for the form's platform, or null while there is none to go on. */
@@ -12867,6 +12877,7 @@ export function render() {
    * someone filling in a dialog would be a worse bug than the one this fixes.
    */
   const wasTypingOnDevice = document.activeElement?.classList?.contains('dev-video');
+  const typing = fieldInUse();
 
   main.replaceChildren();
   add(main, [(SCREENS[state.route.name] || SCREENS.devices)()]);
@@ -12886,6 +12897,38 @@ export function render() {
   if (wasTypingOnDevice) {
     document.querySelector('.dev-video')?.focus({ preventScroll: true });
   }
+  restoreField(typing);
+}
+
+/**
+ * THE FIELD A PERSON IS TYPING IN, so a render cannot take it from them.
+ *
+ * The same blur the device video had, for every text box: `replaceChildren` detaches the focused
+ * <textarea>, and the rebuilt one has the draft (it lives in `state`) but not the focus or the
+ * caret — so whatever was typed next went nowhere. The AI screen re-checks its go / no-go every five
+ * seconds (ADR-0044), which made that a sentence cut off mid-word rather than a rare race.
+ *
+ * Only a field with an `id` is followed, because the id is how the rebuilt one is found; one without
+ * is left alone rather than guessed at.
+ */
+function fieldInUse() {
+  const el = document.activeElement;
+  if (!el || !el.id || !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return null;
+  let start = null;
+  let end = null;
+  try { start = el.selectionStart; end = el.selectionEnd; } catch { /* <select>, and input types with no caret */ }
+  return { id: el.id, start, end, scrollTop: el.scrollTop };
+}
+
+function restoreField(typing) {
+  if (!typing) return;
+  const el = document.getElementById(typing.id);
+  if (!el || el === document.activeElement || typeof el.focus !== 'function') return;
+  el.focus({ preventScroll: true });
+  if (typing.start !== null && typeof el.setSelectionRange === 'function') {
+    try { el.setSelectionRange(typing.start, typing.end); } catch { /* the value got shorter under it */ }
+  }
+  if (typing.scrollTop) el.scrollTop = typing.scrollTop;
 }
 
 /**

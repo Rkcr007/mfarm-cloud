@@ -974,6 +974,17 @@ describe('nothing is started that cannot finish (ADR-0044)', () => {
     assert.equal(await runCount(), before);
   });
 
+  test('a host switched off outside the console reads as one: stopped answering, with where to look', async () => {
+    await resetFleet();
+    await withSystem((c) => c.query(
+      `UPDATE devices SET state = 'QUARANTINED', quarantined_at = now(), quarantine_source = 'host',
+              quarantine_reason = 'its host was quarantined: no heartbeat for 90s' WHERE host_id = $1`, [hostId]));
+    const r = await readiness();
+    assert.equal(r.blocking, 'devices');
+    assert.match(r.message!, /device host has stopped answering — it may be switched off/, 'not "out of the pool"');
+    assert.equal(r.checks.devices!.action?.href, '#/infra/hosts');
+  });
+
   test('a model provider that is down refuses a person at the door, and holds an upload\'s run until it is back', async () => {
     await resetFleet();
     resetProviderHealth();

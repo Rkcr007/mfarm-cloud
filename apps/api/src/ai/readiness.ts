@@ -153,7 +153,10 @@ export async function devicesCheck(orgId: string, platform: 'android' | 'ios', r
   if (!usable) {
     const out = rows.filter((r) => !USABLE.has(r.state)).sort((a, b) => b.n - a.n);
     const hostStopped = out.some((r) => r.source === 'host' && /stopped/i.test(r.reason ?? ''));
-    const hostSilent = out.some((r) => r.source === 'reaper');
+    // A host switched off OUTSIDE the console just goes quiet: its devices read "its host was
+    // quarantined: no heartbeat for 90s" (seen on the farm 2026-09-26), which is a stop by another name.
+    const hostSilent = out.some((r) => r.source === 'reaper'
+      || (r.source === 'host' && /heartbeat|not answering|silent/i.test(r.reason ?? '')));
     const infra = { label: 'Open Infrastructure', href: '#/infra/hosts' };
     if (hostStopped) {
       return { ...base, ok: false, action: infra, detail: out[0]?.reason ?? null,
@@ -161,7 +164,7 @@ export async function devicesCheck(orgId: string, platform: 'android' | 'ios', r
     }
     if (hostSilent) {
       return { ...base, ok: false, action: infra, detail: out[0]?.reason ?? null,
-        message: `The device host has stopped answering, so no ${os} device can take a run.` };
+        message: `The device host has stopped answering — it may be switched off — so no ${os} device can take a run.` };
     }
     return { ...base, ok: false, action: { label: 'Open the fleet', href: '#/fleet' }, detail: out[0]?.reason ?? null,
       message: `All ${total} ${os} device${total === 1 ? ' is' : 's are'} out of the pool${where}, so none can take a run.` };

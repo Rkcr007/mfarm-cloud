@@ -6384,6 +6384,12 @@ describe('the AI testing screen', () => {
     assert.match(textOf(mod.SCREENS.airun()), /Waiting for a device/);
   });
 
+  test('the same readiness answer twice is not a change — it would rebuild the page under someone typing', () => {
+    const a = readinessState();
+    assert.equal(mod.readinessSignature({ ...a, at: 1 }), mod.readinessSignature({ ...a, at: 2 }), 'when it was fetched is not news');
+    assert.notEqual(mod.readinessSignature(a), mod.readinessSignature(modelDown()), 'what it says is');
+  });
+
   test('when the page cannot ask, it says so — and does not block on a guess', () => {
     seed({ name: 'ai' });
     mod.state.ai.draft.prompt = 'Open settings';
