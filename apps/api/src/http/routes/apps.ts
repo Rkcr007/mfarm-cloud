@@ -216,7 +216,7 @@ export async function appRoutes(app: FastifyInstance) {
     let aiSkipped: string | null = null;
     if (created && app.aiConfigured()) {
       try {
-        const r = await queueUploadRuns(orgId, { id: row.id, packageName: row.package_name });
+        const r = await queueUploadRuns(orgId, { id: row.id, packageName: row.package_name }, app.aiGate());
         aiRuns = r.queued;
         aiSkipped = r.skipped;
       } catch (err) {

@@ -37,6 +37,10 @@ import { execFileSync } from 'node:child_process';
 import ts from 'typescript';
 import type { Model } from '../src/ai/agent.ts';
 import { approxTokens } from '../src/ai/diagnose.ts';
+import { recordModelFailure, recordModelOk, resetProviderHealth } from '../src/ai/health.ts';
+import { ModelError } from '../src/ai/model-error.ts';
+import { resetProbes, type ModelSlot } from '../src/ai/provider.ts';
+import { queueAiRun } from '../src/ai/queue.ts';
 import { buildApk } from './fixtures/apk.ts';
 
 const REGION = 'ai-test';
@@ -142,6 +146,22 @@ const scriptedModel: Model = async (params) => {
   } as unknown as Anthropic.Beta.BetaMessage;
 };
 
+/**
+ * The provider the RUNNER consults before it claims a run (ADR-0044). It serves nothing — the model
+ * is `scriptedModel` — it only lets a test say "the provider is down" and "it is back", and count the
+ * probes a half-open provider is sent. Health is process memory, so a test that marks it down resets it.
+ */
+let probeFails = false;
+let probes = 0;
+const testSlot: ModelSlot = {
+  slot: 'primary', model: 'claude-opus-5', label: 'test provider', call: scriptedModel,
+  probe: async (params) => {
+    probes++;
+    if (probeFails) throw new ModelError('503 from test: still down', { status: 503 });
+    return scriptedModel({ ...params, messages: [{ role: 'user', content: [{ type: 'text', text: 'probe' }] }] });
+  },
+};
+
 // ---------------------------------------------------------------- fixtures
 
 const auth = (k: string) => ({ authorization: `Bearer ${k}` });
@@ -184,6 +204,14 @@ async function resetFleetKeepingRuns(): Promise<void> {
   if (ready === 0) await seedDevice();
 }
 
+async function runCount(): Promise<number> {
+  return withSystem(async (c) => (await c.query('SELECT count(*)::int AS n FROM ai_runs WHERE org_id = $1', [orgA])).rows[0].n as number);
+}
+
+async function statusOf(id: string): Promise<string> {
+  return withSystem(async (c) => (await c.query('SELECT status FROM ai_runs WHERE id = $1', [id])).rows[0].status as string);
+}
+
 async function startRun(body: Record<string, unknown>, key = keyA) {
   const res = await app.inject({ method: 'POST', url: '/v1/ai/runs', headers: auth(key), payload: body });
   return { status: res.statusCode, body: res.json() as { aiRun: { id: string; status: string }; error?: { code: string } } };
@@ -221,6 +249,7 @@ before(async () => {
   automationKeyA = (await createApiKey(orgA, 'test fixture — ai ci', { scope: 'automation' })).plaintext;
   app = await buildServer({
     logger: false, loginRateLimitMax: 10_000, aiRunnerIntervalMs: 25, aiModel: scriptedModel, aiModelId: 'claude-opus-5',
+    aiSlots: [testSlot],
   });
   await upsertUser(ADMIN, PASSWORD, orgA, 'admin');
   const login = await app.inject({ method: 'POST', url: '/v1/auth/login', payload: { email: ADMIN, password: PASSWORD } });
@@ -394,14 +423,16 @@ describe('an AI run', () => {
     assert.deepEqual((value?.body as { text?: string } | undefined)?.text, 'a@b.co');
   });
 
-  test('a run that cannot get a device says so, and bills nothing', async () => {
+  test('a run no device could ever take is refused at the door — it used to queue, take its time and fail', async () => {
     await resetFleet();
-    const { body } = await startRun({ prompt: 'Somewhere else', region: 'no-such-region' });
-    const done = await settle(body.aiRun.id);
-    assert.equal(done.aiRun.status, 'error');
-    assert.equal(done.aiRun.stopReason, 'no_device');
-    assert.equal(done.aiRun.costInr, 0);
-    assert.ok(done.aiRun.summary, 'the hub\'s reason is carried through');
+    const before = await runCount();
+    const { status, body } = await startRun({ prompt: 'Somewhere else', region: 'no-such-region' });
+    assert.equal(status, 503);
+    const err = (body as unknown as { error: { code: string; blocking: string; message: string } }).error;
+    assert.equal(err.code, 'ai_not_ready');
+    assert.equal(err.blocking, 'devices');
+    assert.match(err.message, /no Android devices in no-such-region\. Nothing was queued\./);
+    assert.equal(await runCount(), before, 'nothing queued, so nothing to bill');
   });
 
   test('stops, inconclusive, at its step cap', async () => {
@@ -899,6 +930,124 @@ describe('who may start one', () => {
     } finally {
       await bare.close();
       names.forEach((n, i) => { if (saved[i] !== undefined) process.env[n] = saved[i]; });
+    }
+  });
+});
+
+describe('nothing is started that cannot finish (ADR-0044)', () => {
+  const gate = { slots: [testSlot], injected: false };
+  const readiness = async (q = `platform=android&region=${REGION}`) =>
+    (await app.inject({ method: 'GET', url: `/v1/ai/readiness?${q}`, headers: auth(keyA) })).json() as {
+      ready: boolean; blocking: string | null; message: string | null;
+      checks: Record<string, { ok: boolean; message: string; retryAt?: string | null; action?: { href: string } | null; ready?: number }>;
+    };
+
+  test('the readiness answer is a go when a device is free, and each check says what it saw', async () => {
+    await resetFleet();
+    const r = await readiness();
+    assert.equal(r.ready, true, JSON.stringify(r));
+    assert.equal(r.blocking, null);
+    assert.equal(r.checks.devices!.ready, 1);
+    assert.match(r.checks.devices!.message, /1 of 1 Android device free/);
+    assert.match(r.checks.budget!.message, /left this month/);
+  });
+
+  test('a stopped host is a no: said as such, with where to fix it, and the door refuses the same way', async () => {
+    await resetFleet();
+    await withSystem((c) => c.query(
+      `UPDATE devices SET state = 'QUARANTINED', quarantined_at = now(), quarantine_source = 'host',
+              quarantine_reason = 'its host was stopped: operator request' WHERE host_id = $1`, [hostId]));
+    const r = await readiness();
+    assert.equal(r.ready, false);
+    assert.equal(r.blocking, 'devices');
+    assert.match(r.message!, /device host is stopped/);
+    assert.equal(r.checks.devices!.action?.href, '#/infra/hosts');
+
+    const before = await runCount();
+    const res = await app.inject({ method: 'POST', url: '/v1/ai/runs', headers: auth(keyA), payload: { prompt: 'Open settings', region: REGION } });
+    assert.equal(res.statusCode, 503);
+    const err = (res.json() as { error: { code: string; blocking: string; message: string; action: { href: string } } }).error;
+    assert.equal(err.code, 'ai_not_ready');
+    assert.equal(err.blocking, 'devices');
+    assert.match(err.message, /device host is stopped.*Nothing was queued/);
+    assert.equal(err.action.href, '#/infra/hosts', 'the API answer names the fix too');
+    assert.equal(await runCount(), before);
+  });
+
+  test('a model provider that is down refuses a person at the door, and holds an upload\'s run until it is back', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    try {
+      recordModelFailure('primary', new ModelError('429 from test', { status: 429, retryAfterMs: 3_600_000, body: 'tokens per day (TPD)' }));
+      await assert.rejects(
+        queueAiRun(orgA, { prompt: 'A person pressed Run', region: REGION }, { ...gate, mode: 'require' }),
+        (err: { code: string; message: string; details: { blocking: string; retryAt: string } }) => {
+          assert.equal(err.code, 'ai_not_ready');
+          assert.equal(err.details.blocking, 'model');
+          assert.match(err.message, /daily allowance/);
+          assert.ok(err.details.retryAt, 'and when it lifts');
+          return true;
+        });
+
+      scripts.set('A build was uploaded', [
+        { tool: 'finish', input: { passed: true, summary: 'Fine', evidence: 'Home', why: 'done' } },
+      ]);
+      const id = await queueAiRun(orgA, { prompt: 'A build was uploaded', region: REGION, trigger: 'upload' }, { ...gate, mode: 'defer' });
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(await statusOf(id), 'queued', 'not claimed: no device is taken for a model that cannot answer');
+
+      recordModelOk('primary');
+      const done = await settle(id);
+      assert.equal(done.aiRun.status, 'passed', 'started by itself once the provider was back');
+    } finally {
+      resetProviderHealth();
+    }
+  });
+
+  test('a provider let back in by the clock is probed with one tiny request before a device is taken', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    resetProbes();
+    probes = 0;
+    probeFails = true;
+    try {
+      // Failed two minutes ago with a one-minute cool-down: half-open now.
+      recordModelFailure('primary', new ModelError('503 from test', { status: 503 }), Date.now() - 120_000);
+      scripts.set('Waiting on a probe', [
+        { tool: 'finish', input: { passed: true, summary: 'Fine', evidence: 'Home', why: 'done' } },
+      ]);
+      const id = await queueAiRun(orgA, { prompt: 'Waiting on a probe', region: REGION, trigger: 'upload' }, { ...gate, mode: 'defer' });
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(await statusOf(id), 'queued', 'the probe failed, so no device was taken');
+      assert.equal(probes, 1, 'one probe, though the runner ticked a dozen times');
+
+      probeFails = false;
+      recordModelFailure('primary', new ModelError('503 from test', { status: 503 }), Date.now() - 120_000);
+      resetProbes();
+      const done = await settle(id);
+      assert.equal(done.aiRun.status, 'passed');
+      assert.equal(probes, 2);
+    } finally {
+      probeFails = false;
+      resetProviderHealth();
+    }
+  });
+
+  test('a run that waited too long for the model is given up with the reason, and nothing billed', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    try {
+      recordModelFailure('primary', new ModelError('402 from test', { status: 402, body: 'Your credit balance is too low' }));
+      const id = await queueAiRun(orgA, { prompt: 'Waited all night', region: REGION, trigger: 'upload' }, { ...gate, mode: 'defer' });
+      await withSystem((c) => c.query(`UPDATE ai_runs SET created_at = now() - interval '7 hours' WHERE id = $1`, [id]));
+      const done = await settle(id);
+      assert.equal(done.aiRun.status, 'error');
+      assert.equal(done.aiRun.stopReason, 'model_error');
+      assert.match(done.aiRun.summary ?? '', /Not started: the AI model stayed unavailable for 6 hours/);
+      assert.match(done.aiRun.summary ?? '', /no credit left/, 'and why it was unavailable');
+      assert.equal(done.aiRun.costInr, 0);
+    } finally {
+      resetProviderHealth();
     }
   });
 });

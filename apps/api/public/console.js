@@ -307,6 +307,8 @@ export const state = {
     filter: 'all',
     /** Set by a run's "Recording & log", so that session page can lead back to the run. */
     cameFrom: null,
+    /** GO / NO-GO for starting a run (ADR-0044), as `GET /v1/ai/readiness` answers it. */
+    readiness: null, readinessLoading: false,
   },
   /**
    * Artifacts for the session detail screen, keyed by session id.
@@ -2006,7 +2008,7 @@ export function loadForRoute() {
    */
   if (name === 'tunnels') return loadTunnels();
   // AI testing, on arrival for the tunnels reason above. The app list feeds the build picker.
-  if (name === 'ai') return Promise.all([loadAiRuns(), loadAiPricing(), loadAiTests(), refreshApps().catch(() => {})]);
+  if (name === 'ai') return Promise.all([loadAiRuns(), loadAiPricing(), loadAiTests(), loadAiReadiness(), refreshApps().catch(() => {})]);
   if (name === 'airun') {
     state.ai.stepN = null;
     return loadAiRun(id);
@@ -11165,15 +11167,16 @@ function aiStopDetail(r) {
   if (r.stopReason === 'model_error' && aiRateLimited(s)) {
     const daily = /per day|\bTPD\b|\bRPD\b/i.test(s) ? ' — today’s allowance is used up' : '';
     const secs = aiRetrySeconds(s);
-    // A CLOCK TIME, anchored to when the run stopped. "Wait about 6 minutes" read hours later is a
-    // lie: the wait began then, not when the page was opened.
+    // The server's own time when it gave one (ADR-0044: "tried again at <ISO>"), else the provider's
+    // "try again in 6m" anchored to when the run stopped — "wait 6 minutes" read hours later is a lie.
+    const stated = /tried again at (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(s);
     let then = 'Start the run again in a few minutes.';
-    if (secs !== null) {
-      const at = new Date(new Date(r.endedAt || r.createdAt).getTime() + secs * 1000);
+    if (stated || secs !== null) {
+      const at = stated ? new Date(stated[1]) : new Date(new Date(r.endedAt || r.createdAt).getTime() + secs * 1000);
       const clockAt = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       then = at.getTime() <= Date.now()
         ? `It asked to wait until ${clockAt}, which has passed — you can start the run again now.`
-        : `It asked to wait until ${clockAt} (${aiWaitWords(secs)}); start the run again after that.`;
+        : `It asked to wait until ${clockAt}${stated ? '' : ` (${aiWaitWords(secs)})`}; start the run again after that.`;
     }
     return `The provider is rate-limiting this farm’s AI key${daily}. ${then} Nothing was billed for the step that could not run.`;
   }
@@ -11320,7 +11323,7 @@ function screenAi() {
         h('span', { class: 'micro', text: 'Platform' }),
         h('select', {
           class: 'field', disabled: off,
-          onchange: (e) => { state.ai.draft = { ...state.ai.draft, platform: e.target.value }; },
+          onchange: (e) => { state.ai.draft = { ...state.ai.draft, platform: e.target.value }; void loadAiReadiness(); },
         }, ['android', 'ios'].map((v) => h('option', {
           value: v, selected: d.platform === v, disabled: !hasPlatform(v) && d.platform !== v,
           // Short, because a select is as wide as its longest option.
@@ -11347,13 +11350,14 @@ function screenAi() {
         : null,
     ),
     aiSaveRow(off),
+    off ? null : aiReadinessStrip(),
     h('div', { class: 'row between mt-md' },
       h('p', { class: 'caption', text: profileSpec
         ? `${aiMoney(profileSpec.priceInr)} per step, up to ${profileSpec.stepCap} steps `
           + `(at most ${aiMoney(profileSpec.priceInr * profileSpec.stepCap)}), plus device time.`
         : ' ' }),
       btn(ai.busy ? 'Starting…' : 'Start AI run', 'primary', () => void startAiRun(),
-        { disabled: off || ai.busy || !d.prompt.trim() }),
+        { disabled: off || ai.busy || !d.prompt.trim() || Boolean(aiBlocked()), title: aiBlocked()?.message || null }),
     ),
   );
 
@@ -11469,7 +11473,10 @@ function screenAiRun() {
       ? [h('p', { text: r.summary || '' }),
          r.evidence ? h('p', { class: 'caption mt-sm' }, h('span', { class: 'micro', text: 'Evidence ' }), r.evidence) : null]
       : active
-        ? h('p', { class: 'caption', text: r.status === 'queued' ? 'Waiting for a device…'
+        ? h('p', { class: 'caption', text: r.status === 'queued'
+            ? (aiReady() && !aiReady().checks.model.ok
+                ? `Waiting for the AI model provider: ${aiReady().checks.model.message}${aiReady().checks.model.retryAt ? ` It can be tried again at ${aiClock(aiReady().checks.model.retryAt)}.` : ''}`
+                : 'Waiting for a device…')
             : `Working — step ${r.steps} of at most ${r.stepCap}.` })
         : [h('p', { class: 'ai-stop', text: aiStopText(r) }),
            detail ? h('p', { class: 'caption mt-sm', text: detail }) : null,
@@ -11628,7 +11635,10 @@ function aiTestsCard(off) {
   const ai = state.ai;
   if (!ai.testsLoaded) return null;
   if (!ai.tests.length) return null;
+  // One sentence for the whole card, not a tooltip on each button: the reason is the same for all.
+  const blocked = aiBlocked();
   return card('Saved tests', { aside: h('span', { class: 'caption', text: `${ai.tests.length}` }) },
+    blocked ? h('p', { class: 'caption ai-row-why mb-sm', text: `Paused: ${blocked.message}` }) : null,
     h('div', { class: 'stack' }, ai.tests.map((t) => h('div', { class: 'inset row between fit' },
       h('div', { class: 'stack tight shrink' },
         h('span', { class: 'row tight' },
@@ -11646,7 +11656,7 @@ function aiTestsCard(off) {
           : h('span', { class: 'caption', text: 'Never run' }),
       ),
       h('span', { class: 'row tight' },
-        btn('Run', '', () => void runAiTest(t), { disabled: off }),
+        btn('Run', '', () => void runAiTest(t), { disabled: off || Boolean(blocked), title: blocked?.message || null }),
         btn('Archive', 'tiny ghost', () => void archiveAiTest(t), { title: 'Hide it; its past runs keep its name' })),
     ))));
 }
@@ -11750,12 +11760,15 @@ function aiExplainBlock(sessionId) {
     );
   }
   const price = ai.pricing?.diagnosePriceInr;
-  return h('p', { class: 'row tight' },
+  const blocked = aiBlocked('explain');
+  return h('p', { class: 'row tight wrap' },
     btn(d.busy ? 'Reading the evidence\u2026' : 'Explain this failure', 'tiny', () => void explainFailure(sessionId), {
-      disabled: d.busy || !d.loaded,
-      title: 'AI reads the failure, the last commands, the log and the screen, and says whose problem it is',
+      disabled: d.busy || !d.loaded || Boolean(blocked),
+      title: blocked?.message || 'AI reads the failure, the last commands, the log and the screen, and says whose problem it is',
     }),
-    price !== undefined ? h('span', { class: 'caption', text: `${aiMoney(price)} from the AI budget` }) : null);
+    blocked
+      ? h('span', { class: 'caption ai-row-why', text: `Not available right now: ${blocked.message}` })
+      : price !== undefined ? h('span', { class: 'caption', text: `${aiMoney(price)} from the AI budget` }) : null);
 }
 
 async function loadDiagnoses(sessionId) {
@@ -11822,6 +11835,7 @@ async function startAiRun() {
     go(`#/ai/${out.aiRun.id}`);
   } catch (e) {
     toast('Could not start the AI run', e.message, 'bad');
+    void loadAiReadiness();
   } finally {
     state.ai.busy = false;
     render();
@@ -11836,6 +11850,92 @@ async function cancelAiRun(id) {
   } catch (e) {
     toast('Could not stop the run', e.message, 'bad');
   }
+}
+
+/**
+ * GO / NO-GO FOR STARTING A RUN (ADR-0044) — the server's answer for the platform the form is on.
+ *
+ * Polled while an AI screen is open, so a button disabled because the provider is limited until 19:23
+ * enables itself at 19:23. A failure to ASK is not a no: the page says it could not check, and the
+ * doors still apply the same answer server-side, so nothing unsafe gets through on a guess.
+ */
+async function loadAiReadiness() {
+  if (state.ai.readinessLoading) return;
+  const d = state.ai.draft;
+  const platform = d.platform || 'android';
+  const regions = aiRegionsFor(platform);
+  const region = regions.includes(d.region) ? d.region : (regions[0] || '');
+  state.ai = { ...state.ai, readinessLoading: true };
+  let answer;
+  try {
+    answer = await api(`/v1/ai/readiness?platform=${encodeURIComponent(platform)}${region ? `&region=${encodeURIComponent(region)}` : ''}`);
+  } catch (e) {
+    answer = { ready: null, blocking: null, message: null, checks: null, failed: e.message };
+  }
+  // After the await, never `{ ...state.ai, x: await … }` — that was D49.
+  state.ai = { ...state.ai, readiness: { ...answer, platform, at: Date.now() }, readinessLoading: false };
+  scheduleRender();
+}
+
+/** The readiness answer for the form's platform, or null while there is none to go on. */
+function aiReady() {
+  const r = state.ai.readiness;
+  return r && r.checks && r.platform === (state.ai.draft.platform || 'android') ? r : null;
+}
+
+/**
+ * What stops `kind` right now, as its check (`{ ok, message, retryAt, action }`), or null for go.
+ * A run needs everything; explaining a failure needs the model and the budget, not a device.
+ */
+function aiBlocked(kind = 'run') {
+  const r = aiReady();
+  if (!r) return null;
+  const order = kind === 'explain' ? ['configured', 'model', 'budget'] : ['configured', 'model', 'devices', 'budget'];
+  const key = order.find((k) => r.checks[k] && !r.checks[k].ok);
+  return key ? r.checks[key] : null;
+}
+
+/** An ISO instant as the reader's clock — "19:23", or "now" once it has passed. */
+function aiClock(iso) {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '';
+  return at.getTime() <= Date.now() ? 'now' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * The three things a run needs, each with a dot — and, when one says no, why, until when and where
+ * to fix it, above a Start button that stays disabled until it lifts.
+ */
+function aiReadinessStrip() {
+  const r = aiReady();
+  if (!r) {
+    const failed = state.ai.readiness?.failed;
+    return h('p', { class: 'caption mt-sm', text: failed
+      ? `Could not check whether a run can start (${failed}). Starting may still work.`
+      : 'Checking the model, the devices and the budget…' });
+  }
+  const item = (label, c, text) => h('span', { class: `ai-check ${c.ok ? 'ok' : 'bad'}`, title: c.detail || c.message },
+    h('span', { class: `dot ${c.ok ? 'ok' : 'bad'}`, 'aria-hidden': 'true' }),
+    h('span', { class: 'micro', text: label }),
+    h('span', { class: 'caption', text }));
+  const m = r.checks.model;
+  const dv = r.checks.devices;
+  const b = r.checks.budget;
+  const onFallback = m.ok && m.using && !/^Ready/.test(m.message) && /fallback/i.test(m.message);
+  const blocked = aiBlocked();
+  return h('div', { class: 'stack tight mt-sm' },
+    h('div', { class: 'row wrap ai-checks', role: 'group', 'aria-label': 'Can a run start?' },
+      item('Model', m, m.ok ? (onFallback ? 'Using the fallback' : 'Ready') : 'Unavailable'),
+      item('Devices', dv, dv.ok ? `${dv.ready} of ${dv.total} free` : 'None available'),
+      item('Budget', b, `${aiMoney(Math.max(0, b.budgetInr - b.spentInr))} left`)),
+    blocked
+      ? h('div', { class: 'inset stack tight ai-gate', role: 'status' },
+          h('p', { class: 'ai-stop', text: blocked.message }),
+          blocked.retryAt ? h('p', { class: 'caption', text: `It can be tried again at ${aiClock(blocked.retryAt)}. This page checks again by itself.` }) : null,
+          blocked.action ? h('span', { class: 'row tight' }, btn(blocked.action.label, 'tiny', () => go(blocked.action.href))) : null)
+      : onFallback
+        ? h('p', { class: 'caption', text: m.message })
+        : null);
 }
 
 async function loadAiRuns() {
@@ -12911,6 +13011,9 @@ function startPoll() {
        * seconds, which is the thing a person opened the page to watch.
        */
       if (state.route.name === 'ai' && state.ai.runs.some((r) => AI_ACTIVE.has(r.status))) await loadAiRuns();
+      // Every tick while an AI screen is open: a provider limited until 19:23 re-enables Start at
+      // 19:23 without anybody reloading, and a host that just stopped disables it within seconds.
+      if (state.route.name === 'ai' || state.route.name === 'airun') await loadAiReadiness();
       if (state.route.name === 'airun' && state.ai.detail?.aiRun?.id === state.route.id
           && AI_ACTIVE.has(state.ai.detail.aiRun.status)) {
         await loadAiRun(state.route.id);

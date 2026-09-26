@@ -3409,6 +3409,12 @@ kbd {
 .ai-step-err { color: var(--warn, #E8A30E); overflow-wrap: anywhere; }
 .ai-row-why { color: var(--warn, #E8A30E); }
 .backrow { margin: 0 0 6px; }
+/* ADR-0044: the three things a run needs, each with a dot, above a Start that waits for all three. */
+.ai-checks { gap: 16px; }
+.ai-check { display: inline-flex; align-items: center; gap: 6px; }
+.ai-check .micro { color: var(--t-label, #8A8A8A); }
+.ai-check.bad .caption { color: var(--warn, #E8A30E); }
+.ai-gate { border-color: var(--warn-line, rgba(232, 163, 14, .35)); }
 
 /* Saved-test history: one dot per recent run, newest first. The colours are the pills'. */
 .ai-dot {

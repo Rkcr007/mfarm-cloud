@@ -1,5 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Model } from './agent.ts';
+import { ModelError, ModelUnavailableError } from './model-error.ts';
+import {
+  modelHalfOpen, modelUsable, providerHealth, recordModelFailure, recordModelOk, type ProviderSlot,
+} from './health.ts';
 
 /**
  * WHICH MODEL SERVICE AI RUNS TALK TO — provider-agnostic by configuration (ADR-0043 addendum).
@@ -49,21 +53,179 @@ export function aiProviderConfig(env: Env = process.env): AiProviderConfig | nul
   return { provider, apiKey, baseUrl: (env.MFARM_AI_BASE_URL ?? '').trim() || null };
 }
 
+/** The model id the primary provider is asked for — the one name config.ts and the runner share. */
+export function aiModelId(env: Env = process.env): string {
+  return (env.MFARM_AI_MODEL ?? '').trim() || 'claude-opus-5';
+}
+
 export function buildModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
-  return cfg.provider === 'openai' ? openaiModel(cfg, retry) : anthropicModel(cfg);
+  return cfg.provider === 'openai' ? openaiModel(cfg, retry) : anthropicModel(cfg, retry);
+}
+
+// ---------------------------------------------------------------- the fallback provider (ADR-0044)
+
+/**
+ * A SECOND PROVIDER, used only while the first cannot serve. Optional; the same four meanings as the
+ * primary's variables, under `MFARM_AI_FALLBACK_*`:
+ *
+ *   MFARM_AI_FALLBACK_API_KEY   its credential. Unset: there is no fallback.
+ *   MFARM_AI_FALLBACK_PROVIDER  its wire protocol, `anthropic` (default) or `openai`.
+ *   MFARM_AI_FALLBACK_BASE_URL  optional gateway or self-hosted endpoint.
+ *   MFARM_AI_FALLBACK_MODEL     required for `openai`; defaults to claude-opus-5 for `anthropic`.
+ *
+ * A different VENDOR is the useful kind: a second key on the same provider shares its outage, and on
+ * a free tier usually its allowance too.
+ */
+export interface AiSlotConfig extends AiProviderConfig {
+  model: string;
+}
+
+export function aiFallbackConfig(env: Env = process.env): AiSlotConfig | null {
+  const apiKey = (env.MFARM_AI_FALLBACK_API_KEY ?? '').trim();
+  if (!apiKey) return null;
+  const provider = (env.MFARM_AI_FALLBACK_PROVIDER ?? '').trim().toLowerCase() || 'anthropic';
+  if (!(AI_PROVIDERS as readonly string[]).includes(provider)) return null;
+  const model = (env.MFARM_AI_FALLBACK_MODEL ?? '').trim() || (provider === 'anthropic' ? 'claude-opus-5' : '');
+  if (!model) return null;
+  return { provider: provider as AiProvider, apiKey, baseUrl: (env.MFARM_AI_FALLBACK_BASE_URL ?? '').trim() || null, model };
+}
+
+/** One provider the farm may use: its place in the order, the model it is asked for, and how to call it. */
+export interface ModelSlot {
+  slot: ProviderSlot;
+  model: string;
+  /** "openai via api.groq.com qwen/qwen3.8-27b" — what an operator configured, in one line. */
+  label: string;
+  call: Model;
+  /** The same provider with no retries — a probe must answer "is it back?" in one request. */
+  probe: Model;
+}
+
+function slotOf(slot: ProviderSlot, cfg: AiProviderConfig, model: string): ModelSlot {
+  const via = cfg.baseUrl ? ` via ${new URL(cfg.baseUrl).host}` : '';
+  return { slot, model, label: `${cfg.provider}${via} ${model}`, call: buildModel(cfg), probe: buildModel(cfg, NO_RETRY) };
+}
+
+/** The providers this farm is configured with, primary first. Empty when AI is off. */
+export function configuredSlots(env: Env = process.env): ModelSlot[] {
+  const primary = aiProviderConfig(env);
+  if (!primary) return [];
+  const slots = [slotOf('primary', primary, aiModelId(env))];
+  const fallback = aiFallbackConfig(env);
+  if (fallback) slots.push(slotOf('fallback', fallback, fallback.model));
+  return slots;
+}
+
+/**
+ * THE MODEL THE AGENT AND DIAGNOSIS ACTUALLY CALL: the first provider that is usable, recording what
+ * each call taught about it (health.ts). A provider known to be down or limited is skipped WITHOUT
+ * being contacted; when none is usable, `ModelUnavailableError` says why and until when — at once,
+ * rather than after the run has taken a device.
+ *
+ * The agent names the model it wants; each provider is asked for ITS OWN model instead, and every
+ * step records the model that answered (agent.ts), so a run half-served by the fallback says so.
+ */
+export function resilientModel(slots: ModelSlot[]): Model {
+  return async (params) => {
+    for (const s of slots) {
+      if (!modelUsable(s.slot)) continue;
+      try {
+        const message = await s.call({ ...params, model: s.model });
+        recordModelOk(s.slot);
+        return message;
+      } catch (err) {
+        // Null: the REQUEST's own fault (a schema, a size). Another provider would refuse it too, and
+        // it says nothing about this one — so it is neither recorded nor retried elsewhere.
+        if (!recordModelFailure(s.slot, err)) throw err;
+      }
+    }
+    throw modelUnavailable(slots);
+  };
+}
+
+/** Why no provider can serve, from the primary's side, and the earliest time one is worth trying. */
+export function modelUnavailable(slots: ModelSlot[]): ModelUnavailableError {
+  const primary = providerHealth('primary');
+  const retryAt = slots.map((s) => providerHealth(s.slot).retryAt)
+    .filter((t): t is number => t !== null).sort((a, b) => a - b)[0] ?? null;
+  const parts = [primary.reason ?? 'The AI model is unavailable.'];
+  const fallback = slots.find((s) => s.slot === 'fallback');
+  if (fallback) {
+    const fb = providerHealth('fallback');
+    if (fb.reason) parts.push(`The fallback is unavailable too: ${fb.reason}`);
+  }
+  // Machine-readable on purpose: the console turns it into a clock time in the reader's zone.
+  if (retryAt) parts.push(`It can be tried again at ${new Date(retryAt).toISOString()}.`);
+  if (primary.detail) parts.push(`(${primary.detail.slice(0, 300)})`);
+  return new ModelUnavailableError(parts.join(' '), retryAt);
+}
+
+const lastProbeAt = new Map<ProviderSlot, number>();
+/** A half-open provider is probed at most this often, however many callers ask. */
+export const PROBE_EVERY_MS = 30_000;
+
+/**
+ * GO / NO-GO FOR SOMETHING ABOUT TO TAKE A DEVICE. True at once for a provider that last worked (or
+ * was never tried); for one only let back in by the clock, one tiny request decides — so a provider
+ * that is still down costs a request, never a device. False when nothing can serve.
+ */
+export async function ensureModelReady(slots: ModelSlot[], now = Date.now()): Promise<boolean> {
+  for (const s of slots) {
+    if (!modelUsable(s.slot, now)) continue;
+    if (!modelHalfOpen(s.slot, now)) return true;
+    if ((lastProbeAt.get(s.slot) ?? -Infinity) > now - PROBE_EVERY_MS) continue;
+    lastProbeAt.set(s.slot, now);
+    try {
+      await s.probe({ model: s.model, max_tokens: 8, messages: [{ role: 'user', content: 'Reply with OK.' }] });
+      recordModelOk(s.slot, now);
+      return true;
+    } catch (err) {
+      // A probe the provider ANSWERED with a request error still proves it is reachable.
+      if (!recordModelFailure(s.slot, err, now)) {
+        recordModelOk(s.slot, now);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Tests only: forget when each slot was last probed. */
+export function resetProbes(): void {
+  lastProbeAt.clear();
 }
 
 // ---------------------------------------------------------------- anthropic
 
-function anthropicModel(cfg: AiProviderConfig): Model {
-  const client = new Anthropic({ apiKey: cfg.apiKey, ...(cfg.baseUrl ? { baseURL: cfg.baseUrl } : {}) });
-  // Server-side refusal fallback is Anthropic's own feature; a compatible gateway may reject the beta.
-  if (cfg.baseUrl) return (params) => client.beta.messages.create(params);
-  return (params) => client.beta.messages.create({
-    ...params,
-    betas: ['server-side-fallback-2026-07-01'],
-    fallbacks: 'default',
+/** An SDK failure as a `ModelError`: its status, and the provider's own retry hint. */
+function fromAnthropicError(err: unknown): ModelError {
+  if (err instanceof Anthropic.APIError) {
+    const status = typeof err.status === 'number' ? err.status : null;
+    const headers = err.headers as { get?(n: string): string | null } | undefined;
+    const hint = headers?.get ? retryAfterMs({ headers: { get: (n) => headers.get!(n) } }, '') : null;
+    return new ModelError(err.message, { status, retryAfterMs: hint, body: err.message });
+  }
+  return new ModelError((err as Error)?.message ?? String(err), { status: null });
+}
+
+function anthropicModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
+  const client = new Anthropic({
+    apiKey: cfg.apiKey,
+    ...(cfg.baseUrl ? { baseURL: cfg.baseUrl } : {}),
+    // The SDK retries 429 and 5xx itself; a probe must not.
+    ...(retry?.maxAttempts === 1 ? { maxRetries: 0 } : {}),
   });
+  // Server-side refusal fallback is Anthropic's own feature; a compatible gateway may reject the beta.
+  const create: Model = cfg.baseUrl
+    ? (params) => client.beta.messages.create(params)
+    : (params) => client.beta.messages.create({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' });
+  return async (params) => {
+    try {
+      return await create(params);
+    } catch (err) {
+      throw fromAnthropicError(err);
+    }
+  };
 }
 
 // ---------------------------------------------------------------- openai-compatible
@@ -183,8 +345,12 @@ export interface RetryPolicy {
   baseMs: number;
   maxSingleWaitMs: number;
   maxTotalWaitMs: number;
+  /** A hard stop on requests. Without it a zero-wait policy would re-send forever: 0 + 0 is never > 0. */
+  maxAttempts?: number;
 }
 export const DEFAULT_RETRY: RetryPolicy = Object.freeze({ baseMs: 1_000, maxSingleWaitMs: 60_000, maxTotalWaitMs: 120_000 });
+/** One request and its answer — what a probe needs. */
+export const NO_RETRY: RetryPolicy = Object.freeze({ baseMs: 0, maxSingleWaitMs: 0, maxTotalWaitMs: 0, maxAttempts: 1 });
 
 const RETRYABLE = (status: number) => status === 429 || status >= 500;
 
@@ -211,29 +377,46 @@ function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY):
     let waited = 0;
     let regenerated = false;
     for (let attempt = 0; ; attempt++) {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.apiKey}` },
-        body,
-        signal: AbortSignal.timeout(600_000),
-      });
+      const last = attempt + 1 >= (retry.maxAttempts ?? Infinity);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.apiKey}` },
+          body,
+          signal: AbortSignal.timeout(600_000),
+        });
+      } catch (err) {
+        // No HTTP answer at all — DNS, a refused connection, the timeout. Retried like a 5xx, and said
+        // as "did not answer" rather than surfacing as fetch's bare "fetch failed".
+        const failure = `${host} did not answer: ${(err as Error).message}`;
+        const wait = Math.min(retry.maxSingleWaitMs, retry.baseMs * 2 ** attempt);
+        if (last || waited + wait > retry.maxTotalWaitMs) {
+          throw new ModelError(`${failure} (after ${attempt + 1} attempt${attempt ? 's' : ''})`, { status: null });
+        }
+        waited += wait;
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
       const text = await res.text();
       if (res.ok) return fromOpenAiResponse(JSON.parse(text) as OaResponse, params.model);
       const failure = `${res.status} from ${host}: ${text.slice(0, 300)}`;
       // A structured answer the server's own validator rejected (Groq: `json_validate_failed`). It is
       // the model's sampling, not the request: the same diagnosis parsed on 2 of 2 re-sends. Once.
-      if (res.status === 400 && !regenerated && request.response_format && /json_validate_failed/.test(text)) {
+      if (res.status === 400 && !regenerated && !last && request.response_format && /json_validate_failed/.test(text)) {
         regenerated = true;
         continue;
       }
-      if (!RETRYABLE(res.status)) throw new Error(failure);
       const asked = retryAfterMs(res, text);
+      if (!RETRYABLE(res.status)) throw new ModelError(failure, { status: res.status, retryAfterMs: asked, body: text });
       if (asked !== null && asked > retry.maxSingleWaitMs) {
-        throw new Error(`${failure} (the provider asked to wait ${Math.ceil(asked / 1000)}s — longer than a device can be held idle)`);
+        throw new ModelError(`${failure} (the provider asked to wait ${Math.ceil(asked / 1000)}s — longer than a device can be held idle)`,
+          { status: res.status, retryAfterMs: asked, body: text });
       }
       const wait = asked ?? Math.min(retry.maxSingleWaitMs, retry.baseMs * 2 ** attempt);
-      if (waited + wait > retry.maxTotalWaitMs) {
-        throw new Error(`${failure} (still refused after ${attempt + 1} attempts and ${Math.round(waited / 1000)}s of waiting)`);
+      if (last || waited + wait > retry.maxTotalWaitMs) {
+        throw new ModelError(`${failure} (still refused after ${attempt + 1} attempts and ${Math.round(waited / 1000)}s of waiting)`,
+          { status: res.status, retryAfterMs: asked, body: text });
       }
       waited += wait;
       await new Promise((r) => setTimeout(r, wait));

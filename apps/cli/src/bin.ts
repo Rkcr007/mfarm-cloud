@@ -435,11 +435,16 @@ async function appCommand(flags: Flags, rest: string[]): Promise<number> {
       // Said here because it spends money: a saved AI test listening for this package just started.
       for (const r of aiRuns) process.stderr.write(`mfarm: started AI test "${r.testName}" on this build (${r.aiRunId})\n`);
       if (aiRunsSkipped) {
-        process.stderr.write(aiRunsSkipped === 'budget'
-          ? 'mfarm: AI tests listening for this app were NOT started — the monthly AI budget is spent.\n'
-          : aiRunsSkipped === 'region'
-            ? 'mfarm: AI tests listening for this app were NOT started — the farm has several regions; give each saved test one.\n'
-            : 'mfarm: AI tests listening for this app could not be started.\n');
+        // One sentence per reason the server gives (ADR-0044), so CI output says what to fix.
+        const why: Record<string, string> = {
+          budget: 'the monthly AI budget is spent',
+          region: 'the farm has several regions; give each saved test one',
+          devices: 'no device of that platform can take a run (is the device host stopped?)',
+          configured: 'AI runs are not switched on for this farm',
+        };
+        process.stderr.write(why[aiRunsSkipped]
+          ? `mfarm: AI tests listening for this app were NOT started — ${why[aiRunsSkipped]}.\n`
+          : 'mfarm: AI tests listening for this app could not be started.\n');
       }
     }
     return 0;

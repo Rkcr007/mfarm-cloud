@@ -108,6 +108,11 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
   verification used all of it, and the next call is refused for ~45 minutes (a wait the retry does
   not sit through). Caveat: a free model's token counts do NOT calibrate the price of the model we
   will sell on.
+- **Nothing is started that cannot finish (ADR-0044, 2026-09-26).** A run used to take a device and
+  only then discover the provider was capped. Now every model call feeds a health tracker, a fallback
+  provider can serve while the primary cannot, `GET /v1/ai/readiness` is the go / no-go (model,
+  devices, budget) that the console's buttons and every door apply, uploads' runs wait for a provider
+  to return, and the runner probes a recovering provider with one tiny request before taking a device.
 - **Flash and Pro on a non-Anthropic provider are the same model.** `effort` is Anthropic-only and is
   dropped by the `openai` adapter, so the only Pro difference there is the plan step and the verdict
   re-check. Open: a separate Pro model id before Pro is sold on such a provider.

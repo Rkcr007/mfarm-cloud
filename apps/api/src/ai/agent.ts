@@ -97,6 +97,15 @@ function targetOf(el: UiElement | undefined, elements: UiElement[]): ActionTarge
  * What an action touched: the element a tap_element named, or for typing the field that had focus
  * on the screen the decision was made on. Null for actions that touch no element.
  */
+/**
+ * The model that ANSWERED, as the provider reports it — not the one the agent asked for. With a
+ * fallback provider (ADR-0044) those differ, and a step recorded under the wrong name would make a
+ * run half-served by the fallback read as if the primary had done it all.
+ */
+function servedBy(message: { model?: string | null }, asked: string): string {
+  return (typeof message.model === 'string' && message.model.trim()) || asked;
+}
+
 export function actionTarget(name: string, input: Record<string, unknown>, elements: UiElement[]): ActionTarget | null {
   if (name === 'tap_element') return targetOf(elements[Number(input.index)], elements);
   if (name === 'type_text') return targetOf(elements.find((e) => e.focused), elements);
@@ -292,7 +301,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     await sink.record({
       n, phase: 'plan', thought: plan, action: null, result: null,
       screenshotB64: first.screenshotB64, elementCount: first.elements.length,
-      usage: usage(r.message), model: modelId, startedAt: r.startedAt, durationMs: Date.now() - r.t0,
+      usage: usage(r.message), model: servedBy(r.message, modelId), startedAt: r.startedAt, durationMs: Date.now() - r.t0,
     });
     if (r.message.stop_reason === 'refusal') return stop('model_refused', 'The model declined this task.');
   }
@@ -329,7 +338,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
         n, phase, thought: thoughtText || null, action: null,
         result: m.stop_reason === 'refusal' ? 'the model declined' : 'no action chosen',
         screenshotB64: obs.screenshotB64, elementCount: obs.elements.length,
-        usage: usage(m), model: modelId, startedAt: r.startedAt, durationMs: Date.now() - r.t0,
+        usage: usage(m), model: servedBy(m, modelId), startedAt: r.startedAt, durationMs: Date.now() - r.t0,
       });
       if (m.stop_reason === 'refusal') return stop('model_refused', 'The model declined to continue this task.');
       history.push(`${n}. (no action) ${thoughtText.slice(0, 160)}`);
@@ -373,7 +382,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
       n, phase, thought: [reason, thoughtText].filter(Boolean).join('\n') || null,
       action: { tool: use.name, input, target: actionTarget(use.name, input, obs.elements) }, result,
       screenshotB64: obs.screenshotB64, elementCount: obs.elements.length,
-      usage: usage(m), model: modelId, startedAt: r.startedAt, durationMs: Date.now() - r.t0,
+      usage: usage(m), model: servedBy(m, modelId), startedAt: r.startedAt, durationMs: Date.now() - r.t0,
     });
     history.push(`${n}. ${describeAction(use.name, input, obs.elements)} — ${reason} → ${result}`);
     if (outcome) return outcome;

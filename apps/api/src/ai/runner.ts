@@ -7,7 +7,7 @@ import { appStore, type AppStore } from '../appstore.ts';
 import { release } from '../allocator.ts';
 import { AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
-import { aiProviderConfig, buildModel } from './provider.ts';
+import { aiProviderConfig, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
 import { runAgent, type AgentOutcome, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 
 /**
@@ -26,6 +26,12 @@ import { runAgent, type AgentOutcome, type Device, type DeviceKey, type Model, t
 const RUN_KEY_TTL_MS = 3 * 60 * 60_000;
 /** Capacity wait at allocation — the same the MCP server and the example suites use. */
 const QUEUE_TIMEOUT_SECONDS = 300;
+/**
+ * How long a queued run may wait for the model provider to come back before it is given up. Only a
+ * run queued while the provider was down waits at all — an upload's run (queue.ts `defer`); a person
+ * pressing Run is refused at the door instead. Long enough for a daily allowance to reset overnight.
+ */
+export const DEFAULT_QUEUE_MAX_WAIT_MS = 6 * 3_600_000;
 
 export interface AiRunnerOptions {
   intervalMs: number;
@@ -36,12 +42,19 @@ export interface AiRunnerOptions {
   /** Tests inject a scripted model. Production builds one from MFARM_AI_API_KEY (provider.ts). */
   model?: Model;
   artifactDir: string;
+  /** Overrides DEFAULT_QUEUE_MAX_WAIT_MS — a test seam, so the give-up can be seen without waiting hours. */
+  queueMaxWaitMs?: number;
+  /** Overrides the configured providers — tests, to drive the health gate without a real one. */
+  slots?: ModelSlot[];
 }
 
-/** The configured provider's model (provider.ts), or undefined when AI is not configured. */
+/**
+ * The configured providers' model (provider.ts): the first usable of the primary and the fallback,
+ * with every call reported to the health tracker. Undefined when AI is not configured.
+ */
 export function configuredModel(): Model | undefined {
-  const cfg = aiProviderConfig();
-  return cfg ? buildModel(cfg) : undefined;
+  const slots = configuredSlots();
+  return slots.length ? resilientModel(slots) : undefined;
 }
 
 /** True when this process can run AI at all. Checked at creation so a run is refused, not stranded. */
@@ -67,17 +80,38 @@ export interface ClaimedRun {
 }
 
 export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void {
-  const model = opts.model ?? configuredModel();
+  const slots = opts.slots ?? (opts.model ? [] : configuredSlots());
+  const model = opts.model ?? (slots.length ? resilientModel(slots) : undefined);
+  const maxWaitMs = opts.queueMaxWaitMs ?? DEFAULT_QUEUE_MAX_WAIT_MS;
   const store = aiStepStore(opts.artifactDir);
   const inFlight = new Set<Promise<void>>();
   let closing = false;
   let ticking = false;
+
+  /**
+   * THE MODEL FIRST, THEN A DEVICE (ADR-0044). A run claimed while the provider is down would allocate
+   * a device, install the app and fail on its first call — what a person saw on 2026-09-26. So no run
+   * is claimed until the provider is usable, and one only let back in by the clock gets a one-token
+   * probe first.
+   *
+   * Asked before EVERY claim. The first version asked once per tick, and only when something was
+   * already queued — so a run queued between that check and the claim was claimed unchecked (caught
+   * by `ai-runs.test.ts`). "Nothing queued" now means "claim nothing", which also keeps an idle farm
+   * from spending a probe.
+   */
+  const readyToClaim = async (): Promise<boolean> => {
+    if (!(await anyQueued())) return false;
+    if (await ensureModelReady(slots)) return true;
+    await giveUpWaiting(maxWaitMs, modelUnavailable(slots).message);
+    return false;
+  };
 
   const tick = async () => {
     if (ticking || closing) return;
     ticking = true;
     try {
       while (!closing && inFlight.size < opts.maxConcurrent) {
+        if (slots.length && !(await readyToClaim())) break;
         const run = await claimNext();
         if (!run) break;
         const p = driveRun(app, run, { model, modelId: opts.modelId, store, isClosing: () => closing })
@@ -109,6 +143,27 @@ export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void
     clearInterval(retention);
     await Promise.allSettled([...inFlight]);
   });
+}
+
+async function anyQueued(): Promise<boolean> {
+  return withSystem(async (c) => (await c.query<{ any: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM ai_runs WHERE status = 'queued') AS any`,
+  )).rows[0]!.any);
+}
+
+/**
+ * Runs that have waited longer than `maxWaitMs` for the model to come back are given up: an honest
+ * "not started, and why" beats a queue that fills for ever behind a key nobody is fixing. Nothing
+ * was billed — they never took a step.
+ */
+async function giveUpWaiting(maxWaitMs: number, why: string): Promise<void> {
+  const hours = Math.max(1, Math.round(maxWaitMs / 3_600_000));
+  await withSystem((c) => c.query(
+    `UPDATE ai_runs SET status = 'error', stop_reason = 'model_error', ended_at = now(), summary = $2
+      WHERE status = 'queued' AND created_at < now() - make_interval(secs => $1::double precision)`,
+    [maxWaitMs / 1000, `Not started: the AI model stayed unavailable for ${maxWaitMs < 3_600_000 ? 'too long' : `${hours} hour${hours === 1 ? '' : 's'}`}, `
+      + `so this run was given up. Nothing was billed. ${why}`.slice(0, 1000)],
+  ));
 }
 
 async function claimNext(): Promise<ClaimedRun | null> {

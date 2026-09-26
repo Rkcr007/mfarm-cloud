@@ -1,6 +1,9 @@
 import { withTenant } from '../db.ts';
+import { spendThisMonth } from './budget.ts';
 import { ApiError, conflict } from '../http/errors.ts';
 import { AI_CURRENCY, AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
+import { aiReadiness } from './readiness.ts';
+import type { ModelSlot } from './provider.ts';
 
 /**
  * PUTTING AN AI RUN IN THE QUEUE — the one writer, whoever asks (ADR-0043).
@@ -10,6 +13,8 @@ import { AI_CURRENCY, AI_PROFILES, isAiProfile, type AiProfile } from './pricing
  * row, so the budget check lives here and nowhere else — a door that skipped it would be a way to
  * queue runs the org cannot pay for.
  */
+
+export { spendThisMonth } from './budget.ts';
 
 export interface QueueInput {
   prompt: string;
@@ -23,19 +28,22 @@ export interface QueueInput {
   trigger?: 'manual' | 'test' | 'upload';
 }
 
-export async function spendThisMonth(orgId: string): Promise<{ spentInr: number; budgetInr: number }> {
-  return withTenant(orgId, async (c) => {
-    const { rows } = await c.query<{ spent: string; budget: string }>(
-      // Steps AND diagnoses: one budget, whichever part of the AI line spent it (C4, C8).
-      `SELECT (SELECT COALESCE(sum(price_inr), 0) FROM ai_steps
-                WHERE org_id = $1 AND created_at >= date_trunc('month', now()))
-            + (SELECT COALESCE(sum(price_inr), 0) FROM ai_diagnoses
-                WHERE org_id = $1 AND created_at >= date_trunc('month', now())) AS spent,
-              (SELECT ai_monthly_budget_inr FROM orgs WHERE id = $1) AS budget`,
-      [orgId],
-    );
-    return { spentInr: Number(rows[0]?.spent ?? 0), budgetInr: Number(rows[0]?.budget ?? 0) };
-  });
+/**
+ * THE GO / NO-GO A DOOR APPLIES BEFORE IT QUEUES (ADR-0044) — readiness.ts decides, this says what
+ * a no means for each kind of asker:
+ *
+ *   `require` — a person pressed Run. Every check must pass, or the answer is a 503 naming what is
+ *               down and when it lifts. Queueing it would only have it fail later, holding a device.
+ *   `defer`   — a build was uploaded and nobody is waiting on the page. A model that is down does not
+ *               refuse it: it waits in the queue and the runner starts it when the model is back
+ *               (runner.ts). Everything else still refuses — no amount of waiting fixes "no devices"
+ *               or "no key", and the upload's answer says so.
+ */
+export interface QueueGate {
+  slots: ModelSlot[];
+  /** Tests inject a model; then there is no provider to be unhealthy. */
+  injected: boolean;
+  mode: 'require' | 'defer';
 }
 
 /**
@@ -71,13 +79,29 @@ export function pickRegion(platform: 'android' | 'ios', asked: string | null | u
   throw new ApiError(400, 'region_required', `Choose a region: this farm has ${os} devices in ${regions.join(', ')}.`);
 }
 
-/** Queue one run. Throws `ai_budget_exhausted` (409) when the budget cannot pay for a single step. */
-export async function queueAiRun(orgId: string, input: QueueInput): Promise<string> {
+/**
+ * Queue one run. Throws `ai_budget_exhausted` (409) when the budget cannot pay for a single step, and
+ * `ai_not_ready` (503) when the gate says no — with `details.blocking` naming the check and
+ * `details.retryAt` when it lifts by itself.
+ */
+export async function queueAiRun(orgId: string, input: QueueInput, gate?: QueueGate): Promise<string> {
   const profile: AiProfile = isAiProfile(input.profile) ? input.profile : 'flash';
   const spec = AI_PROFILES[profile];
   const stepCap = Math.min(input.stepCap ?? spec.stepCap, spec.stepCap);
   const platform = input.platform ?? 'android';
   const region = await resolveRegion(orgId, platform, input.region);
+
+  if (gate) {
+    const r = await aiReadiness(orgId, { platform, region, slots: gate.slots, injected: gate.injected });
+    const deferrable = gate.mode === 'defer' && r.blocking === 'model';
+    // Budget keeps its own 409 below, which callers already branch on.
+    if (!r.ready && r.blocking !== 'budget' && !deferrable) {
+      const c = r.checks[r.blocking!];
+      throw new ApiError(503, 'ai_not_ready', `${r.message} Nothing was queued.`, {
+        blocking: r.blocking, retryAt: c.retryAt ?? null, action: c.action ?? null,
+      });
+    }
+  }
 
   // Refused up front when the budget cannot pay for even one step. A run that would run out
   // part-way is allowed to start and stops cleanly at the step that would overspend.
@@ -110,6 +134,7 @@ export async function queueAiRun(orgId: string, input: QueueInput): Promise<stri
 export async function queueUploadRuns(
   orgId: string,
   build: { id: string; packageName: string },
+  gate?: Omit<QueueGate, 'mode'>,
 ): Promise<{ queued: { aiRunId: string; testId: string; testName: string }[]; skipped: string | null }> {
   const tests = await withTenant(orgId, async (c) => (await c.query<{
     id: string; name: string; prompt: string; profile: string; platform: 'android' | 'ios'; region: string | null;
@@ -128,11 +153,16 @@ export async function queueUploadRuns(
         // The build that was just uploaded, by id — not `@latest`, which a second upload a moment
         // later would silently retarget.
         appRef: build.id, aiTestId: t.id, trigger: 'upload',
-      });
+      }, gate ? { ...gate, mode: 'defer' } : undefined);
       queued.push({ aiRunId, testId: t.id, testName: t.name });
     } catch (err) {
-      const code = (err as { code?: string }).code;
-      return { queued, skipped: code === 'ai_budget_exhausted' ? 'budget' : code === 'region_required' || code === 'no_region' ? 'region' : 'error' };
+      const e = err as { code?: string; details?: { blocking?: string } };
+      const skipped = e.code === 'ai_budget_exhausted' ? 'budget'
+        : e.code === 'region_required' || e.code === 'no_region' ? 'region'
+          // `devices` or `configured`: said as the check that failed, so the CLI can name it.
+          : e.code === 'ai_not_ready' ? (e.details?.blocking ?? 'error')
+            : 'error';
+      return { queued, skipped };
     }
   }
   return { queued, skipped: null };

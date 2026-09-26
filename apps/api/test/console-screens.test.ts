@@ -2288,6 +2288,7 @@ describe('a route fetches what its screen needs', () => {
     assert.ok(urls.includes('/v1/ai/pricing'), 'the prices, which the page must never write itself');
     assert.ok(urls.includes('/v1/apps'), 'the build picker');
     assert.ok(urls.includes('/v1/ai/tests'), 'the saved tests');
+    assert.ok(urls.some((u) => u.startsWith('/v1/ai/readiness?platform=android')), `the go / no-go (ADR-0044): ${urls.join(', ')}`);
 
     seed({ name: 'airun', id: 'air-9' });
     urls = recording();
@@ -6306,6 +6307,90 @@ describe('the AI testing screen', () => {
     assert.match(text, /Share this AI run/);
     assert.match(text, /the task, the verdict and the screen at every step/);
     assert.doesNotMatch(text, /the step that broke/);
+  });
+
+  // ------------------------------------------------ ADR-0044: nothing offered that cannot finish
+
+  function readinessState(over: Record<string, any> = {}) {
+    const checks = {
+      configured: { ok: true, message: 'AI runs are switched on for this farm.' },
+      model: { ok: true, message: 'Ready.', using: 'openai via api.groq.com qwen/qwen3.8-27b' },
+      devices: { ok: true, message: '1 of 1 Android device free.', platform: 'android', region: 'lab', total: 1, usable: 1, ready: 1 },
+      budget: { ok: true, message: '₹1880 of ₹2000 left this month.', spentInr: 120, budgetInr: 2000 },
+      ...(over.checks || {}),
+    };
+    return { ready: true, blocking: null, message: null, platform: 'android', at: Date.now(), ...over, checks };
+  }
+  const modelDown = () => readinessState({
+    ready: false, blocking: 'model', message: 'The AI model provider’s daily allowance for this farm’s key is used up.',
+    checks: { model: { ok: false, message: 'The AI model provider’s daily allowance for this farm’s key is used up.',
+      retryAt: new Date(Date.now() + 3_600_000).toISOString(), using: null } },
+  });
+  const hostStopped = () => readinessState({
+    ready: false, blocking: 'devices',
+    checks: { devices: { ok: false, total: 1, usable: 0, ready: 0,
+      message: 'The device host is stopped, so no Android device can take a run. Start it from Infrastructure.',
+      action: { label: 'Open Infrastructure', href: '#/infra/hosts' } } },
+  });
+
+  test('while the model is down, the form says why and until when, and nothing can be started', () => {
+    seed({ name: 'ai' });
+    mod.state.ai.draft.prompt = 'Open settings';
+    mod.state.ai.readiness = modelDown();
+    const tree = mod.SCREENS.ai();
+    const text = textOf(tree);
+    assert.match(text, /Model\s+Unavailable/);
+    assert.match(text, /daily allowance for this farm’s key is used up/);
+    assert.match(text, /It can be tried again at \d\d:\d\d/);
+    const start = findByText(tree, 'Start AI run');
+    assert.equal(start.disabled, true, 'a control is never offered on a false premise');
+    assert.match(start.getAttribute('title'), /daily allowance/);
+    assert.match(text, /Paused: The AI model provider’s daily allowance/, 'the saved tests say it once, not per button');
+    assert.equal(findByText(tree, 'Run').disabled, true);
+
+    mod.state.ai.readiness = readinessState();
+    const again = mod.SCREENS.ai();
+    assert.equal(findByText(again, 'Start AI run').disabled, false, 'a go re-enables it — the poll, not a reload');
+    assert.match(textOf(again), /Model\s+Ready/);
+  });
+
+  test('a stopped host names the fix, and explaining a failure needs the model but not a device', () => {
+    seed({ name: 'ai' });
+    mod.state.ai.readiness = hostStopped();
+    const tree = mod.SCREENS.ai();
+    assert.match(textOf(tree), /Devices\s+None available/);
+    assert.match(textOf(tree), /device host is stopped/);
+    const fix = findByText(tree, 'Open Infrastructure');
+    assert.ok(fix && fix.click() > 0, 'a working way to the fix');
+    assert.equal((globalThis as any).location.hash, '#/infra/hosts');
+
+    seed({ name: 'airun', id: 'air-1' });
+    mod.state.ai = aiState({ detail: { aiRun: aiRun({ status: 'failed', summary: 'nope' }), steps: [], fetchedAt: Date.now() } });
+    mod.state.ai.diag = { 'sess-1': { items: [], loaded: true, loading: false, busy: false } };
+    mod.state.ai.readiness = hostStopped();
+    assert.equal(findByText(mod.SCREENS.airun(), 'Explain this failure').disabled, false, 'a diagnosis takes no device');
+    mod.state.ai.readiness = modelDown();
+    const page = mod.SCREENS.airun();
+    assert.equal(findByText(page, 'Explain this failure').disabled, true);
+    assert.match(textOf(page), /Not available right now: .*daily allowance/);
+  });
+
+  test('a queued run says what it is waiting for — the model, or a device', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    mod.state.ai = aiState({ detail: { aiRun: aiRun({ status: 'queued', steps: 0 }), steps: [], fetchedAt: Date.now() } });
+    mod.state.ai.readiness = modelDown();
+    assert.match(textOf(mod.SCREENS.airun()), /Waiting for the AI model provider: .*daily allowance.*tried again at \d\d:\d\d/);
+    mod.state.ai.readiness = readinessState();
+    assert.match(textOf(mod.SCREENS.airun()), /Waiting for a device/);
+  });
+
+  test('when the page cannot ask, it says so — and does not block on a guess', () => {
+    seed({ name: 'ai' });
+    mod.state.ai.draft.prompt = 'Open settings';
+    mod.state.ai.readiness = { ready: null, checks: null, failed: 'offline', platform: 'android' };
+    const tree = mod.SCREENS.ai();
+    assert.match(textOf(tree), /Could not check whether a run can start \(offline\)/);
+    assert.equal(findByText(tree, 'Start AI run').disabled, false, 'the doors still check, server-side');
   });
 
   test('a platform this farm has no devices for is shown, and cannot be picked', () => {

@@ -193,6 +193,8 @@ export interface Config {
   aiBaseUrl: string | null;
   /** `MFARM_AI_MODEL`. A cheaper model is a pricing decision for the owner, not a default. */
   aiModel: string;
+  /** The fallback provider in one line (ADR-0044), or null when there is none. Never the key. */
+  aiFallback: string | null;
   /** How often the AI runner looks for queued runs. 0 turns AI runs off in this process. */
   aiRunnerIntervalMs: number;
   /** Runs driven at once. Each holds a device, so this is also a cap on devices AI can occupy. */
@@ -529,6 +531,31 @@ export function parseConfig(env: Env): Config {
     problems.push('MFARM_AI_PROVIDER=openai needs MFARM_AI_MODEL: the default, claude-opus-5, is an Anthropic model id.');
   }
   const aiModel = aiModelSet || 'claude-opus-5';
+  /**
+   * THE FALLBACK PROVIDER (ADR-0044) — optional, and checked as strictly as the primary: a typo here
+   * must fail the boot, not the first outage the fallback exists to cover.
+   */
+  const fbKey = (env.MFARM_AI_FALLBACK_API_KEY ?? '').trim();
+  const fbProvider = (env.MFARM_AI_FALLBACK_PROVIDER ?? '').trim().toLowerCase() || 'anthropic';
+  const fbBaseUrl = (env.MFARM_AI_FALLBACK_BASE_URL ?? '').trim() || null;
+  const fbModel = (env.MFARM_AI_FALLBACK_MODEL ?? '').trim();
+  let aiFallback: string | null = null;
+  if (fbKey) {
+    if (!(AI_PROVIDERS as readonly string[]).includes(fbProvider)) {
+      problems.push(`MFARM_AI_FALLBACK_PROVIDER=${env.MFARM_AI_FALLBACK_PROVIDER} is not one of ${AI_PROVIDERS.join(', ')}.`);
+    }
+    const fbUrlOk = !fbBaseUrl || /^https?:\/\/[^/]/.test(fbBaseUrl);
+    if (!fbUrlOk) problems.push(`MFARM_AI_FALLBACK_BASE_URL=${fbBaseUrl} is not an http(s) URL.`);
+    if (fbProvider === 'openai' && !fbModel) {
+      problems.push('MFARM_AI_FALLBACK_PROVIDER=openai needs MFARM_AI_FALLBACK_MODEL: the default, claude-opus-5, is an Anthropic model id.');
+    }
+    if (!aiApiKey(env)) {
+      problems.push('MFARM_AI_FALLBACK_API_KEY is set but MFARM_AI_API_KEY is not: a fallback has to fall back from something.');
+    }
+    aiFallback = `${fbProvider}${fbBaseUrl && fbUrlOk ? ` via ${new URL(fbBaseUrl).host}` : ''} ${fbModel || 'claude-opus-5'}`;
+  } else if (fbModel || fbBaseUrl || (env.MFARM_AI_FALLBACK_PROVIDER ?? '').trim()) {
+    problems.push('MFARM_AI_FALLBACK_* is set without MFARM_AI_FALLBACK_API_KEY, so there is no fallback. Set the key or remove the rest.');
+  }
   const aiRunnerIntervalMs = intVar(env.AI_RUNNER_INTERVAL_MS, 'AI_RUNNER_INTERVAL_MS', 2_000, 0, 600_000, problems);
   const aiMaxConcurrentRuns = intVar(env.AI_MAX_CONCURRENT_RUNS, 'AI_MAX_CONCURRENT_RUNS', 2, 1, 64, problems);
   const aiKeySource = aiApiKey(env) ? 'environment' as const : 'none' as const;
@@ -874,6 +901,7 @@ export function parseConfig(env: Env): Config {
     aiProvider: aiProvider ?? 'anthropic',
     aiBaseUrl,
     aiModel,
+    aiFallback,
     aiRunnerIntervalMs,
     aiMaxConcurrentRuns,
     turnTtlSeconds,
@@ -957,7 +985,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (same-origin /dp on this console)',
     ai: c.aiKeySource === 'none'
       ? 'off (no MFARM_AI_API_KEY)'
-      : `${c.aiProvider}${c.aiBaseUrl ? ` via ${new URL(c.aiBaseUrl).host}` : ''} ${c.aiModel}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms`,
+      : `${c.aiProvider}${c.aiBaseUrl ? ` via ${new URL(c.aiBaseUrl).host}` : ''} ${c.aiModel}${c.aiFallback ? `, fallback ${c.aiFallback}` : ''}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms`,
     turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };
 }
