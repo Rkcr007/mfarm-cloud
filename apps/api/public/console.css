@@ -3504,14 +3504,21 @@ kbd {
 }
 
 /* Recording & log beside the run (proposal 14). Under the scrim, so Share still opens over it. */
+:root { --ai-panel-w: clamp(380px, 36vw, 560px); }
 .ai-panel {
   position: fixed; top: 50px; right: 0; bottom: 0; z-index: 30;
-  width: min(640px, 100vw);
+  width: min(var(--ai-panel-w), 100vw);
   display: flex; flex-direction: column;
   background: var(--s-overlay, #101012); border-left: 1px solid var(--b-overlay, #2E2E31);
   box-shadow: var(--e-2);
 }
 .ai-panel[hidden] { display: none; }
+/* BESIDE, NOT OVER: on a screen wide enough for both, the page gives up the panel's width, so the
+   run's title, steps and screen stay readable next to its recording. Narrower, the panel covers the
+   page as before — two columns of 300px help nobody. */
+@media (min-width: 1100px) {
+  .shell.ai-panel-open .main { padding-right: calc(var(--ai-panel-w) + 26px); }
+}
 .ai-panel-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--b-row, #19191B); }
 .ai-panel-body { flex: 1 1 auto; overflow: auto; padding: 14px; }
 .ai-panel-body > .card { margin: 0; }

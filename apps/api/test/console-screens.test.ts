@@ -6637,6 +6637,8 @@ describe('the AI testing screen', () => {
     mod.paintAiPanel();
     const panel = (globalThis as any).document.getElementById('ai-panel');
     assert.equal(panel.hidden, false);
+    const shell = (globalThis as any).document.getElementById('console');
+    assert.ok(shell.classList.contains('ai-panel-open'), 'the page makes room beside it — it covered the run\'s title on the farm');
     const video = findByClass(panel, 'evidence-video');
     assert.equal(video.getAttribute('src'), '/v1/artifacts/art-v/blob');
     mod.paintAiPanel();
@@ -6650,6 +6652,7 @@ describe('the AI testing screen', () => {
     assert.equal(mod.state.ai.panel, null, 'Esc closes the panel before it leaves the run');
     mod.paintAiPanel();
     assert.equal(panel.hidden, true);
+    assert.ok(!shell.classList.contains('ai-panel-open'), 'and gives the room back when it closes');
   });
 
   test('a saved test can be edited — and one with hidden values is read back whole before the box opens', async () => {
