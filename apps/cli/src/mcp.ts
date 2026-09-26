@@ -307,7 +307,8 @@ export class McpServer {
           const p = this.point(s, { index: a.index });
           await this.hub.command(s.sessionId, 'POST', 'actions', tapActions(p.x, p.y));
         }
-        const el = elementId(await this.hub.command(s.sessionId, 'POST', 'element/active', {}));
+        // GET, per W3C: Appium 2 answers POST with "unknown command" (found on a real device, 2026-09-26).
+        const el = elementId(await this.hub.command(s.sessionId, 'GET', 'element/active'));
         if (!el) throw new Error('No field has focus. Tap a text field first (pass index).');
         await this.hub.command(s.sessionId, 'POST', `element/${encodeURIComponent(el)}/value`, { text: value, value: [...value] });
         return text(`Typed ${value.length} character(s).`);

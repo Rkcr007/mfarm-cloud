@@ -252,7 +252,9 @@ function hubDevice(call: ReturnType<typeof hubCaller>, sessionId: string, platfo
       ]);
     },
     async typeText(text) {
-      const active = await call('POST', `${s}/element/active`, {}) as Record<string, unknown> | null;
+      // GET, per W3C. Appium 2 answers POST (the old JSON Wire form) with "unknown command", so every
+      // type_text failed on the farm's first real runs while the fake device here accepted either.
+      const active = await call('GET', `${s}/element/active`) as Record<string, unknown> | null;
       const id = active?.['element-6066-11e4-a52e-4f735466cecf'] ?? active?.ELEMENT;
       if (typeof id !== 'string') throw new Error('no field has focus — tap the field first');
       await call('POST', `${s}/element/${encodeURIComponent(id)}/value`, { text, value: [...text] });

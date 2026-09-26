@@ -206,8 +206,10 @@ function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY):
   const url = `${(cfg.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')}/chat/completions`;
   const host = new URL(url).host;
   return async (params) => {
-    const body = JSON.stringify(toOpenAiRequest(params));
+    const request = toOpenAiRequest(params);
+    const body = JSON.stringify(request);
     let waited = 0;
+    let regenerated = false;
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(url, {
         method: 'POST',
@@ -218,6 +220,12 @@ function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY):
       const text = await res.text();
       if (res.ok) return fromOpenAiResponse(JSON.parse(text) as OaResponse, params.model);
       const failure = `${res.status} from ${host}: ${text.slice(0, 300)}`;
+      // A structured answer the server's own validator rejected (Groq: `json_validate_failed`). It is
+      // the model's sampling, not the request: the same diagnosis parsed on 2 of 2 re-sends. Once.
+      if (res.status === 400 && !regenerated && request.response_format && /json_validate_failed/.test(text)) {
+        regenerated = true;
+        continue;
+      }
       if (!RETRYABLE(res.status)) throw new Error(failure);
       const asked = retryAfterMs(res, text);
       if (asked !== null && asked > retry.maxSingleWaitMs) {
