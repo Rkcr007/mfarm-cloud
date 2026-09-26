@@ -6276,10 +6276,10 @@ describe('the AI testing screen', () => {
 
   test('the task is shown whole, with the build it ran against, who started it and how long it took', () => {
     seed({ name: 'airun', id: 'air-1' });
-    const run = aiRun({ prompt: 'open the app\nenter email\npin 0987', appRef: 'app-1', createdBy: null, trigger: 'manual' });
+    const run = aiRun({ prompt: 'open the app\nenter email\npin 4812', appRef: 'app-1', createdBy: null, trigger: 'manual' });
     mod.state.ai = aiState({ detail: { aiRun: run, steps: [], fetchedAt: Date.now() } });
     const tree = mod.SCREENS.airun();
-    assert.equal(textOf(findByClass(tree, 'ai-task')), 'open the app\nenter email\npin 0987', 'line breaks kept');
+    assert.equal(textOf(findByClass(tree, 'ai-task')), 'open the app\nenter email\npin 4812', 'line breaks kept');
     const text = textOf(tree);
     assert.match(text, /Acme 1\.0/, 'the build, by name');
     assert.match(text, /an API key/, 'a run with no person behind it says what started it');
@@ -6430,11 +6430,11 @@ describe('the AI testing screen', () => {
     mod.state.ai = aiState({ detail: { aiRun: run, steps: [], fetchedAt: Date.now() } });
     assert.match(textOf(mod.SCREENS.airun()), /hidden here and on shared links/);
 
-    const sent = capture({ prompt: 'Log in with pin : 0987' });
+    const sent = capture({ prompt: 'Log in with pin : 4812' });
     findByText(mod.SCREENS.airun(), 'Run again').click();
     await new Promise((r) => setTimeout(r, 0));
     assert.ok(sent.some((x) => x.url === '/v1/ai/runs/air-1/prompt'), 'the whole task, asked for');
-    assert.equal(mod.state.ai.draft.prompt, 'Log in with pin : 0987', 'not "••••", which the app would have been typed');
+    assert.equal(mod.state.ai.draft.prompt, 'Log in with pin : 4812', 'not "••••", which the app would have been typed');
   });
 
   test('a platform this farm has no devices for is shown, and cannot be picked', () => {

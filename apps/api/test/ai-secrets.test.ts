@@ -9,12 +9,12 @@ import {
  * on the run list, the Runs page and the public share page.
  */
 
-const OWNERS_TASK = 'open the app\nenter email as :  autospendermob1@gmail.com\npin : 0987\npasscode as : 268426';
+const LOGIN_TASK = 'open the app\nenter email as :  qa.tester1@example.org\npin : 4812\npasscode as : 539176';
 
-test('the values after a secret\'s name are found — on the task that leaked', () => {
-  assert.deepEqual(secretsIn(OWNERS_TASK), ['268426', '0987'], 'longest first');
-  assert.equal(redact(OWNERS_TASK, secretsIn(OWNERS_TASK)),
-    `open the app\nenter email as :  autospendermob1@gmail.com\npin : ${MASK}\npasscode as : ${MASK}`,
+test('the values after a secret\'s name are found — on the shape of the task that leaked', () => {
+  assert.deepEqual(secretsIn(LOGIN_TASK), ['539176', '4812'], 'longest first');
+  assert.equal(redact(LOGIN_TASK, secretsIn(LOGIN_TASK)),
+    `open the app\nenter email as :  qa.tester1@example.org\npin : ${MASK}\npasscode as : ${MASK}`,
     'the e-mail is the owner\'s own identifier — kept for them, masked only for strangers');
 });
 
@@ -41,13 +41,13 @@ test('a value is masked wherever it appears, and never half of it', () => {
   assert.equal(redact(null, ['x']), null);
   assert.equal(redact('nothing to hide', []), 'nothing to hide');
   assert.deepEqual(
-    redactDeep({ tool: 'type_text', input: { text: '0987', why: 'enter 0987' }, target: { text: '0987' } }, ['0987']),
+    redactDeep({ tool: 'type_text', input: { text: '4812', why: 'enter 4812' }, target: { text: '4812' } }, ['4812']),
     { tool: 'type_text', input: { text: MASK, why: `enter ${MASK}` }, target: { text: MASK } });
 });
 
 test('a stranger sees neither the secrets nor the account\'s e-mail', () => {
-  const shown = redactForStrangers(OWNERS_TASK, secretsIn(OWNERS_TASK));
-  assert.doesNotMatch(shown, /0987|268426|autospendermob1|gmail/);
+  const shown = redactForStrangers(LOGIN_TASK, secretsIn(LOGIN_TASK));
+  assert.doesNotMatch(shown, /4812|539176|qa\.tester1|example\.org/);
   assert.match(shown, /pin : ••••/);
 });
 
@@ -62,9 +62,9 @@ test('names are cut at a word, with an ellipsis — never mid-word', () => {
 });
 
 test('a run\'s names are masked BEFORE they are cut, so a secret cannot survive by being halved', () => {
-  const names = aiRunNames(OWNERS_TASK);
+  const names = aiRunNames(LOGIN_TASK);
   for (const n of Object.values(names)) {
-    assert.doesNotMatch(n, /0987|268426/);
+    assert.doesNotMatch(n, /4812|539176/);
     assert.match(n, /^AI: /);
   }
   assert.ok(names.runName.length <= 200 && names.sessionName.length <= 300 && names.resultName.length <= 500,
