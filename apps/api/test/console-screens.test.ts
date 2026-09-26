@@ -6171,12 +6171,26 @@ describe('the AI testing screen', () => {
         + '361s — longer than a device can be held idle)',
     });
     mod.state.ai = aiState({ detail: { aiRun: run, steps: [], fetchedAt: Date.now() } });
-    const text = textOf(mod.SCREENS.airun());
-    assert.match(text, /The model could not be reached\./, 'the headline stays');
-    assert.match(text, /rate-limiting this farm — today’s allowance is used up/);
-    assert.match(text, /wait about 6 minutes/);
+    const page = mod.SCREENS.airun();
+    const text = textOf(page);
+    assert.equal(textOf(findByClass(page, 'ai-stop')), 'The AI model provider’s usage limit was reached.',
+      'the headline: a cap is not an outage (the raw record below may still say "could not be reached")');
+    assert.match(text, /rate-limiting this farm’s AI key — today’s allowance is used up/);
+    // The fixture ended a minute ago and the provider asked for six: five are still to come.
+    assert.match(text, /It asked to wait until \d\d:\d\d(?:\s?[AP]M)? \(about 6 minutes\)/);
     assert.match(text, /Nothing was billed/);
     assert.match(text, /What the server recorded/, 'and the raw record is one click away');
+
+    // Read hours later, "wait about 6 minutes" would be a lie — the wait began when the run stopped.
+    const old = { ...run, createdAt: new Date(Date.now() - 3 * 3600_000).toISOString(),
+      startedAt: new Date(Date.now() - 3 * 3600_000).toISOString(), endedAt: new Date(Date.now() - 3 * 3600_000).toISOString() };
+    mod.state.ai = aiState({ detail: { aiRun: old, steps: [], fetchedAt: Date.now() } });
+    assert.match(textOf(mod.SCREENS.airun()), /which has passed — you can start the run again now/);
+
+    // And the list says the same headline, so the row does not send anyone looking for an outage.
+    seed({ name: 'ai' });
+    mod.state.ai = aiState({ runs: [run] });
+    assert.match(textOf(mod.SCREENS.ai()), /usage limit was reached/);
   });
 
   test('a run with no verdict says why on the list itself, and the filters narrow the list', () => {
@@ -6299,6 +6313,6 @@ describe('the AI testing screen', () => {
     const ios = findByText(mod.SCREENS.ai(), 'iOS', 'option');
     assert.ok(ios, 'still listed, so nobody wonders whether iOS exists at all');
     assert.equal(ios.disabled, true);
-    assert.match(textOf(ios), /no devices on this farm/);
+    assert.match(textOf(ios), /\(no devices\)/);
   });
 });
