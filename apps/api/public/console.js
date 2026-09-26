@@ -12106,6 +12106,9 @@ export function paintAiPanel() {
   const box = $('ai-panel');
   const p = state.ai.panel;
   const run = state.route.name === 'airun' && p && state.ai.detail?.aiRun?.id === p.runId ? state.ai.detail.aiRun : null;
+  // The page makes room for it on a wide screen (console.css), rather than being covered by it:
+  // on the farm the run's own title was cut off behind the recording (2026-09-27).
+  $('console').classList[run ? 'add' : 'remove']('ai-panel-open');
   if (!run) {
     if (!box.hidden) {
       box.hidden = true;
