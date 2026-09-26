@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { aiStepStore } from '../../ai/runner.ts';
+import { redactDeepForStrangers, redactForStrangers, secretsIn, stripToolMarkup } from '../../ai/secrets.ts';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -88,7 +89,7 @@ async function aiRunFor(sessionId: string) {
   });
 }
 
-export function publicAiStep(s: { n: number; phase: string; thought: string | null; action: { tool: string; input: Record<string, unknown> } | null; result: string | null; screenshot_sha256: string | null }, hasShot: boolean) {
+export function publicAiStep(s: { n: number; phase: string; thought: string | null; action: { tool: string; input: Record<string, unknown> } | null; result: string | null; screenshot_sha256: string | null }, hasShot: boolean, secrets: string[] = []) {
   const input = { ...(s.action?.input ?? {}) } as Record<string, unknown>;
   if (s.action?.tool === 'type_text') {
     const len = String(input.text ?? '').length;
@@ -99,10 +100,14 @@ export function publicAiStep(s: { n: number; phase: string; thought: string | nu
     n: s.n,
     phase: s.phase,
     tool: s.action?.tool ?? null,
-    input,
-    // The agent's stated reason is its own words about the screen, not the customer's data.
-    thought: s.thought,
-    result: s.result,
+    // Every argument the agent gave — its "why", and a finish step's own summary — can repeat what it
+    // was told (caught by the share test: "enter 0987", "Welcome qa@example.com").
+    input: redactDeepForStrangers(input, secrets),
+    // The agent's stated reason is its own words about the screen — but a model repeats what it was
+    // told, so the task's secrets and any e-mail address are masked out of it (secrets.ts), and
+    // markup meant for a parser is dropped.
+    thought: redactForStrangers(stripToolMarkup(s.thought), secrets),
+    result: redactForStrangers(s.result, secrets),
     screenshot: hasShot,
   };
 }
@@ -120,11 +125,14 @@ function publicPayload(
     steps: ReturnType<typeof publicAiStep>[];
   } | null = null,
 ) {
+  // An AI run's names and failure are written from its task. Its secrets were masked when they were
+  // written (runner.ts); an e-mail address is masked here, because only a STRANGER holds this link.
+  const forStrangers = <T extends string | null>(t: T): T => (ai ? redactForStrangers(t, []) : t);
   return {
     test: {
-      name: r.result.name,
+      name: forStrangers(r.result.name),
       status: r.result.status,
-      failure: r.result.failure,
+      failure: forStrangers(r.result.failure),
       failureClass: r.result.failure_class,
       failureReason: r.result.failure_reason,
       durationMs: r.result.duration_ms,
@@ -134,7 +142,7 @@ function publicPayload(
     // The session's own name (migration 048), which on the one-test-per-session shape IS this test
     // and on a multi-test session is the suite's label for the batch. Never the uuid.
     session: {
-      name: r.session.name,
+      name: forStrangers(r.session.name),
       region: r.session.region,
       startedAt: r.session.started_at ? r.session.started_at.toISOString() : null,
       endedAt: r.session.ended_at ? r.session.ended_at.toISOString() : null,
@@ -151,7 +159,7 @@ function publicPayload(
       tier: r.device.tier,
       profile: r.device.profile,
     },
-    run: r.run && { name: r.run.name, externalId: r.run.external_id },
+    run: r.run && { name: forStrangers(r.run.name), externalId: r.run.external_id },
     // Who this came from, which is the first thing a recipient with no account needs to know. The
     // org's NAME, never its id or its slug.
     org: { name: r.org.name },
@@ -415,11 +423,16 @@ export async function shareRoutes(app: FastifyInstance): Promise<void> {
             partial: rec.context.partial === true,
           }
         : null,
-    }, ai ? {
-      prompt: ai.run.prompt, profile: ai.run.profile, status: ai.run.status,
-      summary: ai.run.summary, evidence: ai.run.evidence,
-      steps: ai.steps.map((st, i) => publicAiStep(st, aiShots[i] === true)),
-    } : null));
+    }, ai ? (() => {
+      // A stranger holding this link sees the task — it IS the test — but never its secrets or the
+      // account's e-mail (found on the farm 2026-09-26: a PIN and passcode, in full, on this page).
+      const secrets = secretsIn(ai.run.prompt);
+      return {
+        prompt: redactForStrangers(ai.run.prompt, secrets), profile: ai.run.profile, status: ai.run.status,
+        summary: redactForStrangers(ai.run.summary, secrets), evidence: redactForStrangers(ai.run.evidence, secrets),
+        steps: ai.steps.map((st, i) => publicAiStep(st, aiShots[i] === true, secrets)),
+      };
+    })() : null));
   });
 
   /**

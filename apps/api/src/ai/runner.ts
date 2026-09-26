@@ -8,6 +8,7 @@ import { release } from '../allocator.ts';
 import { AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
 import { aiProviderConfig, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
+import { aiRunNames, redact, secretsIn } from './secrets.ts';
 import { runAgent, type AgentOutcome, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 
 /**
@@ -129,6 +130,9 @@ export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void
   // A run that was mid-flight when the previous process died cannot be resumed: its key was in that
   // process's memory and the device's state is unknown. Say so, give back what it held.
   void sweepInterrupted().then(tick, (err: Error) => app.log.error({ err }, 'ai runner boot sweep failed'));
+  void renameStoredAiRuns().then(
+    (n) => { if (n) app.log.info({ renamed: n }, 'ai runner: masked and re-clipped the names of earlier AI runs'); },
+    (err: Error) => app.log.error({ err }, 'ai runner: renaming earlier AI runs failed'));
   const timer = setInterval(() => { void tick(); }, opts.intervalMs);
   timer.unref?.();
   // Hourly, and on its own timer: a slow disk must never delay a claim.
@@ -143,6 +147,54 @@ export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void
     clearInterval(retention);
     await Promise.allSettled([...inFlight]);
   });
+}
+
+/**
+ * NAMES WRITTEN BEFORE 2026-09-26, rewritten from the task — masked and cut at a word (secrets.ts).
+ *
+ * Until then an AI run's names were its task's first characters, verbatim and cut mid-word: a PIN in
+ * the task was on the Runs page, in the session's test name, and on every link that shared the
+ * result. Run once per boot; a name that is already right is not touched, and only rows that an AI
+ * run itself wrote ("AI: …") are. A failure message is masked too — the agent's summary can repeat
+ * what it typed.
+ */
+export async function renameStoredAiRuns(): Promise<number> {
+  const runs = await withSystem(async (c) => (await c.query<{ prompt: string; session_id: string | null; run_id: string | null }>(
+    'SELECT prompt, session_id, run_id FROM ai_runs WHERE session_id IS NOT NULL OR run_id IS NOT NULL',
+  )).rows);
+  let changed = 0;
+  for (const r of runs) {
+    const n = aiRunNames(r.prompt);
+    const secrets = secretsIn(r.prompt);
+    changed += await withSystem(async (c) => {
+      let k = 0;
+      if (r.run_id) {
+        k += (await c.query(
+          `UPDATE runs SET name = $2 WHERE id = $1 AND name LIKE 'AI:%' AND name IS DISTINCT FROM $2`,
+          [r.run_id, n.runName])).rowCount ?? 0;
+      }
+      if (r.session_id) {
+        k += (await c.query(
+          `UPDATE sessions SET name = $2 WHERE id = $1 AND name LIKE 'AI:%' AND name IS DISTINCT FROM $2`,
+          [r.session_id, n.sessionName])).rowCount ?? 0;
+        k += (await c.query(
+          `UPDATE test_results SET name = $2 WHERE session_id = $1 AND name LIKE 'AI:%' AND name IS DISTINCT FROM $2`,
+          [r.session_id, n.resultName])).rowCount ?? 0;
+        if (secrets.length) {
+          const results = (await c.query<{ id: string; failure: string | null }>(
+            `SELECT id, failure FROM test_results WHERE session_id = $1 AND failure IS NOT NULL`, [r.session_id])).rows;
+          for (const t of results) {
+            const masked = redact(t.failure, secrets);
+            if (masked !== t.failure) {
+              k += (await c.query('UPDATE test_results SET failure = $2 WHERE id = $1', [t.id, masked])).rowCount ?? 0;
+            }
+          }
+        }
+      }
+      return k;
+    });
+  }
+  return changed;
 }
 
 async function anyQueued(): Promise<boolean> {
@@ -365,10 +417,10 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
   ));
 
   const call = hubCaller(app, key.plaintext);
+  const names = aiRunNames(run.prompt);
   let sessionId: string | null = null;
   let outcome: AgentOutcome | null = null;
   try {
-    const title = run.prompt.replace(/\s+/g, ' ').trim();
     const created = await call('POST', '/session', {
       capabilities: {
         alwaysMatch: {
@@ -378,8 +430,10 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
           ...(run.platform === 'android' ? { 'appium:autoGrantPermissions': true } : {}),
           'mfarm:queueTimeoutSeconds': QUEUE_TIMEOUT_SECONDS,
           'mfarm:runId': `ai-${run.id}`,
-          'mfarm:runName': `AI: ${title.slice(0, 80)}`,
-          'mfarm:name': `AI: ${title.slice(0, 120)}`,
+          // Masked and cut at a word (secrets.ts) — these names are shown on the Runs page and on
+          // every shared link, where the task's PIN used to be printed in full.
+          'mfarm:runName': names.runName,
+          'mfarm:name': names.sessionName,
           ...(run.region ? { 'mfarm:region': run.region } : {}),
           ...(run.app_ref ? { 'mfarm:appId': run.app_ref } : {}),
         },
@@ -460,8 +514,9 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
       headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
       payload: JSON.stringify({
         status: outcome.status,
-        name: `AI: ${run.prompt.replace(/\s+/g, ' ').trim().slice(0, 400)}`,
-        ...(outcome.status === 'failed' ? { failure: outcome.summary.slice(0, 4000) } : {}),
+        name: names.resultName,
+        // The agent's own words can repeat what it typed; the failure is shown on shared links too.
+        ...(outcome.status === 'failed' ? { failure: redact(outcome.summary, secretsIn(run.prompt)).slice(0, 4000) } : {}),
       }),
     }).catch(() => {});
   }
