@@ -6149,4 +6149,156 @@ describe('the AI testing screen', () => {
     mod.state.ai = aiState({ detail: { aiRun: failed, steps: [], fetchedAt: Date.now() } });
     assert.ok(!findByText(mod.SCREENS.airun(), 'Export WebdriverIO', 'a'), 'only a route known to work is offered as code');
   });
+
+  // ------------------------------------------------ what exploring the deployed farm found, 2026-09-26
+
+  test('the run page leads back to the list with a button, first on the page — not a 10px crumb', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    (globalThis as any).location.hash = '#/ai/air-1';
+    const back = findByText(mod.SCREENS.airun(), 'All AI runs');
+    assert.ok(back, 'a back button on the run page');
+    assert.ok(back.click() > 0, 'wired to something');
+    assert.equal((globalThis as any).location.hash, '#/ai');
+  });
+
+  test('a run the provider rate-limited says so and when to try again — not only "could not be reached"', () => {
+    seed({ name: 'airun', id: 'air-9' });
+    const run = aiRun({
+      id: 'air-9', status: 'error', stopReason: 'model_error', steps: 0,
+      summary: 'The model could not be reached: 429 from api.groq.com: {"error":{"message":"Rate limit reached for model '
+        + '`qwen/qwen3.8-27b` in organization `org_x` service tier `on_demand` on tokens per day (TPD): Limit 200000, '
+        + 'Used 196023, Requested 4811. Please try again in 6m0.288s. Need more tokens?"}} (the provider asked to wait '
+        + '361s — longer than a device can be held idle)',
+    });
+    mod.state.ai = aiState({ detail: { aiRun: run, steps: [], fetchedAt: Date.now() } });
+    const text = textOf(mod.SCREENS.airun());
+    assert.match(text, /The model could not be reached\./, 'the headline stays');
+    assert.match(text, /rate-limiting this farm — today’s allowance is used up/);
+    assert.match(text, /wait about 6 minutes/);
+    assert.match(text, /Nothing was billed/);
+    assert.match(text, /What the server recorded/, 'and the raw record is one click away');
+  });
+
+  test('a run with no verdict says why on the list itself, and the filters narrow the list', () => {
+    seed({ name: 'ai' });
+    mod.state.ai = aiState({ runs: [
+      aiRun({ id: 'p', status: 'passed' }),
+      aiRun({ id: 'e', status: 'error', stopReason: 'model_error', summary: 'x', prompt: 'Died at once' }),
+    ] });
+    let tree = mod.SCREENS.ai();
+    assert.match(textOf(tree), /Died at once[\s\S]*The model could not be reached/, 'the reason, on the row');
+    findByText(tree, 'No verdict').click();
+    tree = mod.SCREENS.ai();
+    assert.match(textOf(tree), /Died at once/);
+    assert.doesNotMatch(textOf(tree), /Log in and open the cart/, 'the passed run is filtered out');
+    assert.match(textOf(tree), /1 of 2/);
+    findByText(tree, 'All').click();
+    assert.match(textOf(mod.SCREENS.ai()), /Log in and open the cart/);
+  });
+
+  test('Run again keeps the build the run was about — it used to drop it', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const run = aiRun({ appRef: 'app-1', profile: 'pro', prompt: 'Open Acme and log in' });
+    mod.state.ai = aiState({ detail: { aiRun: run, steps: [], fetchedAt: Date.now() } });
+    findByText(mod.SCREENS.airun(), 'Run again').click();
+    assert.deepEqual(
+      { appId: mod.state.ai.draft.appId, prompt: mod.state.ai.draft.prompt, profile: mod.state.ai.draft.profile },
+      { appId: 'app-1', prompt: 'Open Acme and log in', profile: 'pro' },
+    );
+    assert.equal((globalThis as any).location.hash, '#/ai');
+
+    // A saved test's run names its package `@latest`: that is the newest build of it.
+    seed({ name: 'airun', id: 'air-1' });
+    mod.state.ai = aiState({ detail: { aiRun: aiRun({ appRef: 'com.acme.app@latest' }), steps: [], fetchedAt: Date.now() } });
+    findByText(mod.SCREENS.airun(), 'Run again').click();
+    assert.equal(mod.state.ai.draft.appId, 'app-1');
+  });
+
+  test('a step names what it touched, a step that did not work says so, and a "failed" verdict is not a broken step', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const run = aiRun({ status: 'failed', summary: 'No such setting' });
+    mod.state.ai = aiState({ detail: { aiRun: run, fetchedAt: Date.now(), steps: [
+      { n: 1, phase: 'plan', action: null, result: null, screenshotUrl: null,
+        thought: 'Plan: 1. Open Settings.\n\n<tool_call>\n<function=launch_app>\n<parameter=package>\ncom.android.settings\n</parameter>\n</function>\n</tool_call>' },
+      { n: 2, phase: 'act', thought: 'Open Display', result: 'ok', screenshotUrl: '/s/2',
+        action: { tool: 'tap_element', input: { index: 22 },
+          target: { kind: 'TextView', text: 'Display', label: null, id: 'android:id/title', x: 0, y: 0, width: 9, height: 9 } } },
+      { n: 3, phase: 'act', thought: 'Search for it', screenshotUrl: '/s/3',
+        action: { tool: 'type_text', input: { text: 'Quantum' } }, result: 'failed: The requested resource could not be found' },
+      { n: 4, phase: 'act', thought: 'It is not there', screenshotUrl: '/s/4',
+        action: { tool: 'finish', input: { passed: false } }, result: 'failed' },
+    ] } });
+    const text = textOf(mod.SCREENS.airun());
+    assert.match(text, /Tapped “Display”/, 'by the words on the screen, not "element [22]"');
+    assert.match(text, /Tried to type “Quantum”/);
+    assert.doesNotMatch(text, /Typed “Quantum”/, 'a step whose text never arrived must not say it typed it');
+    assert.equal((text.match(/did not work/g) || []).length, 1, 'the "failed" verdict is the answer, not a broken step');
+    assert.match(text, /Plan: 1\. Open Settings\./);
+    assert.doesNotMatch(text, /tool_call|function=|parameter=/, 'markup meant for a parser is not shown to a person');
+  });
+
+  test('a failed AI run offers "Explain this failure" on its own page', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    mod.state.ai = aiState({ detail: { aiRun: aiRun({ status: 'failed', summary: 'nope' }), steps: [], fetchedAt: Date.now() } });
+    mod.state.ai.diag = { 'sess-1': { items: [], loaded: true, loading: false, busy: false } };
+    assert.ok(findByText(mod.SCREENS.airun(), 'Explain this failure'), 'where the failure is being read');
+  });
+
+  test('the task is shown whole, with the build it ran against, who started it and how long it took', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const run = aiRun({ prompt: 'open the app\nenter email\npin 0987', appRef: 'app-1', createdBy: null, trigger: 'manual' });
+    mod.state.ai = aiState({ detail: { aiRun: run, steps: [], fetchedAt: Date.now() } });
+    const tree = mod.SCREENS.airun();
+    assert.equal(textOf(findByClass(tree, 'ai-task')), 'open the app\nenter email\npin 0987', 'line breaks kept');
+    const text = textOf(tree);
+    assert.match(text, /Acme 1\.0/, 'the build, by name');
+    assert.match(text, /an API key/, 'a run with no person behind it says what started it');
+    assert.match(text, /took 50 seconds/, 'started 110s ago, ended 60s ago in the fixture');
+  });
+
+  test('the screen stays beside the steps, and Previous / Next walk the screens', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    let tree = mod.SCREENS.airun();
+    assert.ok(findByClass(tree, 'ai-rail'), 'the rail console.css pins');
+    assert.equal(findByClass(tree, 'ai-shot').getAttribute('loading'), null, 'the chosen screen is the thing on show — never lazy');
+    assert.equal(findByText(tree, 'Next').disabled, true, 'the last screen is chosen first');
+    findByText(tree, 'Previous').click();
+    tree = mod.SCREENS.airun();
+    assert.equal(findByClass(tree, 'ai-shot').getAttribute('src'), '/v1/ai/runs/air-1/steps/1/screenshot');
+    assert.equal(findByText(tree, 'Previous').disabled, true);
+  });
+
+  test('a session opened from an AI run leads back to it; one opened any other way does not claim to', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    const plain = mod.SCREENS.cockpit();
+    assert.ok(!findByText(plain, 'Back to the AI run'), 'no run was the way in');
+    assert.match(textOf(plain), /Fleet\s+\/\s+Session/);
+
+    mod.state.ai.cameFrom = { sessionId: 'sess-1', runId: 'air-1', prompt: 'Log in and open the cart' };
+    const tree = mod.SCREENS.cockpit();
+    assert.match(textOf(tree), /AI testing\s+\/\s+AI run\s+\/\s+Session/);
+    const back = findByText(tree, 'Back to the AI run');
+    assert.ok(back);
+    back.click();
+    assert.equal((globalThis as any).location.hash, '#/ai/air-1');
+  });
+
+  test('sharing an AI run says what its link shows — it said "Share this failure" on a passed run', async () => {
+    seed({ name: 'airun', id: 'air-1' });
+    capture({ results: [{ id: 'res-1', name: 'AI: Log in and open the cart', status: 'passed' }], shares: [] });
+    findByText(mod.SCREENS.airun(), 'Share').click();
+    await new Promise((r) => setTimeout(r, 0));
+    const text = textOf((globalThis as any).document.getElementById('dialog'));
+    assert.match(text, /Share this AI run/);
+    assert.match(text, /the task, the verdict and the screen at every step/);
+    assert.doesNotMatch(text, /the step that broke/);
+  });
+
+  test('a platform this farm has no devices for is shown, and cannot be picked', () => {
+    seed({ name: 'ai' });
+    const ios = findByText(mod.SCREENS.ai(), 'iOS', 'option');
+    assert.ok(ios, 'still listed, so nobody wonders whether iOS exists at all');
+    assert.equal(ios.disabled, true);
+    assert.match(textOf(ios), /no devices on this farm/);
+  });
 });

@@ -747,6 +747,13 @@ The reusable half: when a document says one small step remains, the step to chec
 anything CALLS the thing the step is meant to complete — `grep` for the class name outside its own
 test, which is ten seconds and would have said so.
 
+## Found by using the AI testing tab on the farm, 2026-09-26
+
+| id | what | status |
+|---|---|---|
+| D49 | **"Recent AI runs" said "Loading…" for good, so a person who started a run could not find it again.** The AI screen's three loaders run together on arrival, and `loadAiPricing` wrote `state.ai = { ...state.ai, pricing: await api(…) }` — JavaScript copies the spread BEFORE the await, so when the prices answered after the run list, that copy was written back over it, restoring `loading: true` with no runs. `loadAiRuns` refuses to start while `loading` is set, so only a full reload could recover, and a reload could lose the same race. The same write could erase an open run's page. **Every AI console test seeded `state.ai` and rendered it** — the family `console-runs-loader.test.ts` was written for, one screen over. Reported by the owner as "the run started but it went away"; the run existed, and had stopped on the model provider's daily cap, which the run page also did not say. | Fixed 2026-09-26 (#216): the spread happens after the await. `console-ai-loader.test.ts` answers the list before the prices and asserts both survive; **verified RED** with the original line restored — both tests fail. The same exploration fixed ten usability defects on the same two screens, each with a test that fails with it put back. |
+| D50 | **An AI run could not type, and a run that could not type still reached a verdict.** The runner and `mfarm mcp` asked for the focused field with `POST /element/active`, the JSON Wire form; Appium 2 answers only the W3C `GET` and says "unknown command" to the POST. Seven of seven `type_text` steps failed on the farm, and the agent concluded the field "never registered" — a plausible sentence about the app built on a defect in ours. **Both fakes accepted either method**, so every typing test was green, and the MCP server's hardware check two days earlier happened never to type. | Fixed 2026-09-26 (#215). Proven on a real device through the hub before changing a line: POST → unknown command, GET → the focused EditText, "Display" typed and read back. Both fakes now answer POST as Appium does; **verified RED** — putting POST back fails the MCP test, and a new test asserts the typed value reaches the device. |
+
 ## Suite health
 
 The order-dependent `attempts.test.ts` flake is **fixed** — it was a real billing bug (the usage
