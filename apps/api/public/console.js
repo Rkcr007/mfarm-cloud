@@ -303,6 +303,10 @@ export const state = {
     save: { open: false, name: '', runOnUpload: false, busy: false },
     /** Failure diagnoses (C8), by session id: `{ items, loaded, loading, busy }`. */
     diag: {},
+    /** The list's status filter — one of `AI_FILTERS`. */
+    filter: 'all',
+    /** Set by a run's "Recording & log", so that session page can lead back to the run. */
+    cameFrom: null,
   },
   /**
    * Artifacts for the session detail screen, keyed by session id.
@@ -6845,7 +6849,7 @@ export const SHARE_MAX_DAYS = 30;
  * NOTHING IS MINTED UNTIL "CREATE LINK". A dialog that made a credential on open would leave a live
  * link behind every accidental press of Share.
  */
-export function shareDialog(result) {
+export function shareDialog(result, opts = {}) {
   const d = $('dialog');
   d.dataset.kind = 'share';
   // Per-dialog, deliberately not in `state`: nothing outside this dialog reads it, and a token in
@@ -6855,8 +6859,18 @@ export function shareDialog(result) {
     recording: true, logcat: true, week: false,
   };
 
+  /**
+   * What the page behind the link shows, said for THIS result. It was always "the failure message,
+   * the step that broke" — including on an AI run that had passed (found on the farm 2026-09-26).
+   */
+  const subject = opts.ai
+    ? 'the task, the verdict and the screen at every step (typed text is hidden)'
+    : result.status === 'passed'
+      ? 'the result and its screenshot'
+      // The default: every other caller hands this a FAILURE row, which need not carry a status.
+      : 'the failure message, the step that broke and the screenshot';
   const carries = (v) => [
-    'the failure message, the step that broke and the screenshot',
+    subject,
     v.recording ? 'the recording' : null,
     v.logcat ? 'the full device log' : null,
   ].filter(Boolean).join(', ').replace(/, ([^,]*)$/, ' and $1');
@@ -6934,7 +6948,7 @@ export function shareDialog(result) {
     lead = h('p', { class: 'help mt-xs', text: leadText() });
 
     fill(d,
-      h('h2', { id: 'dialog-title', text: 'Share this failure' }),
+      h('h2', { id: 'dialog-title', text: opts.ai ? 'Share this AI run' : result.status === 'passed' ? 'Share this result' : 'Share this failure' }),
       lead,
 
       view.made
@@ -7335,7 +7349,7 @@ function screenCockpit(id) {
     return [
       // The same crumb the found path uses. Two branches of one screen disagreeing about where
       // they live is a small thing that reads as the console not knowing where it is.
-      pageHead([{ label: 'Fleet', to: '#/fleet' }, { label: 'Session' }], 'Session', null),
+      pageHead(sessionCrumbs(state.route.id), 'Session', null),
       card(null, {}, empty('That session is not visible to this org.',
         'An id that belongs to another org answers exactly like one that never existed — that is the disclosure boundary, not a bug.')),
     ];
@@ -7375,6 +7389,27 @@ function screenCockpit(id) {
 }
 
 /**
+ * The AI run whose "Recording & log" opened this session — only when that IS how the person got
+ * here. Deliberately not "whichever run the console last loaded": what a page offers must not
+ * depend on the browsing that happened to come before it.
+ */
+function aiRunOfSession(sessionId) {
+  const from = state.ai?.cameFrom;
+  return from && from.sessionId === sessionId ? { id: from.runId, prompt: from.prompt } : null;
+}
+
+/**
+ * Where a session page says it lives. Reached from an AI run it lives under that run — it used to
+ * say "Fleet / Session" and light up Fleet, and the only way back to the run was the browser's.
+ */
+function sessionCrumbs(sessionId) {
+  const run = aiRunOfSession(sessionId);
+  return run
+    ? [{ label: 'AI testing', to: '#/ai' }, { label: 'AI run', to: `#/ai/${run.id}` }, { label: 'Session' }]
+    : [{ label: 'Fleet', to: '#/fleet' }, { label: 'Session' }];
+}
+
+/**
  * THE DEVICE IS THE TITLE, not the session's uuid — document 04 S1. The uuid moves one line down
  * into the identity strip beside the OS and the geometry, which is where a support message or a log
  * line needs it anyway. Geometry is the DEVICE'S OWN REPORT via `geometryText` (ADR-0016).
@@ -7384,10 +7419,16 @@ function screenCockpit(id) {
  */
 function cockpitHeader(sess, live, device, st) {
   const failures = (state.artifacts.sessionId === sess.id && state.artifacts.failures) || [];
+  const crumbs = sessionCrumbs(sess.id);
+  const aiRun = aiRunOfSession(sess.id);
   return h('header', { class: 'ws-head' },
     h('div', { class: 'ws-title' },
-      h('p', { class: 'crumb' },
-        h('button', { type: 'button', text: 'Fleet', onclick: () => go('#/fleet') }), ' / Session'),
+      aiRun ? h('p', { class: 'backrow' },
+        btn('\u2190 Back to the AI run', 'ghost tiny', () => go(`#/ai/${aiRun.id}`), { title: aiRun.prompt })) : null,
+      h('p', { class: 'crumb' }, crumbs.map((c, i) => [
+        i ? ' / ' : null,
+        c.to ? h('button', { type: 'button', text: c.label, onclick: () => go(c.to) }) : c.label,
+      ])),
       h('div', { class: 'ws-titleline' },
         h('h1', { class: 'ws-h1', text: device ? deviceName(device) : (sess.device || `Session ${short(sess.id)}`) }),
         pill(st.label, st.tone, { live: sess.state === 'ACTIVE' }),
@@ -11069,6 +11110,19 @@ async function loadTunnels() {
 
 const AI_ACTIVE = new Set(['queued', 'running']);
 
+/** The list's filters. "No verdict" is `error` AND `cancelled`: neither says anything about the app. */
+const AI_FILTERS = [['all', 'All'], ['active', 'In progress'], ['passed', 'Passed'], ['failed', 'Failed'], ['error', 'No verdict']];
+function aiFilterMatches(k, r) {
+  if (k === 'active') return AI_ACTIVE.has(r.status);
+  if (k === 'error') return r.status === 'error' || r.status === 'cancelled';
+  return k === 'all' || r.status === k;
+}
+
+/** Regions with devices of this platform — what a run for it can actually be given. */
+function aiRegionsFor(platform) {
+  return [...new Set(state.devices.filter((x) => x.platform === platform).map((x) => x.region))].sort();
+}
+
 function aiStatusPill(r) {
   if (r.status === 'passed') return pill('passed', 'ok');
   if (r.status === 'failed') return pill('failed', 'bad');
@@ -11096,20 +11150,110 @@ function aiStopText(r) {
   })[r.stopReason] || r.summary || 'Ended without a verdict.';
 }
 
-function aiActionText(action) {
+/**
+ * WHAT THE SERVER RECORDED, in words a person can act on — beside the headline, never instead of it.
+ *
+ * Found on the farm 2026-09-26: a run stopped on the model provider's DAILY token cap, the server
+ * wrote the cap and "try again in 6m" into the summary, and the page said only "The model could not
+ * be reached." — so the person saw a run that had apparently died for no reason.
+ */
+function aiStopDetail(r) {
+  const s = String(r.summary || '');
+  if (!s) return null;
+  if (r.stopReason === 'model_error' && /\b429\b|rate limit/i.test(s)) {
+    const wait = aiRetryIn(s);
+    return `The AI model's provider is rate-limiting this farm${/per day|\bTPD\b|\bRPD\b/i.test(s) ? ' — today’s allowance is used up' : ''}. `
+      + (wait ? `It asked to wait ${wait}; start the run again after that.` : 'Start the run again in a few minutes.')
+      + ' Nothing was billed for the step that could not run.';
+  }
+  return s === aiStopText(r) ? null : s;
+}
+
+/** "Please try again in 6m0.288s" → "about 6 minutes". Null when the provider named no time. */
+function aiRetryIn(s) {
+  const m = /try again in\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?/i.exec(s);
+  if (!m || !(m[1] || m[2] || m[3])) return null;
+  const secs = Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0);
+  if (secs < 90) return `about ${Math.max(1, Math.round(secs))} seconds`;
+  const mins = Math.round(secs / 60);
+  return mins < 90 ? `about ${mins} minutes` : `about ${Math.round(mins / 60)} hours`;
+}
+
+/**
+ * A STEP THAT DID NOT WORK, as opposed to a verdict of "failed". The runner writes a step's own
+ * failure as `failed: <why>`; `finish(passed=false)` writes the bare word, and that is the run's
+ * answer about the APP, not a step going wrong — the two used to be drawn the same.
+ */
+const aiStepFailed = (s) => /^failed:/.test(String(s?.result || ''));
+
+/** What the agent touched, by the words on the screen — "Display", not "element [22]". */
+function aiTargetName(action) {
+  const t = action?.target;
+  const name = t && (t.text || t.label || t.id);
+  if (!name) return null;
+  const v = String(name);
+  return v.length > 40 ? `${v.slice(0, 40)}…` : v;
+}
+
+/**
+ * The step's headline. `failed` changes the verb: "Typed “x”" over an error saying the text never
+ * arrived told a person the opposite of what happened (the farm's first typing runs, 2026-09-26).
+ */
+function aiActionText(action, failed = false) {
   if (!action) return 'Planned the checkpoints';
   const i = action.input || {};
+  const name = aiTargetName(action);
+  const said = (done, tried) => (failed ? tried : done);
   switch (action.tool) {
-    case 'tap_element': return `Tapped element [${i.index}]`;
-    case 'tap_point': return `Tapped at ${i.x}, ${i.y}`;
-    case 'type_text': return `Typed “${String(i.text ?? '').slice(0, 60)}”${i.submit ? ' and pressed Enter' : ''}`;
-    case 'scroll': return `Scrolled ${i.direction}`;
-    case 'press_key': return `Pressed ${i.key}`;
-    case 'launch_app': return `Opened ${i.app_id}`;
+    case 'tap_element': return name
+      ? said(`Tapped “${name}”`, `Tried to tap “${name}”`)
+      : said(`Tapped element [${i.index}]`, `Tried to tap element [${i.index}]`);
+    case 'tap_point': return said(`Tapped at ${i.x}, ${i.y}`, `Tried to tap at ${i.x}, ${i.y}`);
+    case 'type_text': {
+      const text = `“${String(i.text ?? '').slice(0, 60)}”${name ? ` into “${name}”` : ''}`;
+      return said(`Typed ${text}${i.submit ? ' and pressed Enter' : ''}`, `Tried to type ${text}`);
+    }
+    case 'scroll': return said(`Scrolled ${i.direction}`, `Tried to scroll ${i.direction}`);
+    case 'press_key': return said(`Pressed ${i.key}`, `Tried to press ${i.key}`);
+    case 'launch_app': return said(`Opened ${i.app_id}`, `Tried to open ${i.app_id}`);
     case 'wait': return `Waited ${i.seconds}s`;
     case 'finish': return i.passed ? 'Concluded: passed' : 'Concluded: failed';
     default: return action.tool;
   }
+}
+
+/**
+ * The model's reasoning, minus markup meant for a parser. Some models write their tool call into the
+ * prose as well as making it (Qwen: `<tool_call><function=launch_app>…`), and the plan step showed a
+ * page of XML to the person reading it.
+ */
+function aiThought(text) {
+  return String(text || '')
+    .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, '')
+    .replace(/<\/?(?:function|parameter)(?:=[^>]*)?>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * The build a run is about. `appRef` is a build id, or `<package>@latest` for a saved test — which
+ * resolves to the newest build of that package the library holds (`/v1/apps` is newest first).
+ */
+function aiBuildOf(ref) {
+  if (!ref) return null;
+  const byId = state.apps.find((a) => a.id === ref);
+  if (byId) return byId;
+  const m = /^(.+)@latest$/.exec(ref);
+  return m ? state.apps.find((a) => a.packageName === m[1]) || null : null;
+}
+
+const aiBuildLabel = (a) => `${a.label || a.packageName} ${a.versionName || ''}`.trim();
+
+/** Who or what started a run, as a sentence fragment. An API key has no person to name. */
+function aiStartedBy(r) {
+  if (r.trigger === 'upload') return `a new build${r.test ? ` — ${r.test.name}` : ''}`;
+  if (r.test) return `saved test “${r.test.name}”${r.createdBy ? ` (${r.createdBy})` : ''}`;
+  return r.createdBy || 'an API key';
 }
 
 function aiMoney(n) {
@@ -11125,8 +11269,11 @@ function screenAi() {
   const p = ai.pricing;
   const d = ai.draft;
 
-  const regions = [...new Set(state.devices.map((x) => x.region))].sort();
+  const regions = aiRegionsFor(d.platform);
   const profileSpec = p?.profiles?.[d.profile];
+  // A platform this farm has no devices for is shown, and not offered: a run for it would queue
+  // until its timeout and end "no device" — a control on a false premise.
+  const hasPlatform = (v) => state.devices.some((x) => x.platform === v);
 
   const off = p && p.configured === false;
   const form = card('New AI run', {},
@@ -11158,7 +11305,10 @@ function screenAi() {
         h('select', {
           class: 'field', disabled: off,
           onchange: (e) => { state.ai.draft = { ...state.ai.draft, platform: e.target.value }; },
-        }, ['android', 'ios'].map((v) => h('option', { value: v, selected: d.platform === v, text: v === 'ios' ? 'iOS' : 'Android' })))),
+        }, ['android', 'ios'].map((v) => h('option', {
+          value: v, selected: d.platform === v, disabled: !hasPlatform(v) && d.platform !== v,
+          text: `${v === 'ios' ? 'iOS' : 'Android'}${hasPlatform(v) ? '' : ' \u2014 no devices on this farm'}`,
+        })))),
       h('div', { class: 'stack tight' },
         h('span', { class: 'micro', text: 'App build' }),
         h('select', {
@@ -11191,30 +11341,48 @@ function screenAi() {
   );
 
   const runs = ai.runs;
+  const filter = AI_FILTERS.some(([k]) => k === ai.filter) ? ai.filter : 'all';
+  const shown = runs.filter((r) => aiFilterMatches(filter, r));
   const list = card('Recent AI runs', {
-    aside: h('span', { class: 'caption', text: ai.loaded ? `${runs.length}` : 'loading…' }),
+    aside: h('span', { class: 'caption', text: ai.loaded ? `${shown.length} of ${runs.length}` : 'loading…' }),
   },
+    ai.loaded && runs.length
+      ? h('div', { class: 'row tight wrap mb-sm', role: 'group', 'aria-label': 'Show runs' },
+          AI_FILTERS.map(([k, label]) => h('button', {
+            type: 'button', class: `levelchip${filter === k ? ' on' : ''}`, 'aria-pressed': String(filter === k),
+            onclick: () => { state.ai.filter = k; render(); },
+          }, `${label} ${runs.filter((r) => aiFilterMatches(k, r)).length}`)))
+      : null,
     !ai.loaded
       ? h('p', { class: 'caption', text: 'Loading…' })
-      : runs.length
-        ? h('div', { class: 'stack' }, runs.map((r) => h('button', {
-            type: 'button', class: 'inset row between fit airow', onclick: () => go(`#/ai/${r.id}`),
-          },
-            h('div', { class: 'stack tight shrink' },
-              h('span', { class: 'row tight' }, aiStatusPill(r),
-                h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' }),
-                r.test ? h('span', { class: 'chip', text: r.test.name }) : null,
-                r.trigger === 'upload' ? h('span', { class: 'chip', text: 'on upload', title: 'Started by a new build of the app' }) : null),
-              h('p', { class: 'ai-row-prompt', text: r.prompt.length > 160 ? `${r.prompt.slice(0, 160)}…` : r.prompt }),
-              h('p', { class: 'caption', text: [
-                `${r.steps} step${r.steps === 1 ? '' : 's'}`,
-                aiMoney(r.costInr),
-                r.createdBy ? `by ${r.createdBy}` : null,
-                when(r.createdAt),
-              ].filter(Boolean).join(' · ') }),
-            ),
-          )))
-        : empty('No AI runs yet.', 'Describe a test above and press Start AI run.'),
+      : shown.length
+        ? h('div', { class: 'stack' }, shown.map((r) => {
+            const build = aiBuildOf(r.appRef);
+            return h('button', {
+              type: 'button', class: 'inset row between fit airow', onclick: () => go(`#/ai/${r.id}`),
+            },
+              h('div', { class: 'stack tight shrink' },
+                h('span', { class: 'row tight wrap' }, aiStatusPill(r),
+                  h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' }),
+                  build ? h('span', { class: 'chip', text: aiBuildLabel(build), title: build.packageName }) : null,
+                  r.test ? h('span', { class: 'chip', text: r.test.name }) : null,
+                  r.trigger === 'upload' ? h('span', { class: 'chip', text: 'on upload', title: 'Started by a new build of the app' }) : null),
+                h('p', { class: 'ai-row-prompt', text: r.prompt.length > 160 ? `${r.prompt.slice(0, 160)}…` : r.prompt }),
+                // Why a run has no verdict, on the row — it used to be a tooltip on the pill, so a
+                // run that died at once looked like a run that had never happened.
+                r.status === 'error' ? h('p', { class: 'caption ai-row-why', text: aiStopText(r) }) : null,
+                h('p', { class: 'caption', text: [
+                  `${r.steps} step${r.steps === 1 ? '' : 's'}`,
+                  aiMoney(r.costInr),
+                  `by ${aiStartedBy(r)}`,
+                  when(r.createdAt),
+                ].filter(Boolean).join(' · ') }),
+              ),
+            );
+          }))
+        : runs.length
+          ? empty('No runs match this filter.', 'Pick All to see every run.')
+          : empty('No AI runs yet.', 'Describe a test above and press Start AI run.'),
   );
 
   const b = p?.budget;
@@ -11249,6 +11417,12 @@ function screenAi() {
   ];
 }
 
+/** Back to the list, where a person expects it: first on the page, in words (2026-09-26). */
+function aiBackLink() {
+  return h('p', { class: 'backrow' },
+    btn('← All AI runs', 'ghost tiny', () => go('#/ai'), { title: 'Back to AI testing: the form and every run' }));
+}
+
 function screenAiRun() {
   const id = state.route.id;
   const ai = state.ai;
@@ -11256,91 +11430,143 @@ function screenAiRun() {
   if (!det && !ai.detailLoading) void loadAiRun(id);
   if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
   if (!det) {
-    return [pageHead([{ label: 'AI testing', to: '#/ai' }], 'AI run', null), h('p', { class: 'caption', text: 'Loading…' })];
+    return [aiBackLink(), pageHead(null, 'AI run', null), h('p', { class: 'caption', text: 'Loading…' })];
   }
   const r = det.aiRun;
   const steps = det.steps || [];
   const chosen = steps.find((s) => s.n === ai.stepN) || [...steps].reverse().find((s) => s.screenshotUrl) || null;
   const active = AI_ACTIVE.has(r.status);
+  const concluded = r.status === 'passed' || r.status === 'failed';
+  const detail = !active && !concluded ? aiStopDetail(r) : null;
+  const build = aiBuildOf(r.appRef);
+
+  const task = card('Task', {
+    aside: h('span', { class: 'row tight' },
+      h('span', { class: 'chip', text: r.profile === 'pro' ? 'Pro' : 'Flash' }),
+      h('span', { class: 'chip', text: r.platform === 'ios' ? 'iOS' : 'Android' }),
+      build ? h('span', { class: 'chip', text: aiBuildLabel(build), title: build.packageName }) : null),
+  }, h('p', { class: 'ai-task', text: r.prompt }));
 
   const verdict = card('Verdict', { aside: aiStatusPill(r) },
-    r.status === 'passed' || r.status === 'failed'
+    concluded
       ? [h('p', { text: r.summary || '' }),
          r.evidence ? h('p', { class: 'caption mt-sm' }, h('span', { class: 'micro', text: 'Evidence ' }), r.evidence) : null]
       : active
         ? h('p', { class: 'caption', text: r.status === 'queued' ? 'Waiting for a device…'
             : `Working — step ${r.steps} of at most ${r.stepCap}.` })
-        : h('p', { text: aiStopText(r) }),
+        : [h('p', { class: 'ai-stop', text: aiStopText(r) }),
+           detail ? h('p', { class: 'caption mt-sm', text: detail }) : null,
+           // The raw record stays one click away: it is what an operator needs, and what support asks for.
+           r.summary && r.summary !== detail
+             ? h('details', { class: 'ai-raw mt-sm' },
+                 h('summary', { class: 'caption', text: 'What the server recorded' }),
+                 h('p', { class: 'mono caption', text: r.summary }))
+             : null],
+    // C8 where the failure is being read. It used to be offered only under results on other pages.
+    r.status === 'failed' || (r.status === 'error' && r.steps > 0) ? aiExplainBlock(r.sessionId) : null,
     kv([
-      ['Mode', r.profile === 'pro' ? 'Pro' : 'Flash'],
-      ['Started by', r.trigger === 'upload' ? `a new build${r.test ? ` \u2014 ${r.test.name}` : ''}`
-        : r.test ? `saved test \u201c${r.test.name}\u201d` : (r.createdBy || '\u2014')],
+      ['Started by', aiStartedBy(r)],
+      ['App build', build ? `${aiBuildLabel(build)} · ${build.packageName}` : (r.appRef || 'None — what was on the device')],
       ['Steps', `${r.steps} of at most ${r.stepCap}`],
       ['Cost', `${aiMoney(r.costInr)} in AI steps`],
       ['Model', r.model, true],
       ['Started', r.startedAt ? when(r.startedAt) : '—'],
+      ['Ended', r.endedAt ? `${when(r.endedAt)} · took ${lengthInWords(r.startedAt || r.createdAt, r.endedAt)}` : (active ? 'still running' : '—')],
     ]),
   );
 
   const trajectory = card('Steps', { aside: h('span', { class: 'caption', text: `${steps.length}` }) },
     steps.length
-      ? h('ol', { class: 'ai-steps' }, steps.map((s) => h('li', {
-          class: `ai-step ${chosen?.n === s.n ? 'on' : ''} ${String(s.result || '').startsWith('failed') ? 'miss' : ''}`.trim(),
-        },
-          h('button', {
-            type: 'button', class: 'ai-step-btn',
-            onclick: () => { state.ai.stepN = s.n; render(); },
-            'aria-label': `Show the screen at step ${s.n}`,
-          },
-            h('span', { class: 'ai-step-n', text: String(s.n) }),
-            h('span', { class: 'stack tight shrink' },
-              h('span', { class: 'row tight' },
-                h('strong', { text: aiActionText(s.action) }),
-                s.phase !== 'act' ? h('span', { class: 'chip', text: s.phase }) : null),
-              s.thought ? h('span', { class: 'caption ai-thought', text: s.thought }) : null,
-              s.result && s.result !== 'ok' ? h('span', { class: 'caption mono', text: s.result }) : null),
-          ))))
+      ? h('ol', { class: 'ai-steps' }, steps.map((s) => {
+          const failed = aiStepFailed(s);
+          const thought = aiThought(s.thought);
+          return h('li', { class: `ai-step ${chosen?.n === s.n ? 'on' : ''} ${failed ? 'miss' : ''}`.trim() },
+            h('button', {
+              type: 'button', class: 'ai-step-btn',
+              onclick: () => { state.ai.stepN = s.n; render(); },
+              'aria-label': `Show the screen at step ${s.n}`,
+            },
+              h('span', { class: 'ai-step-n', text: String(s.n) }),
+              h('span', { class: 'stack tight shrink' },
+                h('span', { class: 'row tight' },
+                  h('strong', { text: aiActionText(s.action, failed) }),
+                  failed ? pill('did not work', 'warn', { dot: false }) : null,
+                  s.phase !== 'act' ? h('span', { class: 'chip', text: s.phase }) : null),
+                thought ? h('span', { class: 'caption ai-thought', text: thought }) : null,
+                s.result && s.result !== 'ok'
+                  ? h('span', { class: `caption mono ${failed ? 'ai-step-err' : ''}`.trim(), text: s.result })
+                  : null),
+            ));
+        }))
       : h('p', { class: 'caption', text: active ? 'The first step appears once a device is ready.' : 'No steps were taken.' }),
   );
 
+  // Previous / Next walk the steps that HAVE a screen, so neither ever lands on a blank panel.
+  const shots = steps.filter((s) => s.screenshotUrl);
+  const at = chosen ? shots.indexOf(chosen) : -1;
+  const stepper = shots.length > 1
+    ? h('span', { class: 'row tight' },
+        btn('Previous', 'tiny ghost', () => { state.ai.stepN = shots[at - 1].n; render(); }, { disabled: at <= 0 }),
+        btn('Next', 'tiny ghost', () => { state.ai.stepN = shots[at + 1].n; render(); }, { disabled: at < 0 || at >= shots.length - 1 }))
+    : null;
+
   return [
-    pageHead([{ label: 'AI testing', to: '#/ai' }], 'AI run', r.prompt,
-      h('span', { class: 'row tight' },
+    aiBackLink(),
+    pageHead(null, 'AI run', null,
+      h('span', { class: 'row tight wrap' },
         active && !r.cancelRequested ? btn('Stop', 'ghost', () => void cancelAiRun(r.id)) : null,
-        r.sessionId ? btn('Recording & log', 'ghost', () => go(`#/sessions/${r.sessionId}`),
-          { title: 'The device session this run used: video, logcat and every WebDriver command' }) : null,
+        r.sessionId ? btn('Recording & log', 'ghost', () => {
+          // Remembered so the session page can lead back here — see `aiRunOfSession`.
+          state.ai.cameFrom = { sessionId: r.sessionId, runId: r.id, prompt: r.prompt };
+          go(`#/sessions/${r.sessionId}`);
+        }, { title: 'The device session this run used: video, logcat and every WebDriver command' }) : null,
         // C9: the route this run took, as code — offered for a PASSED run, because that is the
         // one known to work. A plain link, so the browser downloads with the session cookie.
         r.status === 'passed' ? h('a', {
           class: 'btn ghost', href: `/v1/ai/runs/${encodeURIComponent(r.id)}/script?lang=webdriverio&origin=${encodeURIComponent(location.origin)}`,
-          download: '', title: 'This run\u2019s steps as a WebdriverIO script for the hub \u2014 deterministic, and no AI cost to run',
+          download: '', title: 'This run’s steps as a WebdriverIO script for the hub — deterministic, and no AI cost to run',
         }, 'Export WebdriverIO') : null,
         r.status === 'passed' ? h('a', {
           class: 'btn ghost', href: `/v1/ai/runs/${encodeURIComponent(r.id)}/script?lang=python&origin=${encodeURIComponent(location.origin)}`,
-          download: '', title: 'This run\u2019s steps as a pytest script for the hub',
+          download: '', title: 'This run’s steps as a pytest script for the hub',
         }, 'Export pytest') : null,
         // C10: the verdict is the session's test result, so it shares through the same links every
         // result does — and the public page shows the task and each step's screen, never typed text.
-        (r.status === 'passed' || r.status === 'failed') && r.sessionId
+        concluded && r.sessionId
           ? btn('Share', 'ghost', () => void shareAiRun(r), {
-              title: 'A link anyone can open: the task, the verdict and each step\u2019s screen. Typed text is hidden.',
+              title: 'A link anyone can open: the task, the verdict and each step’s screen. Typed text is hidden.',
             })
           : null,
-        btn('Run again', '', () => {
-          state.ai.draft = { ...state.ai.draft, prompt: r.prompt, profile: r.profile, platform: r.platform, appId: '' };
-          go('#/ai');
-        }),
+        btn('Run again', '', () => aiRunAgain(r), { title: 'A new run with this task, mode and app build — you can edit it first' }),
       )),
     h('div', { class: 'split' },
-      h('div', { class: 'content' }, verdict, trajectory),
-      h('div', { class: 'rail' },
-        card(chosen ? `Screen at step ${chosen.n}` : 'Screen', {},
+      h('div', { class: 'content' }, task, verdict, trajectory),
+      // Sticky: the steps are a long list and the screen is what choosing one is FOR. It used to
+      // scroll away, so picking step 3 at the bottom changed a picture nobody could see.
+      h('div', { class: 'rail ai-rail' },
+        card(chosen ? `Screen at step ${chosen.n}` : 'Screen', { aside: stepper },
           chosen?.screenshotUrl
-            ? h('img', { class: 'ai-shot', src: chosen.screenshotUrl, alt: `The device screen at step ${chosen.n}`, loading: 'lazy' })
-            : h('p', { class: 'caption', text: 'No screenshot yet.' })),
+            ? h('img', { class: 'ai-shot', src: chosen.screenshotUrl, alt: `The device screen at step ${chosen.n}` })
+            : h('p', { class: 'caption', text: active ? 'No screenshot yet.' : 'No screenshot was taken.' })),
       ),
     ),
   ];
+}
+
+/**
+ * "Run again": the same task, mode, platform AND BUILD, back in the form to be checked and started.
+ * It used to clear the build, so a run against an uploaded app came back as a run against whatever
+ * happened to be on the device — the one thing the person was testing, silently gone.
+ */
+function aiRunAgain(r) {
+  const build = aiBuildOf(r.appRef);
+  state.ai.draft = {
+    ...state.ai.draft, prompt: r.prompt, profile: r.profile, platform: r.platform,
+    appId: build ? build.id : '', region: r.region || '',
+  };
+  toast('Copied into a new run', 'Check the task, then press Start AI run.', '');
+  go('#/ai');
+  setTimeout(() => document.getElementById('ai-prompt')?.focus(), 0);
 }
 
 /**
@@ -11552,7 +11778,7 @@ async function shareAiRun(r) {
       toast('Nothing to share yet', 'This run has not recorded its verdict on the session.', 'bad');
       return;
     }
-    shareDialog(result);
+    shareDialog(result, { ai: true });
   } catch (e) {
     toast('Could not open sharing', e.message, 'bad');
   }
@@ -11564,8 +11790,8 @@ async function startAiRun() {
   state.ai.busy = true;
   render();
   try {
-    const regions = [...new Set(state.devices.map((x) => x.region))].sort();
-    const region = d.region || regions[0];
+    const regions = aiRegionsFor(d.platform);
+    const region = regions.includes(d.region) ? d.region : regions[0];
     const out = await api('/v1/ai/runs', {
       method: 'POST',
       body: {
@@ -11612,11 +11838,21 @@ async function loadAiRuns() {
 async function loadAiPricing() {
   if (state.ai.pricingLoading) return;
   state.ai = { ...state.ai, pricingLoading: true };
+  let pricing;
   try {
-    state.ai = { ...state.ai, pricing: await api('/v1/ai/pricing'), pricingLoading: false };
+    pricing = await api('/v1/ai/pricing');
   } catch {
-    state.ai = { ...state.ai, pricing: { configured: false, profiles: {}, currency: '' }, pricingLoading: false };
+    pricing = { configured: false, profiles: {}, currency: '' };
   }
+  /**
+   * SPREAD AFTER THE AWAIT, never beside it. `{ ...state.ai, pricing: await api(…) }` copies
+   * `state.ai` BEFORE the request leaves, and writing that copy back erased whatever landed in the
+   * meantime. The three loaders run together on arrival, so when prices answered after the run list
+   * this restored `loading: true` with no runs — and `loadAiRuns` refuses to start while `loading`
+   * is set, so "Recent AI runs" said "Loading…" for good (found on the farm, 2026-09-26: a person
+   * started a run and could not find it again). The same write could erase an open run's detail.
+   */
+  state.ai = { ...state.ai, pricing, pricingLoading: false };
   scheduleRender();
 }
 

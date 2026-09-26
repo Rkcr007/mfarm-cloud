@@ -610,6 +610,8 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; user-select: text; 
   transition: border-color var(--m-fast, 160ms) var(--ease-out), background var(--m-fast, 160ms) var(--ease-out);
 }
 .btn:active:not([disabled]) { transform: translateY(.5px); transition-duration: var(--m-instant, 90ms); }
+/* An <a> dressed as a button (downloads, exports) reads as one: the UA's link underline is not ours. */
+a.btn, a.btn:hover { text-decoration: none; }
 .btn:hover:not([disabled]) { border-color: var(--b-hover-strong, #454548); color: var(--t-primary, #F1F1F1); }
 
 .btn.primary {
@@ -3387,7 +3389,26 @@ kbd {
 }
 .ai-step.miss .ai-step-n { color: var(--warn, #E8A30E); }
 .ai-thought { white-space: pre-wrap; overflow-wrap: anywhere; }
-.ai-shot { display: block; width: 100%; height: auto; border-radius: var(--r-lg, 12px); border: 1px solid var(--b-card, #1F1F22); }
+/* The whole phone, always: capped to the viewport so a tall 1080x2340 screen never needs scrolling
+   inside the panel it is supposed to be glanced at. */
+.ai-shot {
+  display: block; width: auto; max-width: 100%; height: auto; max-height: calc(100vh - 150px); margin: 0 auto;
+  object-fit: contain; border-radius: var(--r-lg, 12px); border: 1px solid var(--b-card, #1F1F22);
+}
+/* Pinned while the steps scroll: choosing a step is for seeing its screen (2026-09-26 — it scrolled
+   away, so a step picked at the bottom of a long run changed a picture nobody could see). `.main` is
+   the scroller, below the top bar, so the offset is only the page's own breathing room. */
+.split > .rail.ai-rail { position: sticky; top: 16px; }
+@media (max-width: 900px) {
+  .split > .rail.ai-rail { position: static; }
+}
+.ai-task { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--t-primary, #F1F1F1); }
+.ai-stop { color: var(--t-primary, #F1F1F1); }
+.ai-raw > summary { cursor: pointer; }
+.ai-raw > p { margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-step-err { color: var(--warn, #E8A30E); overflow-wrap: anywhere; }
+.ai-row-why { color: var(--warn, #E8A30E); }
+.backrow { margin: 0 0 6px; }
 
 /* Saved-test history: one dot per recent run, newest first. The colours are the pills'. */
 .ai-dot {
