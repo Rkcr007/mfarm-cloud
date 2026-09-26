@@ -101,7 +101,8 @@ describe('the AI testing loaders', () => {
     stubFetch();
     fresh({ name: 'ai' });
     mod.SCREENS.ai(); // arrival: the screen asks for everything it has not got, all at once
-    const runs = take('/v1/ai/runs');
+    // The most recent 100: the list's search and filters work over those, in the browser (2026-09-27).
+    const runs = take('/v1/ai/runs?limit=100');
     const pricing = take('/v1/ai/pricing');
 
     runs.answer({ aiRuns: [RUN] });

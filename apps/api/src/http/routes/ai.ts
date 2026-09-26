@@ -13,7 +13,7 @@ import { exportScript, type ScriptLang, type ExportStep } from '../../ai/export.
 import type { Model } from '../../ai/agent.ts';
 import { configuredSlots } from '../../ai/provider.ts';
 import { aiReadiness } from '../../ai/readiness.ts';
-import { redact, redactDeep, secretsIn, stripToolMarkup } from '../../ai/secrets.ts';
+import { MASK, redact, redactDeep, secretsIn, stripToolMarkup } from '../../ai/secrets.ts';
 import type { QueueGate } from '../../ai/queue.ts';
 
 /**
@@ -57,7 +57,9 @@ const RUN_COLUMNS = `r.id, r.prompt, r.profile, r.platform, r.region, r.app_ref,
 
 /**
  * A run as the API shows it: the task and everything the agent said about it MASKED (secrets.ts).
- * The whole task is read back only through `GET /v1/ai/runs/:id/prompt`, by the org that owns it.
+ * The whole task is read back only through `GET /v1/ai/runs/:id/prompt` (and a saved test's through
+ * `GET /v1/ai/tests/:id/prompt`), by the org that owns it. A task sent back still holding the mask
+ * is refused — `refuseMaskedPrompt`.
  */
 function runJson(r: RunRow) {
   const secrets = secretsIn(r.prompt);
@@ -180,6 +182,7 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       }
       const prompt = req.body.prompt.trim();
       if (!prompt) throw badRequest('The prompt is empty.');
+      refuseMaskedPrompt(prompt);
       const id = await queueAiRun(orgId, {
         prompt, profile: req.body.profile, platform: (req.body.platform as 'android' | 'ios') ?? 'android',
         region: req.body.region ?? null, appRef: req.body.appId ?? null, stepCap: req.body.stepCap,
@@ -428,6 +431,22 @@ type TestBody = {
   appPackage?: string | null; runOnUpload?: boolean;
 };
 
+/**
+ * A TASK THAT STILL HOLDS THE MASK IS REFUSED, wherever a task is written (2026-09-27).
+ *
+ * The console shows a task's secrets as `••••` (secrets.ts), and reads the real values back before
+ * anything is edited or run again. If that read-back is skipped — an older tab, a copy and paste from
+ * the run page — the mask itself would be saved, and the agent would type four bullets into a PIN
+ * field and report the app broken. Refused at the door instead, with the reason.
+ */
+function refuseMaskedPrompt(prompt: string): string {
+  if (prompt.includes(MASK)) {
+    throw badRequest(`The task contains ${MASK} where a hidden value was shown. Type the value again — `
+      + 'the agent would otherwise type the dots themselves.');
+  }
+  return prompt;
+}
+
 /** Postgres' refusals, as the sentences a person can act on. */
 function testWriteError(err: unknown): never {
   const e = err as { code?: string; constraint?: string };
@@ -454,6 +473,7 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
   }, async (req, reply) => {
     const { orgId, userId } = requireSpender(req);
     const b = req.body;
+    refuseMaskedPrompt(b.prompt!);
     const id = await withTenant(orgId, async (c) => (await c.query<{ id: string }>(
       `INSERT INTO ai_tests (org_id, created_by, name, prompt, profile, platform, region, app_package, run_on_upload)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
@@ -475,7 +495,7 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
     const vals: unknown[] = [orgId, id];
     const put = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
     if (b.name !== undefined) put('name', b.name.trim());
-    if (b.prompt !== undefined) put('prompt', b.prompt.trim());
+    if (b.prompt !== undefined) put('prompt', refuseMaskedPrompt(b.prompt).trim());
     if (b.profile !== undefined) put('profile', b.profile);
     if (b.platform !== undefined) put('platform', b.platform);
     if (b.region !== undefined) put('region', b.region);
@@ -491,6 +511,20 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
       return (await c.query<TestRow>(`${TEST_SELECT} WHERE t.org_id = $1 AND t.id = $2`, [orgId, id])).rows[0]!;
     });
     return { aiTest: testJson(row) };
+  });
+
+  /**
+   * THE WHOLE TASK OF A SAVED TEST, for the org that owns it — the edit box's twin of
+   * `GET /v1/ai/runs/:id/prompt`. The list shows it masked; an edit started from the masked text
+   * would save "••••" over the PIN, and the next run would type that into the app.
+   */
+  app.get<{ Params: { id: string } }>('/ai/tests/:id/prompt', async (req) => {
+    const { orgId } = requireSpender(req);
+    const id = uuidParam(req.params.id, 'AI test');
+    const row = await withTenant(orgId, async (c) => (await c.query<{ prompt: string }>(
+      'SELECT prompt FROM ai_tests WHERE org_id = $1 AND id = $2 AND archived_at IS NULL', [orgId, id])).rows[0]);
+    if (!row) throw notFound('AI test');
+    return { prompt: row.prompt };
   });
 
   /** Archive. Its runs keep pointing at it, so their history keeps its name. */

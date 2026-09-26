@@ -319,6 +319,12 @@ export function installDom(): void {
   set('DOMParser', class { parseFromString() { throw new Error('The shim does not parse XML.'); } });
   set('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {}, clear: () => {} });
   set('location', location);
+  // `replaceState` moves the address without a navigation — the AI list's filters live in it
+  // (2026-09-27). Only the hash matters to the console, so only the hash is kept.
+  set('history', {
+    replaceState: (_s: unknown, _t: string, url: string) => { location.hash = String(url).replace(/^[^#]*/, ''); },
+    back: () => {},
+  });
   set('navigator', { clipboard: { writeText: async () => {} } });
   // The console boots on import: it calls the API, then polls and ticks. A rejecting `fetch` sends
   // it down its own "not signed in" path, which is a legitimate state and needs no server.

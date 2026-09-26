@@ -54,7 +54,12 @@ export interface StepRecord {
    * id, a label or a text is a locator a script can use next week — and "Export as script" is only
    * as good as what was written down here at the time.
    */
-  action: { tool: string; input: Record<string, unknown>; target?: ActionTarget | null } | null;
+  /**
+   * `screen` is the size the coordinates in `input` and `target` are measured against — pixels on
+   * Android, POINTS on iOS, where the screenshot is two or three times larger. Without it the run
+   * page cannot put a mark where the agent tapped (2026-09-27); steps recorded before it have none.
+   */
+  action: { tool: string; input: Record<string, unknown>; target?: ActionTarget | null; screen?: { width: number; height: number } } | null;
   /** What happened when the action ran: `ok`, or the error, in words. */
   result: string | null;
   /** The observation this step decided on. */
@@ -381,7 +386,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
 
     await sink.record({
       n, phase, thought: [reason, thoughtText].filter(Boolean).join('\n') || null,
-      action: { tool: use.name, input, target: actionTarget(use.name, input, obs.elements) }, result,
+      action: { tool: use.name, input, target: actionTarget(use.name, input, obs.elements), screen }, result,
       screenshotB64: obs.screenshotB64, elementCount: obs.elements.length,
       usage: usage(m), model: servedBy(m, modelId), startedAt: r.startedAt, durationMs: Date.now() - r.t0,
     });
