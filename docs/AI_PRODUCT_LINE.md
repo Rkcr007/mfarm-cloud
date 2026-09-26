@@ -104,7 +104,7 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
   its only model that takes an image and tools: ~0.8s per model call, but **7,000 input tokens a
   minute** and ~4.4k counted per step, so about one step every 35s and **one run at a time**
   (`AI_MAX_CONCURRENT_RUNS=1`) — two at once starved each other into `model_error`. Runbook: "Turn on
-  AI runs". ****2026-09-27: a third ceiling, and this one refuses rather than waits — 1,000 OUTPUT tokens a minute (OTPM), and an uncapped request is assumed to want 1,748, so every call was refused (D54, fixed in #PR: the adapter learns the limit from the refusal and asks for 500).** The day's real ceiling is 200,000 tokens (TPD)** — about 45 steps; one afternoon of
+  AI runs". ****2026-09-27: a third ceiling, and this one refuses rather than waits — 1,000 OUTPUT tokens a minute (OTPM), and an uncapped request is assumed to want 1,748, so every call was refused (D54, fixed in #226: the adapter learns the limit from the refusal and asks for 500).** The day's real ceiling is 200,000 tokens (TPD)** — about 45 steps; one afternoon of
   verification used all of it, and the next call is refused for ~45 minutes (a wait the retry does
   not sit through). Caveat: a free model's token counts do NOT calibrate the price of the model we
   will sell on.
