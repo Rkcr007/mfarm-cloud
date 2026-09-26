@@ -36,6 +36,7 @@ import { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import ts from 'typescript';
 import type { Model } from '../src/ai/agent.ts';
+import { approxTokens } from '../src/ai/diagnose.ts';
 import { buildApk } from './fixtures/apk.ts';
 
 const REGION = 'ai-test';
@@ -111,9 +112,13 @@ let diagnosisReply: Record<string, unknown> = {
   suggested_fix: 'Guard the null cart in CheckoutActivity',
 };
 
+/** When set, a diagnosis request fails the way a real provider does (a 413, a 429 past its budget). */
+let diagnosisThrows: Error | null = null;
+
 const scriptedModel: Model = async (params) => {
   calls.push(params);
   if (params.output_config?.format) {
+    if (diagnosisThrows) throw diagnosisThrows;
     return {
       id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: params.model,
       content: [{ type: 'text', text: JSON.stringify(diagnosisReply) }], stop_reason: 'end_turn', stop_sequence: null,
@@ -302,6 +307,27 @@ describe('an AI run', () => {
     const labels = (list.json() as { keys: { label: string }[] }).keys.map((k) => k.label);
     assert.ok(labels.includes('test fixture — ai'), 'the list does show the keys a person minted');
     assert.ok(!labels.some((l) => l.startsWith('AI run')), `AI-run keys leaked into the list: ${labels.join(', ')}`);
+  });
+
+  // AFTER the key-list test, not before it: the next test's resetFleet() deletes this run, and
+  // `api_keys.ai_run_id` is ON DELETE SET NULL — its (revoked) key would then show in that list.
+  test('a run that names no region takes the farm default — on the farm it was accepted, then died at allocation', async () => {
+    await resetFleet();
+    scripts.set('Open it with no region', [
+      { tool: 'finish', input: { passed: true, summary: 'Open', evidence: 'Shown', why: 'done' } },
+    ]);
+    const prior = process.env.MFARM_DEFAULT_REGION;
+    process.env.MFARM_DEFAULT_REGION = REGION;
+    let started: Awaited<ReturnType<typeof startRun>>;
+    try {
+      started = await startRun({ prompt: 'Open it with no region' });
+    } finally {
+      if (prior === undefined) delete process.env.MFARM_DEFAULT_REGION; else process.env.MFARM_DEFAULT_REGION = prior;
+    }
+    assert.equal(started.status, 201);
+    assert.equal((started.body.aiRun as { region?: string }).region, REGION, 'resolved when queued, not left for the hub to refuse');
+    const done = await settle(started.body.aiRun.id);
+    assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
   });
 
   test('Pro: plans first, and a verdict is confirmed on a fresh screen before it counts', async () => {
@@ -529,7 +555,7 @@ describe('explaining a failure (C8)', () => {
   const diagnose = (sessionId: string, key = keyA) =>
     app.inject({ method: 'POST', url: '/v1/ai/diagnoses', headers: auth(key), payload: { sessionId } });
 
-  async function failedSession(): Promise<string> {
+  async function failedSession(pad = ''): Promise<string> {
     scripts.set('Buy the shirt', [
       { tool: 'tap_element', input: { index: 1, why: 'checkout' } },
       { tool: 'finish', input: { passed: false, summary: 'Checkout crashed', evidence: 'App closed', why: 'crash' } },
@@ -539,7 +565,7 @@ describe('explaining a failure (C8)', () => {
     await drainCommandLog();
     // A logcat artifact, as the worker would have uploaded it — a real blob in the real store.
     const store = appStore(process.env.ARTIFACT_DIR!);
-    const lines = Array.from({ length: 400 }, (_, i) => `I/Noise: line ${i}`).concat(['E/AndroidRuntime: FATAL EXCEPTION: main']);
+    const lines = Array.from({ length: 400 }, (_, i) => `I/Noise: line ${i}${pad}`).concat(['E/AndroidRuntime: FATAL EXCEPTION: main']);
     const blob = await store.put(Readable.from([Buffer.from(lines.join('\n'))]), 10_000_000);
     await withSystem((c) => c.query(
       `INSERT INTO artifacts (org_id, session_id, kind, sha256, size_bytes, content_type, expires_at)
@@ -573,6 +599,52 @@ describe('explaining a failure (C8)', () => {
 
     const list = await app.inject({ method: 'GET', url: `/v1/ai/diagnoses?sessionId=${sessionId}`, headers: auth(keyA) });
     assert.equal((list.json() as { diagnoses: unknown[] }).diagnoses.length, 1, 'kept, so asking again need not buy again');
+  });
+
+  test('a model that cannot be reached is a 503 that says why and bills nothing — it was a bare 500', async () => {
+    await resetFleet();
+    const sessionId = await failedSession();
+    const spent = async () => ((await app.inject({ method: 'GET', url: '/v1/ai/pricing', headers: auth(keyA) }))
+      .json() as { budget: { spentInr: number } }).budget.spentInr;
+    const before = await spent();
+    diagnosisThrows = new Error('413 from api.groq.com: Request too large for model `qwen/qwen3.8-27b`');
+    let res: Awaited<ReturnType<typeof diagnose>>;
+    try {
+      res = await diagnose(sessionId);
+    } finally {
+      diagnosisThrows = null;
+    }
+    assert.equal(res.statusCode, 503, res.body);
+    assert.match((res.json() as { error: { message: string } }).error.message,
+      /could not be reached: 413 from api\.groq\.com.*Nothing was billed/);
+    assert.equal(await spent(), before);
+    const list = await app.inject({ method: 'GET', url: `/v1/ai/diagnoses?sessionId=${sessionId}`, headers: auth(keyA) });
+    assert.equal((list.json() as { diagnoses: unknown[] }).diagnoses.length, 0, 'nothing kept, so nothing to show as bought');
+  });
+
+  test('MFARM_AI_MAX_INPUT_TOKENS: the log is cut from its old end until the request fits', async () => {
+    await resetFleet();
+    // ~200-character lines: the 48 KB tail alone is ~16k estimated tokens, as on the farm.
+    const sessionId = await failedSession(` ${'x'.repeat(190)}`);
+    const before = calls.length;
+    process.env.MFARM_AI_MAX_INPUT_TOKENS = '5000';
+    let res: Awaited<ReturnType<typeof diagnose>>;
+    try {
+      res = await diagnose(sessionId);
+    } finally {
+      delete process.env.MFARM_AI_MAX_INPUT_TOKENS;
+    }
+    assert.equal(res.statusCode, 201, res.body);
+    const d = (res.json() as { diagnosis: { inputs: { logcatLines: number; screenshot: boolean } } }).diagnosis;
+    assert.ok(d.inputs.logcatLines > 0 && d.inputs.logcatLines < 250, `kept ${d.inputs.logcatLines} lines`);
+
+    const sent = calls.slice(before).find((p) => p.output_config?.format)!;
+    const blocks = sent.messages[0]!.content as { type: string; text?: string }[];
+    const text = blocks.map((b) => b.text ?? '').join('\n');
+    assert.match(text, /FATAL EXCEPTION: main/, 'the newest line is the one that is kept');
+    const system = (sent.system as { text: string }[])[0]!.text;
+    const image = blocks.some((b) => b.type === 'image') ? 2_048 : 0;
+    assert.ok(approxTokens(`${system}\n\n${text}`) + image + 300 <= 5_000, 'the request fits the budget');
   });
 
   test('another org cannot diagnose — or even learn of — a session that is not theirs', async () => {

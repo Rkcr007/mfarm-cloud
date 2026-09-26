@@ -258,6 +258,9 @@ services:
       AI_MAX_CONCURRENT_RUNS: ${AI_MAX_CONCURRENT_RUNS:-2}
       # How often the runner looks for queued runs. The first step waits on a device either way.
       AI_RUNNER_INTERVAL_MS: ${AI_RUNNER_INTERVAL_MS:-2000}
+      # A provider's per-request input cap (Groq's free tier: 7000). Unset = no trimming. Named here
+      # or it never arrives — see VIDEO_RECORDING below for the day that was learned.
+      MFARM_AI_MAX_INPUT_TOKENS: ${MFARM_AI_MAX_INPUT_TOKENS:-}
 
       # ---------------------------------------------------------------- power control (ADR-0038)
       #
