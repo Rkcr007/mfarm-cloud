@@ -7,7 +7,7 @@ import { appStore, type AppStore } from '../appstore.ts';
 import { release } from '../allocator.ts';
 import { callPriceInr, estimateInr, isAiProfile, type AiProfile } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
-import { aiProviderConfig, aiStrongModelId, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
+import { aiParallelTools, aiProviderConfig, aiStrongModelId, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
 import { aiRunNames, redact, secretsIn } from './secrets.ts';
 import { runAgent, type AgentOutcome, type AgentTiming, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 import { loadRunSecrets } from './secret-store.ts';
@@ -527,6 +527,7 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
       stepCap: run.step_cap,
       timing: agentTiming(),
       strongModelId: aiStrongModelId() ?? undefined,
+      parallelTools: aiParallelTools(),
     });
   } catch (err) {
     const e = err as Error;

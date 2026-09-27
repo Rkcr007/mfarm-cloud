@@ -77,6 +77,19 @@ export function aiStrongModelId(env: Env = process.env): string | null {
   return (env.MFARM_AI_STRONG_MODEL ?? '').trim() || null;
 }
 
+/**
+ * `MFARM_AI_PARALLEL_TOOLS`: whether the primary model may name several actions in one answer
+ * (ADR-0046). Unset, it follows the protocol: on for `anthropic`, whose models write parallel tool
+ * calls well; OFF for `openai`-compatible servers, where it depends on the model and one that cannot
+ * fails the call outright — qwen3.8-27b on Groq, on the farm, 2026-09-27 (D56).
+ */
+export function aiParallelTools(env: Env = process.env): boolean {
+  const v = (env.MFARM_AI_PARALLEL_TOOLS ?? '').trim().toLowerCase();
+  if (v === 'true' || v === '1') return true;
+  if (v === 'false' || v === '0') return false;
+  return aiProviderOf(env) === 'anthropic';
+}
+
 export function buildModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
   return cfg.provider === 'openai' ? openaiModel(cfg, retry) : anthropicModel(cfg, retry);
 }
@@ -439,6 +452,18 @@ export const outputCapFor = (limit: number): number => Math.max(64, Math.floor(l
 /** Per endpoint and model, the cap a provider's refusal taught. In memory, like health.ts: one request re-learns it. */
 const learnedOutputCaps = new Map<string, number>();
 
+/**
+ * Per endpoint and model: it could not write several tool calls in one answer. Found on the farm
+ * 2026-09-27 (D56): asked for several actions a turn (ADR-0046), qwen3.8-27b on Groq wrote tool calls
+ * Groq could not parse — `400 tool_use_failed` — and every run died on its second or sixth call.
+ */
+const noParallelTools = new Set<string>();
+
+/** Tests only: forget what providers' refusals taught about tool calls. */
+export function resetLearnedToolLimits(): void {
+  noParallelTools.clear();
+}
+
 function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY): Model {
   const url = `${(cfg.baseUrl ?? 'https://api.openai.com/v1').replace(/\/+$/, '')}/chat/completions`;
   const host = new URL(url).host;
@@ -448,11 +473,17 @@ function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY):
       const caps = [cfg.maxOutputTokens, learnedOutputCaps.get(capKey)].filter((n): n is number => typeof n === 'number' && n > 0);
       return caps.length ? Math.min(...caps) : null;
     };
-    let request = toOpenAiRequest(params, capNow());
+    const build = () => {
+      const r = toOpenAiRequest(params, capNow());
+      if (r.tools && noParallelTools.has(capKey)) r.parallel_tool_calls = false;
+      return r;
+    };
+    let request = build();
     let body = JSON.stringify(request);
     let waited = 0;
     let regenerated = false;
     let resized = 0;
+    let toolRetries = 0;
     for (let attempt = 0; ; attempt++) {
       const last = attempt + 1 >= (retry.maxAttempts ?? Infinity);
       let res: Response;
@@ -487,7 +518,7 @@ function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY):
         const sent = request.max_completion_tokens as number | undefined;
         if (cap && resized < 2 && (sent === undefined || cap < sent)) {
           learnedOutputCaps.set(capKey, Math.min(learnedOutputCaps.get(capKey) ?? Infinity, cap));
-          request = toOpenAiRequest(params, capNow());
+          request = build();
           body = JSON.stringify(request);
           resized++;
           continue;
@@ -499,6 +530,17 @@ function openaiModel(cfg: AiProviderConfig, retry: RetryPolicy = DEFAULT_RETRY):
       // the model's sampling, not the request: the same diagnosis parsed on 2 of 2 re-sends. Once.
       if (res.status === 400 && !regenerated && !last && request.response_format && /json_validate_failed/.test(text)) {
         regenerated = true;
+        continue;
+      }
+      // A tool call the model WROTE but the server could not read (Groq: `tool_use_failed`) is the
+      // model's sampling too. Asked again at once — twice at most — and with one tool call an answer:
+      // several in one answer is what qwen on Groq could not write (D56), and it is remembered for
+      // this model, so the next call does not fail first to find out.
+      if (res.status === 400 && request.tools && toolRetries < 2 && !last && /tool_use_failed/.test(text)) {
+        toolRetries++;
+        if (request.parallel_tool_calls !== false) noParallelTools.add(capKey);
+        request = build();
+        body = JSON.stringify(request);
         continue;
       }
       const asked = retryAfterMs(res, text);

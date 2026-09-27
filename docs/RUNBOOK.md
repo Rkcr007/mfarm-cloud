@@ -437,7 +437,12 @@ MFARM_AI_MODEL=claude-haiku-4-5
 MFARM_AI_STRONG_MODEL=claude-sonnet-5
 ```
 
-(Haiku refuses `effort` and adaptive thinking; the provider drops both for it.) The log line then
+(Haiku refuses `effort` and adaptive thinking; the provider drops both for it.)
+
+**Several actions in one answer** (`MFARM_AI_PARALLEL_TOOLS`) is on for `anthropic` and OFF for
+`openai`-compatible servers unless set to `true`: whether a model there can write several tool calls
+in one answer depends on the model, and one that cannot fails the call outright (D56 — qwen on Groq).
+The `"ai"` log line says `several actions an answer` or `one action an answer`. The log line then
 reads `anthropic claude-haiku-4-5 (strong: claude-sonnet-5), …`. `MFARM_AI_FALLBACK_STRONG_MODEL`
 does the same for the fallback provider.
 

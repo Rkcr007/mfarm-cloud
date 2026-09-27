@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AGENT_TOOLS } from '../src/ai/agent.ts';
 import {
+  aiParallelTools, resetLearnedToolLimits,
   aiApiKey, aiFallbackConfig, aiProviderConfig, buildModel, DEFAULT_RETRY, fromOpenAiResponse, NO_RETRY, outputCapFor,
   retryAfterMs, toOpenAiRequest, tooLargeOf,
 } from '../src/ai/provider.ts';
@@ -287,4 +288,67 @@ test('a size refusal is read from the provider\'s words once, and an ordinary 42
   assert.deepEqual(tooLargeOf(413, 'Request too large'), { limit: null, requested: null, output: false });
   assert.equal(outputCapFor(1000), 500);
   assert.equal(outputCapFor(60), 64, 'never a cap too small to hold a tool call');
+});
+
+// ---------------------------------------------------------------- D56: a tool call the server could not read
+
+
+test('several actions an answer: on for anthropic, off for openai-compatible servers, unless set', () => {
+  assert.equal(aiParallelTools({}), true);
+  assert.equal(aiParallelTools({ MFARM_AI_PROVIDER: 'openai' }), false);
+  assert.equal(aiParallelTools({ MFARM_AI_PROVIDER: 'openai', MFARM_AI_PARALLEL_TOOLS: 'true' }), true);
+  assert.equal(aiParallelTools({ MFARM_AI_PARALLEL_TOOLS: 'false' }), false);
+});
+
+/** A server that answers from a list and keeps each request's body. */
+async function recording(replies: Array<[number, string]>) {
+  const bodies: Array<Record<string, unknown>> = [];
+  const srv = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      bodies.push(JSON.parse(raw));
+      const [status, body] = replies[Math.min(bodies.length - 1, replies.length - 1)]!;
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(body);
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const { port } = srv.address() as AddressInfo;
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, bodies, close: () => srv.close() };
+}
+
+// What Groq answered on the farm, 2026-09-27 — the tool call qwen wrote, and could not be read.
+const TOOL_USE_FAILED: [number, string] = [400, JSON.stringify({ error: {
+  message: "Failed to call a function. Please adjust your prompt. See 'failed_generation' for more details.",
+  type: 'invalid_request_error', code: 'tool_use_failed',
+  failed_generation: '<tool_call>\n<function=tap_element>\n<parameter=index>\n7\n</parameter',
+} })];
+const withTools = {
+  ...ask, model: 'qwen/qwen3.8-27b',
+  tools: [{ name: 'tap_element', description: 'tap', input_schema: { type: 'object', properties: {}, required: [] } }],
+  tool_choice: { type: 'auto', disable_parallel_tool_use: false },
+};
+
+test('a tool call the server could not read is asked for again, with one tool an answer — and that is remembered', async () => {
+  resetLearnedToolLimits();
+  const s = await recording([TOOL_USE_FAILED, [200, OK[2]]]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    assert.equal((await model(withTools as never)).stop_reason, 'end_turn');
+    assert.deepEqual(s.bodies.map((b) => b.parallel_tool_calls), [true, false]);
+    // The next call to this model does not have to fail first to find out.
+    await model(withTools as never);
+    assert.equal(s.bodies[2]!.parallel_tool_calls, false);
+  } finally { s.close(); }
+});
+
+test('a model that keeps writing unreadable tool calls fails after two more tries, not forever', async () => {
+  resetLearnedToolLimits();
+  const s = await recording([TOOL_USE_FAILED]);
+  try {
+    const model = buildModel({ provider: 'openai', apiKey: 'k', baseUrl: s.baseUrl }, FAST);
+    await assert.rejects(model(withTools as never), /400 .*tool_use_failed/);
+    assert.equal(s.bodies.length, 3);
+  } finally { s.close(); }
 });
