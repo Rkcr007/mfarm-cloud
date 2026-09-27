@@ -11,6 +11,11 @@
 //
 //   MFARM_API_KEY=$(cat ~/mfarm/deploy/.state/api_key) node deploy/ai-eval.mjs
 //   MFARM_API_KEY=… HUB=https://farm.mfarm.dev REGION=lab PROFILE=pro TASKS=api-demos-form node deploy/ai-eval.mjs
+//   MFARM_API_KEY=… SAVED=1 node deploy/ai-eval.mjs    # each task as a saved test, run twice (ADR-0046 phase 2)
+//
+// With SAVED=1 each task is a saved test named `ai-eval <task>` (created once, reused), run TWICE: the
+// first run keeps the route (or replays one kept before), the second replays it — the "re-run costs
+// nothing" claim, measured.
 //
 // Each task costs model calls and device time. Exits non-zero when a task did not pass.
 
@@ -59,13 +64,16 @@ export function summarise(taskId, run, steps) {
     costInr: run.costInr,
     seconds,
     model: run.model ?? null,
+    replayed: steps.filter((s) => s.by === 'replay').length,
+    route: run.planVersion ?? null,
   };
 }
 
 export function table(rows) {
-  const head = ['task', 'status', 'calls', 'steps', 'rule', 'in tok', 'out tok', '₹', 'sec'];
+  const head = ['task', 'status', 'calls', 'steps', 'replayed', 'rule', 'in tok', 'out tok', '₹', 'sec'];
   const body = rows.map((r) => [r.task, r.stopReason ? `${r.status} (${r.stopReason})` : r.status, r.calls, r.steps,
-    r.byRule, r.inputTokens, r.outputTokens, r.costInr, r.seconds ?? '—'].map(String));
+    r.route ? `${r.replayed} (route v${r.route})` : r.replayed ?? 0, r.byRule, r.inputTokens, r.outputTokens, r.costInr,
+    r.seconds ?? '—'].map(String));
   const widths = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (cells) => cells.map((c, i) => c.padEnd(widths[i])).join('  ');
   return [line(head), line(widths.map((w) => '-'.repeat(w))), ...body.map(line)].join('\n');
@@ -94,13 +102,37 @@ async function main() {
   console.log(`model ${pricing.model} · billing ${pricing.billing} · margin ${pricing.margin}× · `
     + `about ₹${pricing.profiles?.[PROFILE]?.estimateInr} a ${PROFILE} call · profile ${PROFILE}\n`);
 
-  const rows = [];
-  for (const t of tasks) {
-    const started = await api('POST', '/ai/runs', {
-      prompt: t.prompt, profile: PROFILE, ...(REGION ? { region: REGION } : {}), ...(t.appId ? { appId: t.appId } : {}),
+  const SAVED = process.env.SAVED === '1';
+  const saved = SAVED ? (await api('GET', '/ai/tests')).aiTests ?? [] : [];
+  /** A saved test for the task, created the first time — the same one every eval, so its route persists. */
+  const testFor = async (t) => {
+    const name = `ai-eval ${t.id}`;
+    const have = saved.find((x) => x.name === name && x.prompt === t.prompt);
+    if (have) return have.id;
+    const made = await api('POST', '/ai/tests', {
+      name, prompt: t.prompt, profile: PROFILE, platform: 'android', ...(REGION ? { region: REGION } : {}),
+      ...(t.appId ? { appPackage: t.appId.replace(/@.*$/, '') } : {}),
     });
+    return made.aiTest.id;
+  };
+  const runs = [];
+  for (const t of tasks) {
+    if (SAVED) {
+      const testId = await testFor(t);
+      runs.push({ label: `${t.id} #1`, start: () => api('POST', `/ai/tests/${testId}/run`) });
+      runs.push({ label: `${t.id} #2`, start: () => api('POST', `/ai/tests/${testId}/run`) });
+    } else {
+      runs.push({ label: t.id, start: () => api('POST', '/ai/runs', {
+        prompt: t.prompt, profile: PROFILE, ...(REGION ? { region: REGION } : {}), ...(t.appId ? { appId: t.appId } : {}),
+      }) });
+    }
+  }
+
+  const rows = [];
+  for (const t of runs) {
+    const started = await t.start();
     const id = started.aiRun.id;
-    process.stdout.write(`${t.id}: run ${id} `);
+    process.stdout.write(`${t.label}: run ${id} `);
     const deadline = Date.now() + 15 * 60_000;
     let done;
     for (;;) {
@@ -110,7 +142,7 @@ async function main() {
       process.stdout.write('.');
       await new Promise((r) => setTimeout(r, 3000));
     }
-    const row = summarise(t.id, done.aiRun, done.steps);
+    const row = summarise(t.label, done.aiRun, done.steps);
     rows.push(row);
     console.log(` ${row.status}${row.stopReason ? ` (${row.stopReason})` : ''}${done.aiRun.summary ? ` — ${done.aiRun.summary.slice(0, 120)}` : ''}`);
   }

@@ -570,3 +570,94 @@ test('a fill_form that names no field fails in words and does nothing', async ()
   assert.equal(s.steps[0]!.result, 'failed: fill_form named no fields to fill');
   assert.deepEqual(device.taps, []);
 });
+
+// ---------------------------------------------------------------- item 3: a saved route, replayed without a model
+
+import type { PlanStep } from '../src/ai/plan.ts';
+
+const EMAIL_T = { kind: 'EditText', text: 'Email', label: null, id: 'com.acme:id/email', x: 40, y: 400, width: 1000, height: 120,
+  unique: { id: true, label: false, text: true } };
+const PASSWORD_T = { ...EMAIL_T, text: 'Password', id: 'com.acme:id/password', y: 560 };
+const LOGIN_T = { kind: 'Button', text: 'Log in', label: null, id: 'com.acme:id/login', x: 390, y: 1160, width: 300, height: 100,
+  unique: { id: true, label: false, text: true } };
+const ROUTE: { steps: PlanStep[]; expect: string } = {
+  expect: 'Welcome back',
+  steps: [
+    { tool: 'type_text', input: { index: 0, text: 'asha@example.test', submit: false }, target: EMAIL_T, intent: 'the e-mail' },
+    { tool: 'type_text', input: { index: 1, text: '{{PASSWORD}}', submit: false }, target: PASSWORD_T, intent: 'the password' },
+    { tool: 'tap_element', input: { index: 2 }, target: LOGIN_T, intent: 'log in' },
+  ],
+};
+const SECRETS = { values: { PASSWORD: 'hunter2' }, unreadable: [] };
+
+test('a saved route replays with NO model call: each element found by what it is, the secret filled at the device', async () => {
+  const device = phone(LOGIN, [{ box: [390, 1160, 690, 1260], to: HOME }]);
+  const model = scripted([]);
+  const s = sink();
+  const out = await runAgent({
+    task: 'Log in with {{PASSWORD}}', profile: 'flash', device, sink: s, model, modelId: 'm', timing: FAST,
+    plan: ROUTE, secrets: SECRETS,
+  });
+  assert.equal(out.status, 'passed', JSON.stringify(out));
+  assert.equal(model.calls.length, 0, 'no model at all');
+  assert.deepEqual(s.steps.map((x) => [x.action?.tool, x.model, x.billed]),
+    [['type_text', 'replay', false], ['type_text', 'replay', false], ['tap_element', 'replay', false], ['finish', 'replay', false]]);
+  assert.deepEqual(device.typed, ['asha@example.test', 'hunter2'], 'the value, typed where the route named it');
+  assert.equal(s.steps[1]!.action?.input.text, '{{PASSWORD}}', 'and only its name kept');
+  assert.deepEqual(device.taps, [[540, 460], [540, 620], [540, 1210]]);
+  assert.match((out as { summary: string }).summary, /Replayed the saved route — 3 steps, no AI — and “Welcome back” is on the screen/);
+});
+
+test('a route whose element moved is still replayed: the element is found by what it is, not where it was', async () => {
+  const MOVED = LOGIN.replace('[390,1160][690,1260]', '[390,1500][690,1600]');
+  const device = phone(MOVED, [{ box: [390, 1500, 690, 1600], to: HOME }]);
+  const model = scripted([]);
+  const out = await runAgent({ task: 'Log in', profile: 'flash', device, sink: sink(), model, modelId: 'm', timing: FAST,
+    plan: ROUTE, secrets: SECRETS });
+  assert.equal(out.status, 'passed');
+  assert.equal(model.calls.length, 0);
+  assert.deepEqual(device.taps.at(-1), [540, 1550]);
+});
+
+test('an element still loading is waited for — the route does not give up on a slow screen', async () => {
+  const device = phone(xml(node({ class: 'android.widget.ProgressBar', bounds: '[500,1000][580,1080]' })),
+    [{ box: [390, 1160, 690, 1260], to: HOME }]);
+  let reads = 0;
+  const source = device.source.bind(device);
+  device.source = async () => { if (++reads === 4) device.screen = LOGIN; return source(); };
+  const model = scripted([]);
+  const out = await runAgent({ task: 'Log in', profile: 'flash', device, sink: sink(), model, modelId: 'm',
+    timing: { ...FAST, expectMs: 500 }, plan: ROUTE, secrets: SECRETS });
+  assert.equal(out.status, 'passed', JSON.stringify(out));
+  assert.equal(model.calls.length, 0);
+});
+
+test('where the app no longer matches the route, the model takes over from that step — told what was done', async () => {
+  // The button was renamed and given a new id: step 3 of the route cannot be found.
+  const RENAMED = LOGIN.replace('text="Log in" resource-id="com.acme:id/login"', 'text="Sign in" resource-id="com.acme:id/sign_in"');
+  const device = phone(RENAMED, [{ box: [390, 1160, 690, 1260], to: HOME }]);
+  const model = scripted([
+    [{ tool: 'tap_element', input: { index: 2 } }],
+    [{ tool: 'finish', input: { passed: true, summary: 'In', evidence: 'Welcome', expect: 'Welcome back' } }],
+  ]);
+  const s = sink();
+  const out = await runAgent({ task: 'Log in', profile: 'flash', device, sink: s, model, modelId: 'm', timing: FAST,
+    plan: ROUTE, secrets: SECRETS });
+  assert.equal(out.status, 'passed');
+  assert.equal(model.calls.length, 2, 'the model only for what the route could not do');
+  assert.deepEqual(s.steps.map((x) => x.model), ['replay', 'replay', 'm', 'm']);
+  const told = textOf(model.calls[0]!);
+  assert.match(told, /replayed this test's saved route, without you, until step 3 \(log in\): “Log in” is not on the screen/);
+  assert.match(told, /type "asha@example\.test" into \[0\].*\(replayed\)/);
+  assert.doesNotMatch(told, /hunter2/, 'the secret is not in what the model reads');
+});
+
+test('a route that ends without its expect on the screen is judged by the model, not passed', async () => {
+  const device = phone(LOGIN); // Log in does nothing: the welcome never comes
+  const model = scripted([[{ tool: 'finish', input: { passed: false, summary: 'Still on login', evidence: 'Log in', expect: 'Log in' } }]]);
+  const out = await runAgent({ task: 'Log in', profile: 'flash', device, sink: sink(), model, modelId: 'm', timing: FAST,
+    plan: ROUTE, secrets: SECRETS });
+  assert.equal(out.status, 'failed');
+  assert.equal(model.calls.length, 1);
+  assert.match(textOf(model.calls[0]!), /until the end of the route, where “Welcome back” was expected but is not on the screen/);
+});

@@ -5023,3 +5023,11 @@ when the feature is broken. See issues 37 and 38.
     (qwen on Groq) fills every field of a form and taps its button in one call; the loop runs it as the
     `type_text`/`tap_element` steps it stands for, so exports and share pages are unchanged. Offered
     only in one-action mode. Measured on the next lab session.
+
+103. **A SAVED TEST NOW PAYS FOR AI ONCE.** 2026-09-27, ADR-0046 phase 2, migration 065, tracker C13.
+    A run of a saved test that passes with an `expect` is kept as its route (`ai_test_plans`); the next
+    run replays it with no model at all — 0 calls, ₹0 AI — finding each element by the locator that
+    named it alone when it was recorded, waiting for it while the screen loads. Where the app changed,
+    the model takes over at that step and a pass is the next version. Deliberately conservative: a
+    route is not kept when any step could not be found again for certain, because a replay that taps
+    the wrong thing is worse than a model call. Not yet run on the farm.

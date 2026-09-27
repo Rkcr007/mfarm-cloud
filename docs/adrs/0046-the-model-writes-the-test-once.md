@@ -218,6 +218,14 @@ Each phase ships and is verified on the farm before the next starts; each is mea
    `export.ts`'s `locatorFor`); tiers 0–2 in the runner; tier 3 hand-off; the run page's per-tier line
    and heal diffs. Exit: an unchanged saved test re-runs with 0 model calls; a renamed button heals in
    one call and the next run replays it.
+
+   **As built (2026-09-27):** `ai_test_plans` (065), `ai/plan.ts` (pure: compile, locate) and
+   `ai/plan-store.ts`. Tier 0 replays; tier 1 is waiting for a step's element while the screen loads
+   (alternate locators come free — `locate` tries each one that was unique); tier 2 is folded into tier
+   3: the model takes over from the step that no longer matches, told what the route already did, and
+   a run that then passes is the next version. The steps show `replayed` / `by rule`; the run's details
+   name the route version. **Not built:** scroll-search for a step's element, a `regression`/`explore`
+   switch on a saved test (every saved test replays once it has a route), and a heal diff on the page.
 3. **Shared sub-flows** per app package. Exit: a second saved test on the same app replays its login.
 4. **Pricing** — whichever §6 option the owner chooses; console reads it from `/v1/ai/pricing`.
 5. **Only if volume justifies it:** a self-hosted grounding model (UI-TARS / Qwen-VL class) for

@@ -11,6 +11,7 @@ import { aiParallelTools, aiProviderConfig, aiStrongModelId, configuredSlots, en
 import { aiRunNames, redact, secretsIn } from './secrets.ts';
 import { runAgent, type AgentOutcome, type AgentTiming, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 import { loadRunSecrets } from './secret-store.ts';
+import { keepRoute, latestPlan } from './plan-store.ts';
 
 /**
  * THE AI RUN RUNNER — takes queued AI runs and drives each to a verdict (ADR-0043).
@@ -79,6 +80,8 @@ export interface ClaimedRun {
   region: string | null;
   app_ref: string | null;
   step_cap: number;
+  /** The saved test this is a run of — whose route (ADR-0046 phase 2) it replays, and keeps. */
+  ai_test_id: string | null;
 }
 
 export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void {
@@ -225,7 +228,7 @@ async function claimNext(): Promise<ClaimedRun | null> {
       `UPDATE ai_runs SET status = 'running', started_at = now()
         WHERE id = (SELECT id FROM ai_runs WHERE status = 'queued'
                      ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-        RETURNING id, org_id, prompt, profile, platform, region, app_ref, step_cap`,
+        RETURNING id, org_id, prompt, profile, platform, region, app_ref, step_cap, ai_test_id`,
     );
     return rows[0] ?? null;
   });
@@ -516,7 +519,15 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
 
     // Opened for this run only, and passed to nothing but the agent (ADR-0045).
     const secrets = await loadRunSecrets(orgId, run.prompt, app.signingKey.privateKeyPem);
+    // A saved test replays the route its last passing run took, with no model (ADR-0046 phase 2).
+    const plan = run.ai_test_id ? await latestPlan(orgId, run.ai_test_id, run.prompt, run.platform) : null;
+    if (plan) {
+      await withTenant(orgId, (c) => c.query(
+        'UPDATE ai_runs SET plan_id = $3 WHERE org_id = $1 AND id = $2', [orgId, run.id, plan.id],
+      ));
+    }
     outcome = await runAgent({
+      plan,
       task: run.prompt,
       secrets,
       profile,
@@ -552,6 +563,13 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
   }
   if (sessionId) await call('DELETE', `/session/${encodeURIComponent(sessionId)}`).catch(() => {});
   await revokeRunKeys(orgId, run.id);
+
+  // A pass the model had a hand in is the saved test's route from now on. Best effort: a run that
+  // raced another to the same version, or that cannot be replayed for certain, keeps what was there.
+  if (run.ai_test_id && outcome.status === 'passed') {
+    await keepRoute(orgId, { id: run.id, ai_test_id: run.ai_test_id, prompt: run.prompt, platform: run.platform })
+      .catch((err) => app.log.warn({ err, aiRun: run.id }, 'ai: the route of a passing run was not kept'));
+  }
 
   if ('summary' in outcome) {
     await finishRun(orgId, run.id, { status: outcome.status, summary: outcome.summary, evidence: outcome.evidence });
