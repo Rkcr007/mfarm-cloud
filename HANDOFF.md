@@ -5016,3 +5016,10 @@ when the feature is broken. See issues 37 and 38.
     asked again with one tool an answer, remembered per model. Re-run the eval to close D56. Also:
     `pgrep -f` over `gcloud ssh` matched its own command line again — the eval looked "still running"
     after it had finished ([[ssh + pkill self-match]] in memory).
+
+102. **D56 VERIFIED CLOSED, AND A FORM IS ONE CALL ON A ONE-ACTION MODEL.** 2026-09-27. The eval
+    after #234 deployed: 3 of 3 passed on the farm (lab up 16:23–16:34 UTC). ₹8.08 for 13 calls that
+    the old flat price billed at ₹52. Then `fill_form`: a model that can write one tool call an answer
+    (qwen on Groq) fills every field of a form and taps its button in one call; the loop runs it as the
+    `type_text`/`tap_element` steps it stands for, so exports and share pages are unchanged. Offered
+    only in one-action mode. Measured on the next lab session.

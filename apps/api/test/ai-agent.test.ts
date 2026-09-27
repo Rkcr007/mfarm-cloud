@@ -502,3 +502,71 @@ test('with parallel tools off, the model is told one tool a turn, and a second t
   assert.deepEqual(device.typed, ['asha@example.test'], 'only the first action of the answer ran');
   assert.deepEqual(s.steps.map((x) => x.action?.tool), ['type_text', 'finish']);
 });
+
+// ---------------------------------------------------------------- item 4: a whole form in one answer
+
+import { AGENT_TOOLS as TOOLS, agentTools } from '../src/ai/agent.ts';
+
+const formTurn: Tool[] = [{ tool: 'fill_form', input: {
+  fields: [{ index: 0, text: 'asha@example.test' }, { index: 1, text: 'hunter2' }], then_tap: 2,
+} }];
+const welcome: Tool[] = [{ tool: 'finish', input: { passed: true, summary: 'In', evidence: 'Welcome', expect: 'Welcome back' } }];
+
+test('a one-action model fills a whole form in one answer: a login is two calls, not four', async () => {
+  const device = phone(LOGIN, [{ box: [390, 1160, 690, 1260], to: HOME }]);
+  const model = scripted([formTurn, welcome]);
+  const s = sink();
+  const out = await runAgent({
+    task: 'Log in as asha', profile: 'flash', device, sink: s, model, modelId: 'm', timing: FAST, parallelTools: false,
+  });
+  assert.equal(out.status, 'passed', JSON.stringify(out));
+  assert.equal(model.calls.length, 2);
+  // Recorded as the steps it stands for, so the run, its export and its share page read as before.
+  assert.deepEqual(s.steps.map((x) => x.action?.tool), ['type_text', 'type_text', 'tap_element', 'finish']);
+  assert.deepEqual(s.steps.map((x) => x.billed), [true, false, false, true]);
+  assert.deepEqual(device.typed, ['asha@example.test', 'hunter2']);
+  assert.deepEqual(device.taps, [[540, 460], [540, 620], [540, 1210]]);
+  assert.equal(s.steps[1]!.action?.target?.id, 'com.acme:id/password');
+});
+
+test('fill_form is offered only to a model that cannot write several tool calls', async () => {
+  assert.equal(agentTools(true), TOOLS);
+  assert.ok(!TOOLS.some((t) => t.name === 'fill_form'));
+  const one = agentTools(false).map((t) => t.name);
+  assert.ok(one.includes('fill_form'));
+  assert.equal(one.at(-1), 'finish', 'finish stays last');
+  const model = scripted([formTurn, welcome]);
+  await runAgent({
+    task: 'Log in', profile: 'flash', device: phone(LOGIN, [{ box: [390, 1160, 690, 1260], to: HOME }]), sink: sink(),
+    model, modelId: 'm', timing: FAST, parallelTools: false,
+  });
+  assert.ok((model.calls[0]!.tools ?? []).some((t) => (t as { name: string }).name === 'fill_form'));
+  assert.match((model.calls[0]!.system as Array<{ text: string }>)[0]!.text, /use fill_form/);
+});
+
+test('a form whose fields move after the first is typed into where they are now; then_tap -1 taps nothing', async () => {
+  const BANNER = node({ class: 'android.widget.TextView', text: 'Check your e-mail address', bounds: '[40,200][1040,280]' });
+  const SHIFTED = LOGIN.replace('<hierarchy>', `<hierarchy>${BANNER}`)
+    .replace('[40,400][1040,520]', '[40,500][1040,620]').replace('[40,560][1040,680]', '[40,660][1040,780]');
+  const device = phone(LOGIN);
+  const typeText = device.typeText.bind(device);
+  device.typeText = async (t) => { await typeText(t); device.screen = SHIFTED; };
+  const model = scripted([
+    [{ tool: 'fill_form', input: { fields: [{ index: 0, text: 'a' }, { index: 1, text: 'b' }], then_tap: -1 } }],
+    [{ tool: 'finish', input: { passed: false, summary: 'x', evidence: 'x', expect: '' } }],
+  ]);
+  await runAgent({ task: 'Fill', profile: 'flash', device, sink: sink(), model, modelId: 'm', timing: FAST, parallelTools: false });
+  assert.deepEqual(device.taps, [[540, 460], [540, 720]], 'the password field where it had moved to, and no button');
+});
+
+test('a fill_form that names no field fails in words and does nothing', async () => {
+  const device = phone(LOGIN);
+  const model = scripted([
+    [{ tool: 'fill_form', input: { fields: [], then_tap: 2 } }],
+    [{ tool: 'finish', input: { passed: false, summary: 'x', evidence: 'x', expect: '' } }],
+  ]);
+  const s = sink();
+  await runAgent({ task: 'Fill', profile: 'flash', device, sink: s, model, modelId: 'm', timing: FAST, parallelTools: false });
+  assert.equal(s.steps[0]!.result, 'failed: fill_form named no fields to fill');
+  assert.deepEqual(device.taps, []);
+});

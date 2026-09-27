@@ -278,6 +278,61 @@ export const AGENT_TOOLS: Anthropic.Beta.BetaTool[] = [
   }),
 ];
 
+/** Fields one `fill_form` may name. A form longer than this is filled in two turns. */
+export const MAX_FORM_FIELDS = 8;
+
+/**
+ * A WHOLE FORM IN ONE ANSWER, for a model that can write only one tool call an answer (ADR-0046, D56).
+ * Batching across screens cannot work — the model has not seen the next one — so the answer that pays
+ * is the one screen with several fields: a login, a sign-up, a search. The loop runs it as the
+ * `type_text` and `tap_element` steps it stands for, so a run, its export and its share page read
+ * exactly as if the model had called them one by one.
+ */
+export const FILL_FORM_TOOL: Anthropic.Beta.BetaTool = tool('fill_form',
+  'Fill several text fields on the screen you see now, in one action, then tap a button — a login, a sign-up, a '
+  + 'search. Each field is tapped and typed into, in order. then_tap is the [index] to tap afterwards (Log in, '
+  + 'Submit, OK), or -1 for none.', {
+    fields: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { index: { type: 'integer' }, text: { type: 'string' } },
+        required: ['index', 'text'],
+        additionalProperties: false,
+      },
+    },
+    then_tap: { type: 'integer' },
+  });
+
+/** The tools a model is offered: `fill_form` too when it cannot write several tool calls an answer. */
+export function agentTools(parallel: boolean): Anthropic.Beta.BetaTool[] {
+  if (parallel) return AGENT_TOOLS;
+  const finish = AGENT_TOOLS.length - 1;
+  return [...AGENT_TOOLS.slice(0, finish), FILL_FORM_TOOL, AGENT_TOOLS[finish]!];
+}
+
+/**
+ * `fill_form` as the steps it stands for: a `type_text` a field, then the `tap_element`. A call that
+ * names no field is left as it is, and fails in words when it runs.
+ */
+export function expandFillForm(use: Anthropic.Beta.BetaToolUseBlock): Anthropic.Beta.BetaToolUseBlock[] {
+  if (use.name !== 'fill_form') return [use];
+  const input = (use.input ?? {}) as { fields?: unknown; then_tap?: unknown; why?: unknown };
+  const fields = Array.isArray(input.fields) ? input.fields.slice(0, MAX_FORM_FIELDS) : [];
+  if (!fields.length) return [use];
+  const why = typeof input.why === 'string' ? input.why : '';
+  const steps = fields.map((f, i) => {
+    const field = (f ?? {}) as { index?: unknown; text?: unknown };
+    return { ...use, id: `${use.id}_${i}`, name: 'type_text',
+      input: { index: Number(field.index), text: String(field.text ?? ''), submit: false, why } };
+  });
+  const tap = Number(input.then_tap);
+  if (Number.isInteger(tap) && tap >= 0) {
+    steps.push({ ...use, id: `${use.id}_tap`, name: 'tap_element', input: { index: tap, why } } as typeof steps[number]);
+  }
+  return steps as Anthropic.Beta.BetaToolUseBlock[];
+}
+
 export function systemPrompt(
   platform: 'android' | 'ios', profile: AiProfile, secretNames: string[] = [], parallel = true,
 ): string {
@@ -296,7 +351,8 @@ export function systemPrompt(
         + 'gone, the rest are skipped and you see the new screen next turn. Never name an element of a screen you have '
         + 'not seen.'
       : 'Call exactly one tool per turn. MFARM waits for the screen to settle after it, so never call wait just '
-        + 'for an animation.',
+        + 'for an animation. To fill a form — several fields on one screen, then a button — use fill_form: the '
+        + 'whole form, and the tap that sends it, in one turn.',
     '',
     'How to work:',
     '- Prefer tap_element with an index. Use tap_point only for things the element list cannot see.',
@@ -438,7 +494,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
         max_tokens: 16000,
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         ...(withTools
-          ? { tools: AGENT_TOOLS, tool_choice: { type: 'auto', disable_parallel_tool_use: !parallel } }
+          ? { tools: agentTools(parallel), tool_choice: { type: 'auto', disable_parallel_tool_use: !parallel } }
           : {}),
         thinking: { type: 'adaptive' },
         output_config: { effort: spec.effort },
@@ -554,7 +610,8 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     const thoughtText = hide(stripToolMarkup(textOf(m)));
     const uses = m.content
       .filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use')
-      .slice(0, parallel ? MAX_ACTIONS_PER_TURN : 1);
+      .slice(0, parallel ? MAX_ACTIONS_PER_TURN : 1)
+      .flatMap(expandFillForm);
 
     if (m.stop_reason === 'refusal' || !uses.length) {
       await record({
@@ -927,6 +984,9 @@ export async function act(
     case 'launch_app':
       await device.launchApp(String(input.app_id ?? ''));
       return 'ok';
+    case 'fill_form':
+      // Expanded into its steps before it gets here (`expandFillForm`) — unless it named no field.
+      return 'failed: fill_form named no fields to fill';
     case 'wait': {
       const s = Math.min(Math.max(Number(input.seconds) || 1, 1), 10);
       await new Promise((r) => setTimeout(r, s * 1000));
