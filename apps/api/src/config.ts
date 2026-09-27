@@ -1,7 +1,7 @@
 import { createPrivateKey, createPublicKey, sign, verify, type KeyObject } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AI_PROVIDERS, aiApiKey, aiProviderOf, type AiProvider } from './ai/provider.ts';
+import { AI_PROVIDERS, aiApiKey, aiParallelTools, aiProviderOf, type AiProvider } from './ai/provider.ts';
 import { AI_MARGIN, MODEL_PRICES, UNKNOWN_MODEL_PRICE, modelPrice } from './ai/pricing.ts';
 
 /**
@@ -200,6 +200,8 @@ export interface Config {
   aiStrongModel: string | null;
   /** How AI calls are priced on this farm, in words for the boot log — and a warning when it is a guess. */
   aiPricing: string;
+  /** `MFARM_AI_PARALLEL_TOOLS`, resolved: whether one model answer may name several actions. */
+  aiParallelTools: boolean;
   /** How often the AI runner looks for queued runs. 0 turns AI runs off in this process. */
   aiRunnerIntervalMs: number;
   /** Runs driven at once. Each holds a device, so this is also a cap on devices AI can occupy. */
@@ -916,6 +918,7 @@ export function parseConfig(env: Env): Config {
     aiFallback,
     aiStrongModel,
     aiPricing,
+    aiParallelTools: aiParallelTools(env),
     aiRunnerIntervalMs,
     aiMaxConcurrentRuns,
     turnTtlSeconds,
@@ -999,7 +1002,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (same-origin /dp on this console)',
     ai: c.aiKeySource === 'none'
       ? 'off (no MFARM_AI_API_KEY)'
-      : `${c.aiProvider}${c.aiBaseUrl ? ` via ${new URL(c.aiBaseUrl).host}` : ''} ${c.aiModel}${c.aiStrongModel ? ` (strong: ${c.aiStrongModel})` : ''}${c.aiFallback ? `, fallback ${c.aiFallback}` : ''}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms; billed at ${c.aiPricing}`,
+      : `${c.aiProvider}${c.aiBaseUrl ? ` via ${new URL(c.aiBaseUrl).host}` : ''} ${c.aiModel}${c.aiStrongModel ? ` (strong: ${c.aiStrongModel})` : ''}${c.aiFallback ? `, fallback ${c.aiFallback}` : ''}, ${c.aiParallelTools ? 'several actions' : 'one action'} an answer, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms; billed at ${c.aiPricing}`,
     turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };
 }

@@ -279,6 +279,9 @@ services:
       # A call is billed from its measured tokens at its model's list price (ai/pricing.ts). A model that
       # table does not know is billed as claude-sonnet-5 until named here: `model=in/out[/cached]`, $/MTok.
       MFARM_AI_PRICES: ${MFARM_AI_PRICES:-}
+      # Several actions in one model answer (ADR-0046). Unset: on for anthropic, off for openai-compatible
+      # servers — qwen on Groq could not write several tool calls and every run failed (D56).
+      MFARM_AI_PARALLEL_TOOLS: ${MFARM_AI_PARALLEL_TOOLS:-}
 
       # ---------------------------------------------------------------- power control (ADR-0038)
       #

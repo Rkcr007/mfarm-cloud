@@ -481,3 +481,24 @@ test('with no stronger model every call uses the one model', async () => {
   await run('Log in as asha', phone(LOGIN, [{ box: [390, 1160, 690, 1260], to: HOME }]), model, sink(), 'pro');
   assert.deepEqual(model.calls.map((c) => c.model), ['test-model', 'test-model']);
 });
+
+// ---------------------------------------------------------------- D56: a model that cannot batch
+
+test('with parallel tools off, the model is told one tool a turn, and a second tool it sends is not run', async () => {
+  const device = phone(LOGIN);
+  const model = scripted([
+    [{ tool: 'type_text', input: { index: 0, text: 'asha@example.test', submit: false } },
+      { tool: 'type_text', input: { index: 1, text: 'hunter2', submit: false } }],
+    [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Log in' } }],
+  ]);
+  const s = sink();
+  await runAgent({
+    task: 'Fill the form', profile: 'flash', device, sink: s, model, modelId: 'm', timing: FAST, parallelTools: false,
+  });
+  const system = (model.calls[0]!.system as Array<{ text: string }>)[0]!.text;
+  assert.match(system, /Call exactly one tool per turn/);
+  assert.doesNotMatch(system, /call up to \d+ tools in one turn/);
+  assert.deepEqual(model.calls[0]!.tool_choice, { type: 'auto', disable_parallel_tool_use: true });
+  assert.deepEqual(device.typed, ['asha@example.test'], 'only the first action of the answer ran');
+  assert.deepEqual(s.steps.map((x) => x.action?.tool), ['type_text', 'finish']);
+});

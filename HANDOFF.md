@@ -5004,3 +5004,15 @@ when the feature is broken. See issues 37 and 38.
     never reaches the container — both are added. A planted rounding bug first slipped past its test,
     because the "exact" example (₹2.55) happens to be exact in floating point; 58,000 tokens (₹14.79,
     computed 14.790000000000003) is not.
+
+101. **THE FIRST HARDWARE EVAL: EVERY AI RUN DIED (D56), AND WHAT IT COST WHEN IT RAN.** 2026-09-27,
+    after 1c deployed (`c24e76e`). `deploy/ai-eval.mjs` on the control plane, lab up 14:52–15:20 UTC
+    (~28 min). 3 of 3 runs ended `model_error`: `400 tool_use_failed` from Groq — asked by 1a for up
+    to six tools a turn, qwen wrote tool calls Groq could not parse, and a 400 is never retried. The
+    calls that did work never batched (API Demos' form: 5 calls, one field each). What they cost is
+    the good news: ₹0.51–0.65 a call at measured price (the flat price was ₹4), 2.1–2.9k input tokens
+    a call, ~0.5–0.8 s a call when Groq's free tier was not making it wait (~17 s when it was).
+    Fix: `MFARM_AI_PARALLEL_TOOLS` (off for openai-compatible servers by default), and `tool_use_failed`
+    asked again with one tool an answer, remembered per model. Re-run the eval to close D56. Also:
+    `pgrep -f` over `gcloud ssh` matched its own command line again — the eval looked "still running"
+    after it had finished ([[ssh + pkill self-match]] in memory).

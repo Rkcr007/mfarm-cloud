@@ -201,6 +201,13 @@ Each phase ships and is verified on the farm before the next starts; each is mea
      checked on the screen (replacing Pro's confirm call when it holds), one charge per call.
    - **1b — smaller calls:** text-first observation with downscaling; history compression. A screen
      the element list cannot read keeps its full-size image: the model taps it by pixel.
+   - **D56, found by the first hardware eval:** asked for several actions a turn, qwen on Groq wrote
+     tool calls Groq could not parse and every run died. Several actions an answer is now a setting
+     (`MFARM_AI_PARALLEL_TOOLS`) — on for Anthropic, off for OpenAI-compatible servers — and an
+     unreadable tool call is asked for again with one tool an answer. On a one-action model the other
+     savings stay: no call to tap a field, to wait, to press Allow or to confirm a verdict the screen
+     shows; smaller images; the measured price. Batching for such models needs one tool that takes a
+     list of actions — a later change, measured first.
    - **1c — the right model, the real price:** the model table and routing; every call's actual cost
      recorded; §6's pricing.
    Exit: a login authoring run in ≤ 4 calls on the eval.
