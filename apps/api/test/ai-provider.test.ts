@@ -38,6 +38,12 @@ test('a Messages request becomes Chat Completions: system, images, strict tools,
   assert.equal(body.tools[0]!.function.name, 'tap_element');
   assert.equal(body.tools[0]!.function.strict, true);
   assert.equal(body.parallel_tool_calls, false);
+  // The agent lets one call name several actions (ADR-0046); the flag carries across as it was set.
+  const batched = toOpenAiRequest({
+    model: 'm', max_tokens: 100, tools: AGENT_TOOLS, tool_choice: { type: 'auto', disable_parallel_tool_use: false },
+    messages: [{ role: 'user', content: 'TASK' }],
+  }) as { parallel_tool_calls: boolean };
+  assert.equal(batched.parallel_tool_calls, true);
   assert.equal(body.thinking, undefined);
 });
 

@@ -9,7 +9,7 @@ import { AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
 import { aiProviderConfig, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
 import { aiRunNames, redact, secretsIn } from './secrets.ts';
-import { runAgent, type AgentOutcome, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
+import { runAgent, type AgentOutcome, type AgentTiming, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 import { loadRunSecrets } from './secret-store.ts';
 
 /**
@@ -381,6 +381,24 @@ function hubDevice(call: ReturnType<typeof hubCaller>, sessionId: string, platfo
   };
 }
 
+/**
+ * `MFARM_AI_SETTLE_POLL_MS` / `_MAX_MS` / `_AFTER_ACTION_MS` / `_EXPECT_MS` / `_FOCUS_MS`: how long a run
+ * waits on screens (agent.ts `AgentTiming`). Unset in production; the suite winds them down so a
+ * test's run takes milliseconds, not the seconds a real phone needs.
+ */
+export function agentTiming(env: Record<string, string | undefined> = process.env): Partial<AgentTiming> {
+  const ms = (v: string | undefined) => {
+    const n = Number(v);
+    return v !== undefined && v.trim() !== '' && Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const t: Partial<AgentTiming> = {
+    pollMs: ms(env.MFARM_AI_SETTLE_POLL_MS), maxMs: ms(env.MFARM_AI_SETTLE_MAX_MS),
+    afterActionMs: ms(env.MFARM_AI_SETTLE_AFTER_ACTION_MS), expectMs: ms(env.MFARM_AI_SETTLE_EXPECT_MS),
+    focusMs: ms(env.MFARM_AI_SETTLE_FOCUS_MS),
+  };
+  return Object.fromEntries(Object.entries(t).filter(([, v]) => v !== undefined)) as Partial<AgentTiming>;
+}
+
 interface DriveContext {
   model: Model | undefined;
   modelId: string;
@@ -467,6 +485,8 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
         return null;
       },
       async record(step) {
+        // One model call is one charge, however many actions it named; a step taken by rule is free.
+        const charged = step.billed ? price : 0;
         let sha: string | null = null;
         if (step.screenshotB64) {
           const blob = await ctx.store.put(Readable.from([Buffer.from(step.screenshotB64, 'base64')]), 20 * 1024 * 1024);
@@ -481,11 +501,11 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
             [orgId, run.id, step.n, step.phase, step.thought?.slice(0, 4000) ?? null,
              step.action ? JSON.stringify(step.action) : null, step.result?.slice(0, 1000) ?? null, sha,
              step.elementCount, step.model, step.usage.input, step.usage.output, step.usage.cacheRead,
-             step.usage.cacheWrite, price, step.startedAt, step.durationMs],
+             step.usage.cacheWrite, charged, step.startedAt, step.durationMs],
           );
           await c.query(
             'UPDATE ai_runs SET steps = $3, cost_inr = cost_inr + $4 WHERE org_id = $1 AND id = $2',
-            [orgId, run.id, step.n, price],
+            [orgId, run.id, step.n, charged],
           );
         });
       },
@@ -502,6 +522,7 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
       model: ctx.model,
       modelId: ctx.modelId,
       stepCap: run.step_cap,
+      timing: agentTiming(),
     });
   } catch (err) {
     const e = err as Error;

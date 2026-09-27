@@ -6036,7 +6036,7 @@ describe('the AI testing screen', () => {
     mod.state.ai = aiState();
     mod.state.ai.pricing.profiles.flash = { priceInr: 7, stepCap: 11 };
     const text = textOf(mod.SCREENS.ai());
-    assert.match(text, /₹7 per step, up to 11 steps \(at most ₹77\)/);
+    assert.match(text, /₹7 per AI turn — one turn can take several steps — up to 11 turns \(at most ₹77\)/);
     assert.match(text, /₹120 of ₹2,?000/);
   });
 
