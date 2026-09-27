@@ -107,6 +107,46 @@ export function coverBoxes(pngB64: string, boxes: Box[], screen: { width: number
   return encodePng(img).toString('base64');
 }
 
+/**
+ * THE SCREENSHOT THE MODEL IS SHOWN, SMALLER (ADR-0046). A model is billed by the image's pixels —
+ * on Claude about width × height / 750 tokens, so a 1080×2400 screen is ~3,400 tokens and the same
+ * screen 346 px wide is ~350. The model reads WHERE things are from the element list and only needs
+ * the picture to see what they look like, so it is scaled to `maxEdge` on its long side by averaging
+ * each target pixel's footprint. The run keeps the full image as evidence; this one is only sent.
+ * Unchanged when already small enough; null when the image is not one this can read.
+ */
+export function shrinkPng(pngB64: string, maxEdge: number): string | null {
+  const img = decodePng(Buffer.from(pngB64, 'base64'));
+  if (!img) return null;
+  const long = Math.max(img.width, img.height);
+  if (long <= maxEdge) return pngB64;
+  const scale = maxEdge / long;
+  const width = Math.max(1, Math.round(img.width * scale));
+  const height = Math.max(1, Math.round(img.height * scale));
+  const ch = img.channels;
+  const out = Buffer.alloc(width * height * ch);
+  const sum = new Float64Array(ch);
+  for (let ty = 0; ty < height; ty++) {
+    const y0 = Math.floor((ty * img.height) / height);
+    const y1 = Math.max(y0 + 1, Math.floor(((ty + 1) * img.height) / height));
+    for (let tx = 0; tx < width; tx++) {
+      const x0 = Math.floor((tx * img.width) / width);
+      const x1 = Math.max(x0 + 1, Math.floor(((tx + 1) * img.width) / width));
+      sum.fill(0);
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const o = (y * img.width + x) * ch;
+          for (let c = 0; c < ch; c++) sum[c]! += img.pixels[o + c]!;
+        }
+      }
+      const n = (y1 - y0) * (x1 - x0);
+      const o = (ty * width + tx) * ch;
+      for (let c = 0; c < ch; c++) out[o + c] = Math.round(sum[c]! / n);
+    }
+  }
+  return encodePng({ width, height, channels: ch, pixels: out }).toString('base64');
+}
+
 function chunk(type: string, data: Buffer): Buffer {
   const head = Buffer.alloc(8);
   head.writeUInt32BE(data.length, 0);

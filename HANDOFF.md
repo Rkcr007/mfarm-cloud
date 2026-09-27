@@ -4984,3 +4984,12 @@ when the feature is broken. See issues 37 and 38.
     agent's own unit suite (`ai-agent.test.ts`) was checked by planting each bug it guards — the first
     version missed one (an element renumbered by a banner above it). **Not measured on hardware yet**;
     1b, 1c and phase 2 (compiled replay) follow.
+
+99. **THE SCREENSHOT WAS MOST OF EVERY CALL, AND MOST CALLS DID NOT NEED IT.** 2026-09-27, ADR-0046
+    phase 1b. A call now reads the element list alone unless the picture helps: the first turn, a
+    turn after something went wrong or changed nothing, a verdict being confirmed, a control with no
+    name. When sent it is 768 px on its long side (~350 tokens on Claude, not ~3,400) — except on a
+    screen the list cannot read, where the model taps by pixel and a scaled image would move its taps.
+    The first version of the test phone did not show what was typed into it, so every typing turn
+    read as "changed nothing" and earned a screenshot; the fake now behaves like a field. One planted
+    bug (no look after a failure) hid behind that same rule until the test made the screen change.

@@ -4,7 +4,7 @@ import { AI_PROFILES, type AiProfile } from './pricing.ts';
 import { stripToolMarkup } from './secrets.ts';
 import { modelFailureWords } from './model-error.ts';
 import { fillSecrets, hideSecrets, NO_SECRETS, secretNamesIn, type RunSecrets } from './vault.ts';
-import { coverBoxes, type Box } from './png-cover.ts';
+import { coverBoxes, shrinkPng, type Box } from './png-cover.ts';
 
 /**
  * THE AI RUN LOOP — observe, decide, act, record (ADR-0043, capabilities C2 and C3).
@@ -197,8 +197,10 @@ export const DEFAULT_TIMING: Readonly<AgentTiming> = Object.freeze({
 
 /** How many consecutive turns may end without an action before the run is called stuck. */
 const MAX_IDLE_TURNS = 3;
-/** Lines of step history each call carries. Older steps are summarised as a count. */
-const HISTORY_LINES = 25;
+/** Steps of history each call carries word for word; older ones are one summary line (ADR-0046). */
+const HISTORY_RECENT = 15;
+/** The long side of the screenshot a model is shown, when it is shown one it does not tap by. */
+export const SMALL_IMAGE_EDGE = 768;
 /** Actions one call may name. Enough for a sign-up form; few enough that a wrong guess is cheap. */
 export const MAX_ACTIONS_PER_TURN = 6;
 /** Interruptions cleared by rule in one run, at most — a prompt that keeps coming back is the app's. */
@@ -264,7 +266,7 @@ export function systemPrompt(platform: 'android' | 'ios', profile: AiProfile, se
       + 'on a device farm to carry out a test a person described in plain English.',
     '',
     'Each turn you receive: the task, what you have done so far, the list of on-screen elements '
-      + '(numbered, with centre coordinates), and a screenshot.',
+      + '(numbered, with centre coordinates), and a screenshot when the list alone may not be enough.',
     '',
     `Every turn costs time and money, so do as much in one turn as the screen allows: call up to `
       + `${MAX_ACTIONS_PER_TURN} tools in one turn when they all act on the screen you see now — for a login, `
@@ -372,6 +374,12 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
   let calls = 0;
   let idle = 0;
   let ruleSteps = 0;
+  /** Turns taken — the first one is always shown the screenshot. */
+  let turns = 0;
+  /** Last turn went wrong (an action failed, a verdict was refused, nothing was done): show the screen. */
+  let trouble = false;
+  /** The element list a turn's actions were decided on, to tell the next turn whether they did anything. */
+  let actedOn: string | null = null;
   /** Pro: the verdict awaiting confirmation on a fresh screen, when the screen could not confirm it. */
   let pendingVerdict: { passed: boolean } | null = null;
 
@@ -468,7 +476,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     const r = await call([
       { type: 'text', text: `TASK:\n${task}\n\nBefore acting, write a short numbered plan: the checkpoints `
         + 'that would prove this task done, in order, and what on screen would confirm each. Do not call a tool.' },
-      ...observationBlocks(first, screen),
+      ...observationBlocks(first, screen, imageFor(first.elements, { first: true, trouble: false, verifying: false })),
     ], false);
     if ('status' in r) return r;
     plan = hide(stripToolMarkup(textOf(r.message))) || null;
@@ -490,21 +498,27 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     }
     next = null;
     acted = false;
+    const unchanged = actedOn !== null && formatUiTree(obs.elements) === actedOn;
+    actedOn = null;
+    const image = imageFor(obs.elements, { first: turns === 0, trouble: trouble || unchanged, verifying: pendingVerdict !== null });
+    trouble = false;
+    turns++;
 
     const phase: StepPhase = pendingVerdict ? 'verify' : 'act';
     const prompt = [
       `TASK:\n${task}`,
       plan ? `YOUR PLAN:\n${plan}` : null,
       history.length
-        ? `STEPS SO FAR (${calls} of at most ${cap} turns used):\n${history.slice(-HISTORY_LINES).join('\n')}`
+        ? `STEPS SO FAR (${calls} of at most ${cap} turns used):\n${historyText(history)}`
         : 'No steps taken yet.',
+      unchanged ? 'Your last actions did not change the screen.' : null,
       pendingVerdict
         ? `You called finish(passed=${pendingVerdict.passed}). This is the screen now. If it confirms that `
           + 'verdict, call finish again with the same verdict. If not, continue with an action.'
         : null,
     ].filter(Boolean).join('\n\n');
 
-    const r = await call([{ type: 'text', text: prompt }, ...observationBlocks(obs, screen)], true);
+    const r = await call([{ type: 'text', text: prompt }, ...observationBlocks(obs, screen, image)], true);
     if ('status' in r) return r;
     const m = r.message;
     const thoughtText = hide(stripToolMarkup(textOf(m)));
@@ -521,6 +535,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
       });
       if (m.stop_reason === 'refusal') return stop('model_refused', 'The model declined to continue this task.');
       history.push(`${n}. (no action) ${thoughtText.slice(0, 160)}`);
+      trouble = true;
       if (++idle >= MAX_IDLE_TURNS) return stop('no_action', `The agent took no action ${MAX_IDLE_TURNS} turns running.`);
       continue;
     }
@@ -614,9 +629,53 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
       });
       history.push(`${n}. ${describeAction(use.name, input, obs.elements)} — ${reason} → ${result}`);
       if (outcome) return outcome;
+      if (/^(failed|refused)/.test(result)) trouble = true;
       if (endTurn) break;
     }
+    if (acted) actedOn = formatUiTree(obs.elements);
   }
+}
+
+/**
+ * WHAT A CALL IS SHOWN OF THE SCREEN (ADR-0046). The screenshot was most of every call's input, and on
+ * a screen whose element list names everything it adds little the model can act on. So it is sent:
+ *
+ * - `full`, as captured, when the list cannot speak for the screen (a canvas, a game, Flutter without
+ *   semantics) — there the model taps by pixel, and a scaled image would put its taps in the wrong place;
+ * - `small` (`SMALL_IMAGE_EDGE`) on the first turn, after a turn that went wrong or changed nothing,
+ *   when confirming a verdict, and when a control has no name the list could show (an icon);
+ * - `none` otherwise. A model that needs to see takes no action, and is shown the screen next turn.
+ */
+export type ImageSize = 'none' | 'small' | 'full';
+
+export function imageFor(
+  elements: UiElement[],
+  why: { first: boolean; trouble: boolean; verifying: boolean },
+): ImageSize {
+  if (!readable(elements)) return 'full';
+  if (why.first || why.trouble || why.verifying) return 'small';
+  return hasUnnamedControl(elements) ? 'small' : 'none';
+}
+
+/**
+ * A control the element list cannot name: tappable, with no text, label or id of its own and no named
+ * element inside it. A list row is tappable and nameless too, but its title is inside it; an icon is not.
+ */
+function hasUnnamedControl(elements: UiElement[]): boolean {
+  const named = elements.filter((e) => e.text || e.label);
+  return elements.some((e) => e.clickable && !e.text && !e.label && !e.id && !named.some((n) =>
+    n !== e && n.x >= e.x && n.y >= e.y && n.x + n.width <= e.x + e.width && n.y + n.height <= e.y + e.height));
+}
+
+/** The run so far: the last `HISTORY_RECENT` steps word for word, and a count of the ones before. */
+function historyText(lines: string[]): string {
+  if (lines.length <= HISTORY_RECENT) return lines.join('\n');
+  const older = lines.slice(0, -HISTORY_RECENT);
+  const wrong = older.filter((l) => / → (failed|refused)/.test(l)).length;
+  return [
+    `(${older.length} earlier steps${wrong ? `, ${wrong} of them failed or refused` : ''})`,
+    ...lines.slice(-HISTORY_RECENT),
+  ].join('\n');
 }
 
 /**
@@ -722,7 +781,15 @@ export function interruptionOn(
   return null;
 }
 
-function observationBlocks(o: Observation, screen: { width: number; height: number }): Anthropic.Beta.BetaContentBlockParam[] {
+function observationBlocks(o: Observation, screen: { width: number; height: number }, size: ImageSize): Anthropic.Beta.BetaContentBlockParam[] {
+  const coords = `${screen.width}x${screen.height} tap coordinates`;
+  if (size === 'none') {
+    return [{
+      type: 'text',
+      text: `SCREEN (${coords}; no screenshot this turn — the element list is the screen. If you cannot act `
+        + 'without seeing it, take no action and you will be shown it):\n' + formatUiTree(o.elements),
+    }];
+  }
   if (!o.screenshotB64) {
     return [{
       type: 'text',
@@ -730,13 +797,15 @@ function observationBlocks(o: Observation, screen: { width: number; height: numb
         + 'and the image could not be painted over, so only the element list is sent):\n' + formatUiTree(o.elements),
     }];
   }
+  // An image this cannot read is sent as it came: larger, never missing.
+  const data = size === 'small' ? shrinkPng(o.screenshotB64, SMALL_IMAGE_EDGE) ?? o.screenshotB64 : o.screenshotB64;
   return [
     {
       type: 'text',
-      text: `SCREEN (${screen.width}x${screen.height} tap coordinates; the image shows the whole screen):\n`
+      text: `SCREEN (${coords}; the image${size === 'small' ? ', scaled down,' : ''} shows the whole screen):\n`
         + formatUiTree(o.elements),
     },
-    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: o.screenshotB64 } },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
   ];
 }
 
