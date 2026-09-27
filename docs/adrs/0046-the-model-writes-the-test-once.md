@@ -224,8 +224,14 @@ Each phase ships and is verified on the farm before the next starts; each is mea
    (alternate locators come free — `locate` tries each one that was unique); tier 2 is folded into tier
    3: the model takes over from the step that no longer matches, told what the route already did, and
    a run that then passes is the next version. The steps show `replayed` / `by rule`; the run's details
-   name the route version. **Not built:** scroll-search for a step's element, a `regression`/`explore`
-   switch on a saved test (every saved test replays once it has a route), and a heal diff on the page.
+   name the route version. **Then built (2026-09-27):** scroll-search — a step whose element is not on
+   the screen is scrolled for, DOWN only (up at the top of a list is pull-to-refresh), at most three
+   times, stopping when the list stops moving; those scrolls are recorded but are not route, since the
+   next replay looks again. `ai_tests.replay` (migration 066) — off, a saved test is exploratory: the AI
+   drives every run, it is not let past a model that is down, and its routes are still kept so switching
+   it back replays at once. And the repair diff: a run that repaired its route shows, step by step,
+   what changed between the version it replayed and the one it kept (`diffRoutes`, aligned by what
+   each step does to which element).
 
    **Measured on the farm (2026-09-27, Groq qwen3.8-27b):** a saved test's second run replayed with 0
    model calls and ₹0 — API Demos' form in 31 s (the model-driven run: 5 calls, ₹3.07, 106 s), a

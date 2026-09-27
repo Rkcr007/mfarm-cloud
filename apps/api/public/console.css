@@ -3370,6 +3370,11 @@ kbd {
 .ai-metric { font: var(--ty-display-md); letter-spacing: var(--tr-display-md); color: var(--t-primary, #F1F1F1); }
 .ai-row-prompt { color: var(--t-body, #D4D4D4); overflow-wrap: anywhere; }
 .ai-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+/* What a route repair changed (ADR-0046): one line a step, the kind in the left rule. */
+.ai-route-diff { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ai-route-diff li { padding: 4px 8px; border-left: 3px solid var(--warn-line); background: var(--warn-bg); border-radius: 4px; }
+.ai-route-diff li.ai-route-added { border-left-color: var(--ok-line); background: var(--ok-bg); }
+.ai-route-diff li.ai-route-removed { border-left-color: var(--bad-line); background: var(--bad-bg); }
 .ai-step-btn {
   display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left;
   padding: 8px 10px; border: 1px solid transparent; border-radius: var(--r-md, 9px);

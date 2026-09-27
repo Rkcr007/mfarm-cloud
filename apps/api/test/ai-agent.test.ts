@@ -645,7 +645,9 @@ test('where the app no longer matches the route, the model takes over from that 
     plan: ROUTE, secrets: SECRETS });
   assert.equal(out.status, 'passed');
   assert.equal(model.calls.length, 2, 'the model only for what the route could not do');
-  assert.deepEqual(s.steps.map((x) => x.model), ['replay', 'replay', 'm', 'm']);
+  // Two route steps, one scroll down looking for the button (the list did not move), then the model.
+  assert.deepEqual(s.steps.map((x) => x.model), ['replay', 'replay', 'replay', 'm', 'm']);
+  assert.equal(s.steps[2]!.action?.tool, 'scroll');
   const told = textOf(model.calls[0]!);
   assert.match(told, /replayed this test's saved route, without you, until step 3 \(log in\): “Log in” is not on the screen/);
   assert.match(told, /type "asha@example\.test" into \[0\].*\(replayed\)/);
@@ -660,4 +662,42 @@ test('a route that ends without its expect on the screen is judged by the model,
   assert.equal(out.status, 'failed');
   assert.equal(model.calls.length, 1);
   assert.match(textOf(model.calls[0]!), /until the end of the route, where “Welcome back” was expected but is not on the screen/);
+});
+
+// ---------------------------------------------------------------- replay: an element further down a list
+
+test('a route step whose element is below the fold is scrolled for — found, and still no model', async () => {
+  // A short screen: the form's button is below it until the list is scrolled.
+  const TOP = LOGIN.replace(/<node [^>]*text="Log in"[^>]*\/>/, '').replace(/<node [^>]*Forgot[^>]*\/>/, '');
+  const device = phone(TOP, [{ box: [390, 1160, 690, 1260], to: HOME }]);
+  let swipes = 0;
+  device.swipe = async () => { swipes++; device.screen = LOGIN; };
+  const model = scripted([]);
+  const s = sink();
+  const out = await runAgent({ task: 'Log in', profile: 'flash', device, sink: s, model, modelId: 'm', timing: FAST,
+    plan: ROUTE, secrets: SECRETS });
+  assert.equal(out.status, 'passed', JSON.stringify(out));
+  assert.equal(model.calls.length, 0);
+  assert.equal(swipes, 1, 'one scroll found it');
+  assert.deepEqual(s.steps.map((x) => [x.action?.tool, x.model, x.billed]), [
+    ['type_text', 'replay', false], ['type_text', 'replay', false], ['scroll', 'replay', false],
+    ['tap_element', 'replay', false], ['finish', 'replay', false]]);
+  assert.match(s.steps[2]!.thought ?? '', /looking further down for “Log in”/);
+});
+
+test('an element that is nowhere is scrolled for only until the list stops moving, then the model is asked', async () => {
+  const RENAMED = LOGIN.replace('text="Log in" resource-id="com.acme:id/login"', 'text="Sign in" resource-id="com.acme:id/sign_in"');
+  const device = phone(RENAMED, [{ box: [390, 1160, 690, 1260], to: HOME }]);
+  // Two pages more of the same list, then its end: the third scroll changes nothing.
+  const pages = [RENAMED.replace('Forgot password?', 'Page 2'), RENAMED.replace('Forgot password?', 'Page 3')];
+  let swipes = 0;
+  device.swipe = async () => { swipes++; if (pages.length) device.screen = pages.shift()!; };
+  const model = scripted([
+    [{ tool: 'tap_element', input: { index: 2 } }],
+    [{ tool: 'finish', input: { passed: true, summary: 'In', evidence: 'Welcome', expect: 'Welcome back' } }],
+  ]);
+  await runAgent({ task: 'Log in', profile: 'flash', device, sink: sink(), model, modelId: 'm', timing: FAST,
+    plan: ROUTE, secrets: SECRETS });
+  assert.equal(swipes, 3, 'two that moved the list, one that found its end');
+  assert.match(textOf(model.calls[0]!), /“Log in” is not on the screen — not after 2 scrolls down either/);
 });

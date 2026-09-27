@@ -61,6 +61,12 @@ test('no route when a step could not be found again for certain', () => {
     'recorded before uniqueness was');
   // Actions that need no element are kept without one.
   assert.equal(compilePlan([step('press_key', { key: 'back' }, 'ok'), passed])?.steps[0]?.tool, 'press_key');
+  // A replay's own scroll looking for an element is not route: the next replay looks again.
+  const searched = compilePlan([step('scroll', { direction: 'down', search: true }, 'ok', null, 'replay'),
+    step('tap_element', { index: 1 }, 'ok', LOGIN, 'replay'), passed]);
+  assert.deepEqual(searched?.steps.map((x) => x.tool), ['tap_element']);
+  assert.equal(compilePlan([step('scroll', { direction: 'down' }, 'ok'), passed])?.steps[0]?.tool, 'scroll',
+    'a scroll the model chose is route');
 });
 
 test('locate finds the element by the locator that named it alone — and only if it still does', () => {
@@ -81,4 +87,33 @@ test('which steps need an element, and which targets can be found again', () => 
   assert.ok(locatable(LOGIN));
   assert.ok(!locatable(target({ id: 'x', unique: { id: false, label: false, text: false } })));
   assert.ok(!locatable(target({ unique: { id: true, label: false, text: false } })), 'unique, but no value');
+});
+
+// ---------------------------------------------------------------- what a repair changed
+
+import { diffRoutes, stepWords, type PlanStep } from '../src/ai/plan.ts';
+
+const ps = (tool: string, input: Record<string, unknown>, t: ActionTarget | null = null): PlanStep => ({ tool, input, target: t, intent: '' });
+const SIGN_IN = target({ text: 'Sign in', id: 'com.acme:id/sign_in', unique: { id: true, label: false, text: true } });
+const V1 = [ps('type_text', { index: 0, text: '{{EMAIL}}' }, EMAIL), ps('tap_element', { index: 1 }, LOGIN)];
+
+test('a step in words: what it does, to what a person calls the element', () => {
+  assert.equal(stepWords(V1[0]!), 'Type “{{EMAIL}}” into “Email”');
+  assert.equal(stepWords(V1[1]!), 'Tap “Log in”');
+  assert.equal(stepWords(ps('tap_element', {}, target({ id: 'com.acme:id/menu_button' }))), 'Tap “menu_button”');
+  assert.equal(stepWords(ps('scroll', { direction: 'down' })), 'Scroll down');
+});
+
+test('a renamed button is one changed step; the steps around it are not reported', () => {
+  const v2 = [V1[0]!, ps('tap_element', { index: 1 }, SIGN_IN)];
+  assert.deepEqual(diffRoutes(V1, v2), [{ kind: 'changed', step: 2, before: 'Tap “Log in”', after: 'Tap “Sign in”' }]);
+  assert.deepEqual(diffRoutes(V1, V1), [], 'an unchanged route has nothing to say');
+});
+
+test('a new step and a dropped one are said as such, at their places', () => {
+  const consent = ps('tap_element', { index: 3 }, target({ text: 'Accept cookies', unique: { id: false, label: false, text: true } }));
+  assert.deepEqual(diffRoutes(V1, [consent, ...V1]), [{ kind: 'added', step: 1, before: null, after: 'Tap “Accept cookies”' }]);
+  assert.deepEqual(diffRoutes([consent, ...V1], V1), [{ kind: 'removed', step: 1, before: 'Tap “Accept cookies”', after: null }]);
+  assert.deepEqual(diffRoutes([...V1, consent], V1), [{ kind: 'removed', step: 3, before: 'Tap “Accept cookies”', after: null }],
+    'a removed step is numbered where it was in the old route');
 });

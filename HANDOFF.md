@@ -5049,3 +5049,13 @@ when the feature is broken. See issues 37 and 38.
     the tests list carries `routeVersion`, and the console keeps Run with a `route vN` chip. Two
     planted bugs first went uncaught (a routed run past a stopped host; a routed run given up after a
     long queue) — both now have tests.
+
+106. **REPLAY'S THREE LOOSE ENDS: SCROLLING, AN "ALWAYS AI" SWITCH, AND WHAT A REPAIR CHANGED.**
+    2026-09-27, migration 066. A route step whose element is further down a list is scrolled for —
+    down only (up at the top is pull-to-refresh), three times at most, stopping when the list stops
+    moving — and those scrolls are not kept in the route, since the next replay looks again (the first
+    version kept them, and the healed route of a renamed button grew a pointless scroll). A saved test
+    can be set to ask the AI every run (`replay: false`); it then needs a model like any run. And a run
+    that repaired its route says so: "Route repaired: version 1 → 2", with each changed, added or dropped
+    step in words. One planted bug first went uncaught — the runner claiming an "always AI" test while
+    the model was down — now tested.
