@@ -61,7 +61,16 @@ function phone(screen: string, goto: Array<{ box: [number, number, number, numbe
       const hit = goto.find(({ box: [x1, y1, x2, y2] }) => x >= x1 && x <= x2 && y >= y1 && y <= y2);
       if (hit) p.screen = typeof hit.to === 'function' ? hit.to() : hit.to;
     },
-    async typeText(t) { p.typed.push(t); },
+    async typeText(t) {
+      p.typed.push(t);
+      // As a real field does: the text field last tapped now shows what was typed.
+      const [tx, ty] = p.taps.at(-1) ?? [-1, -1];
+      p.screen = p.screen.replace(/<node [^>]*\/>/g, (n) => {
+        const b = /bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/.exec(n);
+        const inside = b && tx >= +b[1]! && tx <= +b[3]! && ty >= +b[2]! && ty <= +b[4]!;
+        return inside && n.includes('EditText') ? n.replace(/ text="[^"]*"/, ` text="${t}"`) : n;
+      });
+    },
     async swipe() {},
     async pressKey() {},
     async launchApp() {},
@@ -319,3 +328,121 @@ import { parseUiTree } from '@mfarm/protocol';
 function parse(x: string): UiElement[] {
   return parseUiTree(x);
 }
+
+// ---------------------------------------------------------------- 1b: what a call is shown
+
+import { encodePng, decodePng, shrinkPng } from '../src/ai/png-cover.ts';
+
+type Block = { type: string; text?: string; source?: { data: string } };
+const blocksOf = (p: Anthropic.Beta.MessageCreateParamsNonStreaming) => p.messages[0]!.content as Block[];
+const imageOf = (p: Anthropic.Beta.MessageCreateParamsNonStreaming) => blocksOf(p).find((b) => b.type === 'image')?.source?.data;
+const textOf = (p: Anthropic.Beta.MessageCreateParamsNonStreaming) => blocksOf(p).map((b) => b.text ?? '').join('\n');
+
+/** A real PNG the size of a phone: the left half red, the right half blue. */
+function phonePng(width = 1080, height = 2400): string {
+  const pixels = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      pixels[o] = x < width / 2 ? 255 : 0; pixels[o + 2] = x < width / 2 ? 0 : 255; pixels[o + 3] = 255;
+    }
+  }
+  return encodePng({ width, height, channels: 4, pixels }).toString('base64');
+}
+const PHONE_PNG = phonePng();
+
+test('a readable screen after a turn that worked is sent as text alone — the screenshot was most of the bill', async () => {
+  const model = scripted([
+    [{ tool: 'type_text', input: { index: 0, text: 'asha@example.test', submit: false } }],
+    [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Log in' } }],
+  ]);
+  await run('Type the email', phone(LOGIN), model, sink());
+  assert.ok(imageOf(model.calls[0]!), 'the first turn sees the screen');
+  assert.equal(imageOf(model.calls[1]!), undefined, 'the second reads the element list alone');
+  assert.match(textOf(model.calls[1]!), /no screenshot this turn — the element list is the screen/);
+  assert.match(textOf(model.calls[1]!), /\[1\] EditText "Password"/);
+});
+
+test('after a turn that went wrong the model is shown the screen again', async () => {
+  // The screen DID change (Log in worked), so only the failed second action explains the look.
+  const model = scripted([
+    [{ tool: 'tap_element', input: { index: 2 } }, { tool: 'type_text', input: { index: 1, text: 'x', submit: false } }],
+    [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Welcome back' } }],
+  ]);
+  await run('Log in', phone(LOGIN, [{ box: [390, 1160, 690, 1260], to: HOME }]), model, sink());
+  assert.doesNotMatch(textOf(model.calls[1]!), /did not change/);
+  assert.ok(imageOf(model.calls[1]!), 'a failed action earns a look');
+});
+
+test('actions that changed nothing are said so, and the screen is shown', async () => {
+  // "Forgot password?" goes nowhere on this phone.
+  const model = scripted([
+    [{ tool: 'tap_element', input: { index: 3 } }],
+    [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Log in' } }],
+  ]);
+  await run('Reset the password', phone(LOGIN), model, sink());
+  assert.ok(imageOf(model.calls[1]!));
+  assert.match(textOf(model.calls[1]!), /Your last actions did not change the screen\./);
+});
+
+test('the screenshot the model is shown is scaled to 768 on its long side; the one kept is not', async () => {
+  const device = phone(LOGIN);
+  device.screenshot = async () => PHONE_PNG;
+  const model = scripted([[{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Log in' } }]]);
+  const s = sink();
+  await run('Look', device, model, s);
+  const sent = decodePng(Buffer.from(imageOf(model.calls[0]!)!, 'base64'))!;
+  assert.deepEqual([sent.width, sent.height], [346, 768]);
+  assert.match(textOf(model.calls[0]!), /the image, scaled down, shows the whole screen/);
+  assert.equal(s.steps[0]!.screenshotB64, PHONE_PNG, 'the evidence is the full screenshot');
+});
+
+test('a screen the element list cannot read is sent at full size — there the model taps by pixel', async () => {
+  const CANVAS = xml(node({ class: 'android.view.View', 'resource-id': 'com.game:id/surface', bounds: '[0,0][1080,2400]' }));
+  const device = phone(CANVAS);
+  device.screenshot = async () => PHONE_PNG;
+  const model = scripted([
+    [{ tool: 'tap_point', input: { x: 200, y: 300 } }],
+    [{ tool: 'finish', input: { passed: false, summary: 'x', evidence: 'x', expect: '' } }],
+  ]);
+  await run('Play', device, model, sink());
+  assert.equal(imageOf(model.calls[0]!), PHONE_PNG);
+  assert.equal(imageOf(model.calls[1]!), PHONE_PNG, 'every turn, not only the first');
+});
+
+test('an icon the list cannot name earns a look; a list row with its title inside it does not', async () => {
+  const ICON = LOGIN.replace('</hierarchy>',
+    `${node({ class: 'android.widget.ImageButton', clickable: 'true', bounds: '[960,40][1040,120]' })}</hierarchy>`);
+  const ROW = LOGIN.replace('</hierarchy>',
+    `${node({ class: 'android.widget.LinearLayout', clickable: 'true', bounds: '[0,1400][1080,1520]' })}`
+    + `${node({ class: 'android.widget.TextView', text: 'Help', bounds: '[40,1420][400,1500]' })}</hierarchy>`);
+  for (const [screen, wants] of [[ICON, true], [ROW, false]] as const) {
+    const model = scripted([
+      [{ tool: 'type_text', input: { index: 0, text: 'a', submit: false } }],
+      [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Log in' } }],
+    ]);
+    await run('Type', phone(screen), model, sink());
+    assert.equal(Boolean(imageOf(model.calls[1]!)), wants, screen === ICON ? 'the icon' : 'the row');
+  }
+});
+
+test('a long run carries its last 15 steps word for word and a count of the rest', async () => {
+  const model = scripted([
+    ...Array.from({ length: 20 }, (_, i) => [{ tool: 'type_text', input: { index: 0, text: `try ${i}`, submit: false } }]),
+    [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Log in' } }],
+  ]);
+  await runAgent({ task: 'Keep typing', profile: 'flash', device: phone(LOGIN), sink: sink(), model, modelId: 'm', stepCap: 30, timing: FAST });
+  const last = textOf(model.calls[20]!);
+  assert.match(last, /\(5 earlier steps\)/);
+  assert.equal(last.match(/^\d+\. type "try/gm)?.length, 15);
+});
+
+test('shrinkPng averages each footprint, leaves small images alone, and refuses what it cannot read', () => {
+  const small = decodePng(Buffer.from(shrinkPng(PHONE_PNG, 768)!, 'base64'))!;
+  const px = (x: number) => [...small.pixels.subarray((100 * small.width + x) * 4, (100 * small.width + x) * 4 + 3)];
+  assert.deepEqual(px(10), [255, 0, 0], 'the left stays red');
+  assert.deepEqual(px(small.width - 10), [0, 0, 255], 'the right stays blue');
+  const tiny = phonePng(108, 240);
+  assert.equal(shrinkPng(tiny, 768), tiny);
+  assert.equal(shrinkPng('iVBORw0KGgo=', 768), null);
+});

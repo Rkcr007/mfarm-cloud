@@ -192,7 +192,8 @@ Each phase ships and is verified on the farm before the next starts; each is mea
    - **1a — fewer calls:** several actions per call (`type_text` names its field, so tapping it is no
      longer a call of its own), settle after every action, interruption rules, the verdict's `expect`
      checked on the screen (replacing Pro's confirm call when it holds), one charge per call.
-   - **1b — smaller calls:** text-first observation with downscaling; history compression.
+   - **1b — smaller calls:** text-first observation with downscaling; history compression. A screen
+     the element list cannot read keeps its full-size image: the model taps it by pixel.
    - **1c — the right model, the real price:** the model table and routing; every call's actual cost
      recorded; §6's pricing.
    Exit: a login authoring run in ≤ 4 calls on the eval.
