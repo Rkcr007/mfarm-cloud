@@ -12091,6 +12091,19 @@ function closeAiPanel() {
 }
 
 /**
+ * WHY A RUN HAS NO RECORDING, in words true on every farm. A farm keeps the recordings of FAILED runs
+ * unless it is set to keep them all, so a passed run normally has none — found on the farm 2026-09-27,
+ * where a passed run's panel blamed the farm's settings and the retention window instead.
+ */
+export function noRecordingWords(run) {
+  return run?.status === 'passed'
+    ? 'No recording was kept: this run passed, and a farm keeps the recordings of failed runs unless it is '
+      + 'set to keep them all. The log is here.'
+    : 'No recording was kept for this run — recording may be off on this farm, or it has passed its '
+      + 'retention window. The log may still be there.';
+}
+
+/**
  * RECORDING & LOG IN A PANEL BESIDE THE RUN (proposal 14). "Recording & log" used to leave for the
  * session cockpit, which is built for driving a device and is a great deal to take in for a run
  * that has finished.
@@ -12145,8 +12158,7 @@ export function paintAiPanel() {
         ? h('p', { class: 'caption', text: 'Loading…' })
         : video
           ? videoPlayer(video, [])
-          : h('p', { class: 'caption', text: 'No recording was kept for this run — recording may be off on this farm, '
-              + 'or it has passed its retention window. The log may still be there.' }));
+          : h('p', { class: 'caption', text: noRecordingWords(run) }));
     }
   } else {
     aiPanelSlots.key = '';

@@ -6622,6 +6622,12 @@ describe('the AI testing screen', () => {
     assert.doesNotMatch(textOf(tree), /Outlined/);
   });
 
+  test('a run with no recording says why in words true on every farm — a passed run is not kept by default', () => {
+    assert.match(mod.noRecordingWords({ status: 'passed' }), /this run passed, and a farm keeps the recordings of failed runs/);
+    assert.doesNotMatch(mod.noRecordingWords({ status: 'passed' }), /retention|may be off/, 'it blamed the farm for a passed run');
+    assert.match(mod.noRecordingWords({ status: 'failed' }), /may be off on this farm, or it has passed its retention window/);
+  });
+
   test('the recording and the log open beside the run, the recording survives a render, and Esc closes them first', () => {
     seed({ name: 'airun', id: 'air-1' });
     mod.closeOverlays();
