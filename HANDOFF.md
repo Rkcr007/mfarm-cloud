@@ -5031,3 +5031,12 @@ when the feature is broken. See issues 37 and 38.
     the model takes over at that step and a pass is the next version. Deliberately conservative: a
     route is not kept when any step could not be found again for certain, because a replay that taps
     the wrong thing is worse than a model call. Not yet run on the farm.
+
+104. **REPLAY AND `fill_form`, VERIFIED ON THE FARM.** 2026-09-27, `e616e09`, lab up 17:04–17:17 UTC.
+    `ai-eval.mjs SAVED=1`: each task as a saved test, run twice. API Demos' form: run 1 by the model
+    in 5 calls (was 7 before `fill_form` — name, password and OK are one call now), ₹3.07, 106 s; run 2
+    replayed its route — 0 calls, ₹0, 31 s. Settings search: 4 calls / ₹2.53 / 72 s, then 0 / ₹0 / 17 s.
+    The third task hit Groq's free-tier DAILY token allowance mid-eval, and its replayable second run
+    was refused at the door (`503 ai_not_ready`): the readiness gate wants a model every run needs,
+    and a replay does not. That is the next change. Groq's daily cap is also why the free tier cannot
+    serve customers (~45 model steps a day).
