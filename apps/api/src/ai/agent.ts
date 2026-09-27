@@ -4,6 +4,7 @@ import { AI_PROFILES, type AiProfile } from './pricing.ts';
 import { stripToolMarkup } from './secrets.ts';
 import { modelFailureWords } from './model-error.ts';
 import { fillSecrets, hideSecrets, NO_SECRETS, secretNamesIn, type RunSecrets } from './vault.ts';
+import { coverBoxes, type Box } from './png-cover.ts';
 
 /**
  * THE AI RUN LOOP — observe, decide, act, record (ADR-0043, capabilities C2 and C3).
@@ -231,7 +232,8 @@ export function systemPrompt(platform: 'android' | 'ios', profile: AiProfile, se
       ? ['', `SECRETS: the task names ${secretNames.map((n) => `{{${n}}}`).join(', ')}. You will never see their `
           + 'values, and must not guess them. To enter one, tap the field, then call type_text with the placeholder '
           + `exactly as written — type_text(text="{{${secretNames[0]}}}") — and MFARM types the value. Where the `
-          + 'screen shows a secret, you are shown its placeholder instead.']
+          + 'screen shows a secret, the element list shows its placeholder and that part of the screenshot is '
+          + 'painted over. A field showing the placeholder in the element list HOLDS the value.']
       : []),
     ...(profile === 'pro'
       ? ['', 'This is a PRO run: follow the plan you wrote, work through its checkpoints in order, and say in '
@@ -256,12 +258,27 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
   const secrets = opts.secrets ?? NO_SECRETS;
   /** A value out of anything the model reads or the run records — its placeholder in its place. */
   const hide = (text: string): string => hideSecrets(text, secrets.values);
+  /** `hide`, through every string in a tool call's input — the model may quote what it read on screen. */
+  const hideAll = (v: unknown): unknown => (typeof v === 'string' ? hide(v)
+    : Array.isArray(v) ? v.map(hideAll)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, hideAll(x)]))
+    : v);
   const see = async (): Promise<Observation> => {
     const o = await observe(device);
     if (!Object.keys(secrets.values).length) return o;
-    // A plain text field shows what was typed into it — the value the model must never be shown.
+    // A plain text field shows what was typed into it — the value the model must never be shown. In
+    // the element list it becomes its placeholder; in the SCREENSHOT its box is painted over, because
+    // on the farm the model read the value off the image once the list no longer had it.
     const off = (v: string | null) => (v === null ? null : hide(v));
-    return { ...o, elements: o.elements.map((e) => ({ ...e, text: off(e.text), label: off(e.label), id: off(e.id) })) };
+    const shown: Box[] = [];
+    const elements = o.elements.map((e) => {
+      const seen = { ...e, text: off(e.text), label: off(e.label), id: off(e.id) };
+      if (seen.text !== e.text || seen.label !== e.label || seen.id !== e.id) shown.push(e);
+      return seen;
+    });
+    if (!shown.length) return { ...o, elements };
+    // An image this cannot edit is WITHHELD for the turn, never sent as it was.
+    return { screenshotB64: coverBoxes(o.screenshotB64, shown, screen) ?? '', elements };
   };
   const history: string[] = [];
   let plan: string | null = null;
@@ -330,7 +347,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     plan = hide(stripToolMarkup(textOf(r.message))) || null;
     await sink.record({
       n, phase: 'plan', thought: plan, action: null, result: null,
-      screenshotB64: first.screenshotB64, elementCount: first.elements.length,
+      screenshotB64: first.screenshotB64 || null, elementCount: first.elements.length,
       usage: usage(r.message), model: servedBy(r.message, modelId), startedAt: r.startedAt, durationMs: Date.now() - r.t0,
     });
     if (r.message.stop_reason === 'refusal') return stop('model_refused', 'The model declined this task.');
@@ -367,7 +384,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
       await sink.record({
         n, phase, thought: thoughtText || null, action: null,
         result: m.stop_reason === 'refusal' ? 'the model declined' : 'no action chosen',
-        screenshotB64: obs.screenshotB64, elementCount: obs.elements.length,
+        screenshotB64: obs.screenshotB64 || null, elementCount: obs.elements.length,
         usage: usage(m), model: servedBy(m, modelId), startedAt: r.startedAt, durationMs: Date.now() - r.t0,
       });
       if (m.stop_reason === 'refusal') return stop('model_refused', 'The model declined to continue this task.');
@@ -410,8 +427,8 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
 
     await sink.record({
       n, phase, thought: [hide(reason), thoughtText].filter(Boolean).join('\n') || null,
-      action: { tool: use.name, input, target: actionTarget(use.name, input, obs.elements), screen }, result,
-      screenshotB64: obs.screenshotB64, elementCount: obs.elements.length,
+      action: { tool: use.name, input: hideAll(input) as Record<string, unknown>, target: actionTarget(use.name, input, obs.elements), screen }, result,
+      screenshotB64: obs.screenshotB64 || null, elementCount: obs.elements.length,
       usage: usage(m), model: servedBy(m, modelId), startedAt: r.startedAt, durationMs: Date.now() - r.t0,
     });
     history.push(`${n}. ${describeAction(use.name, input, obs.elements)} — ${reason} → ${result}`);
@@ -425,6 +442,13 @@ async function observe(device: Device): Promise<Observation> {
 }
 
 function observationBlocks(o: Observation, screen: { width: number; height: number }): Anthropic.Beta.BetaContentBlockParam[] {
+  if (!o.screenshotB64) {
+    return [{
+      type: 'text',
+      text: `SCREEN (${screen.width}x${screen.height} tap coordinates; no image this turn — the screen showed a secret `
+        + 'and the image could not be painted over, so only the element list is sent):\n' + formatUiTree(o.elements),
+    }];
+  }
   return [
     {
       type: 'text',
