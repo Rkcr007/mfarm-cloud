@@ -46,7 +46,11 @@ model that `{{NAME}}` is a secret it will never see, and that to enter one it ty
 exactly. The runner fills it in at the one moment it sends keys to the device, and nowhere else: the
 step records what the model sent (`{{PIN}}`). Anything the model would read that contains a value —
 the on-screen element list, where a plain text field shows what was typed — has the value replaced by
-its placeholder before it is sent, and before it is recorded.
+its placeholder before it is sent, and before it is recorded. **And the screenshot**: wherever an
+element's text held a value, its box is painted over in the image before the model is sent it or the
+run keeps it (`ai/png-cover.ts`); an image that cannot be edited is withheld for that turn, never sent
+as it was. Added after the farm showed the model reading a typed value off the image once the element
+list no longer had it (D55).
 
 **5. Refused at the door.** A run or saved test that names a secret the org does not have is refused
 (400) with the names that are missing. A secret deleted after a test was saved fails the step that
@@ -57,8 +61,9 @@ runs and is still masked everywhere it is shown. The console suggests the named 
 
 ## What this does not do
 
-- **Pixels.** The screenshot the model is sent is the screen. A PIN field shows dots; an app that
-  prints a secret in plain text shows it, and MFARM cannot reliably remove text from an image.
+- **Text the element tree does not describe.** A value is painted over where an ELEMENT shows it. One
+  drawn onto a canvas, into a game, or inside a web view the tree does not describe cannot be found,
+  so cannot be covered. A PIN or password field shows dots and needs nothing.
 - **People in the same org.** Anyone in the org can USE a secret in a task. The store
   keeps values from being READ, not from being used — the same line CI secrets draw.
 - **Scripts (C9).** "Export as script" writes `process.env.PIN` where a step typed `{{PIN}}`: the

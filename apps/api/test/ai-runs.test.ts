@@ -43,6 +43,7 @@ import { resetProbes, type ModelSlot } from '../src/ai/provider.ts';
 import { queueAiRun } from '../src/ai/queue.ts';
 import { buildApk } from './fixtures/apk.ts';
 import { seal, vaultKey } from '../src/ai/vault.ts';
+import { decodePng, encodePng } from '../src/ai/png-cover.ts';
 
 const REGION = 'ai-test';
 let app: FastifyInstance;
@@ -58,7 +59,13 @@ const SOURCE = `<hierarchy>
   <android.widget.EditText class="android.widget.EditText" text="" resource-id="com.acme:id/email" content-desc="Email" clickable="true" focusable="true" bounds="[40,400][1040,520]" displayed="true"/>
   <android.widget.Button class="android.widget.Button" text="Log in" resource-id="com.acme:id/login" clickable="true" bounds="[390,1160][690,1260]" displayed="true"/>
 </hierarchy>`;
-const PNG_B64 = Buffer.from('\x89PNG\r\n\x1a\nfake-screen').toString('base64');
+/**
+ * A REAL PNG, a tenth of the stub device's 1080×2400 window, so a secret painted over in it (ADR-0045)
+ * can be checked pixel by pixel. White; the paint is 0x2a2a30.
+ */
+const PNG_B64 = encodePng({ width: 108, height: 240, channels: 4, pixels: Buffer.alloc(108 * 240 * 4, 0xff) }).toString('base64');
+/** What `/screenshot` answers. A test may swap it and must put PNG_B64 back. */
+let screenshot = PNG_B64;
 /** What `/source` answers. A test may swap it for one screen and must put SOURCE back. */
 let source = SOURCE;
 
@@ -84,7 +91,7 @@ function startUpstream(): Promise<string> {
       }
       if (u.startsWith('/session/up-1')) {
         if (req.method === 'DELETE' && u === '/session/up-1') return json(200, null);
-        if (u.endsWith('/screenshot')) return json(200, PNG_B64);
+        if (u.endsWith('/screenshot')) return json(200, screenshot);
         if (u.endsWith('/source')) return json(200, source);
         if (u.endsWith('/window/rect')) return json(200, { x: 0, y: 0, width: 1080, height: 2400 });
         if (u.endsWith('/actions')) return json(200, null);
@@ -1301,7 +1308,8 @@ describe('named secrets (ADR-0045)', () => {
       scripts.set('Enter the account pin {{PIN}}', [
         { tool: 'tap_element', input: { index: 0, why: 'the pin field' } },
         { tool: 'type_text', input: { text: '{{PIN}}', submit: false, why: 'enter the pin' } },
-        { tool: 'finish', input: { passed: true, summary: 'The pin was accepted', evidence: 'The field is filled', why: 'done' } },
+        // The model quoting what it read — on the farm it read a value off the screenshot and wrote it here.
+        { tool: 'finish', input: { passed: true, summary: `The pin ${PIN} was accepted`, evidence: `The field shows ${PIN}`, why: 'done' } },
       ]);
       const { status, body } = await startRun({ prompt: 'Enter the account pin {{PIN}}', region: REGION });
       assert.equal(status, 201, JSON.stringify(body));
@@ -1315,11 +1323,24 @@ describe('named secrets (ADR-0045)', () => {
       const screen = (calls[0]!.messages[0]!.content as { type: string; text?: string }[]).find((b) => b.text?.startsWith('SCREEN'))!.text!;
       assert.match(screen, /EditText "\{\{PIN\}\}"/, 'where the field showed the value, the model is shown its name');
 
+      // AND the image: the field's box [40,400][1040,520] painted over, at the image's scale (0.1).
+      const painted = (b64: string) => {
+        const img = decodePng(Buffer.from(b64, 'base64'))!;
+        const px = (x: number, y: number) => [...img.pixels.subarray((y * img.width + x) * 4, (y * img.width + x) * 4 + 3)];
+        return { inField: px(50, 45), outside: px(50, 100) };
+      };
+      const image = (calls[0]!.messages[0]!.content as { type: string; source?: { data: string } }[]).find((b) => b.type === 'image')!;
+      assert.deepEqual(painted(image.source!.data), { inField: [0x2a, 0x2a, 0x30], outside: [0xff, 0xff, 0xff] },
+        'the model read the value off the screenshot on the farm once the list no longer had it');
+      const kept = await app.inject({ method: 'GET', url: (done as unknown as { steps: { screenshotUrl: string }[] }).steps[0]!.screenshotUrl, headers: auth(keyA) });
+      assert.deepEqual(painted(kept.rawPayload.toString('base64')).inField, [0x2a, 0x2a, 0x30], 'and the run keeps the covered one');
+
       const typed = recorded.filter((r) => r.url.endsWith('/value')).map((r) => (r.body as { text: string }).text);
       assert.deepEqual(typed, [PIN], 'the device got the value — once, where the model typed its name');
       assert.equal(done.steps[1]!.action!.input.text, '{{PIN}}', 'the step keeps what the model sent');
-      const kept = await withSystem((c) => c.query('SELECT thought, action::text, result FROM ai_steps WHERE ai_run_id = $1', [body.aiRun.id]));
-      assert.doesNotMatch(JSON.stringify(kept.rows) + JSON.stringify(done), /4812/, 'nor does anything the run kept');
+      const rows = await withSystem((c) => c.query('SELECT thought, action::text, result FROM ai_steps WHERE ai_run_id = $1', [body.aiRun.id]));
+      assert.doesNotMatch(JSON.stringify(rows.rows) + JSON.stringify(done), /4812/,
+        'nor does anything the run kept — the finish step\'s own input included, where it leaked on the farm');
 
       for (const lang of ['python', 'webdriverio']) {
         const script = (await app.inject({ method: 'GET', url: `/v1/ai/runs/${body.aiRun.id}/script?lang=${lang}&origin=${encodeURIComponent('https://farm.example.test')}`, headers: auth(keyA) })).body;
@@ -1335,6 +1356,28 @@ describe('named secrets (ADR-0045)', () => {
       }
     } finally {
       source = SOURCE;
+    }
+  });
+
+  test('a screenshot showing a secret that cannot be painted over is withheld, never sent as it was', async () => {
+    await resetFleet();
+    await clearSecrets();
+    await put('PIN', PIN);
+    source = SOURCE.replace('text="" resource-id="com.acme:id/email"', `text="${PIN}" resource-id="com.acme:id/email"`);
+    screenshot = Buffer.from('\x89PNG\r\n\x1a\nnot-an-image-this-can-edit').toString('base64');
+    try {
+      scripts.set('Check the pin field {{PIN}}', [
+        { tool: 'finish', input: { passed: true, summary: 'Shown', evidence: 'the field', why: 'done' } },
+      ]);
+      const { body } = await startRun({ prompt: 'Check the pin field {{PIN}}', region: REGION });
+      const done = await settle(body.aiRun.id);
+      const blocks = calls[0]!.messages[0]!.content as { type: string; text?: string }[];
+      assert.equal(blocks.filter((b) => b.type === 'image').length, 0, 'no image at all');
+      assert.match(blocks.find((b) => b.text?.startsWith('SCREEN'))!.text!, /no image this turn — the screen showed a secret/);
+      assert.equal(done.steps[0]!.screenshotUrl, null, 'and none kept');
+    } finally {
+      source = SOURCE;
+      screenshot = PNG_B64;
     }
   });
 
