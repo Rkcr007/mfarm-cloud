@@ -68,6 +68,15 @@ export function aiModelId(env: Env = process.env): string {
   return (env.MFARM_AI_MODEL ?? '').trim() || 'claude-opus-5';
 }
 
+/**
+ * `MFARM_AI_STRONG_MODEL`: the primary provider's STRONGER model, optional (ADR-0046 §3.7). With one,
+ * `MFARM_AI_MODEL` should be the fast, cheap model every acting call uses, and this one is asked for
+ * the Pro plan and when a run has gone wrong twice running. Without one, every call uses the one model.
+ */
+export function aiStrongModelId(env: Env = process.env): string | null {
+  return (env.MFARM_AI_STRONG_MODEL ?? '').trim() || null;
+}
+
 export function buildModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
   return cfg.provider === 'openai' ? openaiModel(cfg, retry) : anthropicModel(cfg, retry);
 }
@@ -109,6 +118,8 @@ export function aiFallbackConfig(env: Env = process.env): AiSlotConfig | null {
 export interface ModelSlot {
   slot: ProviderSlot;
   model: string;
+  /** Asked for when a call wants the `strong` tier; absent, the slot answers with `model`. */
+  strongModel?: string | null;
   /** "openai via api.groq.com qwen/qwen3.8-27b" — what an operator configured, in one line. */
   label: string;
   call: Model;
@@ -116,18 +127,21 @@ export interface ModelSlot {
   probe: Model;
 }
 
-function slotOf(slot: ProviderSlot, cfg: AiProviderConfig, model: string): ModelSlot {
+function slotOf(slot: ProviderSlot, cfg: AiProviderConfig, model: string, strongModel: string | null): ModelSlot {
   const via = cfg.baseUrl ? ` via ${new URL(cfg.baseUrl).host}` : '';
-  return { slot, model, label: `${cfg.provider}${via} ${model}`, call: buildModel(cfg), probe: buildModel(cfg, NO_RETRY) };
+  return {
+    slot, model, strongModel, label: `${cfg.provider}${via} ${model}${strongModel ? ` (strong: ${strongModel})` : ''}`,
+    call: buildModel(cfg), probe: buildModel(cfg, NO_RETRY),
+  };
 }
 
 /** The providers this farm is configured with, primary first. Empty when AI is off. */
 export function configuredSlots(env: Env = process.env): ModelSlot[] {
   const primary = aiProviderConfig(env);
   if (!primary) return [];
-  const slots = [slotOf('primary', primary, aiModelId(env))];
+  const slots = [slotOf('primary', primary, aiModelId(env), aiStrongModelId(env))];
   const fallback = aiFallbackConfig(env);
-  if (fallback) slots.push(slotOf('fallback', fallback, fallback.model));
+  if (fallback) slots.push(slotOf('fallback', fallback, fallback.model, (env.MFARM_AI_FALLBACK_STRONG_MODEL ?? '').trim() || null));
   return slots;
 }
 
@@ -141,11 +155,12 @@ export function configuredSlots(env: Env = process.env): ModelSlot[] {
  * step records the model that answered (agent.ts), so a run half-served by the fallback says so.
  */
 export function resilientModel(slots: ModelSlot[]): Model {
-  return async (params) => {
+  return async (params, opts) => {
     for (const s of slots) {
       if (!modelUsable(s.slot)) continue;
       try {
-        const message = await s.call({ ...params, model: s.model });
+        const model = opts?.tier === 'strong' && s.strongModel ? s.strongModel : s.model;
+        const message = await s.call({ ...params, model });
         recordModelOk(s.slot);
         return message;
       } catch (err) {
@@ -237,11 +252,25 @@ function anthropicModel(cfg: AiProviderConfig, retry?: RetryPolicy): Model {
   const cap = cfg.maxOutputTokens;
   return async (params) => {
     try {
-      return await create(cap && params.max_tokens > cap ? { ...params, max_tokens: cap } : params);
+      const fitted = forModel(params);
+      return await create(cap && fitted.max_tokens > cap ? { ...fitted, max_tokens: cap } : fitted);
     } catch (err) {
       throw fromAnthropicError(err);
     }
   };
+}
+
+/**
+ * WHAT THIS MODEL ACCEPTS. The loop asks every model for adaptive thinking and an `effort`; Claude
+ * Haiku 4.5 — the cheap, fast model an acting call is meant for — refuses `effort` and takes thinking
+ * only as a fixed budget, so for it both are dropped (it answers without thinking, which is the point
+ * of a cheap acting call). A structured-output `format` is kept.
+ */
+export function forModel(params: Params): Params {
+  if (!/^claude-haiku-4/.test(params.model)) return params;
+  const { thinking: _thinking, output_config, ...rest } = params;
+  const format = output_config?.format;
+  return { ...rest, ...(format ? { output_config: { format } } : {}) } as Params;
 }
 
 // ---------------------------------------------------------------- openai-compatible

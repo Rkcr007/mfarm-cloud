@@ -146,7 +146,15 @@ export interface Sink {
   record(step: StepRecord): Promise<void>;
 }
 
-export type Model = (params: Anthropic.Beta.MessageCreateParamsNonStreaming) => Promise<Anthropic.Beta.BetaMessage>;
+/**
+ * `tier: 'strong'` asks for the farm's stronger model (`MFARM_AI_STRONG_MODEL`) for this one call — a
+ * Pro plan, or a run that has gone wrong twice running (ADR-0046 §3.7). A provider without one
+ * answers with its usual model.
+ */
+export type Model = (
+  params: Anthropic.Beta.MessageCreateParamsNonStreaming,
+  opts?: { tier?: 'strong' },
+) => Promise<Anthropic.Beta.BetaMessage>;
 
 export type StopReason =
   | 'cancelled' | 'interrupted' | 'budget' | 'step_cap' | 'no_action'
@@ -173,6 +181,11 @@ export interface AgentOptions {
   secrets?: RunSecrets;
   /** How long the loop waits for screens; production uses the defaults, tests wind them down. */
   timing?: Partial<AgentTiming>;
+  /**
+   * The stronger model to escalate to, when the farm has one. Acting calls use `modelId` — the fast,
+   * cheap one; the Pro plan and the call after two turns in a row went wrong use this.
+   */
+  strongModelId?: string;
 }
 
 /**
@@ -380,6 +393,8 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
   let trouble = false;
   /** The element list a turn's actions were decided on, to tell the next turn whether they did anything. */
   let actedOn: string | null = null;
+  /** Turns in a row that went wrong. Two, and the next call goes to the stronger model. */
+  let rough = 0;
   /** Pro: the verdict awaiting confirmation on a fresh screen, when the screen could not confirm it. */
   let pendingVerdict: { passed: boolean } | null = null;
 
@@ -391,6 +406,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
   const call = async (
     content: Anthropic.Beta.BetaContentBlockParam[],
     withTools: boolean,
+    strong = false,
   ): Promise<{ message: Anthropic.Beta.BetaMessage; startedAt: Date; t0: number } | AgentOutcome> => {
     if (calls >= cap) return stop('step_cap', `Stopped after ${cap} AI turns without a verdict.`);
     const blocked = await sink.beforeStep(calls + 1);
@@ -405,7 +421,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     let message: Anthropic.Beta.BetaMessage;
     try {
       message = await model({
-        model: modelId,
+        model: strong && opts.strongModelId ? opts.strongModelId : modelId,
         max_tokens: 16000,
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         ...(withTools
@@ -414,7 +430,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
         thinking: { type: 'adaptive' },
         output_config: { effort: spec.effort },
         messages: [{ role: 'user', content }],
-      });
+      }, strong ? { tier: 'strong' } : undefined);
     } catch (err) {
       calls--; // a call that never returned was not billed and did not happen
       return stop('model_error', modelFailureWords(err));
@@ -477,7 +493,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
       { type: 'text', text: `TASK:\n${task}\n\nBefore acting, write a short numbered plan: the checkpoints `
         + 'that would prove this task done, in order, and what on screen would confirm each. Do not call a tool.' },
       ...observationBlocks(first, screen, imageFor(first.elements, { first: true, trouble: false, verifying: false })),
-    ], false);
+    ], false, true);
     if ('status' in r) return r;
     plan = hide(stripToolMarkup(textOf(r.message))) || null;
     await record({
@@ -501,6 +517,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     const unchanged = actedOn !== null && formatUiTree(obs.elements) === actedOn;
     actedOn = null;
     const image = imageFor(obs.elements, { first: turns === 0, trouble: trouble || unchanged, verifying: pendingVerdict !== null });
+    rough = trouble || unchanged ? rough + 1 : 0;
     trouble = false;
     turns++;
 
@@ -518,7 +535,7 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
         : null,
     ].filter(Boolean).join('\n\n');
 
-    const r = await call([{ type: 'text', text: prompt }, ...observationBlocks(obs, screen, image)], true);
+    const r = await call([{ type: 'text', text: prompt }, ...observationBlocks(obs, screen, image)], true, rough >= 2);
     if ('status' in r) return r;
     const m = r.message;
     const thoughtText = hide(stripToolMarkup(textOf(m)));

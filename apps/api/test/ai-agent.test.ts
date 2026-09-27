@@ -82,10 +82,12 @@ function phone(screen: string, goto: Array<{ box: [number, number, number, numbe
 
 type Tool = { tool: string; input: Record<string, unknown> };
 
-function scripted(turns: Tool[][]): Model & { calls: Anthropic.Beta.MessageCreateParamsNonStreaming[] } {
+function scripted(turns: Tool[][]): Model & { calls: Anthropic.Beta.MessageCreateParamsNonStreaming[]; tiers: Array<string | null> } {
   const calls: Anthropic.Beta.MessageCreateParamsNonStreaming[] = [];
-  const m = (async (params: Anthropic.Beta.MessageCreateParamsNonStreaming) => {
+  const tiers: Array<string | null> = [];
+  const m = (async (params: Anthropic.Beta.MessageCreateParamsNonStreaming, opts?: { tier?: string }) => {
     calls.push(params);
+    tiers.push(opts?.tier ?? null);
     const turn = turns.shift() ?? [];
     const content = params.tools
       ? turn.map((t, i) => ({ type: 'tool_use', id: `tu_${calls.length}_${i}`, name: t.tool, input: { why: 'because', ...t.input } }))
@@ -95,8 +97,9 @@ function scripted(turns: Tool[][]): Model & { calls: Anthropic.Beta.MessageCreat
       stop_reason: turn.length ? 'tool_use' : 'end_turn', stop_sequence: null,
       usage: { input_tokens: 2000, output_tokens: 120, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     } as unknown as Anthropic.Beta.BetaMessage;
-  }) as Model & { calls: typeof calls };
+  }) as Model & { calls: typeof calls; tiers: typeof tiers };
   m.calls = calls;
+  m.tiers = tiers;
   return m;
 }
 
@@ -445,4 +448,36 @@ test('shrinkPng averages each footprint, leaves small images alone, and refuses 
   const tiny = phonePng(108, 240);
   assert.equal(shrinkPng(tiny, 768), tiny);
   assert.equal(shrinkPng('iVBORw0KGgo=', 768), null);
+});
+
+// ---------------------------------------------------------------- 1c: which model a call goes to
+
+test('two turns in a row that went wrong send the next call to the stronger model; a good turn goes back', async () => {
+  const model = scripted([
+    [{ tool: 'tap_element', input: { index: 9 } }],
+    [{ tool: 'tap_element', input: { index: 9 } }],
+    [{ tool: 'type_text', input: { index: 0, text: 'asha@example.test', submit: false } }],
+    [{ tool: 'finish', input: { passed: true, summary: 'ok', evidence: 'ok', expect: 'Log in' } }],
+  ]);
+  await runAgent({
+    task: 'Type the email', profile: 'flash', device: phone(LOGIN), sink: sink(), model, modelId: 'fast-model',
+    strongModelId: 'strong-model', timing: FAST,
+  });
+  assert.deepEqual(model.calls.map((c) => c.model), ['fast-model', 'fast-model', 'strong-model', 'fast-model']);
+  assert.deepEqual(model.tiers, [null, null, 'strong', null]);
+});
+
+test('Pro writes its plan on the stronger model and acts on the fast one', async () => {
+  const model = scripted([[], loginTurn]);
+  await runAgent({
+    task: 'Log in as asha', profile: 'pro', device: phone(LOGIN, [{ box: [390, 1160, 690, 1260], to: HOME }]),
+    sink: sink(), model, modelId: 'fast-model', strongModelId: 'strong-model', timing: FAST,
+  });
+  assert.deepEqual(model.calls.map((c) => c.model), ['strong-model', 'fast-model']);
+});
+
+test('with no stronger model every call uses the one model', async () => {
+  const model = scripted([[], loginTurn]);
+  await run('Log in as asha', phone(LOGIN, [{ box: [390, 1160, 690, 1260], to: HOME }]), model, sink(), 'pro');
+  assert.deepEqual(model.calls.map((c) => c.model), ['test-model', 'test-model']);
 });

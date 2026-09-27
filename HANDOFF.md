@@ -4993,3 +4993,14 @@ when the feature is broken. See issues 37 and 38.
     The first version of the test phone did not show what was typed into it, so every typing turn
     read as "changed nothing" and earned a screenshot; the fake now behaves like a field. One planted
     bug (no look after a failure) hid behind that same rule until the test made the screen change.
+
+100. **A CALL IS NOW BILLED AT WHAT IT USED, AND A RUN CAN USE A CHEAP MODEL.** 2026-09-27, ADR-0046
+    phase 1c. The flat ₹4/₹9 per call is gone: a call is billed from its measured tokens × its
+    model's list price × 3, up to the paisa (`ai/pricing.ts`); a diagnosis too. On the farm's Groq model
+    a typical call is well under a rupee. A model the table does not know is billed as Sonnet 5 and the
+    boot log says so — never free (`MFARM_AI_PRICES` names others). `MFARM_AI_STRONG_MODEL` lets
+    `MFARM_AI_MODEL` be the fast, cheap one: the Pro plan and the call after two turns in a row went
+    wrong go to the strong one. **`deploy/docker-compose.prod.yml` must name every new variable** or it
+    never reaches the container — both are added. A planted rounding bug first slipped past its test,
+    because the "exact" example (₹2.55) happens to be exact in floating point; 58,000 tokens (₹14.79,
+    computed 14.790000000000003) is not.

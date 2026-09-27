@@ -1,8 +1,8 @@
 import { withTenant } from '../db.ts';
-import { AI_CURRENCY, AI_PROFILES } from './pricing.ts';
+import { AI_CURRENCY, estimateInr } from './pricing.ts';
 import { spendThisMonth } from './budget.ts';
 import { modelHalfOpen, modelUsable, providerHealth } from './health.ts';
-import type { ModelSlot } from './provider.ts';
+import { aiModelId, type ModelSlot } from './provider.ts';
 
 /**
  * CAN AN AI RUN START RIGHT NOW — one go / no-go, and the reason in words (ADR-0044).
@@ -175,10 +175,10 @@ export async function devicesCheck(orgId: string, platform: 'android' | 'ios', r
   return { ...base, ok: true, message: `${ready} of ${total} ${os} device${total === 1 ? '' : 's'} free${where}.` };
 }
 
-/** Whether the budget can pay for the cheapest step — the same sum every door checks (queue.ts). */
+/** Whether the budget can pay for the cheapest typical call — the same sum every door checks (queue.ts). */
 export async function budgetCheck(orgId: string): Promise<ReadinessCheck & { spentInr: number; budgetInr: number }> {
   const { spentInr, budgetInr } = await spendThisMonth(orgId);
-  const cheapest = Math.min(...Object.values(AI_PROFILES).map((p) => p.priceInr));
+  const cheapest = Math.min(estimateInr('flash', aiModelId()), estimateInr('pro', aiModelId()));
   const left = Math.max(0, budgetInr - spentInr);
   if (spentInr + cheapest > budgetInr) {
     return { ok: false, spentInr, budgetInr,

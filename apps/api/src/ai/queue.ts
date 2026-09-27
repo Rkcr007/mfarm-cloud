@@ -1,9 +1,9 @@
 import { withTenant } from '../db.ts';
 import { spendThisMonth } from './budget.ts';
 import { ApiError, conflict } from '../http/errors.ts';
-import { AI_CURRENCY, AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
+import { AI_CURRENCY, AI_PROFILES, estimateInr, isAiProfile, type AiProfile } from './pricing.ts';
 import { aiReadiness } from './readiness.ts';
-import type { ModelSlot } from './provider.ts';
+import { aiModelId, type ModelSlot } from './provider.ts';
 
 /**
  * PUTTING AN AI RUN IN THE QUEUE — the one writer, whoever asks (ADR-0043).
@@ -103,10 +103,10 @@ export async function queueAiRun(orgId: string, input: QueueInput, gate?: QueueG
     }
   }
 
-  // Refused up front when the budget cannot pay for even one step. A run that would run out
-  // part-way is allowed to start and stops cleanly at the step that would overspend.
+  // Refused up front when the budget cannot pay for even one typical call. A run that would run out
+  // part-way is allowed to start and stops cleanly at the call that would overspend.
   const { spentInr, budgetInr } = await spendThisMonth(orgId);
-  if (spentInr + spec.priceInr > budgetInr) {
+  if (spentInr + estimateInr(profile, aiModelId()) > budgetInr) {
     throw conflict('ai_budget_exhausted',
       `This organisation has spent ${AI_CURRENCY}${spentInr} of its ${AI_CURRENCY}${budgetInr} monthly AI budget. `
       + 'Raise the budget or wait for next month.');
