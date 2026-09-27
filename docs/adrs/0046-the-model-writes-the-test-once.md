@@ -206,8 +206,11 @@ Each phase ships and is verified on the farm before the next starts; each is mea
      (`MFARM_AI_PARALLEL_TOOLS`) — on for Anthropic, off for OpenAI-compatible servers — and an
      unreadable tool call is asked for again with one tool an answer. On a one-action model the other
      savings stay: no call to tap a field, to wait, to press Allow or to confirm a verdict the screen
-     shows; smaller images; the measured price. Batching for such models needs one tool that takes a
-     list of actions — a later change, measured first.
+     shows; smaller images; the measured price. Verified on the farm: 3 of 3 eval tasks passed.
+   - **Batching for one-action models — `fill_form`:** across screens nothing can be batched (the model
+     has not seen the next one), so the answer that pays is a form: every field on one screen and the
+     button that sends it, in one call. Offered only in one-action mode, run as the `type_text` and
+     `tap_element` steps it stands for. The eval's form task was 7 calls; this makes it 5.
    - **1c — the right model, the real price:** the model table and routing; every call's actual cost
      recorded; §6's pricing.
    Exit: a login authoring run in ≤ 4 calls on the eval.
