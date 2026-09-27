@@ -255,6 +255,20 @@ export function findByText(node: unknown, text: string, tag = 'button'): any {
   return hits[hits.length - 1] ?? null;
 }
 
+/** Every control `findByText` would choose among, in document order — for a list of rows each with its own button. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function findAllByText(node: unknown, text: string, tag = 'button'): any[] {
+  const hits: ShimElement[] = [];
+  const walk = (n: unknown) => {
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (!(n instanceof ShimElement)) return;
+    if (n.tagName === tag.toUpperCase() && textOf(n).trim() === text) hits.push(n);
+    n.children.forEach(walk);
+  };
+  walk(node);
+  return hits;
+}
+
 export function classesOf(node: unknown): string[] {
   if (Array.isArray(node)) return node.flatMap(classesOf);
   if (!(node instanceof ShimNode)) return [];

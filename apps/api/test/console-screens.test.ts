@@ -24,7 +24,7 @@ import { readFile, readdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { installDom, countElements, classesOf, textOf, findByClass, findByText } from './dom-shim.ts';
+import { installDom, countElements, classesOf, textOf, findByClass, findByText, findAllByText } from './dom-shim.ts';
 /**
  * The hub's own capability allow-list, imported so the console cannot document a different one.
  *
@@ -6412,6 +6412,28 @@ describe('the AI testing screen', () => {
     const again = mod.SCREENS.ai();
     assert.equal(findByText(again, 'Start AI run').disabled, false, 'a go re-enables it — the poll, not a reload');
     assert.match(textOf(again), /Model\s+Ready/);
+  });
+
+  test('while the model is down, a saved test with a route can still Run — it replays without AI (ADR-0046)', () => {
+    seed({ name: 'ai', lens: 'tests' });
+    const bare = mod.state.ai.tests[0];
+    mod.state.ai.tests = [
+      { ...bare, id: 'aitest-routed', name: 'Routed login', routeVersion: 2 },
+      { ...bare, id: 'aitest-bare', name: 'Bare checkout', routeVersion: null },
+    ];
+    mod.state.ai.readiness = modelDown();
+    const tree = mod.SCREENS.ai();
+    const text = textOf(tree);
+    assert.match(text, /Tests with a saved route still run — they replay it without AI/);
+    assert.match(text, /route v2/);
+    // The routed test's Run is enabled; the bare one's is not, and says why.
+    const runs = findAllByText(tree, 'Run');
+    assert.deepEqual(runs.map((b) => b.disabled), [false, true]);
+    assert.match(runs[1].getAttribute('title') ?? '', /daily allowance/);
+
+    // A stopped host stops both: a replay needs a device.
+    mod.state.ai.readiness = hostStopped();
+    assert.deepEqual(findAllByText(mod.SCREENS.ai(), 'Run').map((b) => b.disabled), [true, true]);
   });
 
   test('a stopped host names the fix, and explaining a failure needs the model but not a device', () => {

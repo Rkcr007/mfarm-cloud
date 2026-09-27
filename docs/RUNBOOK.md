@@ -393,7 +393,7 @@ curl -s -H "Authorization: Bearer $KEY" "https://farm.mfarm.dev/v1/ai/readiness?
 
 | It says | What it means | What to do |
 |---|---|---|
-| *daily allowance … is used up* | The provider's free tier cap (429 with a long wait) | Wait for the time shown, or add a fallback |
+| *daily allowance … is used up* | The provider's free tier cap (429 with a long wait) | Wait for the time shown, or add a fallback. Saved tests with a route (`route vN`) still run — they replay without AI (ADR-0046) |
 | *is rate-limiting* | A per-minute cap | Nothing; it lifts within a minute |
 | *no credit left* / *rejected* / *not available to this key* | 402 / 401 / 404 — the key itself | Fix the key or model; re-checked every 15 minutes |
 | *device host is stopped* | Every device of that platform is quarantined by a stop | Start it: Infrastructure › Hosts |

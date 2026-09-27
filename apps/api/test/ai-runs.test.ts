@@ -1195,6 +1195,124 @@ describe('nothing is started that cannot finish (ADR-0044)', () => {
     }
   });
 
+  // ADR-0046 phase 2, found on the farm 2026-09-27: the provider's daily allowance ran out and a run
+  // that needed no model at all was refused like any other.
+  const routeTurn = { tools: [
+    { tool: 'type_text', input: { index: 0, text: 'a@b.co', submit: false, why: 'the e-mail' } },
+    { tool: 'tap_element', input: { index: 1, why: 'log in' } },
+    { tool: 'finish', input: { passed: true, summary: 'Signed in', evidence: 'Log in', expect: 'Log in', why: 'done' } },
+  ] };
+  const savedWithRoute = async (name: string, prompt: string) => {
+    const t = (await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA),
+      payload: { name, prompt, region: REGION } })).json().aiTest as { id: string };
+    scripts.set(prompt, [routeTurn]);
+    const id = await queueAiRun(orgA, { prompt, region: REGION, aiTestId: t.id, trigger: 'test' }, { ...gate, mode: 'require' });
+    assert.equal((await settle(id)).aiRun.status, 'passed', 'the first pass keeps the route');
+    await resetFleetKeepingRuns();
+    return t.id;
+  };
+  const dailyCapSpent = () => recordModelFailure('primary',
+    new ModelError('429 from test', { status: 429, retryAfterMs: 3_600_000, body: 'tokens per day (TPD)' }));
+
+  test('with the model down, a saved test with a route is let in at the door and replays; one without is refused', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    try {
+      const routed = await savedWithRoute('Down but routed', 'Sign in while the model sleeps');
+      const bare = (await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA),
+        payload: { name: 'Down and bare', prompt: 'Sign in with no route yet', region: REGION } })).json().aiTest as { id: string };
+      dailyCapSpent();
+      calls.length = 0;
+
+      const id = await queueAiRun(orgA, { prompt: 'Sign in while the model sleeps', region: REGION, aiTestId: routed, trigger: 'test' },
+        { ...gate, mode: 'require' });
+      const done = await settle(id);
+      assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
+      assert.equal(calls.length, 0, 'and not one model call');
+      assert.equal((done.aiRun as { planVersion?: number }).planVersion, 1);
+
+      await assert.rejects(
+        queueAiRun(orgA, { prompt: 'Sign in with no route yet', region: REGION, aiTestId: bare.id, trigger: 'test' }, { ...gate, mode: 'require' }),
+        (err: { code: string; details: { blocking: string } }) => err.code === 'ai_not_ready' && err.details.blocking === 'model');
+
+      // The list says which can run: the console keeps Run for a test with a route.
+      const list = (await app.inject({ method: 'GET', url: '/v1/ai/tests', headers: auth(keyA) })).json() as
+        { aiTests: Array<{ id: string; routeVersion: number | null }> };
+      assert.equal(list.aiTests.find((x) => x.id === routed)!.routeVersion, 1);
+      assert.equal(list.aiTests.find((x) => x.id === bare.id)!.routeVersion, null);
+    } finally {
+      resetProviderHealth();
+    }
+  });
+
+  test('with the model down, the runner starts the replayable run and leaves the rest queued until it is back', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    try {
+      const routed = await savedWithRoute('Queued and routed', 'Sign in from the upload queue');
+      const bare = (await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA),
+        payload: { name: 'Queued and bare', prompt: 'Look around after the upload', region: REGION } })).json().aiTest as { id: string };
+      scripts.set('Look around after the upload', [
+        { tool: 'finish', input: { passed: true, summary: 'Fine', evidence: 'Log in', expect: 'Log in', why: 'done' } },
+      ]);
+      dailyCapSpent();
+
+      // An upload's runs are deferred rather than refused (ADR-0044); the bare one is queued FIRST.
+      const waiting = await queueAiRun(orgA, { prompt: 'Look around after the upload', region: REGION, aiTestId: bare.id, trigger: 'upload' },
+        { ...gate, mode: 'defer' });
+      const replaying = await queueAiRun(orgA, { prompt: 'Sign in from the upload queue', region: REGION, aiTestId: routed, trigger: 'upload' },
+        { ...gate, mode: 'defer' });
+      assert.equal((await settle(replaying)).aiRun.status, 'passed', 'claimed past the one ahead of it, and replayed');
+      assert.equal(await statusOf(waiting), 'queued', 'the one that needs a model still waits for it');
+
+      await resetFleetKeepingRuns(); // the stub farm does not reset a device after a session
+      recordModelOk('primary');
+      assert.equal((await settle(waiting)).aiRun.status, 'passed', 'and starts by itself once the model is back');
+    } finally {
+      resetProviderHealth();
+    }
+  });
+
+  test('a route does not get a run past a stopped host — a replay needs a device', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    try {
+      const routed = await savedWithRoute('Routed, host off', 'Sign in on a stopped host');
+      dailyCapSpent();
+      await withSystem((c) => c.query(
+        `UPDATE devices SET state = 'QUARANTINED', quarantined_at = now(), quarantine_source = 'host',
+                quarantine_reason = 'its host was stopped: operator request' WHERE host_id = $1`, [hostId]));
+      await assert.rejects(
+        queueAiRun(orgA, { prompt: 'Sign in on a stopped host', region: REGION, aiTestId: routed, trigger: 'test' }, { ...gate, mode: 'require' }),
+        (err: { code: string; message: string; details: { blocking: string } }) => {
+          assert.equal(err.details.blocking, 'devices', 'the devices say no, not the model');
+          assert.match(err.message, /device host is stopped.*Nothing was queued/);
+          return true;
+        });
+    } finally {
+      resetProviderHealth();
+    }
+  });
+
+  test('a replayable run is never given up for a model it does not need', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    try {
+      const routed = await savedWithRoute('Routed, long queued', 'Sign in after a long night');
+      dailyCapSpent();
+      // Queued seven hours ago (the control plane was down, say) — inserted old, so the runner cannot
+      // claim it in the moment before it is aged.
+      const id = await withSystem(async (c) => (await c.query<{ id: string }>(
+        `INSERT INTO ai_runs (org_id, prompt, profile, platform, region, step_cap, ai_test_id, trigger, created_at)
+         VALUES ($1, 'Sign in after a long night', 'flash', 'android', $2, 40, $3, 'upload', now() - interval '7 hours')
+         RETURNING id`, [orgA, REGION, routed])).rows[0]!.id);
+      const done = await settle(id);
+      assert.equal(done.aiRun.status, 'passed', `replayed, not given up: ${done.aiRun.summary}`);
+    } finally {
+      resetProviderHealth();
+    }
+  });
+
   test('a provider let back in by the clock is probed with one tiny request before a device is taken', async () => {
     await resetFleet();
     resetProviderHealth();

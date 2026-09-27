@@ -11,7 +11,7 @@ import { aiParallelTools, aiProviderConfig, aiStrongModelId, configuredSlots, en
 import { aiRunNames, redact, secretsIn } from './secrets.ts';
 import { runAgent, type AgentOutcome, type AgentTiming, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 import { loadRunSecrets } from './secret-store.ts';
-import { keepRoute, latestPlan } from './plan-store.ts';
+import { hasRouteSql, keepRoute, latestPlan } from './plan-store.ts';
 
 /**
  * THE AI RUN RUNNER — takes queued AI runs and drives each to a verdict (ADR-0043).
@@ -104,11 +104,17 @@ export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void
    * by `ai-runs.test.ts`). "Nothing queued" now means "claim nothing", which also keeps an idle farm
    * from spending a probe.
    */
-  const readyToClaim = async (): Promise<boolean> => {
+  /**
+   * …EXCEPT A RUN THAT NEEDS NO MODEL (ADR-0046 phase 2). A saved test with a route replays it without
+   * one, so while the provider is down those runs are still claimed — and never given up on — and the
+   * rest wait. Found on the farm 2026-09-27: the provider's daily allowance ran out and a replayable run
+   * was refused like any other.
+   */
+  const readyToClaim = async (): Promise<'all' | 'replayable' | false> => {
     if (!(await anyQueued())) return false;
-    if (await ensureModelReady(slots)) return true;
+    if (await ensureModelReady(slots)) return 'all';
     await giveUpWaiting(maxWaitMs, modelUnavailable(slots).message);
-    return false;
+    return 'replayable';
   };
 
   const tick = async () => {
@@ -116,8 +122,9 @@ export function startAiRunner(app: FastifyInstance, opts: AiRunnerOptions): void
     ticking = true;
     try {
       while (!closing && inFlight.size < opts.maxConcurrent) {
-        if (slots.length && !(await readyToClaim())) break;
-        const run = await claimNext();
+        const may = slots.length ? await readyToClaim() : 'all';
+        if (!may) break;
+        const run = await claimNext(may === 'replayable');
         if (!run) break;
         const p = driveRun(app, run, { model, modelId: opts.modelId, store, isClosing: () => closing })
           .catch((err: Error) => app.log.error({ err, aiRun: run.id }, 'ai run crashed'))
@@ -215,18 +222,20 @@ async function anyQueued(): Promise<boolean> {
 async function giveUpWaiting(maxWaitMs: number, why: string): Promise<void> {
   const hours = Math.max(1, Math.round(maxWaitMs / 3_600_000));
   await withSystem((c) => c.query(
-    `UPDATE ai_runs SET status = 'error', stop_reason = 'model_error', ended_at = now(), summary = $2
-      WHERE status = 'queued' AND created_at < now() - make_interval(secs => $1::double precision)`,
+    `UPDATE ai_runs r SET status = 'error', stop_reason = 'model_error', ended_at = now(), summary = $2
+      WHERE status = 'queued' AND created_at < now() - make_interval(secs => $1::double precision)
+        AND NOT ${hasRouteSql('r')}`,
     [maxWaitMs / 1000, `Not started: the AI model stayed unavailable for ${maxWaitMs < 3_600_000 ? 'too long' : `${hours} hour${hours === 1 ? '' : 's'}`}, `
       + `so this run was given up. Nothing was billed. ${why}`.slice(0, 1000)],
   ));
 }
 
-async function claimNext(): Promise<ClaimedRun | null> {
+async function claimNext(replayableOnly = false): Promise<ClaimedRun | null> {
   return withSystem(async (c) => {
     const { rows } = await c.query<ClaimedRun>(
       `UPDATE ai_runs SET status = 'running', started_at = now()
-        WHERE id = (SELECT id FROM ai_runs WHERE status = 'queued'
+        WHERE id = (SELECT id FROM ai_runs r WHERE status = 'queued'
+                       ${replayableOnly ? `AND ${hasRouteSql('r')}` : ''}
                      ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
         RETURNING id, org_id, prompt, profile, platform, region, app_ref, step_cap, ai_test_id`,
     );

@@ -409,6 +409,7 @@ interface TestRow {
   app_package: string | null; run_on_upload: boolean; created_at: Date; updated_at: Date;
   created_by_email: string | null;
   recent: { id: string; status: string; at: string }[] | null;
+  route_version: number | null;
 }
 
 function testJson(t: TestRow) {
@@ -421,6 +422,11 @@ function testJson(t: TestRow) {
     createdBy: t.created_by_email,
     // Newest first — a saved test's history is the question "has this been passing?".
     recent: t.recent ?? [],
+    /**
+     * The route its next run replays without AI (ADR-0046 phase 2), or null: the model drives it. Such a
+     * test can run while the model provider is down — the console keeps its Run button.
+     */
+    routeVersion: t.route_version ?? null,
   };
 }
 
@@ -428,7 +434,10 @@ const TEST_SELECT = `SELECT t.id, t.name, t.prompt, t.profile, t.platform, t.reg
        t.created_at, t.updated_at, u.email AS created_by_email,
        (SELECT json_agg(json_build_object('id', r.id, 'status', r.status, 'at', r.created_at) ORDER BY r.created_at DESC)
           FROM (SELECT id, status, created_at FROM ai_runs WHERE ai_test_id = t.id
-                 ORDER BY created_at DESC LIMIT 10) r) AS recent
+                 ORDER BY created_at DESC LIMIT 10) r) AS recent,
+       (SELECT max(p.version) FROM ai_test_plans p
+         WHERE p.ai_test_id = t.id AND p.platform = t.platform
+           AND p.prompt_sha256 = encode(sha256(convert_to(t.prompt, 'UTF8')), 'hex')) AS route_version
   FROM ai_tests t LEFT JOIN users u ON u.id = t.created_by`;
 
 const TEST_BODY = {
