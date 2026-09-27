@@ -4,6 +4,7 @@ import { ApiError, conflict } from '../http/errors.ts';
 import { AI_CURRENCY, AI_PROFILES, estimateInr, isAiProfile, type AiProfile } from './pricing.ts';
 import { aiReadiness } from './readiness.ts';
 import { aiModelId, type ModelSlot } from './provider.ts';
+import { latestPlan } from './plan-store.ts';
 
 /**
  * PUTTING AN AI RUN IN THE QUEUE — the one writer, whoever asks (ADR-0043).
@@ -93,12 +94,18 @@ export async function queueAiRun(orgId: string, input: QueueInput, gate?: QueueG
 
   if (gate) {
     const r = await aiReadiness(orgId, { platform, region, slots: gate.slots, injected: gate.injected });
-    const deferrable = gate.mode === 'defer' && r.blocking === 'model';
+    // A saved test with a route replays it without a model (ADR-0046 phase 2): when the model is all
+    // that says no, it is let through — the devices and the budget still decide.
+    const replayable = r.blocking === 'model' && input.aiTestId
+      ? Boolean(await latestPlan(orgId, input.aiTestId, input.prompt, platform))
+      : false;
+    const blocking = replayable ? (r.checks.devices.ok ? null : 'devices') : r.blocking;
+    const deferrable = gate.mode === 'defer' && blocking === 'model';
     // Budget keeps its own 409 below, which callers already branch on.
-    if (!r.ready && r.blocking !== 'budget' && !deferrable) {
-      const c = r.checks[r.blocking!];
-      throw new ApiError(503, 'ai_not_ready', `${r.message} Nothing was queued.`, {
-        blocking: r.blocking, retryAt: c.retryAt ?? null, action: c.action ?? null,
+    if (blocking && blocking !== 'budget' && !deferrable) {
+      const c = r.checks[blocking];
+      throw new ApiError(503, 'ai_not_ready', `${blocking === r.blocking ? r.message : c.message} Nothing was queued.`, {
+        blocking, retryAt: c.retryAt ?? null, action: c.action ?? null,
       });
     }
   }

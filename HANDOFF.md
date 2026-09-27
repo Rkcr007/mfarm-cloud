@@ -5040,3 +5040,12 @@ when the feature is broken. See issues 37 and 38.
     was refused at the door (`503 ai_not_ready`): the readiness gate wants a model every run needs,
     and a replay does not. That is the next change. Groq's daily cap is also why the free tier cannot
     serve customers (~45 model steps a day).
+
+105. **A SAVED TEST WITH A ROUTE RUNS WHILE THE MODEL IS DOWN.** 2026-09-27, the gap entry 104 found.
+    ADR-0044's gate asked for a model every run needs; a replay needs none. Now, with the provider
+    down: the door lets a routed saved test in (devices and budget still decide), the runner claims
+    routed runs past the ones waiting for the model and never gives them up (`hasRouteSql` — the task
+    hashed in SQL the way `promptSha` hashes it in JS, which holds because tasks are stored trimmed),
+    the tests list carries `routeVersion`, and the console keeps Run with a `route vN` chip. Two
+    planted bugs first went uncaught (a routed run past a stopped host; a routed run given up after a
+    long queue) — both now have tests.

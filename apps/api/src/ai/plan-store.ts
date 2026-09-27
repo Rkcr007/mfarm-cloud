@@ -7,6 +7,17 @@ import { compilePlan, type PlanStep, type RecordedStep, type RunPlan } from './p
  * that replays a route never imports the database.
  */
 
+/**
+ * SQL: whether a route exists for the run or test row aliased `alias` (its `ai_test_id` or `id`,
+ * `prompt` and `platform`). Tasks are stored trimmed (queue.ts, the tests route), so hashing the stored
+ * text in SQL gives what `promptSha` gives in JS — one definition of "this task's route" on both sides.
+ */
+export function hasRouteSql(alias: string, testIdColumn = 'ai_test_id'): string {
+  return `EXISTS (SELECT 1 FROM ai_test_plans p WHERE p.ai_test_id = ${alias}.${testIdColumn}
+            AND p.platform = ${alias}.platform
+            AND p.prompt_sha256 = encode(sha256(convert_to(${alias}.prompt, 'UTF8')), 'hex'))`;
+}
+
 /** A plan belongs to the words it was written for: an edited test's old route is not replayed. */
 export function promptSha(prompt: string): string {
   return createHash('sha256').update(prompt.trim()).digest('hex');

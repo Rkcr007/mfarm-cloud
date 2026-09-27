@@ -231,8 +231,11 @@ Each phase ships and is verified on the farm before the next starts; each is mea
    model calls and ₹0 — API Demos' form in 31 s (the model-driven run: 5 calls, ₹3.07, 106 s), a
    Settings search in 17 s (4 calls, ₹2.53, 72 s). **Found:** a run that could replay was refused at
    the door because the provider's daily allowance was spent — ADR-0044's readiness gate asks for a
-   model every run needs, and a replay does not. Letting such a run through (and handing over only on
-   a miss) is the next change.
+   model every run needs, and a replay does not. **Fixed the same day:** while the model is down, the
+   door lets in a saved test's run when it has a route (the devices and the budget still decide), the
+   runner claims such runs past the ones waiting for the model and never gives them up, the tests list
+   says `routeVersion`, and the console keeps Run for a test with a route. A replay that misses then
+   hands over to a model that is still down, and the run ends `model_error` with where it got to.
 3. **Shared sub-flows** per app package. Exit: a second saved test on the same app replays its login.
 4. **Pricing** — whichever §6 option the owner chooses; console reads it from `/v1/ai/pricing`.
 5. **Only if volume justifies it:** a self-hosted grounding model (UI-TARS / Qwen-VL class) for

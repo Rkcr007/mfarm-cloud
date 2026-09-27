@@ -12428,16 +12428,23 @@ function aiSaveRow(off) {
 function aiTestsCard(off) {
   const ai = state.ai;
   if (!ai.testsLoaded || !ai.tests.length) return null;
-  // One sentence for the whole card, not a tooltip on each button: the reason is the same for all.
+  // One sentence for the whole card, not a tooltip on each button: the reason is the same for all —
+  // except that a test with a saved route needs no model, so a model that is down does not stop it.
   const blocked = aiBlocked();
+  const replayBlocked = aiBlocked('replay');
+  const routed = ai.tests.some((t) => t.routeVersion);
+  const pausedWords = blocked && blocked !== replayBlocked && routed
+    ? `Paused: ${blocked.message} Tests with a saved route still run — they replay it without AI.`
+    : blocked ? `Paused: ${blocked.message}` : null;
   return card('Saved tests', { aside: h('span', { class: 'caption', text: `${ai.tests.length}` }) },
-    blocked ? h('p', { class: 'caption ai-row-why mb-sm', text: `Paused: ${blocked.message}` }) : null,
+    pausedWords ? h('p', { class: 'caption ai-row-why mb-sm', text: pausedWords }) : null,
     h('div', { class: 'stack' }, ai.tests.map((t) => (ai.edit?.id === t.id ? aiTestEditor(t) : h('div', { class: 'inset row between fit' },
       h('div', { class: 'stack tight shrink' },
         h('span', { class: 'row tight' },
           h('strong', { text: t.name }),
           h('span', { class: 'chip', text: t.profile === 'pro' ? 'Pro' : 'Flash' }),
-          t.runOnUpload ? h('span', { class: 'chip', text: 'every upload', title: `Runs on each new build of ${t.appPackage}` }) : null),
+          t.runOnUpload ? h('span', { class: 'chip', text: 'every upload', title: `Runs on each new build of ${t.appPackage}` }) : null,
+          t.routeVersion ? h('span', { class: 'chip', text: `route v${t.routeVersion}`, title: 'Its next run replays the route its last pass took — no AI, unless the app changed' }) : null),
         h('p', { class: 'caption ai-row-prompt', text: t.prompt.length > 140 ? `${t.prompt.slice(0, 140)}…` : t.prompt }),
         // The last ten verdicts, newest first — "has this been passing?" at a glance.
         t.recent.length
@@ -12449,7 +12456,10 @@ function aiTestsCard(off) {
           : h('span', { class: 'caption', text: 'Never run' }),
       ),
       h('span', { class: 'row tight' },
-        btn('Run', '', () => void runAiTest(t), { disabled: off || Boolean(blocked), title: blocked?.message || null }),
+        btn('Run', '', () => void runAiTest(t), {
+          disabled: off || Boolean(t.routeVersion ? replayBlocked : blocked),
+          title: (t.routeVersion ? replayBlocked : blocked)?.message || null,
+        }),
         btn('Edit', 'tiny ghost', () => void editAiTest(t), { disabled: off || Boolean(ai.edit), title: 'Change its name, task, mode or run-on-upload' }),
         btn('Archive', 'tiny ghost', () => void archiveAiTest(t), { title: 'Hide it; its past runs keep its name' })),
     )))));
@@ -12776,7 +12786,10 @@ function aiReady() {
 function aiBlocked(kind = 'run') {
   const r = aiReady();
   if (!r) return null;
-  const order = kind === 'explain' ? ['configured', 'model', 'budget'] : ['configured', 'model', 'devices', 'budget'];
+  // A saved test with a route replays it without a model (ADR-0046 phase 2): only the rest can stop it.
+  const order = kind === 'explain' ? ['configured', 'model', 'budget']
+    : kind === 'replay' ? ['configured', 'devices', 'budget']
+    : ['configured', 'model', 'devices', 'budget'];
   const key = order.find((k) => r.checks[k] && !r.checks[k].ok);
   return key ? r.checks[key] : null;
 }
