@@ -300,6 +300,12 @@ export const state = {
     draft: { prompt: '', profile: 'flash', platform: 'android', appId: '', region: '' },
     /** Saved tests (C6). `save` is the name box under the prompt — in state for the draft's reason. */
     tests: [], testsLoaded: false, testsLoading: false,
+    /**
+     * The org's secrets (ADR-0045): NAMES only — the API never returns a value. `secretForm.value` is
+     * the one place a value exists in the console, from the moment it is typed until it is saved.
+     */
+    secrets: { items: [], loaded: false, loading: false },
+    secretForm: { name: '', value: '', busy: false },
     save: { open: false, name: '', runOnUpload: false, busy: false },
     /** Failure diagnoses (C8), by session id: `{ items, loaded, loading, busy }`. */
     diag: {},
@@ -1951,12 +1957,12 @@ export function parseHash(hash = location.hash) {
   // that a reload mid-bring-up rejoins the same session rather than allocating a second device.
   if (name === 'launch' && id) return { name: 'launching', id };
   /**
-   * `#/ai` is the list, `#/ai/new` the form and `#/ai/tests` the saved tests (2026-09-27); `#/ai/<id>`
-   * is one run. The list's filters ride in the query — `#/ai?status=failed&q=login` — see
-   * `aiListFilter`. "new" and "tests" can never be a run: a run's id is a uuid.
+   * `#/ai` is the list, `#/ai/new` the form, `#/ai/tests` the saved tests and `#/ai/secrets` the
+   * org's secrets (2026-09-27); `#/ai/<id>` is one run. The list's filters ride in the query —
+   * `#/ai?status=failed&q=login` — see `aiListFilter`. None of these can be a run: a run's id is a uuid.
    */
   if (name === 'ai') {
-    if (id === 'new' || id === 'tests') return { name: 'ai', id: null, lens: id, intent };
+    if (id === 'new' || id === 'tests' || id === 'secrets') return { name: 'ai', id: null, lens: id, intent };
     if (id) return { name: 'airun', id, intent };
     return { name: 'ai', id: null, lens: 'runs', intent };
   }
@@ -11393,7 +11399,7 @@ function aiMoney(n) {
  * IN THE URL, like Infrastructure's sections — `#/ai`, `#/ai/new`, `#/ai/tests` — so each one can be
  * linked, bookmarked, and reached with the browser's own Back.
  */
-const AI_SECTIONS = [['runs', 'Runs'], ['new', 'New run'], ['tests', 'Saved tests']];
+const AI_SECTIONS = [['runs', 'Runs'], ['new', 'New run'], ['tests', 'Saved tests'], ['secrets', 'Secrets']];
 
 /** How many runs the list asks for. The search reads these, so the page says when it is only these. */
 const AI_LIST_LIMIT = 100;
@@ -11488,6 +11494,8 @@ function screenAi() {
   if (!ai.pricing && !ai.pricingLoading) void loadAiPricing();
   if (!ai.testsLoaded && !ai.testsLoading) void loadAiTests();
   const section = AI_SECTIONS.some(([k]) => k === state.route.lens) ? state.route.lens : 'runs';
+  // The form lists them too, so a person can write `{{PIN}}` without leaving it.
+  if ((section === 'secrets' || section === 'new') && !ai.secrets.loaded && !ai.secrets.loading) void loadAiSecrets();
   const off = Boolean(ai.pricing && ai.pricing.configured === false);
   const moving = ai.runs.filter((r) => AI_ACTIVE.has(r.status)).length;
   const b = ai.pricing?.budget;
@@ -11509,11 +11517,137 @@ function screenAi() {
       ))),
     h('div', { class: 'split' },
       h('div', { class: 'content' },
-        section === 'new' ? aiNewRun(off) : section === 'tests' ? aiTestsSection(off) : aiRunsSection()),
+        section === 'new' ? aiNewRun(off) : section === 'tests' ? aiTestsSection(off)
+          : section === 'secrets' ? aiSecretsSection() : aiRunsSection()),
       // The budget is the one side card that changes what somebody does next (proposal 19). "What
       // it is for" and the MCP pitch were the same paragraphs on every visit; they are under New run.
       h('div', { class: 'rail' }, b ? aiBudgetCard(b) : null)),
   ];
+}
+
+/**
+ * A PIN OR A PASSWORD GOES IN AS ITS NAME (ADR-0045): under the task box, the org's secrets as
+ * `{{NAME}}`s that add themselves to the task, and the way to save one. The model never sees a value.
+ */
+function aiSecretHint(off) {
+  const s = state.ai.secrets;
+  const names = s.loaded ? s.items.map((x) => x.name) : [];
+  return h('p', { class: 'caption mt-xs row wrap tight' },
+    h('span', { text: names.length
+      ? 'A PIN or a password? Write its name — the model never sees the value:'
+      : 'A PIN or a password? Save it as a secret and write {{PIN}} here — the model never sees the value.' }),
+    ...names.map((n) => btn(`{{${n}}}`, 'tiny ghost mono', () => {
+      const p = state.ai.draft.prompt;
+      state.ai.draft = { ...state.ai.draft, prompt: `${p}${p && !/\s$/.test(p) ? ' ' : ''}{{${n}}}` };
+      render();
+    }, { disabled: off, title: `Add {{${n}}} to the task` })),
+    btn(names.length ? 'Secrets' : 'Save one', 'tiny', () => go('#/ai/secrets')));
+}
+
+const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,39}$/;
+
+/**
+ * THE ORG'S SECRETS (ADR-0045). Names go out; values only come in. There is no way to see a value
+ * again — not here, not through the API — so "Replace" asks for it afresh, and a secret that no
+ * longer opens (the farm's signing key was rotated) says so, before a run finds out.
+ */
+function aiSecretsSection() {
+  const s = state.ai.secrets;
+  const f = state.ai.secretForm;
+  const form = card('Save a secret', {},
+    h('p', { class: 'caption', text: 'A task names a secret as {{PIN}} and never holds it. The value is typed '
+      + 'into the device where the agent types the name. The model is never shown it, and nothing shows it '
+      + 'again — not this page, not the API. To change one, save it again.' }),
+    h('div', { class: 'row wrap mt-sm' },
+      h('div', { class: 'stack tight' },
+        h('label', { class: 'micro', for: 'ai-secret-name', text: 'Name' }),
+        h('input', {
+          class: 'field mono', id: 'ai-secret-name', maxlength: '40', placeholder: 'PIN', autocomplete: 'off',
+          spellcheck: 'false', value: f.name,
+          oninput: (e) => {
+            const v = e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+            state.ai.secretForm = { ...state.ai.secretForm, name: v };
+            if (e.target.value !== v) e.target.value = v;
+          },
+        })),
+      h('div', { class: 'stack tight' },
+        h('label', { class: 'micro', for: 'ai-secret-value', text: 'Value' }),
+        h('input', {
+          class: 'field', id: 'ai-secret-value', type: 'password', maxlength: '500', autocomplete: 'new-password',
+          value: f.value,
+          oninput: (e) => { state.ai.secretForm = { ...state.ai.secretForm, value: e.target.value }; },
+        }))),
+    f.name && !SECRET_NAME_RE.test(f.name)
+      ? h('p', { class: 'caption warn-text mt-xs', text: 'A name starts with a letter: PIN, LOGIN_EMAIL.' })
+      : null,
+    h('p', { class: 'mt-sm' }, btn(f.busy ? 'Saving…' : 'Save', 'primary', () => void saveAiSecret(),
+      { disabled: f.busy || !SECRET_NAME_RE.test(f.name) || !f.value })));
+
+  const list = card('Saved secrets', { aside: s.loaded ? h('span', { class: 'caption', text: String(s.items.length) }) : null },
+    !s.loaded
+      ? h('p', { class: 'caption', text: 'Loading…' })
+      : !s.items.length
+        ? empty('No secrets yet.', 'Save a PIN or a password above, then write {{PIN}} in a task.')
+        : h('div', { class: 'ai-rows' }, s.items.map((x) => h('div', { class: 'row between ai-secret-row' },
+            h('div', { class: 'stack tight' },
+              h('span', { class: 'mono', text: x.placeholder }),
+              h('span', { class: 'caption', text: `Saved ${when(x.updatedAt)}${x.updatedBy ? ` by ${x.updatedBy}` : ''}` })),
+            h('div', { class: 'row tight' },
+              x.readable ? null : pill('cannot be read — save it again', 'warn', { dot: false }),
+              btn('Replace', 'tiny', () => {
+                state.ai.secretForm = { name: x.name, value: '', busy: false };
+                render();
+                setTimeout(() => $('ai-secret-value')?.focus(), 0);
+              }),
+              btn('Remove', 'tiny ghost', () => askRemoveAiSecret(x)))))));
+  return [form, list];
+}
+
+async function loadAiSecrets() {
+  if (state.ai.secrets.loading) return;
+  state.ai.secrets = { ...state.ai.secrets, loading: true };
+  try {
+    const out = await api('/v1/ai/secrets');
+    state.ai.secrets = { items: out.aiSecrets || [], loaded: true, loading: false };
+  } catch {
+    state.ai.secrets = { items: [], loaded: true, loading: false };
+  }
+  scheduleRender();
+}
+
+export async function saveAiSecret() {
+  const f = state.ai.secretForm;
+  state.ai.secretForm = { ...f, busy: true };
+  render();
+  try {
+    await api(`/v1/ai/secrets/${encodeURIComponent(f.name)}`, { method: 'PUT', body: { value: f.value } });
+    // Gone from the console the moment the farm has it.
+    state.ai.secretForm = { name: '', value: '', busy: false };
+    toast('Secret saved', `Write {{${f.name}}} in a task. The value is not shown again.`, 'ok');
+    await loadAiSecrets();
+  } catch (e) {
+    state.ai.secretForm = { ...state.ai.secretForm, busy: false };
+    toast('Could not save the secret', e.message, 'bad');
+  }
+  render();
+}
+
+function askRemoveAiSecret(x) {
+  confirmDialog({
+    title: `Remove ${x.placeholder}?`,
+    lead: 'A task that names it is refused until it is saved again, and a saved test that types it fails that step.',
+    removes: [`The value saved as ${x.placeholder}`],
+    confirm: 'Remove',
+    onConfirm: async () => {
+      try {
+        await api(`/v1/ai/secrets/${encodeURIComponent(x.name)}`, { method: 'DELETE' });
+        toast('Secret removed', `${x.placeholder} is gone.`, '');
+      } catch (e) {
+        toast('Could not remove the secret', e.message, 'bad');
+      }
+      await loadAiSecrets();
+    },
+  });
 }
 
 function aiBudgetCard(b) {
@@ -11636,10 +11770,13 @@ function aiNewRun(off) {
     h('label', { class: 'micro', for: 'ai-prompt', text: 'What should happen' }),
     h('textarea', {
       class: 'field ai-prompt', id: 'ai-prompt', rows: '5', maxlength: '4000', disabled: off,
-      placeholder: 'e.g. Open the app, log in as demo@acme.test with password demo1234, add any shirt '
+      // The example writes the password the way it should be written (ADR-0045): it used to model
+      // exactly the habit that put a real PIN on a public share page (D52).
+      placeholder: 'e.g. Open the app, log in as demo@acme.test with password {{PASSWORD}}, add any shirt '
         + 'to the cart, and check the cart shows 1 item.',
       oninput: (e) => { state.ai.draft = { ...state.ai.draft, prompt: e.target.value }; },
     }, d.prompt),
+    aiSecretHint(off),
     h('div', { class: 'row wrap mt-sm' },
       h('div', { class: 'stack tight' },
         h('span', { class: 'micro', text: 'Mode' }),
@@ -12091,6 +12228,19 @@ function closeAiPanel() {
 }
 
 /**
+ * WHY A RUN HAS NO RECORDING, in words true on every farm. A farm keeps the recordings of FAILED runs
+ * unless it is set to keep them all, so a passed run normally has none — found on the farm 2026-09-27,
+ * where a passed run's panel blamed the farm's settings and the retention window instead.
+ */
+export function noRecordingWords(run) {
+  return run?.status === 'passed'
+    ? 'No recording was kept: this run passed, and a farm keeps the recordings of failed runs unless it is '
+      + 'set to keep them all. The log is here.'
+    : 'No recording was kept for this run — recording may be off on this farm, or it has passed its '
+      + 'retention window. The log may still be there.';
+}
+
+/**
  * RECORDING & LOG IN A PANEL BESIDE THE RUN (proposal 14). "Recording & log" used to leave for the
  * session cockpit, which is built for driving a device and is a great deal to take in for a run
  * that has finished.
@@ -12145,8 +12295,7 @@ export function paintAiPanel() {
         ? h('p', { class: 'caption', text: 'Loading…' })
         : video
           ? videoPlayer(video, [])
-          : h('p', { class: 'caption', text: 'No recording was kept for this run — recording may be off on this farm, '
-              + 'or it has passed its retention window. The log may still be there.' }));
+          : h('p', { class: 'caption', text: noRecordingWords(run) }));
     }
   } else {
     aiPanelSlots.key = '';
@@ -13592,7 +13741,7 @@ export function documentTitle() {
     // Masked by the API before it ever gets here, so a PIN in a task never reaches a tab or history.
     title = run?.prompt ? `AI run · ${aiClip(run.prompt, 60)}` : 'AI run';
   } else if (r.name === 'ai') {
-    title = r.lens === 'new' ? 'New AI run' : r.lens === 'tests' ? 'Saved AI tests' : 'AI testing';
+    title = r.lens === 'new' ? 'New AI run' : r.lens === 'tests' ? 'Saved AI tests' : r.lens === 'secrets' ? 'AI secrets' : 'AI testing';
   } else if (r.name === 'run') {
     title = `Run ${state.runDetail?.run?.runId || String(r.id || '').slice(0, 8)}`;
   } else if (r.name === 'cockpit') {

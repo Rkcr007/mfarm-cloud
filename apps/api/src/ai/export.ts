@@ -1,4 +1,5 @@
 import type { ActionTarget } from './agent.ts';
+import { secretNamesIn, secretParts } from './vault.ts';
 
 /**
  * AN AI RUN, AS A SCRIPT (ADR-0043, capability C9).
@@ -60,6 +61,17 @@ function locatorFor(t: ActionTarget | null | undefined, platform: 'android' | 'i
 const js = (v: string) => JSON.stringify(v);
 const py = (v: string) => JSON.stringify(v); // JSON string literals are valid Python string literals
 
+/**
+ * WHAT A STEP TYPED, AS CODE. A secret the agent typed as `{{PIN}}` (ADR-0045) becomes `secret("PIN")`,
+ * read from the environment when the script runs: the value was never in the run, so it is never in
+ * the file either. Both languages spell it the same way.
+ */
+function typedExpr(text: string): string {
+  const parts = secretParts(text);
+  if (!parts.some((p) => 'secret' in p)) return js(text);
+  return parts.map((p) => ('secret' in p ? `secret(${js(p.secret)})` : js(p.text))).join(' + ');
+}
+
 function wdioSelector(l: Exclude<Locator, { by: 'point' }>, platform: 'android' | 'ios'): string {
   if (l.by === 'accessibility') return js(`~${l.value}`);
   if (l.by === 'id') return js(`id=${l.value}`);
@@ -113,12 +125,12 @@ function stepLines(lang: ScriptLang, s: ExportStep, platform: 'android' | 'ios')
       const lines = [head];
       if (loc && loc.by !== 'point') {
         lines.push(W
-          ? `driver.find_element(${pyLocator(loc, platform)}).send_keys(${py(text)})`
-          : `await $(${wdioSelector(loc, platform)}).setValue(${js(text)});`);
+          ? `driver.find_element(${pyLocator(loc, platform)}).send_keys(${typedExpr(text)})`
+          : `await $(${wdioSelector(loc, platform)}).setValue(${typedExpr(text)});`);
       } else {
         lines.push(W
-          ? `driver.switch_to.active_element.send_keys(${py(text)})`
-          : `await driver.keys(${js(text)}.split(''));`);
+          ? `driver.switch_to.active_element.send_keys(${typedExpr(text)})`
+          : `await driver.keys((${typedExpr(text)}).split(''));`);
       }
       if (i.submit === true) lines.push(...(stepLines(lang, { ...s, action: { tool: 'press_key', input: { key: 'enter' } } }, platform) ?? []).slice(1));
       return lines;
@@ -164,6 +176,9 @@ export function exportScript(lang: ScriptLang, run: ExportRun, steps: ExportStep
     ...(fragile ? [`${fragile} tap(s) had no stable locator and use fixed coordinates — search for FRAGILE.`] : []),
   ];
   const hub = `${hubOrigin.replace(/\/+$/, '')}/wd/hub`;
+  // The secrets the exported route types, each read from the environment by that name.
+  const secretNames = secretNamesIn(done.map((s) => (s.action?.tool === 'type_text' ? String(s.action.input.text ?? '') : '')).join('\n'));
+  const envHint = secretNames.map((n) => `${n}=… `).join('');
   const platformName = run.platform === 'ios' ? 'iOS' : 'Android';
   const automation = run.platform === 'ios' ? 'XCUITest' : 'UiAutomator2';
 
@@ -178,7 +193,7 @@ export function exportScript(lang: ScriptLang, run: ExportRun, steps: ExportStep
     return [
       comment('python', verdictNote.join('\n')),
       '#',
-      '# pip install Appium-Python-Client pytest   ·   MFARM_API_KEY=mfk_… pytest this_file.py',
+      `# pip install Appium-Python-Client pytest   ·   ${envHint}MFARM_API_KEY=mfk_… pytest this_file.py`,
       'import base64',
       'import os',
       'import time',
@@ -192,6 +207,16 @@ export function exportScript(lang: ScriptLang, run: ExportRun, steps: ExportStep
       `HUB = ${py(hub)}`,
       'KEY = os.environ["MFARM_API_KEY"]',
       '',
+      ...(secretNames.length ? [
+        '',
+        'def secret(name):',
+        '    # A {{NAME}} the task typed. Its value is never in this file: set it in the environment.',
+        '    value = os.environ.get(name)',
+        '    if not value:',
+        '        raise RuntimeError(f"Set {name} in the environment: this test types it")',
+        '    return value',
+        '',
+      ] : []),
       '',
       'class _AuthConnection(AppiumConnection):',
       '    # The key as an Authorization header: several HTTP stacks drop https://key@host userinfo.',
@@ -242,9 +267,18 @@ export function exportScript(lang: ScriptLang, run: ExportRun, steps: ExportStep
   return [
     comment('webdriverio', verdictNote.join('\n')),
     '//',
-    '// npm i -D webdriverio   ·   MFARM_API_KEY=mfk_… npx tsx this_file.ts',
+    `// npm i -D webdriverio   ·   ${envHint}MFARM_API_KEY=mfk_… npx tsx this_file.ts`,
     "import { remote } from 'webdriverio';",
     '',
+    ...(secretNames.length ? [
+      '// A {{NAME}} the task typed. Its value is never in this file: set it in the environment.',
+      'function secret(name: string): string {',
+      '  const value = process.env[name];',
+      '  if (!value) throw new Error(`Set ${name} in the environment: this test types it`);',
+      '  return value;',
+      '}',
+      '',
+    ] : []),
     `const hub = new URL(${js(hub)});`,
     '',
     'async function main() {',

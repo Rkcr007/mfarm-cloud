@@ -238,6 +238,9 @@ function aiState(over: Record<string, unknown> = {}) {
     },
     detailLoading: false,
     draft: { prompt: '', profile: 'flash', platform: 'android', appId: '', region: '' },
+    // Named secrets (ADR-0045): names only, as the API answers.
+    secrets: { items: [], loaded: true, loading: false },
+    secretForm: { name: '', value: '', busy: false },
     tests: [{
       id: 'aitest-1', name: 'Checkout smoke', prompt: 'Add a shirt and check out', profile: 'flash', platform: 'android',
       region: null, appPackage: 'com.acme.app', runOnUpload: true, createdBy: 'someone@mfarm.local',
@@ -6620,6 +6623,96 @@ describe('the AI testing screen', () => {
     tree = mod.SCREENS.airun();
     assert.equal(findByClass(tree, 'ai-mark-box'), null);
     assert.doesNotMatch(textOf(tree), /Outlined/);
+  });
+
+  describe('named secrets (ADR-0045)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const byId = (node: any, id: string): any => {
+      if (Array.isArray(node)) { for (const n of node) { const f = byId(n, id); if (f) return f; } return null; }
+      if (!node || typeof node !== 'object') return null;
+      if (node.id === id || node.getAttribute?.('id') === id) return node;
+      for (const c of node.children ?? []) { const f = byId(c, id); if (f) return f; }
+      return null;
+    };
+    const SAVED = [
+      { name: 'PIN', placeholder: '{{PIN}}', readable: true, updatedAt: new Date().toISOString(), updatedBy: 'qa@example.org' },
+      { name: 'OLD_CODE', placeholder: '{{OLD_CODE}}', readable: false, updatedAt: new Date().toISOString(), updatedBy: null },
+    ];
+    function stubFetch() {
+      const sent: { url: string; method: string; body: any }[] = [];
+      (globalThis as any).fetch = async (url: string, init: { method?: string; body?: string } = {}) => {
+        sent.push({ url: String(url), method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
+        const answer = String(url).endsWith('/v1/ai/secrets') ? { aiSecrets: SAVED } : { aiSecret: { name: 'PIN' } };
+        return { ok: true, status: 200, text: async () => JSON.stringify(answer) };
+      };
+      return sent;
+    }
+
+    test('they have their own tab and address, and the list shows names and trouble — never a value', () => {
+      assert.deepEqual(mod.parseHash('#/ai/secrets'), { name: 'ai', id: null, lens: 'secrets', intent: mod.parseHash('#/ai/secrets').intent },
+        '"secrets" is a tab, not a run id');
+      seed({ name: 'ai', lens: 'secrets' });
+      mod.state.ai.secrets = { items: SAVED, loaded: true, loading: false };
+      const tree = mod.SCREENS.ai();
+      assert.equal(findByText(tree, 'Secrets').getAttribute('aria-selected'), 'true');
+      const text = textOf(tree);
+      assert.match(text, /\{\{PIN\}\}/);
+      assert.match(text, /\{\{OLD_CODE\}\}/);
+      assert.equal((text.match(/cannot be read — save it again/g) ?? []).length, 1, 'only the one sealed under another key');
+      assert.equal(mod.documentTitle(), 'AI secrets · MFARM');
+    });
+
+    test('saving sends the value once and then forgets it; a name that is not one cannot be saved', async () => {
+      seed({ name: 'ai', lens: 'secrets' });
+      mod.state.ai.secrets = { items: [], loaded: true, loading: false };
+      const sent = stubFetch();
+      const name = byId(mod.SCREENS.ai(), 'ai-secret-name');
+      name.dispatch('input', { target: { value: 'login email' } });
+      assert.equal(mod.state.ai.secretForm.name, 'LOGIN_EMAIL', 'kept to the shape a task can name');
+
+      mod.state.ai.secretForm = { name: '1PIN', value: 'x', busy: false };
+      assert.equal(findByText(mod.SCREENS.ai(), 'Save').disabled, true, 'a name must start with a letter');
+
+      mod.state.ai.secretForm = { name: 'PIN', value: '4812', busy: false };
+      findByText(mod.SCREENS.ai(), 'Save').click();
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+      const put = sent.find((x) => x.method === 'PUT')!;
+      assert.equal(put.url, '/v1/ai/secrets/PIN');
+      assert.deepEqual(put.body, { value: '4812' });
+      assert.deepEqual(mod.state.ai.secretForm, { name: '', value: '', busy: false }, 'gone from the console once the farm has it');
+    });
+
+    test('Remove asks first, then deletes', async () => {
+      seed({ name: 'ai', lens: 'secrets' });
+      mod.state.ai.secrets = { items: SAVED, loaded: true, loading: false };
+      const sent = stubFetch();
+      findByText(mod.SCREENS.ai(), 'Remove').click();
+      assert.equal(sent.length, 0, 'nothing is removed by the first press');
+      const dialog = (globalThis as any).document.getElementById('dialog');
+      assert.match(textOf(dialog), /Remove \{\{OLD_CODE\}\}\?/);
+      findByText(dialog, 'Remove').click();
+      await new Promise((r) => setTimeout(r, 0));
+      assert.deepEqual(sent.filter((x) => x.method === 'DELETE').map((x) => x.url), ['/v1/ai/secrets/OLD_CODE']);
+      mod.closeOverlays();
+    });
+
+    test('New run offers the saved names, adds one to the task, and its example writes a password by name', () => {
+      seed({ name: 'ai', lens: 'new' });
+      mod.state.ai.secrets = { items: SAVED, loaded: true, loading: false };
+      mod.state.ai.draft = { ...mod.state.ai.draft, prompt: 'Log in with' };
+      const tree = mod.SCREENS.ai();
+      assert.match(byId(tree, 'ai-prompt').getAttribute('placeholder') ?? byId(tree, 'ai-prompt').placeholder, /\{\{PASSWORD\}\}/);
+      assert.doesNotMatch(String(byId(tree, 'ai-prompt').getAttribute('placeholder') ?? byId(tree, 'ai-prompt').placeholder), /demo1234/);
+      findByText(tree, '{{PIN}}').click();
+      assert.equal(mod.state.ai.draft.prompt, 'Log in with {{PIN}}');
+    });
+  });
+
+  test('a run with no recording says why in words true on every farm — a passed run is not kept by default', () => {
+    assert.match(mod.noRecordingWords({ status: 'passed' }), /this run passed, and a farm keeps the recordings of failed runs/);
+    assert.doesNotMatch(mod.noRecordingWords({ status: 'passed' }), /retention|may be off/, 'it blamed the farm for a passed run');
+    assert.match(mod.noRecordingWords({ status: 'failed' }), /may be off on this farm, or it has passed its retention window/);
   });
 
   test('the recording and the log open beside the run, the recording survives a render, and Esc closes them first', () => {

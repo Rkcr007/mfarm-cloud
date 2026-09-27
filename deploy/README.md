@@ -94,6 +94,9 @@ $EDITOR deploy/.env                      # every password; none may be blank
 # Secrets are FILES, not variables — the signing key is a multi-line PEM and compose .env cannot
 # hold one. They never reach deploy/.env, `docker inspect`, or `docker compose config`.
 mkdir -p deploy/secrets && chmod 700 deploy/secrets
+# KEEP THIS KEY. Replacing it signs everyone out AND makes every AI secret the org saved unreadable —
+# they are sealed under a key derived from it (ADR-0045); AI testing › Secrets then marks each one
+# "cannot be read — save it again", and a run that types one fails that step until it is.
 openssl genpkey -algorithm ed25519 -out deploy/secrets/session_signing_key.pem
 openssl pkey -in deploy/secrets/session_signing_key.pem -pubout \
   -out deploy/secrets/session_public_key.pem

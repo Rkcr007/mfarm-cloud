@@ -3435,6 +3435,9 @@ kbd {
 .ai-toolbar { gap: 8px 12px; align-items: center; margin-bottom: 10px; }
 .ai-search { width: 220px; max-width: 100%; }
 .ai-rows { display: flex; flex-direction: column; }
+/* One saved secret: its {{NAME}}, when it was set, and what can be done to it — never its value. */
+.ai-secret-row { gap: 12px; padding: 10px 0; border-top: 1px solid var(--b-row, #19191B); }
+.ai-secret-row:first-child { border-top: 0; }
 /* One run, one line — about 40px where a row was 90 (proposal 7). A link, so it opens in a new tab. */
 .airow {
   display: grid;

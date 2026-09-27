@@ -15,6 +15,7 @@ import { configuredSlots } from '../../ai/provider.ts';
 import { aiReadiness } from '../../ai/readiness.ts';
 import { MASK, redact, redactDeep, secretsIn, stripToolMarkup } from '../../ai/secrets.ts';
 import type { QueueGate } from '../../ai/queue.ts';
+import { refuseUnknownSecrets } from '../../ai/secret-store.ts';
 
 /**
  * `/v1/ai` — AI runs: describe a test in English, a real device does it (ADR-0043, C2–C5).
@@ -183,6 +184,7 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       const prompt = req.body.prompt.trim();
       if (!prompt) throw badRequest('The prompt is empty.');
       refuseMaskedPrompt(prompt);
+      await refuseUnknownSecrets(orgId, prompt);
       const id = await queueAiRun(orgId, {
         prompt, profile: req.body.profile, platform: (req.body.platform as 'android' | 'ios') ?? 'android',
         region: req.body.region ?? null, appRef: req.body.appId ?? null, stepCap: req.body.stepCap,
@@ -474,6 +476,7 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
     const { orgId, userId } = requireSpender(req);
     const b = req.body;
     refuseMaskedPrompt(b.prompt!);
+    await refuseUnknownSecrets(orgId, b.prompt!);
     const id = await withTenant(orgId, async (c) => (await c.query<{ id: string }>(
       `INSERT INTO ai_tests (org_id, created_by, name, prompt, profile, platform, region, app_package, run_on_upload)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
@@ -495,7 +498,10 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
     const vals: unknown[] = [orgId, id];
     const put = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
     if (b.name !== undefined) put('name', b.name.trim());
-    if (b.prompt !== undefined) put('prompt', refuseMaskedPrompt(b.prompt).trim());
+    if (b.prompt !== undefined) {
+      put('prompt', refuseMaskedPrompt(b.prompt).trim());
+      await refuseUnknownSecrets(orgId, b.prompt);
+    }
     if (b.profile !== undefined) put('profile', b.profile);
     if (b.platform !== undefined) put('platform', b.platform);
     if (b.region !== undefined) put('region', b.region);
@@ -553,6 +559,8 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
     }>('SELECT prompt, profile, platform, region, app_package FROM ai_tests WHERE org_id = $1 AND id = $2 AND archived_at IS NULL',
       [orgId, id])).rows[0]);
     if (!t) throw notFound('AI test');
+    // Saved while its secrets existed; one may have been removed since.
+    await refuseUnknownSecrets(orgId, t.prompt);
     const runId = await queueAiRun(orgId, {
       prompt: t.prompt, profile: t.profile, platform: t.platform, region: t.region,
       appRef: req.body?.appId ?? (t.app_package ? `${t.app_package}@latest` : null),
