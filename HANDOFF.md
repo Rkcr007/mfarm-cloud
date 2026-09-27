@@ -5059,3 +5059,10 @@ when the feature is broken. See issues 37 and 38.
     that repaired its route says so: "Route repaired: version 1 → 2", with each changed, added or dropped
     step in words. One planted bug first went uncaught — the runner claiming an "always AI" test while
     the model was down — now tested.
+
+107. **REPLAY WHILE THE MODEL IS DOWN, SEEN LIVE.** 2026-09-27, `cd1a251` deployed (migration 066
+    applied; existing saved tests default to `replay: true`), lab up 18:32–18:46 UTC. The saved-test
+    eval: all four runs of the two routed tests replayed with 0 AI calls. The third task then spent
+    Groq's daily allowance again — and with the model's readiness red, `POST /v1/ai/tests/:id/run` on a
+    routed test answered 201 and passed by replay (6 steps, ₹0): #238 on hardware, not only in tests.
+    Scroll-search and the repair diff need an app that changed and were not exercised here.
