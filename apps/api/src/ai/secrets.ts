@@ -32,6 +32,9 @@ export function secretsIn(task: string | null | undefined): string[] {
   for (const re of [AFTER_SEPARATOR, AFTER_SPACE]) {
     for (const m of String(task ?? '').matchAll(re)) {
       const raw = m[1]!;
+      // A secret's NAME — `{{PIN}}` (ADR-0045) — holds nothing and is the form to encourage. Masked,
+      // "password {{PASSWORD}}" read "password ••••}}".
+      if (/^\{\{\s*[A-Z][A-Z0-9_]{0,39}\s*\}\}/.test(raw)) continue;
       const quoted = /^["'].*["']$/.test(raw);
       const value = raw.replace(/^["']|["']$/g, '').replace(/[.)\]}>]+$/, '');
       if (value.length < 3) continue;

@@ -10,6 +10,7 @@ import { spendThisMonth } from './queue.ts';
 import { aiProviderConfig, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
 import { aiRunNames, redact, secretsIn } from './secrets.ts';
 import { runAgent, type AgentOutcome, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
+import { loadRunSecrets } from './secret-store.ts';
 
 /**
  * THE AI RUN RUNNER — takes queued AI runs and drives each to a verdict (ADR-0043).
@@ -490,8 +491,11 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
       },
     };
 
+    // Opened for this run only, and passed to nothing but the agent (ADR-0045).
+    const secrets = await loadRunSecrets(orgId, run.prompt, app.signingKey.privateKeyPem);
     outcome = await runAgent({
       task: run.prompt,
+      secrets,
       profile,
       device: hubDevice(call, sessionId, run.platform),
       sink,

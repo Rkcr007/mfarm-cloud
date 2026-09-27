@@ -40,6 +40,7 @@ import { TunnelRegistry, attachTunnel } from './tunnel.ts';
 import { CustomerTunnelRegistry, mountCustomerTunnel } from './customer-tunnel.ts';
 import { makeProxyRouter } from './proxy-router.ts';
 import { aiRoutes, aiTestRoutes } from './routes/ai.ts';
+import { aiSecretRoutes } from './routes/ai-secrets.ts';
 import { loadConfig } from '../config.ts';
 import { startAiRunner, aiConfigured } from '../ai/runner.ts';
 import { configuredSlots, type ModelSlot } from '../ai/provider.ts';
@@ -677,6 +678,7 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
   await app.register(tunnelRoutes, { prefix: '/v1' });
   await app.register(aiRoutes, { prefix: '/v1', aiModel: opts.aiModel, aiModelId: opts.aiModelId });
   await app.register(aiTestRoutes, { prefix: '/v1', aiModel: opts.aiModel });
+  await app.register(aiSecretRoutes, { prefix: '/v1' });
   // Outside `/v1`: this one serves a page to a person, not JSON to a client, and its path is what
   // gets pasted into a chat window. See `sharePageRoutes`.
   await app.register(sharePageRoutes);

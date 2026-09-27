@@ -76,3 +76,10 @@ test('markup meant for a parser is not shown to a person', () => {
   assert.equal(stripToolMarkup(plan), 'Plan: 1. Open Settings.\n\nAction: open it.');
   assert.equal(stripToolMarkup(null), null);
 });
+
+test('a secret written by NAME is not a secret — {{PIN}} is shown as written, a value beside it is still masked', () => {
+  assert.deepEqual(secretsIn('Log in with pin : {{PIN}} and password {{PASSWORD}}'), []);
+  assert.deepEqual(secretsIn('the passcode is {{PASSCODE}}'), []);
+  assert.equal(redact('password {{PASSWORD}}', secretsIn('password {{PASSWORD}}')), 'password {{PASSWORD}}', 'it read "password ••••}}"');
+  assert.deepEqual(secretsIn('pin : 4812 and passcode {{PASSCODE}}'), ['4812'], 'an inline value in the same task is still found');
+});

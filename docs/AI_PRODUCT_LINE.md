@@ -66,6 +66,7 @@ instead of billing past it.
 | C8 | **AI failure diagnosis** | On a failed run (scripted or AI), explain why from steps + logcat + last screenshot | Complements failure classification (ADR-0039) |
 | C9 | **Export as script** | Turn a passed AI run's actions into a WebdriverIO / pytest script | Moves a customer from AI runs onto the hub, where runs are deterministic and cheap |
 | C10 | **Share an AI run** | Share links carry the trajectory, like result shares | Reuses ADR-0036/0040 |
+| C11 | **Named secrets** | A task writes `{{PIN}}`; the value is saved once per org, sealed, typed into the device and never shown to the model | A task can then be shared, exported and shown on a public link with nothing to hide (ADR-0045) |
 
 ## 3. Tracker
 
@@ -83,6 +84,7 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
 | C8 | AI failure diagnosis | Merged — **failed on hardware, fixed in #214** | #207, #214, #215 | 2026-09-26 on the farm (Groq `qwen/qwen3.8-27b`, Cuttlefish): a 500 — the request was 17.5k tokens and Groq's free tier refuses any over 7k (413), and a model error escaped as "Internal error". #214: a 503 saying what the provider said, nothing billed; `MFARM_AI_MAX_INPUT_TOKENS` trims oldest log lines first. Re-verify after deploy. `POST /v1/ai/diagnoses {sessionId}` (migration 063): the reported failure, last 40 WebDriver commands, the last 250 logcat lines, the last screenshot and any AI steps → one structured call → app_bug / test_bug / environment / unknown + evidence + fix. Billed from the same budget; kept, so it is shown rather than re-bought. "Explain this failure" under every failed result 09-26 after #214: the 503 and the input budget work on the farm; one diagnosis then failed inside Groq's strict JSON mode (`json_validate_failed`) — the same request parsed on 2 of 2 re-sends, so #215 asks once more. |
 | C9 | Export as script | Merged — **defect fixed in #214** | #208, #214 | 2026-09-26 on the farm (Groq `qwen/qwen3.8-27b`, Cuttlefish): both files generated, but the Settings "Display" tap exported as `id=android:id/title` — an id every row shares, so the script taps the first row. #214: a step records which locators are unique on its screen; only those are used. `GET /v1/ai/runs/:id/script?lang=webdriverio\|python`: each step now records the element it landed on (`action.target`); locators best-first (id → accessibility → text → marked FRAGILE coordinates); auth by header exactly as `examples/` do; ends in a TODO assertion, never a fake one. Generated files are parse-checked in tests (TypeScript + Python `ast`), including a hostile prompt |
 | C10 | Share an AI run | **Shipped** | #208 | 2026-09-26 on the farm (Groq `qwen/qwen3.8-27b`, Cuttlefish): a passed run's result link opened anonymously with the task, verdict and every step's screen. "Share" on a passed/failed AI run → the existing result link; the public page adds the task, verdict and every step with its screen (`/v1/shares/:token/ai-steps/:n/screenshot`, scoped to that run). **Typed text is never sent** — only its length |
+| C11 | Named secrets | Merged | #PR | ADR-0045, migration 064. `PUT/GET/DELETE /v1/ai/secrets/:name` — values in, names out, never read back by anyone; sealed with AES-256-GCM under a key derived from the signing key, bound to org and name. The model is told `{{NAME}}` exists and types the placeholder; the runner fills it in at the device and hides any value from the element list and everything recorded. A run or saved test naming an unsaved secret is refused at the door. Export as script writes `secret("PIN")`, read from the environment. Console: AI testing › Secrets; New run offers the names and its example writes `{{PASSWORD}}`. |
 
 ## 4. Open questions and what would change them
 
@@ -113,7 +115,7 @@ Status: `Planned` → `Building` → `Merged` → `Shipped` (deployed and exerci
   provider can serve while the primary cannot, `GET /v1/ai/readiness` is the go / no-go (model,
   devices, budget) that the console's buttons and every door apply, uploads' runs wait for a provider
   to return, and the runner probes a recovering provider with one tiny request before taking a device.
-- **Named secrets — not started (2026-09-27).** Masking (D52) finds a secret by the label before it
+- **Named secrets — built (C11, ADR-0045, 2026-09-27).** Masking (D52) finds a secret by the label before it
   ("pin : …"), so a secret written without one is shown, and the model still sees every value. The
   real fix is a secret the task names — `{{PIN}}` — kept out of the task text and never sent to the
   model, filled in only when the agent types it. Proposal 17 of the 2026-09-27 console review, the one

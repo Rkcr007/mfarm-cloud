@@ -42,6 +42,7 @@ import { ModelError } from '../src/ai/model-error.ts';
 import { resetProbes, type ModelSlot } from '../src/ai/provider.ts';
 import { queueAiRun } from '../src/ai/queue.ts';
 import { buildApk } from './fixtures/apk.ts';
+import { seal, vaultKey } from '../src/ai/vault.ts';
 
 const REGION = 'ai-test';
 let app: FastifyInstance;
@@ -58,6 +59,8 @@ const SOURCE = `<hierarchy>
   <android.widget.Button class="android.widget.Button" text="Log in" resource-id="com.acme:id/login" clickable="true" bounds="[390,1160][690,1260]" displayed="true"/>
 </hierarchy>`;
 const PNG_B64 = Buffer.from('\x89PNG\r\n\x1a\nfake-screen').toString('base64');
+/** What `/source` answers. A test may swap it for one screen and must put SOURCE back. */
+let source = SOURCE;
 
 interface Recorded { method: string; url: string; body: unknown }
 let upstream: Server;
@@ -82,7 +85,7 @@ function startUpstream(): Promise<string> {
       if (u.startsWith('/session/up-1')) {
         if (req.method === 'DELETE' && u === '/session/up-1') return json(200, null);
         if (u.endsWith('/screenshot')) return json(200, PNG_B64);
-        if (u.endsWith('/source')) return json(200, SOURCE);
+        if (u.endsWith('/source')) return json(200, source);
         if (u.endsWith('/window/rect')) return json(200, { x: 0, y: 0, width: 1080, height: 2400 });
         if (u.endsWith('/actions')) return json(200, null);
         if (u.endsWith('/element/active')) {
@@ -1233,5 +1236,122 @@ describe('a model call refused for its size (D54)', () => {
 
     // That the go / no-go stays go is ai-health.test.ts's: this server injects its model, so readiness here
     // answers "Ready." without consulting health at all and could not fail.
+  });
+});
+
+describe('named secrets (ADR-0045)', () => {
+  // A made-up value of the shape that leaked in D52 — never a real one.
+  const PIN = '4812';
+  const put = (name: string, value: string, key = keyA) =>
+    app.inject({ method: 'PUT', url: `/v1/ai/secrets/${name}`, headers: auth(key), payload: { value } });
+  const remove = (name: string, key = keyA) => app.inject({ method: 'DELETE', url: `/v1/ai/secrets/${name}`, headers: auth(key) });
+  const list = async (key = keyA) => (await app.inject({ method: 'GET', url: '/v1/ai/secrets', headers: auth(key) })).json() as {
+    aiSecrets: { name: string; placeholder: string; readable: boolean }[] };
+  const clearSecrets = () => withSystem((c) => c.query('DELETE FROM ai_secrets WHERE org_id = ANY($1)', [[orgA, orgB]]));
+  const errorOf = (body: string) => (JSON.parse(body) as { error: { message: string } }).error.message;
+
+  test('values go in and never come out — names only, to its own org; an automation key cannot change them', async () => {
+    await resetFleet();
+    await clearSecrets();
+    const set = await put('PIN', PIN);
+    assert.equal(set.statusCode, 200, set.body);
+    assert.doesNotMatch(set.body, /4812/, 'not echoed, even to the one who set it');
+    const l = await list();
+    assert.deepEqual(l.aiSecrets.map((x) => [x.name, x.placeholder, x.readable]), [['PIN', '{{PIN}}', true]]);
+    assert.doesNotMatch(JSON.stringify(l), /4812/);
+    const row = (await withSystem((c) => c.query('SELECT sealed FROM ai_secrets WHERE org_id = $1 AND name = $2', [orgA, 'PIN']))).rows[0] as { sealed: Buffer };
+    assert.ok(!row.sealed.includes(Buffer.from(PIN)), 'sealed at rest: a dump or a backup holds ciphertext');
+
+    for (const bad of ['pin', '1PIN', 'PIN-2']) assert.equal((await put(bad, 'x')).statusCode, 400, bad);
+    assert.equal((await put('PIN', 'x', automationKeyA)).statusCode, 403, 'the key a run drives the hub with');
+    assert.equal((await remove('PIN', automationKeyA)).statusCode, 403);
+    assert.deepEqual((await list(keyB)).aiSecrets, [], 'another org sees none of it');
+    assert.equal((await remove('PIN', keyB)).statusCode, 404, 'nor removes it');
+    assert.equal((await remove('PIN')).statusCode, 204);
+    assert.deepEqual((await list()).aiSecrets, [], 'removed is gone');
+  });
+
+  test('a task that names a secret the org does not have is refused at every door', async () => {
+    await resetFleet();
+    await clearSecrets();
+    const before = await runCount();
+    const run = await app.inject({ method: 'POST', url: '/v1/ai/runs', headers: auth(keyA), payload: { prompt: 'Log in with {{PIN}}', region: REGION } });
+    assert.equal(run.statusCode, 400, run.body);
+    assert.match(errorOf(run.body), /\{\{PIN\}\}, which is not a saved secret/);
+    assert.equal(await runCount(), before, 'nothing queued to type braces into the app');
+    assert.equal((await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA), payload: { name: 'Needs a pin', prompt: 'Log in with {{PIN}}' } })).statusCode, 400);
+
+    await put('PIN', PIN);
+    const t = (await app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA), payload: { name: 'Needs a pin', prompt: 'Log in with {{PIN}}' } })).json().aiTest as { id: string };
+    const edit = await app.inject({ method: 'PATCH', url: `/v1/ai/tests/${t.id}`, headers: auth(keyA), payload: { prompt: 'Log in with {{PIN}} and {{PASSCODE}}' } });
+    assert.equal(edit.statusCode, 400);
+    assert.match(errorOf(edit.body), /\{\{PASSCODE\}\}/);
+    await remove('PIN');
+    const again = await app.inject({ method: 'POST', url: `/v1/ai/tests/${t.id}/run`, headers: auth(keyA) });
+    assert.equal(again.statusCode, 400, 'saved while PIN existed, run after it was removed');
+  });
+
+  test('the model never sees a secret: it types the name, the device gets the value, everything kept holds the name', async () => {
+    await resetFleet();
+    await clearSecrets();
+    await put('PIN', PIN);
+    // A plain text field shows what was typed into it — the way the model would otherwise have read it.
+    source = SOURCE.replace('text="" resource-id="com.acme:id/email"', `text="${PIN}" resource-id="com.acme:id/email"`);
+    try {
+      scripts.set('Enter the account pin {{PIN}}', [
+        { tool: 'tap_element', input: { index: 0, why: 'the pin field' } },
+        { tool: 'type_text', input: { text: '{{PIN}}', submit: false, why: 'enter the pin' } },
+        { tool: 'finish', input: { passed: true, summary: 'The pin was accepted', evidence: 'The field is filled', why: 'done' } },
+      ]);
+      const { status, body } = await startRun({ prompt: 'Enter the account pin {{PIN}}', region: REGION });
+      assert.equal(status, 201, JSON.stringify(body));
+      const done = await settle(body.aiRun.id) as unknown as {
+        aiRun: { status: string }; steps: { action: { tool: string; input: { text?: string } } | null }[] };
+      assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
+
+      const sent = JSON.stringify(calls);
+      assert.doesNotMatch(sent, /4812/, 'no request to the model holds the value');
+      assert.match(String(calls[0]!.system && JSON.stringify(calls[0]!.system)), /SECRETS: the task names \{\{PIN\}\}/);
+      const screen = (calls[0]!.messages[0]!.content as { type: string; text?: string }[]).find((b) => b.text?.startsWith('SCREEN'))!.text!;
+      assert.match(screen, /EditText "\{\{PIN\}\}"/, 'where the field showed the value, the model is shown its name');
+
+      const typed = recorded.filter((r) => r.url.endsWith('/value')).map((r) => (r.body as { text: string }).text);
+      assert.deepEqual(typed, [PIN], 'the device got the value — once, where the model typed its name');
+      assert.equal(done.steps[1]!.action!.input.text, '{{PIN}}', 'the step keeps what the model sent');
+      const kept = await withSystem((c) => c.query('SELECT thought, action::text, result FROM ai_steps WHERE ai_run_id = $1', [body.aiRun.id]));
+      assert.doesNotMatch(JSON.stringify(kept.rows) + JSON.stringify(done), /4812/, 'nor does anything the run kept');
+
+      for (const lang of ['python', 'webdriverio']) {
+        const script = (await app.inject({ method: 'GET', url: `/v1/ai/runs/${body.aiRun.id}/script?lang=${lang}&origin=${encodeURIComponent('https://farm.example.test')}`, headers: auth(keyA) })).body;
+        assert.match(script, /secret\("PIN"\)/, `${lang}: typed as the environment's PIN`);
+        assert.match(script, /PIN=… MFARM_API_KEY/, `${lang}: and says to set it`);
+        assert.doesNotMatch(script, /4812/, `${lang}: the file never holds the value`);
+        if (lang === 'python') {
+          execFileSync('python3', ['-c', 'import ast,sys; ast.parse(sys.stdin.read())'], { input: script });
+        } else {
+          const out = ts.transpileModule(script, { reportDiagnostics: true, compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
+          assert.deepEqual((out.diagnostics ?? []).map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n')), []);
+        }
+      }
+    } finally {
+      source = SOURCE;
+    }
+  });
+
+  test('a secret sealed under another signing key fails its step in words — and nothing is typed', async () => {
+    await resetFleet();
+    await clearSecrets();
+    await withSystem((c) => c.query('INSERT INTO ai_secrets (org_id, name, sealed) VALUES ($1, $2, $3)',
+      [orgA, 'PIN', seal(vaultKey('a signing key this farm never had'), orgA, 'PIN', PIN)]));
+    assert.deepEqual((await list()).aiSecrets.map((x) => [x.name, x.readable]), [['PIN', false]], 'the console can say so before a run finds out');
+    scripts.set('Type the rotated pin {{PIN}}', [
+      { tool: 'tap_element', input: { index: 0, why: 'the pin field' } },
+      { tool: 'type_text', input: { text: '{{PIN}}', why: 'enter the pin' } },
+      { tool: 'finish', input: { passed: false, summary: 'Could not enter the pin', evidence: 'Field empty', why: 'stuck' } },
+    ]);
+    const { body } = await startRun({ prompt: 'Type the rotated pin {{PIN}}', region: REGION });
+    const done = await settle(body.aiRun.id);
+    assert.match(String(done.steps[1]!.result), /\{\{PIN\}\} could not be read .*set it again/);
+    assert.equal(recorded.filter((r) => r.url.endsWith('/value')).length, 0, 'not the braces, not anything');
   });
 });
