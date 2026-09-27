@@ -226,6 +226,13 @@ Each phase ships and is verified on the farm before the next starts; each is mea
    a run that then passes is the next version. The steps show `replayed` / `by rule`; the run's details
    name the route version. **Not built:** scroll-search for a step's element, a `regression`/`explore`
    switch on a saved test (every saved test replays once it has a route), and a heal diff on the page.
+
+   **Measured on the farm (2026-09-27, Groq qwen3.8-27b):** a saved test's second run replayed with 0
+   model calls and ₹0 — API Demos' form in 31 s (the model-driven run: 5 calls, ₹3.07, 106 s), a
+   Settings search in 17 s (4 calls, ₹2.53, 72 s). **Found:** a run that could replay was refused at
+   the door because the provider's daily allowance was spent — ADR-0044's readiness gate asks for a
+   model every run needs, and a replay does not. Letting such a run through (and handing over only on
+   a miss) is the next change.
 3. **Shared sub-flows** per app package. Exit: a second saved test on the same app replays its login.
 4. **Pricing** — whichever §6 option the owner chooses; console reads it from `/v1/ai/pricing`.
 5. **Only if volume justifies it:** a self-hosted grounding model (UI-TARS / Qwen-VL class) for
