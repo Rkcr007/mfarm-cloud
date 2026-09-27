@@ -229,6 +229,8 @@ export const SMALL_IMAGE_EDGE = 768;
 export const MAX_ACTIONS_PER_TURN = 6;
 /** Interruptions cleared by rule in one run, at most — a prompt that keeps coming back is the app's. */
 const MAX_RULE_STEPS = 5;
+/** Scrolls a replay makes looking down a list for a route step's element, before a model is asked. */
+export const MAX_REPLAY_SCROLLS = 3;
 
 // ---------------------------------------------------------------- the model's tools
 
@@ -562,6 +564,19 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     from: Observation,
   ): Promise<AgentOutcome | { missed: string; screen: Observation }> => {
     let obs = from;
+    /** A step the replay took on its own — a scroll looking for an element — recorded like a route step. */
+    const own = async (tool: string, input: Record<string, unknown>, why: string): Promise<string> => {
+      const startedAt = new Date();
+      const t0 = Date.now();
+      const result = hide(await act(device, tool, input, obs.elements, screen, secrets, timing));
+      await record({
+        phase: 'act', thought: why, action: { tool, input: { ...input, why }, target: null, screen },
+        result, screenshotB64: obs.screenshotB64 || null, elementCount: obs.elements.length,
+        usage: { ...NO_USAGE }, model: 'replay', billed: false, startedAt, durationMs: Date.now() - t0,
+      });
+      history.push(`${n}. ${describeAction(tool, input, obs.elements)} — ${why} → ${result} (replayed)`);
+      return result;
+    };
     for (const [i, ps] of plan.steps.entries()) {
       const startedAt = new Date();
       const t0 = Date.now();
@@ -579,7 +594,21 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
           }
         }
         const what = ps.target?.text ?? ps.target?.label ?? ps.target?.id ?? ps.tool;
-        if (!el) return { missed: `step ${i + 1} (${ps.intent || ps.tool}): “${what}” is not on the screen`, screen: await see(false) };
+        // Not there, and not coming: perhaps further down a list. Scrolled DOWN for it only — scrolling up
+        // at the top of a list is pull-to-refresh — until it shows or the list stops moving.
+        let scrolled = 0;
+        while (!el && ps.target && scrolled < MAX_REPLAY_SCROLLS) {
+          const before = formatUiTree(obs.elements);
+          if (await own('scroll', { direction: 'down', search: true }, `looking further down for “${what}”`) !== 'ok') break;
+          obs = await clearInterruptions(await see(true));
+          if (formatUiTree(obs.elements) === before) break; // the end of the list
+          scrolled++;
+          el = locate(ps.target, obs.elements);
+        }
+        if (!el) {
+          const looked = scrolled ? ` — not after ${scrolled} scroll${scrolled === 1 ? '' : 's'} down either` : '';
+          return { missed: `step ${i + 1} (${ps.intent || ps.tool}): “${what}” is not on the screen${looked}`, screen: await see(false) };
+        }
       }
       const input = el ? { ...ps.input, index: el.index } : ps.input;
       let result: string;

@@ -6436,6 +6436,57 @@ describe('the AI testing screen', () => {
     assert.deepEqual(findAllByText(mod.SCREENS.ai(), 'Run').map((b) => b.disabled), [true, true]);
   });
 
+  test('a test set to ask the AI every run says so, and a model outage pauses it like any other', () => {
+    seed({ name: 'ai', lens: 'tests' });
+    const bare = mod.state.ai.tests[0];
+    mod.state.ai.tests = [{ ...bare, id: 'aitest-explore', name: 'Explore', routeVersion: 3, replay: false }];
+    mod.state.ai.readiness = modelDown();
+    const tree = mod.SCREENS.ai();
+    assert.match(textOf(tree), /AI every run/);
+    assert.doesNotMatch(textOf(tree), /route v3/, 'its route is kept, but it is not what runs');
+    assert.deepEqual(findAllByText(tree, 'Run').map((b) => b.disabled), [true]);
+  });
+
+  test('the editor switches a test between replaying its route and asking the AI every run', async () => {
+    seed({ name: 'ai', lens: 'tests' });
+    const t = { ...mod.state.ai.tests[0], replay: true, secretsHidden: false };
+    mod.state.ai.tests = [t];
+    const sent: Array<{ url: string; body: unknown }> = [];
+    (globalThis as any).fetch = async (url: string, init: { method?: string; body?: string }) => {
+      if (init?.method === 'PATCH') sent.push({ url, body: JSON.parse(init.body!) });
+      return new Response(JSON.stringify({ aiTest: t, aiTests: [t] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    findByText(mod.SCREENS.ai(), 'Edit').click();
+    const box = findByText(mod.SCREENS.ai(), 'Replay its saved route without AI', 'label');
+    assert.ok(box, 'the switch is in the editor');
+    const input = box.children.find((c: any) => c.tagName === 'INPUT');
+    assert.equal(input.checked, true);
+    input.checked = false;
+    input.dispatch('change', { target: input });
+    findByText(mod.SCREENS.ai(), 'Save changes').click();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal((sent[0]?.body as { replay?: boolean })?.replay, false);
+  });
+
+  test('a repaired route says what changed, step by step, and which version it became', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const r = aiRun({ planVersion: 1, test: { id: 'aitest-1', name: 'Checkout smoke' } });
+    mod.state.ai = aiState({ detail: { aiRun: r, steps: [], fetchedAt: Date.now(), routeKept: 2, routeChanges: [
+      { kind: 'changed', step: 2, before: 'Tap “Log in”', after: 'Tap “Sign in”' },
+      { kind: 'added', step: 3, before: null, after: 'Tap “Accept cookies”' },
+    ] } });
+    const text = textOf(mod.SCREENS.airun());
+    assert.match(text, /Route repaired: version 1 → 2/);
+    assert.match(text, /step 2 .*Tap “Log in” → Tap “Sign in”/);
+    assert.match(text, /step 3 .*added: Tap “Accept cookies”/);
+    assert.match(text, /kept as route version 2/);
+
+    mod.state.ai = aiState({ detail: { aiRun: aiRun({ test: { id: 'aitest-1', name: 'Checkout smoke' } }), steps: [], fetchedAt: Date.now(), routeKept: 1, routeChanges: null } });
+    const first = textOf(mod.SCREENS.airun());
+    assert.doesNotMatch(first, /Route repaired/);
+    assert.match(first, /Driven by the AI; kept as route version 1 — its next run replays it/);
+  });
+
   test('a stopped host names the fix, and explaining a failure needs the model but not a device', () => {
     seed({ name: 'ai', lens: 'new' });
     mod.state.ai.readiness = hostStopped();
@@ -6812,7 +6863,7 @@ describe('the AI testing screen', () => {
     await new Promise((r) => setTimeout(r, 0));
     const patch = sent.find((x) => x.method === 'PATCH');
     assert.equal(patch?.url, '/v1/ai/tests/aitest-1');
-    assert.deepEqual(patch?.body, { name: 'Checkout smoke v2', prompt: 'Log in with pin : 4812', profile: 'flash', runOnUpload: true });
+    assert.deepEqual(patch?.body, { name: 'Checkout smoke v2', prompt: 'Log in with pin : 4812', profile: 'flash', replay: true, runOnUpload: true });
   });
 
   test('a run started here says how it ended wherever the person has gone — and not on its own page', async () => {

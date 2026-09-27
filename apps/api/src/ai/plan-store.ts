@@ -13,9 +13,10 @@ import { compilePlan, type PlanStep, type RecordedStep, type RunPlan } from './p
  * text in SQL gives what `promptSha` gives in JS — one definition of "this task's route" on both sides.
  */
 export function hasRouteSql(alias: string, testIdColumn = 'ai_test_id'): string {
-  return `EXISTS (SELECT 1 FROM ai_test_plans p WHERE p.ai_test_id = ${alias}.${testIdColumn}
-            AND p.platform = ${alias}.platform
-            AND p.prompt_sha256 = encode(sha256(convert_to(${alias}.prompt, 'UTF8')), 'hex'))`;
+  return `EXISTS (SELECT 1 FROM ai_test_plans p JOIN ai_tests rt ON rt.id = p.ai_test_id
+           WHERE p.ai_test_id = ${alias}.${testIdColumn} AND rt.replay
+             AND p.platform = ${alias}.platform
+             AND p.prompt_sha256 = encode(sha256(convert_to(${alias}.prompt, 'UTF8')), 'hex'))`;
 }
 
 /** A plan belongs to the words it was written for: an edited test's old route is not replayed. */
@@ -23,15 +24,18 @@ export function promptSha(prompt: string): string {
   return createHash('sha256').update(prompt.trim()).digest('hex');
 }
 
-/** The newest route for this test, task and platform — or null, and the model drives from step one. */
+/**
+ * The newest route for this test, task and platform — or null, and the model drives from step one. A
+ * test set never to replay (`ai_tests.replay`, 066) has none to replay, whatever it has kept.
+ */
 export async function latestPlan(
   orgId: string, testId: string, prompt: string, platform: 'android' | 'ios',
 ): Promise<RunPlan | null> {
   return withTenant(orgId, async (c) => {
     const { rows } = await c.query<{ id: string; version: number; steps: PlanStep[]; expect: string }>(
-      `SELECT id, version, steps, expect FROM ai_test_plans
-        WHERE org_id = $1 AND ai_test_id = $2 AND platform = $3 AND prompt_sha256 = $4
-        ORDER BY version DESC LIMIT 1`,
+      `SELECT p.id, p.version, p.steps, p.expect FROM ai_test_plans p JOIN ai_tests t ON t.id = p.ai_test_id
+        WHERE p.org_id = $1 AND p.ai_test_id = $2 AND p.platform = $3 AND p.prompt_sha256 = $4 AND t.replay
+        ORDER BY p.version DESC LIMIT 1`,
       [orgId, testId, platform, promptSha(prompt)],
     );
     return rows[0] ?? null;

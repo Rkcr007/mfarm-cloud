@@ -680,6 +680,8 @@ describe('a saved test keeps its route, and the next run replays it without AI (
     const first = await runTest(t.id);
     assert.equal(first.aiRun.status, 'passed', JSON.stringify(first.aiRun));
     assert.equal(calls.length, 1);
+    assert.equal((first as unknown as { routeKept: number }).routeKept, 1, 'the run says it kept version 1');
+    assert.equal((first as unknown as { routeChanges: unknown }).routeChanges, null, 'and repaired nothing');
     const kept = await plans(t.id);
     assert.equal(kept.length, 1);
     assert.equal(kept[0]!.expect, 'Log in');
@@ -697,6 +699,32 @@ describe('a saved test keeps its route, and the next run replays it without AI (
     assert.ok((second.steps as Array<{ by?: string }>).every((x) => x.by === 'replay'), 'every step says the route took it');
     assert.equal((recorded.find((r) => r.url.endsWith('/element/el-1/value'))?.body as { text?: string })?.text, 'a@b.co');
     assert.equal((await plans(t.id)).length, 1, 'a replay learns nothing new, and writes no version');
+    assert.equal((second as unknown as { routeKept: number | null }).routeKept, null);
+  });
+
+  test('a test set never to replay is driven by the AI every run — its route kept, and used once it is set back', async () => {
+    await resetFleet();
+    const made = await create({ region: REGION, name: 'Route explore', prompt: 'Sign in and look around', replay: false });
+    assert.equal(made.statusCode, 201, made.body);
+    const t = made.json().aiTest as { id: string; replay: boolean };
+    assert.equal(t.replay, false);
+    scripts.set('Sign in and look around', [{ tools: route }, { tools: route }, { tools: route }]);
+    assert.equal((await runTest(t.id)).aiRun.status, 'passed');
+    assert.equal((await plans(t.id)).length, 1, 'its route is still kept');
+
+    await resetFleetKeepingRuns();
+    calls.length = 0;
+    const again = await runTest(t.id);
+    assert.equal((again.aiRun as { planVersion?: number | null }).planVersion, null, 'not replayed');
+    assert.equal(calls.length, 1, 'the AI drove it');
+
+    const back = await app.inject({ method: 'PATCH', url: `/v1/ai/tests/${t.id}`, headers: auth(keyA), payload: { replay: true } });
+    assert.equal((back.json() as { aiTest: { replay: boolean } }).aiTest.replay, true);
+    await resetFleetKeepingRuns();
+    calls.length = 0;
+    const replayed = await runTest(t.id);
+    assert.ok((replayed.aiRun as { planVersion?: number }).planVersion, 'set back, it replays its latest route at once');
+    assert.equal(calls.length, 0);
   });
 
   test('where the app changed, the model takes over at that step, and the route that passed is the next version', async () => {
@@ -717,10 +745,15 @@ describe('a saved test keeps its route, and the next run replays it without AI (
       const healed = await runTest(t.id);
       assert.equal(healed.aiRun.status, 'passed', JSON.stringify(healed.aiRun));
       assert.equal(calls.length, 2, 'the model for the one step the route could not do, and the verdict');
-      assert.deepEqual((healed.steps as Array<{ by?: string }>).map((x) => x.by), ['replay', 'claude-opus-5', 'claude-opus-5']);
+      // The e-mail, one scroll down looking for the button, then the model.
+      assert.deepEqual((healed.steps as Array<{ by?: string }>).map((x) => x.by), ['replay', 'replay', 'claude-opus-5', 'claude-opus-5']);
       const kept = await plans(t.id);
       assert.deepEqual(kept.map((p) => p.version), [1, 2]);
       assert.equal(kept[1]!.expect, 'Sign in');
+      // The run says what its repair changed — the one step, in words — and which version it kept.
+      const detail = healed as unknown as { routeKept: number | null; routeChanges: unknown };
+      assert.equal(detail.routeKept, 2);
+      assert.deepEqual(detail.routeChanges, [{ kind: 'changed', step: 2, before: 'Tap “Log in”', after: 'Tap “Sign in”' }]);
       assert.deepEqual(kept[1]!.steps.map((x) => x.target.id), ['com.acme:id/email', 'com.acme:id/sign_in']);
     } finally {
       source = SOURCE;
@@ -1268,6 +1301,27 @@ describe('nothing is started that cannot finish (ADR-0044)', () => {
       await resetFleetKeepingRuns(); // the stub farm does not reset a device after a session
       recordModelOk('primary');
       assert.equal((await settle(waiting)).aiRun.status, 'passed', 'and starts by itself once the model is back');
+    } finally {
+      resetProviderHealth();
+    }
+  });
+
+  test('a test set never to replay needs the model even with a route — it is refused while the model is down', async () => {
+    await resetFleet();
+    resetProviderHealth();
+    try {
+      const routed = await savedWithRoute('Routed but exploring', 'Sign in, then explore');
+      await app.inject({ method: 'PATCH', url: `/v1/ai/tests/${routed}`, headers: auth(keyA), payload: { replay: false } });
+      dailyCapSpent();
+      await assert.rejects(
+        queueAiRun(orgA, { prompt: 'Sign in, then explore', region: REGION, aiTestId: routed, trigger: 'test' }, { ...gate, mode: 'require' }),
+        (err: { code: string; details: { blocking: string } }) => err.code === 'ai_not_ready' && err.details.blocking === 'model');
+
+      // An upload's run of it is deferred — and the runner does not start it for a model that is down.
+      const waiting = await queueAiRun(orgA, { prompt: 'Sign in, then explore', region: REGION, aiTestId: routed, trigger: 'upload' },
+        { ...gate, mode: 'defer' });
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(await statusOf(waiting), 'queued', 'it waits for the model it needs');
     } finally {
       resetProviderHealth();
     }

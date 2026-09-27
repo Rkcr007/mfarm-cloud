@@ -16,6 +16,7 @@ import { aiReadiness } from '../../ai/readiness.ts';
 import { MASK, redact, redactDeep, secretsIn, stripToolMarkup } from '../../ai/secrets.ts';
 import type { QueueGate } from '../../ai/queue.ts';
 import { refuseUnknownSecrets } from '../../ai/secret-store.ts';
+import { diffRoutes, type PlanStep } from '../../ai/plan.ts';
 
 /**
  * `/v1/ai` — AI runs: describe a test in English, a real device does it (ADR-0043, C2–C5).
@@ -240,7 +241,25 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       // What the agent said and typed, masked with the task's own secrets: a model repeats what it
       // was told, and a type_text step carries the value itself.
       const secrets = secretsIn(run.prompt);
+      // The route this run KEPT (ADR-0046 phase 2), and — when it repaired one it replayed — what changed.
+      const kept = (await c.query<{ version: number; steps: PlanStep[] }>(
+        'SELECT version, steps FROM ai_test_plans WHERE org_id = $1 AND source_run_id = $2 ORDER BY version DESC LIMIT 1',
+        [orgId, id],
+      )).rows[0] ?? null;
+      const replayed = kept ? (await c.query<{ steps: PlanStep[] }>(
+        `SELECT p.steps FROM ai_test_plans p JOIN ai_runs r ON r.plan_id = p.id WHERE r.org_id = $1 AND r.id = $2`,
+        [orgId, id],
+      )).rows[0] ?? null : null;
+      const routeChanges = kept && replayed
+        ? diffRoutes(replayed.steps, kept.steps).map((ch) => ({
+            ...ch, before: redact(ch.before, secrets), after: redact(ch.after, secrets),
+          }))
+        : null;
       return {
+        /** The route version this run kept for its saved test, or null. */
+        routeKept: kept?.version ?? null,
+        /** What its repair of the replayed route changed, step by step; null when it repaired none. */
+        routeChanges,
         aiRun: runJson(run),
         steps: steps.map((s) => ({
           n: s.n,
@@ -406,7 +425,7 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
 
 interface TestRow {
   id: string; name: string; prompt: string; profile: string; platform: string; region: string | null;
-  app_package: string | null; run_on_upload: boolean; created_at: Date; updated_at: Date;
+  app_package: string | null; run_on_upload: boolean; replay: boolean; created_at: Date; updated_at: Date;
   created_by_email: string | null;
   recent: { id: string; status: string; at: string }[] | null;
   route_version: number | null;
@@ -418,6 +437,8 @@ function testJson(t: TestRow) {
     id: t.id, name: t.name, prompt: redact(t.prompt, secretsIn(t.prompt)), secretsHidden: secretsIn(t.prompt).length > 0,
     profile: t.profile, platform: t.platform,
     region: t.region, appPackage: t.app_package, runOnUpload: t.run_on_upload,
+    /** False: every run is driven by the AI from its first step — an exploratory test (ADR-0046, 066). */
+    replay: t.replay,
     createdAt: t.created_at.toISOString(), updatedAt: t.updated_at.toISOString(),
     createdBy: t.created_by_email,
     // Newest first — a saved test's history is the question "has this been passing?".
@@ -430,7 +451,7 @@ function testJson(t: TestRow) {
   };
 }
 
-const TEST_SELECT = `SELECT t.id, t.name, t.prompt, t.profile, t.platform, t.region, t.app_package, t.run_on_upload,
+const TEST_SELECT = `SELECT t.id, t.name, t.prompt, t.profile, t.platform, t.region, t.app_package, t.run_on_upload, t.replay,
        t.created_at, t.updated_at, u.email AS created_by_email,
        (SELECT json_agg(json_build_object('id', r.id, 'status', r.status, 'at', r.created_at) ORDER BY r.created_at DESC)
           FROM (SELECT id, status, created_at FROM ai_runs WHERE ai_test_id = t.id
@@ -448,11 +469,12 @@ const TEST_BODY = {
   region: { type: ['string', 'null'], minLength: 1, maxLength: 64 },
   appPackage: { type: ['string', 'null'], minLength: 1, maxLength: 255 },
   runOnUpload: { type: 'boolean' },
+  replay: { type: 'boolean' },
 } as const;
 
 type TestBody = {
   name?: string; prompt?: string; profile?: string; platform?: string; region?: string | null;
-  appPackage?: string | null; runOnUpload?: boolean;
+  appPackage?: string | null; runOnUpload?: boolean; replay?: boolean;
 };
 
 /**
@@ -500,10 +522,10 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
     refuseMaskedPrompt(b.prompt!);
     await refuseUnknownSecrets(orgId, b.prompt!);
     const id = await withTenant(orgId, async (c) => (await c.query<{ id: string }>(
-      `INSERT INTO ai_tests (org_id, created_by, name, prompt, profile, platform, region, app_package, run_on_upload)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      `INSERT INTO ai_tests (org_id, created_by, name, prompt, profile, platform, region, app_package, run_on_upload, replay)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
       [orgId, userId, b.name!.trim(), b.prompt!.trim(), b.profile ?? 'flash', b.platform ?? 'android',
-       b.region ?? null, b.appPackage?.trim() || null, b.runOnUpload ?? false],
+       b.region ?? null, b.appPackage?.trim() || null, b.runOnUpload ?? false, b.replay ?? true],
     )).rows[0]!.id).catch(testWriteError);
     const row = await withTenant(orgId, async (c) =>
       (await c.query<TestRow>(`${TEST_SELECT} WHERE t.org_id = $1 AND t.id = $2`, [orgId, id])).rows[0]!);
@@ -529,6 +551,7 @@ export async function aiTestRoutes(app: FastifyInstance, opts: AiRouteOptions): 
     if (b.region !== undefined) put('region', b.region);
     if (b.appPackage !== undefined) put('app_package', b.appPackage?.trim() || null);
     if (b.runOnUpload !== undefined) put('run_on_upload', b.runOnUpload);
+    if (b.replay !== undefined) put('replay', b.replay);
     if (sets.length === 0) throw badRequest('Nothing to change.');
     const row = await withTenant(orgId, async (c) => {
       const r = await c.query(

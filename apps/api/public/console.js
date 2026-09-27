@@ -11939,7 +11939,8 @@ function screenAiRun() {
             + 'links (••••). The agent still uses them, and Run again copies them back.' })
         : null),
     h('div', { class: 'split' },
-      h('div', { class: 'content' }, aiVerdictCard(r, active, concluded), aiTimeline(steps, chosen, active), aiDetailsCard(r, build)),
+      h('div', { class: 'content' }, aiVerdictCard(r, active, concluded), aiRouteChangeCard(r, det),
+        aiTimeline(steps, chosen, active), aiDetailsCard(r, build, det)),
       // Sticky: the steps are a long list and the screen is what choosing one is FOR. It used to
       // scroll away, so picking step 3 at the bottom changed a picture nobody could see.
       h('div', { class: 'rail ai-rail' }, aiScreenCard(r, steps, chosen, active))),
@@ -12049,13 +12050,33 @@ function aiVerdictCard(r, active, concluded) {
  * WHAT DROVE THE RUN (ADR-0046 phase 2). A saved test's run replays the route its last passing run
  * took, without AI; the model is asked only where the app no longer matches it.
  */
-function aiRouteWords(r) {
-  if (r.planVersion) return `Replayed the saved route (version ${r.planVersion}); AI only where the app no longer matched`;
+function aiRouteWords(r, det = {}) {
+  const kept = det.routeKept ? `; kept as route version ${det.routeKept}` : '';
+  if (r.planVersion) return `Replayed the saved route (version ${r.planVersion}); AI only where the app no longer matched${kept}`;
+  if (det.routeKept) return `Driven by the AI${kept} — its next run replays it`;
   if (r.test) return 'Driven by the AI — kept as this test\'s route if it passes';
   return 'Driven by the AI — a one-off run keeps no route';
 }
 
-function aiDetailsCard(r, build) {
+/**
+ * WHAT A REPAIR CHANGED (ADR-0046 phase 2). A run that replayed a route, found the app changed and had
+ * the AI take over writes the next version; this says, step by step, what is different — so a person
+ * can tell "the button was renamed" from "the flow grew a step" before trusting the new route.
+ */
+function aiRouteChangeCard(r, det) {
+  const changes = det?.routeChanges;
+  if (!changes?.length || !r.planVersion || !det.routeKept) return null;
+  const mark = { changed: '~', added: '+', removed: '−' };
+  return card(`Route repaired: version ${r.planVersion} → ${det.routeKept}`, {
+    aside: h('span', { class: 'caption', text: `${changes.length} change${changes.length === 1 ? '' : 's'}` }),
+  },
+    h('ul', { class: 'ai-route-diff' }, changes.map((ch) => h('li', { class: `ai-route-${ch.kind}` },
+      h('span', { class: 'mono', text: `${mark[ch.kind]} step ${ch.step} ` }),
+      ch.kind === 'changed' ? `${ch.before} → ${ch.after}` : ch.kind === 'added' ? `added: ${ch.after}` : `dropped: ${ch.before}`))),
+    h('p', { class: 'caption', text: 'The next run replays the new version without AI.' }));
+}
+
+function aiDetailsCard(r, build, det) {
   const active = AI_ACTIVE.has(r.status);
   return h('details', { class: 'card ai-details' },
     h('summary', { class: 'row between' },
@@ -12067,7 +12088,7 @@ function aiDetailsCard(r, build) {
       ['Started by', aiStartedBy(r)],
       ['App build', build ? `${aiBuildLabel(build)} · ${build.packageName}` : (r.appRef || 'None — what was on the device')],
       ['Steps', `${r.steps} of at most ${r.stepCap}`],
-      ['Route', aiRouteWords(r)],
+      ['Route', aiRouteWords(r, det)],
       ['Cost', `${aiMoney(r.costInr)} in AI steps`],
       ['Model', r.model, true],
       ['Started', r.startedAt ? when(r.startedAt) : '—'],
@@ -12432,7 +12453,8 @@ function aiTestsCard(off) {
   // except that a test with a saved route needs no model, so a model that is down does not stop it.
   const blocked = aiBlocked();
   const replayBlocked = aiBlocked('replay');
-  const routed = ai.tests.some((t) => t.routeVersion);
+  const replays = (t) => t.replay !== false && Boolean(t.routeVersion);
+  const routed = ai.tests.some(replays);
   const pausedWords = blocked && blocked !== replayBlocked && routed
     ? `Paused: ${blocked.message} Tests with a saved route still run — they replay it without AI.`
     : blocked ? `Paused: ${blocked.message}` : null;
@@ -12444,7 +12466,9 @@ function aiTestsCard(off) {
           h('strong', { text: t.name }),
           h('span', { class: 'chip', text: t.profile === 'pro' ? 'Pro' : 'Flash' }),
           t.runOnUpload ? h('span', { class: 'chip', text: 'every upload', title: `Runs on each new build of ${t.appPackage}` }) : null,
-          t.routeVersion ? h('span', { class: 'chip', text: `route v${t.routeVersion}`, title: 'Its next run replays the route its last pass took — no AI, unless the app changed' }) : null),
+          t.replay === false
+            ? h('span', { class: 'chip', text: 'AI every run', title: 'Never replays: the AI drives every run, looking at each build afresh' })
+            : t.routeVersion ? h('span', { class: 'chip', text: `route v${t.routeVersion}`, title: 'Its next run replays the route its last pass took — no AI, unless the app changed' }) : null),
         h('p', { class: 'caption ai-row-prompt', text: t.prompt.length > 140 ? `${t.prompt.slice(0, 140)}…` : t.prompt }),
         // The last ten verdicts, newest first — "has this been passing?" at a glance.
         t.recent.length
@@ -12457,8 +12481,8 @@ function aiTestsCard(off) {
       ),
       h('span', { class: 'row tight' },
         btn('Run', '', () => void runAiTest(t), {
-          disabled: off || Boolean(t.routeVersion ? replayBlocked : blocked),
-          title: (t.routeVersion ? replayBlocked : blocked)?.message || null,
+          disabled: off || Boolean(replays(t) ? replayBlocked : blocked),
+          title: (replays(t) ? replayBlocked : blocked)?.message || null,
         }),
         btn('Edit', 'tiny ghost', () => void editAiTest(t), { disabled: off || Boolean(ai.edit), title: 'Change its name, task, mode or run-on-upload' }),
         btn('Archive', 'tiny ghost', () => void archiveAiTest(t), { title: 'Hide it; its past runs keep its name' })),
@@ -12498,6 +12522,10 @@ function aiTestEditor(t) {
           h('input', { type: 'checkbox', checked: ed.runOnUpload, onchange: (e) => set({ runOnUpload: e.target.checked }) }),
           `Run it on every new build of ${t.appPackage}`)
       : null,
+    // ADR-0046: a regression check replays its route; an exploratory test asks the AI every time.
+    h('label', { class: 'row tight caption' },
+      h('input', { type: 'checkbox', checked: ed.replay !== false, onchange: (e) => set({ replay: e.target.checked }) }),
+      'Replay its saved route without AI — off: the AI drives every run, looking at each build afresh'),
     h('span', { class: 'row tight mt-sm' },
       btn(ed.busy ? 'Saving…' : 'Save changes', 'primary', () => void saveAiTestEdit(t),
         { disabled: ed.busy || ed.loading || !ed.name.trim() || !ed.prompt.trim() }),
@@ -12508,7 +12536,7 @@ function aiTestEditor(t) {
 
 async function editAiTest(t) {
   state.ai.edit = { id: t.id, name: t.name, prompt: t.prompt, profile: t.profile, runOnUpload: t.runOnUpload,
-    busy: false, loading: Boolean(t.secretsHidden) };
+    replay: t.replay !== false, busy: false, loading: Boolean(t.secretsHidden) };
   render();
   if (!t.secretsHidden) return;
   try {
@@ -12530,7 +12558,7 @@ async function saveAiTestEdit(t) {
     await api(`/v1/ai/tests/${encodeURIComponent(t.id)}`, {
       method: 'PATCH',
       body: {
-        name: ed.name.trim(), prompt: ed.prompt.trim(), profile: ed.profile,
+        name: ed.name.trim(), prompt: ed.prompt.trim(), profile: ed.profile, replay: ed.replay !== false,
         ...(t.appPackage ? { runOnUpload: ed.runOnUpload } : {}),
       },
     });
