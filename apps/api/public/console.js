@@ -12045,6 +12045,16 @@ function aiVerdictCard(r, active, concluded) {
  * the times and the cost. It was a seven-row table between the verdict and the steps, read by almost
  * nobody and scrolled past by everybody.
  */
+/**
+ * WHAT DROVE THE RUN (ADR-0046 phase 2). A saved test's run replays the route its last passing run
+ * took, without AI; the model is asked only where the app no longer matches it.
+ */
+function aiRouteWords(r) {
+  if (r.planVersion) return `Replayed the saved route (version ${r.planVersion}); AI only where the app no longer matched`;
+  if (r.test) return 'Driven by the AI — kept as this test\'s route if it passes';
+  return 'Driven by the AI — a one-off run keeps no route';
+}
+
 function aiDetailsCard(r, build) {
   const active = AI_ACTIVE.has(r.status);
   return h('details', { class: 'card ai-details' },
@@ -12057,6 +12067,7 @@ function aiDetailsCard(r, build) {
       ['Started by', aiStartedBy(r)],
       ['App build', build ? `${aiBuildLabel(build)} · ${build.packageName}` : (r.appRef || 'None — what was on the device')],
       ['Steps', `${r.steps} of at most ${r.stepCap}`],
+      ['Route', aiRouteWords(r)],
       ['Cost', `${aiMoney(r.costInr)} in AI steps`],
       ['Model', r.model, true],
       ['Started', r.startedAt ? when(r.startedAt) : '—'],
@@ -12086,6 +12097,9 @@ function aiTimeline(steps, chosen, active) {
               h('span', { class: 'row tight shrink' },
                 h('strong', { text: said }),
                 failed ? pill('did not work', 'warn', { dot: false }) : null,
+                // Who took it (ADR-0046): the saved route, with no AI; or a rule, for a prompt no model saw.
+                s.by === 'replay' ? h('span', { class: 'chip', text: 'replayed', title: 'From the saved route — no AI call' }) : null,
+                s.by === 'rule' ? h('span', { class: 'chip', text: 'by rule', title: 'Answered by MFARM — no AI call' }) : null,
                 s.phase !== 'act' ? h('span', { class: 'chip', text: s.phase }) : null)),
             on ? aiStepBody(s, failed) : null);
         }))

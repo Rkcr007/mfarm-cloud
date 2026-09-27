@@ -5,6 +5,7 @@ import { stripToolMarkup } from './secrets.ts';
 import { modelFailureWords } from './model-error.ts';
 import { fillSecrets, hideSecrets, NO_SECRETS, secretNamesIn, type RunSecrets } from './vault.ts';
 import { coverBoxes, shrinkPng, type Box } from './png-cover.ts';
+import { locate, needsElement, type PlanStep } from './plan.ts';
 
 /**
  * THE AI RUN LOOP — observe, decide, act, record (ADR-0043, capabilities C2 and C3).
@@ -181,6 +182,11 @@ export interface AgentOptions {
   secrets?: RunSecrets;
   /** How long the loop waits for screens; production uses the defaults, tests wind them down. */
   timing?: Partial<AgentTiming>;
+  /**
+   * A saved test's route (ADR-0046 phase 2): replayed with no model first; the model takes over only
+   * from the step the app no longer matches, or to judge a screen the route's `expect` is missing from.
+   */
+  plan?: { steps: PlanStep[]; expect: string } | null;
   /**
    * Whether this model may name several actions in one answer (ADR-0046). Off for a model that cannot
    * write several tool calls reliably — qwen on Groq could not (D56) — where one answer is one action.
@@ -545,12 +551,90 @@ export async function runAgent(opts: AgentOptions): Promise<AgentOutcome> {
     }
   };
 
+  /**
+   * THE ROUTE, WITHOUT A MODEL. Each step's element is found again by the locator that named it alone
+   * (`plan.ts` `locate`) — waited for while the screen loads — and acted on; each is recorded as a
+   * `replay` step, billed nothing. When every step worked and `expect` is on the screen, that is the
+   * verdict. Otherwise: where it stopped, and the screen, for the model to take over from.
+   */
+  const replay = async (
+    plan: { steps: PlanStep[]; expect: string },
+    from: Observation,
+  ): Promise<AgentOutcome | { missed: string; screen: Observation }> => {
+    let obs = from;
+    for (const [i, ps] of plan.steps.entries()) {
+      const startedAt = new Date();
+      const t0 = Date.now();
+      let el: UiElement | undefined;
+      if (needsElement(ps)) {
+        el = ps.target ? locate(ps.target, obs.elements) : undefined;
+        // Still loading, perhaps: the tree is polled (cheap), and once the element is there the screen is
+        // read properly — so the element acted on is always one of the screen it is acted on.
+        const deadline = Date.now() + timing.expectMs;
+        while (!el && ps.target && Date.now() < deadline) {
+          await sleep(timing.pollMs);
+          if (locate(ps.target, masked(parseUiTree(await device.source())).elements)) {
+            obs = await see(false);
+            el = locate(ps.target, obs.elements);
+          }
+        }
+        const what = ps.target?.text ?? ps.target?.label ?? ps.target?.id ?? ps.tool;
+        if (!el) return { missed: `step ${i + 1} (${ps.intent || ps.tool}): “${what}” is not on the screen`, screen: await see(false) };
+      }
+      const input = el ? { ...ps.input, index: el.index } : ps.input;
+      let result: string;
+      try {
+        result = hide(await act(device, ps.tool, input, obs.elements, screen, secrets, timing));
+      } catch (err) {
+        const e = err as Error & { code?: string };
+        if (e.code === 'invalid session id') return stop('device_lost', `The device session ended: ${e.message}`);
+        result = `failed: ${hide(e.message).slice(0, 300)}`;
+      }
+      await record({
+        phase: 'act', thought: ps.intent || null,
+        action: { tool: ps.tool, input: hideAll({ ...input, why: ps.intent }) as Record<string, unknown>,
+          target: el ? targetOf(el, obs.elements) : null, screen },
+        result, screenshotB64: obs.screenshotB64 || null, elementCount: obs.elements.length,
+        usage: { ...NO_USAGE }, model: 'replay', billed: false, startedAt, durationMs: Date.now() - t0,
+      });
+      history.push(`${n}. ${describeAction(ps.tool, input, obs.elements)} — ${ps.intent} → ${result} (replayed)`);
+      if (result !== 'ok') return { missed: `step ${i + 1} (${ps.intent || ps.tool}) ${result}`, screen: await see(false) };
+      obs = await clearInterruptions(await see(true));
+    }
+    if (await lookFor(plan.expect, obs.elements)) {
+      const summary = `Replayed the saved route — ${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}, no AI — `
+        + `and “${plan.expect}” is on the screen.`;
+      await record({
+        phase: 'verify', thought: summary,
+        action: { tool: 'finish', input: { passed: true, summary, evidence: `“${plan.expect}” on the screen`, expect: plan.expect }, target: null, screen },
+        result: 'passed', screenshotB64: obs.screenshotB64 || null, elementCount: obs.elements.length,
+        usage: { ...NO_USAGE }, model: 'replay', billed: false, startedAt: new Date(), durationMs: 0,
+      });
+      return { status: 'passed', summary, evidence: `“${plan.expect}” on the screen`, steps: n };
+    }
+    return { missed: `the end of the route, where “${plan.expect}” was expected but is not on the screen`, screen: await see(false) };
+  };
+
   let start: Observation;
   try {
     start = await clearInterruptions(await see(false));
   } catch (err) {
     return stop('device_lost', `The device stopped answering: ${(err as Error).message}`);
   }
+  // --- A saved test's route, replayed with no model (ADR-0046 phase 2).
+  if (opts.plan?.steps.length) {
+    let r: Awaited<ReturnType<typeof replay>>;
+    try {
+      r = await replay(opts.plan, start);
+    } catch (err) {
+      return stop('device_lost', `The device stopped answering: ${(err as Error).message}`);
+    }
+    if ('status' in r) return r;
+    start = r.screen;
+    history.push(`MFARM replayed this test's saved route, without you, until ${r.missed}. `
+      + 'Carry on with the task from the screen you see now.');
+  }
+
   /** A screen already read and not yet acted on — the first turn's, so it is not read twice. */
   let next: Observation | null = start;
   let acted = false;

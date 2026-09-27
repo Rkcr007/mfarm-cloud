@@ -23,8 +23,17 @@ test('a call is a step that carries tokens; the rest of the call, and rule steps
     startedAt: '2026-09-27T10:00:00.000Z', endedAt: '2026-09-27T10:00:31.450Z' };
   assert.deepEqual(summarise('login', run, steps), {
     task: 'login', status: 'passed', stopReason: null, calls: 2, steps: 6, byRule: 1,
-    inputTokens: 3700, outputTokens: 200, costInr: 1.23, seconds: 31.5, model: 'm',
+    inputTokens: 3700, outputTokens: 200, costInr: 1.23, seconds: 31.5, model: 'm', replayed: 0, route: null,
   });
+});
+
+test('a run of a saved route counts its replayed steps and names the route — and no calls', () => {
+  const replay = (tool) => ({ tokens: { input: 0, output: 0 }, action: { tool, input: {} }, by: 'replay' });
+  const r = summarise('login #2', { status: 'passed', costInr: 0, planVersion: 1 }, [replay('type_text'), replay('tap_element'), replay('finish')]);
+  assert.equal(r.calls, 0);
+  assert.equal(r.replayed, 3);
+  assert.equal(r.route, 1);
+  assert.match(table([r]), /3 \(route v1\)/);
 });
 
 test('a run that never started has no wall time rather than a made-up one', () => {

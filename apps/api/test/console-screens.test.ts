@@ -6074,6 +6074,27 @@ describe('the AI testing screen', () => {
     assert.ok(findByText(tree, 'Recording & log'), 'the session behind it is one click away');
   });
 
+  test('a replayed run says so: its route, and which steps no AI took (ADR-0046)', () => {
+    seed({ name: 'airun', id: 'air-1' });
+    const replayed = aiRun({ planVersion: 2, test: { id: 'aitest-1', name: 'Checkout smoke' }, costInr: 0 });
+    mod.state.ai = aiState({ detail: { aiRun: replayed, fetchedAt: Date.now(), steps: [
+      { n: 1, phase: 'act', thought: 'Allowed', action: { tool: 'tap_element', input: { index: 1, rule: 'permission' } }, result: 'ok',
+        screenshotUrl: null, elementCount: 3, priceInr: 0, by: 'rule' },
+      { n: 2, phase: 'act', thought: 'Open the cart', action: { tool: 'tap_element', input: { index: 2 } }, result: 'ok',
+        screenshotUrl: null, elementCount: 9, priceInr: 0, by: 'replay' },
+      { n: 3, phase: 'verify', thought: 'Shown', action: { tool: 'finish', input: { passed: true } }, result: 'passed',
+        screenshotUrl: null, elementCount: 9, priceInr: 0, by: 'replay' },
+    ] } });
+    const tree = mod.SCREENS.airun();
+    const text = textOf(tree);
+    assert.match(text, /Replayed the saved route \(version 2\)/);
+    assert.equal((text.match(/\breplayed\b/g) ?? []).length, 2, 'the two replayed steps are marked');
+    assert.equal((text.match(/\bby rule\b/g) ?? []).length, 1, 'and the one a rule answered');
+
+    mod.state.ai = aiState({ detail: { aiRun: aiRun({ test: { id: 'aitest-1', name: 'Checkout smoke' } }), steps: [], fetchedAt: Date.now() } });
+    assert.match(textOf(mod.SCREENS.airun()), /Driven by the AI — kept as this test's route if it passes/);
+  });
+
   test('a running run offers Stop, and Stop reaches the API', async () => {
     seed({ name: 'airun', id: 'air-1' });
     const running = aiRun({ status: 'running', steps: 1 });

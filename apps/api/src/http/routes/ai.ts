@@ -48,13 +48,14 @@ interface RunRow {
   summary: string | null; evidence: string | null; model: string | null; session_id: string | null;
   run_id: string | null; steps: number; cost_inr: string; created_at: Date; started_at: Date | null;
   ended_at: Date | null; cancel_requested_at: Date | null; created_by_email: string | null;
-  ai_test_id: string | null; trigger: string; test_name: string | null;
+  ai_test_id: string | null; trigger: string; test_name: string | null; plan_version: number | null;
 }
 
 const RUN_COLUMNS = `r.id, r.prompt, r.profile, r.platform, r.region, r.app_ref, r.step_cap, r.status,
   r.stop_reason, r.summary, r.evidence, r.model, r.session_id, r.run_id, r.steps, r.cost_inr,
   r.created_at, r.started_at, r.ended_at, r.cancel_requested_at, u.email AS created_by_email,
-  r.ai_test_id, r.trigger, (SELECT t.name FROM ai_tests t WHERE t.id = r.ai_test_id) AS test_name`;
+  r.ai_test_id, r.trigger, (SELECT t.name FROM ai_tests t WHERE t.id = r.ai_test_id) AS test_name,
+  (SELECT p.version FROM ai_test_plans p WHERE p.id = r.plan_id) AS plan_version`;
 
 /**
  * A run as the API shows it: the task and everything the agent said about it MASKED (secrets.ts).
@@ -90,6 +91,8 @@ function runJson(r: RunRow) {
     createdBy: r.created_by_email,
     trigger: r.trigger,
     test: r.ai_test_id ? { id: r.ai_test_id, name: r.test_name } : null,
+    /** The saved route this run replayed (ADR-0046 phase 2), or null: the model drove it from the start. */
+    planVersion: r.plan_version ?? null,
   };
 }
 
@@ -228,10 +231,10 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
       const steps = (await c.query<{
         n: number; phase: string; thought: string | null; action: unknown; result: string | null;
         screenshot_sha256: string | null; element_count: number | null; price_inr: string;
-        input_tokens: number; output_tokens: number; started_at: Date; duration_ms: number;
+        input_tokens: number; output_tokens: number; started_at: Date; duration_ms: number; model: string;
       }>(
         `SELECT n, phase, thought, action, result, screenshot_sha256, element_count, price_inr,
-                input_tokens, output_tokens, started_at, duration_ms
+                input_tokens, output_tokens, started_at, duration_ms, model
            FROM ai_steps WHERE org_id = $1 AND ai_run_id = $2 ORDER BY n`, [orgId, id],
       )).rows;
       // What the agent said and typed, masked with the task's own secrets: a model repeats what it
@@ -249,6 +252,9 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
           elementCount: s.element_count,
           priceInr: Number(s.price_inr),
           tokens: { input: s.input_tokens, output: s.output_tokens },
+          // Who took the step: a model's id, `replay` (a saved route, no model) or `rule` (a prompt
+          // answered without asking one) — ADR-0046.
+          by: s.model,
           startedAt: s.started_at.toISOString(),
           durationMs: s.duration_ms,
         })),

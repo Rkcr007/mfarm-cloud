@@ -655,6 +655,108 @@ describe('saved AI tests (C6) and running them on every new build (C7)', () => {
   });
 });
 
+describe('a saved test keeps its route, and the next run replays it without AI (ADR-0046 phase 2)', () => {
+  const create = (body: Record<string, unknown>) =>
+    app.inject({ method: 'POST', url: '/v1/ai/tests', headers: auth(keyA), payload: body });
+  const runTest = async (id: string) => {
+    const res = await app.inject({ method: 'POST', url: `/v1/ai/tests/${id}/run`, headers: auth(keyA) });
+    assert.equal(res.statusCode, 201, res.body);
+    return settle((res.json() as { aiRun: { id: string } }).aiRun.id);
+  };
+  const plans = (testId: string) => withSystem(async (c) => (await c.query(
+    'SELECT version, steps, expect FROM ai_test_plans WHERE ai_test_id = $1 ORDER BY version', [testId])).rows as
+      Array<{ version: number; steps: Array<{ tool: string; target: { id: string } }>; expect: string }>);
+  const route = [
+    { tool: 'type_text', input: { index: 0, text: 'a@b.co', submit: false, why: 'the e-mail' } },
+    { tool: 'tap_element', input: { index: 1, why: 'log in' } },
+    { tool: 'finish', input: { passed: true, summary: 'Signed in', evidence: 'Log in', expect: 'Log in', why: 'done' } },
+  ];
+
+  test('a pass is kept as the route; the next run replays it — no model call, nothing billed', async () => {
+    await resetFleet();
+    const t = (await create({ region: REGION, name: 'Route login', prompt: 'Sign in along the route' })).json().aiTest as { id: string };
+    scripts.set('Sign in along the route', [{ tools: route }]);
+
+    const first = await runTest(t.id);
+    assert.equal(first.aiRun.status, 'passed', JSON.stringify(first.aiRun));
+    assert.equal(calls.length, 1);
+    const kept = await plans(t.id);
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0]!.expect, 'Log in');
+    assert.deepEqual(kept[0]!.steps.map((x) => [x.tool, x.target.id]),
+      [['type_text', 'com.acme:id/email'], ['tap_element', 'com.acme:id/login']]);
+
+    await resetFleetKeepingRuns();
+    calls.length = 0;
+    recorded = [];
+    const second = await runTest(t.id);
+    assert.equal(second.aiRun.status, 'passed', JSON.stringify(second.aiRun));
+    assert.equal(calls.length, 0, 'the model was not asked anything');
+    assert.equal(second.aiRun.costInr, 0);
+    assert.equal((second.aiRun as { planVersion?: number }).planVersion, 1);
+    assert.ok((second.steps as Array<{ by?: string }>).every((x) => x.by === 'replay'), 'every step says the route took it');
+    assert.equal((recorded.find((r) => r.url.endsWith('/element/el-1/value'))?.body as { text?: string })?.text, 'a@b.co');
+    assert.equal((await plans(t.id)).length, 1, 'a replay learns nothing new, and writes no version');
+  });
+
+  test('where the app changed, the model takes over at that step, and the route that passed is the next version', async () => {
+    await resetFleet();
+    const t = (await create({ region: REGION, name: 'Route rename', prompt: 'Sign in along the renamed route' })).json().aiTest as { id: string };
+    scripts.set('Sign in along the renamed route', [{ tools: route }]);
+    assert.equal((await runTest(t.id)).aiRun.status, 'passed');
+
+    // The next build renames the button and gives it a new id.
+    source = SOURCE.replace('text="Log in" resource-id="com.acme:id/login"', 'text="Sign in" resource-id="com.acme:id/sign_in"');
+    try {
+      await resetFleetKeepingRuns();
+      calls.length = 0;
+      scripts.set('Sign in along the renamed route', [
+        { tool: 'tap_element', input: { index: 1, why: 'the button is Sign in now' } },
+        { tool: 'finish', input: { passed: true, summary: 'Signed in', evidence: 'Sign in', expect: 'Sign in', why: 'done' } },
+      ]);
+      const healed = await runTest(t.id);
+      assert.equal(healed.aiRun.status, 'passed', JSON.stringify(healed.aiRun));
+      assert.equal(calls.length, 2, 'the model for the one step the route could not do, and the verdict');
+      assert.deepEqual((healed.steps as Array<{ by?: string }>).map((x) => x.by), ['replay', 'claude-opus-5', 'claude-opus-5']);
+      const kept = await plans(t.id);
+      assert.deepEqual(kept.map((p) => p.version), [1, 2]);
+      assert.equal(kept[1]!.expect, 'Sign in');
+      assert.deepEqual(kept[1]!.steps.map((x) => x.target.id), ['com.acme:id/email', 'com.acme:id/sign_in']);
+    } finally {
+      source = SOURCE;
+    }
+  });
+
+  test('an edited task is not replayed along its old route', async () => {
+    await resetFleet();
+    const t = (await create({ region: REGION, name: 'Route edit', prompt: 'Sign in along the edited route' })).json().aiTest as { id: string };
+    scripts.set('Sign in along the edited route', [{ tools: route }]);
+    assert.equal((await runTest(t.id)).aiRun.status, 'passed');
+    const edit = await app.inject({ method: 'PATCH', url: `/v1/ai/tests/${t.id}`, headers: auth(keyA),
+      payload: { prompt: 'Sign in along the edited route, then open the menu' } });
+    assert.equal(edit.statusCode, 200, edit.body);
+
+    await resetFleetKeepingRuns();
+    calls.length = 0;
+    // The model's script is found by the task's words, and the old task's are inside the new one's.
+    scripts.delete('Sign in along the edited route');
+    scripts.set('Sign in along the edited route, then open the menu', [{ tools: route }]);
+    const again = await runTest(t.id);
+    assert.equal((again.aiRun as { planVersion?: number | null }).planVersion, null);
+    assert.equal(calls.length, 1, 'new words, new route: the model drives');
+  });
+
+  test('a one-off run keeps no route', async () => {
+    await resetFleet();
+    scripts.set('A one-off along a route', [{ tools: route }]);
+    const { body } = await startRun({ prompt: 'A one-off along a route', region: REGION });
+    assert.equal((await settle(body.aiRun.id)).aiRun.status, 'passed');
+    const n = await withSystem(async (c) => (await c.query(
+      'SELECT count(*)::int AS n FROM ai_test_plans WHERE source_run_id = $1', [body.aiRun.id])).rows[0].n as number);
+    assert.equal(n, 0);
+  });
+});
+
 describe('explaining a failure (C8)', () => {
   const diagnose = (sessionId: string, key = keyA) =>
     app.inject({ method: 'POST', url: '/v1/ai/diagnoses', headers: auth(key), payload: { sessionId } });
