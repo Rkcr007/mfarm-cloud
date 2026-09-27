@@ -272,6 +272,13 @@ services:
       MFARM_AI_FALLBACK_BASE_URL: ${MFARM_AI_FALLBACK_BASE_URL:-}
       MFARM_AI_FALLBACK_MODEL: ${MFARM_AI_FALLBACK_MODEL:-}
       MFARM_AI_FALLBACK_MAX_OUTPUT_TOKENS: ${MFARM_AI_FALLBACK_MAX_OUTPUT_TOKENS:-}
+      # ADR-0046: a stronger model on the same provider for Pro plans and runs that have gone wrong
+      # twice running; MFARM_AI_MODEL is then the fast, cheap one every other call uses. Unset: one model.
+      MFARM_AI_STRONG_MODEL: ${MFARM_AI_STRONG_MODEL:-}
+      MFARM_AI_FALLBACK_STRONG_MODEL: ${MFARM_AI_FALLBACK_STRONG_MODEL:-}
+      # A call is billed from its measured tokens at its model's list price (ai/pricing.ts). A model that
+      # table does not know is billed as claude-sonnet-5 until named here: `model=in/out[/cached]`, $/MTok.
+      MFARM_AI_PRICES: ${MFARM_AI_PRICES:-}
 
       # ---------------------------------------------------------------- power control (ADR-0038)
       #

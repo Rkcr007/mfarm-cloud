@@ -413,6 +413,34 @@ MFARM_AI_FALLBACK_MODEL=…
 Recreate the API as above; its `"ai"` log line then ends `…, fallback openai via openrouter.ai …`.
 Each step of a run records the model that answered it, so a run half-served by the fallback says so.
 
+### What a call is billed, and a stronger model (ADR-0046)
+
+**A call is billed from what it used**: its measured tokens × its model's list price × 3, rounded up
+to the paisa, written into `ai_steps.price_inr` when it answers. Only the first step of a call is
+charged — a call may name several actions — and a step the runner takes by rule (a permission prompt)
+is free. The console quotes an *estimate* of a typical call on this farm's model (`GET /v1/ai/pricing`).
+List prices live in `apps/api/src/ai/pricing.ts`. A model that table does not know is billed as
+`claude-sonnet-5`, never free, and the `"ai"` log line says so:
+`…; billed at list price unknown for <model> — billed as claude-sonnet-5; set MFARM_AI_PRICES`. Name
+its price in `deploy/.env`, dollars per million tokens:
+
+```
+MFARM_AI_PRICES=mistral-large-9=2/6,another-model=0.5/1.5/0.05   # model=input/output[/cached input]
+```
+
+**A fast model for acting, a strong one when it matters.** Set `MFARM_AI_MODEL` to a fast, cheap vision
+model and `MFARM_AI_STRONG_MODEL` to a stronger one on the same provider: every acting call uses the
+first; Pro's plan, and the call after two turns in a row went wrong, use the second. On Anthropic:
+
+```
+MFARM_AI_MODEL=claude-haiku-4-5
+MFARM_AI_STRONG_MODEL=claude-sonnet-5
+```
+
+(Haiku refuses `effort` and adaptive thinking; the provider drops both for it.) The log line then
+reads `anthropic claude-haiku-4-5 (strong: claude-sonnet-5), …`. `MFARM_AI_FALLBACK_STRONG_MODEL`
+does the same for the fallback provider.
+
 ## Ship a change
 
 ```bash

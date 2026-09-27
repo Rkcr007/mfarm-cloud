@@ -153,8 +153,15 @@ The owner chose this on 2026-09-27, over the two alternatives below.
 - The monthly budget and step cap stay; the budget now counts real spend.
 
 Not chosen: a flat price per authoring run with a cap and free replays; or an included allowance of
-AI calls per plan. Until phase 1c ships, the flat ₹4/₹9 is charged once per CALL — the other steps a
-call takes cost nothing.
+AI calls per plan.
+
+As built (1c): the margin is **3×**, dollars convert at **₹85**, and a call is rounded **up to the
+paisa** (`ai/pricing.ts`). List prices are a table by model id, matched by the longest id a provider's
+answer starts with (`claude-opus-5-20260401` is Opus 5; `claude-opus-5-5` is not). A model the table
+does not know is billed as `claude-sonnet-5` — never free — until `MFARM_AI_PRICES` names its price, and
+the boot log says which. Budget checks run BEFORE a call against an *estimate* of a typical one (3,000
+in / 300 out for Flash), because a call cannot be priced until it answers; the ledger may therefore end
+a month at most one call past its budget.
 
 ### 7. What is measured
 

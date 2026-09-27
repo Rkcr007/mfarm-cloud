@@ -221,8 +221,8 @@ function aiState(over: Record<string, unknown> = {}) {
   return {
     runs: [run], loaded: true, loading: false, busy: false, stepN: null,
     pricing: {
-      configured: true, currency: '₹', diagnosePriceInr: 12,
-      profiles: { flash: { priceInr: 4, stepCap: 40 }, pro: { priceInr: 9, stepCap: 80 } },
+      configured: true, currency: '₹', diagnoseEstimateInr: 12,
+      profiles: { flash: { estimateInr: 4, stepCap: 40 }, pro: { estimateInr: 9, stepCap: 80 } },
       budget: { spentInr: 120, budgetInr: 2000 },
     },
     pricingLoading: false,
@@ -6034,9 +6034,9 @@ describe('the AI testing screen', () => {
     seed({ name: 'ai', lens: 'new' });
     // Deliberately not the real prices: a literal in the console would show 4 and 40 here.
     mod.state.ai = aiState();
-    mod.state.ai.pricing.profiles.flash = { priceInr: 7, stepCap: 11 };
+    mod.state.ai.pricing.profiles.flash = { estimateInr: 7, stepCap: 11 };
     const text = textOf(mod.SCREENS.ai());
-    assert.match(text, /₹7 per AI turn — one turn can take several steps — up to 11 turns \(at most ₹77\)/);
+    assert.match(text, /About ₹7 per AI turn, billed at what each turn uses — one turn can take several steps\. Up to 11 turns/);
     assert.match(text, /₹120 of ₹2,?000/);
   });
 
@@ -6135,7 +6135,7 @@ describe('the AI testing screen', () => {
     seed({ name: 'run', id: 'run-1' });
     mod.state.ai.diag = { 'sess-1': { items: [], loaded: true, loading: false, busy: false } };
     const tree = mod.SCREENS.run();
-    assert.match(textOf(tree), /₹12 from the AI budget/, 'the price is the API\'s, beside the button');
+    assert.match(textOf(tree), /About ₹12 from the AI budget/, 'the estimate is the API\'s, beside the button');
     const sent = capture({ diagnosis: {
       id: 'dg-1', sessionId: 'sess-1', verdict: 'test_bug', summary: 'The promo field id changed',
       evidence: ['POST element → 404 no such element'], suggestedFix: 'Use the new accessibility id',

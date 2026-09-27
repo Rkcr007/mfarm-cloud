@@ -5,9 +5,9 @@ import { withSystem, withTenant } from '../db.ts';
 import { createApiKey, revokeApiKey } from '../auth.ts';
 import { appStore, type AppStore } from '../appstore.ts';
 import { release } from '../allocator.ts';
-import { AI_PROFILES, isAiProfile, type AiProfile } from './pricing.ts';
+import { callPriceInr, estimateInr, isAiProfile, type AiProfile } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
-import { aiProviderConfig, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
+import { aiProviderConfig, aiStrongModelId, configuredSlots, ensureModelReady, modelUnavailable, resilientModel, type ModelSlot } from './provider.ts';
 import { aiRunNames, redact, secretsIn } from './secrets.ts';
 import { runAgent, type AgentOutcome, type AgentTiming, type Device, type DeviceKey, type Model, type Sink, type StopReason } from './agent.ts';
 import { loadRunSecrets } from './secret-store.ts';
@@ -469,7 +469,9 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
       [orgId, run.id, sessionId],
     ));
 
-    const price = AI_PROFILES[profile].priceInr;
+    // A call is priced from what it used, once it has answered (ADR-0046 §6); before it, the budget is
+    // asked whether a TYPICAL call would fit.
+    const estimate = estimateInr(profile, ctx.modelId);
     const sink: Sink = {
       async beforeStep(): Promise<StopReason | null> {
         // A deploy is not a person pressing Cancel; the run reads as interrupted, like the boot sweep's.
@@ -481,12 +483,13 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
         if (cancelled) return 'cancelled';
         // The same sum the routes quote from — one definition of "spent this month" (queue.ts).
         const { spentInr, budgetInr } = await spendThisMonth(orgId);
-        if (spentInr + price > budgetInr) return 'budget';
+        if (spentInr + estimate > budgetInr) return 'budget';
         return null;
       },
       async record(step) {
-        // One model call is one charge, however many actions it named; a step taken by rule is free.
-        const charged = step.billed ? price : 0;
+        // One model call is one charge, however many actions it named, at what it used on the model that
+        // answered; a step taken by rule is free.
+        const charged = step.billed ? callPriceInr(step.model, step.usage) : 0;
         let sha: string | null = null;
         if (step.screenshotB64) {
           const blob = await ctx.store.put(Readable.from([Buffer.from(step.screenshotB64, 'base64')]), 20 * 1024 * 1024);
@@ -523,6 +526,7 @@ export async function driveRun(app: FastifyInstance, run: ClaimedRun, ctx: Drive
       modelId: ctx.modelId,
       stepCap: run.step_cap,
       timing: agentTiming(),
+      strongModelId: aiStrongModelId() ?? undefined,
     });
   } catch (err) {
     const e = err as Error;

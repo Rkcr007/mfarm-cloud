@@ -3,7 +3,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { withTenant } from '../db.ts';
 import { appStore } from '../appstore.ts';
 import { conflict, notFound, unavailable } from '../http/errors.ts';
-import { AI_CURRENCY, AI_DIAGNOSE_PRICE_INR } from './pricing.ts';
+import { AI_CURRENCY, callPriceInr, estimateInr } from './pricing.ts';
 import { spendThisMonth } from './queue.ts';
 import type { Model } from './agent.ts';
 import { modelFailureWords } from './model-error.ts';
@@ -169,10 +169,13 @@ export async function diagnoseSession(
   });
   if (!ev) throw notFound('Session');
 
+  // Priced from what the call uses once it has answered; refused before it only when even a typical
+  // diagnosis could not be paid for (ADR-0046 §6).
   const { spentInr, budgetInr } = await spendThisMonth(orgId);
-  if (spentInr + AI_DIAGNOSE_PRICE_INR > budgetInr) {
+  const estimate = estimateInr('diagnose', opts.modelId);
+  if (spentInr + estimate > budgetInr) {
     throw conflict('ai_budget_exhausted',
-      `A diagnosis costs ${AI_CURRENCY}${AI_DIAGNOSE_PRICE_INR} and this organisation has ${AI_CURRENCY}${Math.max(0, budgetInr - spentInr)} `
+      `A diagnosis costs about ${AI_CURRENCY}${estimate} and this organisation has ${AI_CURRENCY}${Math.max(0, budgetInr - spentInr)} `
       + 'of its monthly AI budget left.');
   }
 
@@ -244,6 +247,12 @@ export async function diagnoseSession(
   const verdicts = new Set(['app_bug', 'test_bug', 'environment', 'unknown']);
   if (!verdicts.has(parsed.verdict)) parsed.verdict = 'unknown';
 
+  // The model that ANSWERED, and what it used — a fallback provider (ADR-0044) has its own price.
+  const answered = (typeof message.model === 'string' && message.model.trim()) || opts.modelId;
+  const price = callPriceInr(answered, {
+    input: message.usage.input_tokens ?? 0, output: message.usage.output_tokens ?? 0,
+    cacheRead: message.usage.cache_read_input_tokens ?? 0, cacheWrite: message.usage.cache_creation_input_tokens ?? 0,
+  });
   const inputs = {
     failures: failed.length, commands: kept.commands.length, logcatLines: kept.logLines.length,
     screenshot: kept.image, aiSteps: ev.aiSteps.length,
@@ -256,7 +265,7 @@ export async function diagnoseSession(
       [orgId, sessionId, opts.createdBy, parsed.verdict, String(parsed.summary ?? '').slice(0, 4000),
        JSON.stringify((parsed.evidence ?? []).slice(0, 12).map((e) => String(e).slice(0, 600))),
        parsed.suggested_fix ? String(parsed.suggested_fix).slice(0, 2000) : null, JSON.stringify(inputs),
-       opts.modelId, message.usage.input_tokens ?? 0, message.usage.output_tokens ?? 0, AI_DIAGNOSE_PRICE_INR],
+       answered, message.usage.input_tokens ?? 0, message.usage.output_tokens ?? 0, price],
     );
     return diagnosisJson((await c.query<Row>(`${DIAGNOSIS_SELECT} WHERE d.org_id = $1 AND d.id = $2`, [orgId, rows[0]!.id])).rows[0]!);
   });

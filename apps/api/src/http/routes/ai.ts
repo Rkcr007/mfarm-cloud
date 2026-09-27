@@ -5,7 +5,7 @@ import { withTenant } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import { requireTenant } from '../server.ts';
 import { badRequest, conflict, forbidden, notFound, unavailable } from '../errors.ts';
-import { AI_CURRENCY, AI_DIAGNOSE_PRICE_INR, AI_PROFILES } from '../../ai/pricing.ts';
+import { AI_CURRENCY, AI_MARGIN, AI_PROFILES, estimateInr, modelPrice } from '../../ai/pricing.ts';
 import { queueAiRun, spendThisMonth } from '../../ai/queue.ts';
 import { aiConfigured, aiStepStore, configuredModel } from '../../ai/runner.ts';
 import { diagnoseSession, diagnosisJson, DIAGNOSIS_SELECT } from '../../ai/diagnose.ts';
@@ -142,17 +142,24 @@ export async function aiRoutes(app: FastifyInstance, opts: AiRouteOptions): Prom
   });
 
   /**
-   * THE PRICE LIST, as the server bills it. The console renders this and never a literal, so the
-   * quote and the meter are one number (`AI_PROFILES` in `ai/pricing.ts`).
+   * THE PRICE LIST, as the server bills it (ADR-0046 §6). A call is billed from the tokens it used, so
+   * what a person is quoted is an ESTIMATE of one typical call on this farm's model — from the same
+   * function the budget checks use (`ai/pricing.ts`). The console renders this and never a literal.
    */
   app.get('/ai/pricing', async (req) => {
     const { orgId } = requireTenant(req);
+    const model = opts.aiModelId ?? cfg.aiModel;
     return {
       configured: configured(),
       currency: AI_CURRENCY,
+      billing: 'measured',
+      margin: AI_MARGIN,
+      model,
+      // False when the farm runs a model `pricing.ts` does not know: it is billed as a known one, not free.
+      modelPriceKnown: modelPrice(model).known,
       profiles: Object.fromEntries(Object.entries(AI_PROFILES).map(([k, v]) =>
-        [k, { priceInr: v.priceInr, stepCap: v.stepCap }])),
-      diagnosePriceInr: AI_DIAGNOSE_PRICE_INR,
+        [k, { estimateInr: estimateInr(k as keyof typeof AI_PROFILES, model), stepCap: v.stepCap }])),
+      diagnoseEstimateInr: estimateInr('diagnose', model),
       budget: await spendThisMonth(orgId),
     };
   });

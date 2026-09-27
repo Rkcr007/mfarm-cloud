@@ -11823,8 +11823,8 @@ function aiNewRun(off) {
     off ? null : aiReadinessStrip(),
     h('div', { class: 'row between mt-md' },
       h('p', { class: 'caption', text: profileSpec
-        ? `${aiMoney(profileSpec.priceInr)} per AI turn — one turn can take several steps — up to `
-          + `${profileSpec.stepCap} turns (at most ${aiMoney(profileSpec.priceInr * profileSpec.stepCap)}), plus device time.`
+        ? `About ${aiMoney(profileSpec.estimateInr)} per AI turn, billed at what each turn uses — one turn can take `
+          + `several steps. Up to ${profileSpec.stepCap} turns, plus device time.`
         : ' ' }),
       btn(ai.busy ? 'Starting…' : 'Start AI run', 'primary', () => void startAiRun(),
         { disabled: off || ai.busy || !d.prompt.trim() || Boolean(aiBlocked()), title: aiBlocked()?.message || null }),
@@ -12620,7 +12620,7 @@ function aiExplainBlock(sessionId) {
       latest.suggestedFix ? h('p', { class: 'caption' }, h('span', { class: 'micro', text: 'Suggested fix ' }), latest.suggestedFix) : null,
     );
   }
-  const price = ai.pricing?.diagnosePriceInr;
+  const price = ai.pricing?.diagnoseEstimateInr;
   const blocked = aiBlocked('explain');
   return h('p', { class: 'row tight wrap' },
     btn(d.busy ? 'Reading the evidence\u2026' : 'Explain this failure', 'tiny', () => void explainFailure(sessionId), {
@@ -12629,7 +12629,7 @@ function aiExplainBlock(sessionId) {
     }),
     blocked
       ? h('span', { class: 'caption ai-row-why', text: `Not available right now: ${blocked.message}` })
-      : price !== undefined ? h('span', { class: 'caption', text: `${aiMoney(price)} from the AI budget` }) : null);
+      : price !== undefined ? h('span', { class: 'caption', text: `About ${aiMoney(price)} from the AI budget` }) : null);
 }
 
 async function loadDiagnoses(sessionId) {

@@ -2,6 +2,7 @@ import { createPrivateKey, createPublicKey, sign, verify, type KeyObject } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AI_PROVIDERS, aiApiKey, aiProviderOf, type AiProvider } from './ai/provider.ts';
+import { AI_MARGIN, MODEL_PRICES, UNKNOWN_MODEL_PRICE, modelPrice } from './ai/pricing.ts';
 
 /**
  * The environment, read and judged once, at startup.
@@ -195,6 +196,10 @@ export interface Config {
   aiModel: string;
   /** The fallback provider in one line (ADR-0044), or null when there is none. Never the key. */
   aiFallback: string | null;
+  /** `MFARM_AI_STRONG_MODEL`: the primary provider's model for Pro plans and escalations (ADR-0046). */
+  aiStrongModel: string | null;
+  /** How AI calls are priced on this farm, in words for the boot log — and a warning when it is a guess. */
+  aiPricing: string;
   /** How often the AI runner looks for queued runs. 0 turns AI runs off in this process. */
   aiRunnerIntervalMs: number;
   /** Runs driven at once. Each holds a device, so this is also a cap on devices AI can occupy. */
@@ -531,6 +536,13 @@ export function parseConfig(env: Env): Config {
     problems.push('MFARM_AI_PROVIDER=openai needs MFARM_AI_MODEL: the default, claude-opus-5, is an Anthropic model id.');
   }
   const aiModel = aiModelSet || 'claude-opus-5';
+  const aiStrongModel = (env.MFARM_AI_STRONG_MODEL ?? '').trim() || null;
+  // Billed from measured tokens at the model's list price (ADR-0046 §6). A model pricing.ts does not know
+  // is billed as a known one — never free — and the boot log says so, with the fix.
+  const unpriced = [aiModel, aiStrongModel].filter((m): m is string => Boolean(m) && !modelPrice(m!, env).known);
+  const aiPricing = unpriced.length
+    ? `list price unknown for ${unpriced.join(', ')} — billed as ${Object.keys(MODEL_PRICES).find((k) => MODEL_PRICES[k] === UNKNOWN_MODEL_PRICE)}; set MFARM_AI_PRICES`
+    : `measured tokens × list price × ${AI_MARGIN}`;
   /**
    * THE FALLBACK PROVIDER (ADR-0044) — optional, and checked as strictly as the primary: a typo here
    * must fail the boot, not the first outage the fallback exists to cover.
@@ -902,6 +914,8 @@ export function parseConfig(env: Env): Config {
     aiBaseUrl,
     aiModel,
     aiFallback,
+    aiStrongModel,
+    aiPricing,
     aiRunnerIntervalMs,
     aiMaxConcurrentRuns,
     turnTtlSeconds,
@@ -985,7 +999,7 @@ export function describeConfig(c: Config): Record<string, string | number | bool
     dataPlanePublicBase: c.dataPlanePublicBase ?? 'unset (same-origin /dp on this console)',
     ai: c.aiKeySource === 'none'
       ? 'off (no MFARM_AI_API_KEY)'
-      : `${c.aiProvider}${c.aiBaseUrl ? ` via ${new URL(c.aiBaseUrl).host}` : ''} ${c.aiModel}${c.aiFallback ? `, fallback ${c.aiFallback}` : ''}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms`,
+      : `${c.aiProvider}${c.aiBaseUrl ? ` via ${new URL(c.aiBaseUrl).host}` : ''} ${c.aiModel}${c.aiStrongModel ? ` (strong: ${c.aiStrongModel})` : ''}${c.aiFallback ? `, fallback ${c.aiFallback}` : ''}, ${c.aiMaxConcurrentRuns} at once, every ${c.aiRunnerIntervalMs}ms; billed at ${c.aiPricing}`,
     turn: c.turnUrls.length ? `${c.turnUrls.length} url(s), secret ${c.turnSecretSource}` : 'unconfigured',
   };
 }

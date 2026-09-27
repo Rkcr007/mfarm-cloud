@@ -58,8 +58,8 @@ const RUN = {
   cancelRequested: false, createdBy: 'someone@mfarm.local', trigger: 'manual', test: null,
 };
 const PRICING = {
-  configured: true, currency: '₹', diagnosePriceInr: 12,
-  profiles: { flash: { priceInr: 4, stepCap: 40 }, pro: { priceInr: 9, stepCap: 80 } },
+  configured: true, currency: '₹', diagnoseEstimateInr: 12,
+  profiles: { flash: { estimateInr: 4, stepCap: 40 }, pro: { estimateInr: 9, stepCap: 80 } },
   budget: { spentInr: 8, budgetInr: 2000 },
 };
 
