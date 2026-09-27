@@ -253,7 +253,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 |---|---|
 | Tests | **1719**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
 | Migrations | 52; 051 is deployed, **052 is not on the farm yet** |
-| Decisions | 44 ADRs, numbered to 0045 (there is no 0013) |
+| Decisions | 45 ADRs, numbered to 0046 (there is no 0013) |
 | Merged PRs | 173 |
 | Defects | 55 recorded, **53 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |

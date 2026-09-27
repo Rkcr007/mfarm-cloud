@@ -10,6 +10,12 @@
  */
 process.env.RATE_LIMIT_MAX = '10000';
 process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
+// A real phone needs these waits (agent.ts AgentTiming); the stub device answers at once.
+process.env.MFARM_AI_SETTLE_POLL_MS = '5';
+process.env.MFARM_AI_SETTLE_MAX_MS = '40';
+process.env.MFARM_AI_SETTLE_AFTER_ACTION_MS = '0';
+process.env.MFARM_AI_SETTLE_EXPECT_MS = '40';
+process.env.MFARM_AI_SETTLE_FOCUS_MS = '0';
 
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -116,6 +122,7 @@ function startUpstream(): Promise<string> {
 
 type Turn =
   | { tool: string; input: Record<string, unknown> }
+  | { tools: Array<{ tool: string; input: Record<string, unknown> }> }
   | { text: string }
   | { fail: Error };
 
@@ -148,12 +155,14 @@ const scriptedModel: Model = async (params) => {
   const turn = key ? scripts.get(key)!.shift() : undefined;
   if (turn && 'fail' in turn) throw turn.fail;
   const t = turn ?? { text: 'I am not sure what to do.' };
-  const content = 'tool' in t
-    ? [{ type: 'text', text: 'Looking at the screen.' }, { type: 'tool_use', id: `tu_${randomUUID()}`, name: t.tool, input: t.input }]
-    : [{ type: 'text', text: t.text }];
+  const uses = 'tool' in t ? [t] : 'tools' in t ? t.tools : [];
+  const content = uses.length
+    ? [{ type: 'text', text: 'Looking at the screen.' },
+      ...uses.map((u) => ({ type: 'tool_use', id: `tu_${randomUUID()}`, name: u.tool, input: u.input }))]
+    : [{ type: 'text', text: (t as { text: string }).text }];
   return {
     id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', model: params.model,
-    content, stop_reason: 'tool' in t ? 'tool_use' : 'end_turn', stop_sequence: null,
+    content, stop_reason: uses.length ? 'tool_use' : 'end_turn', stop_sequence: null,
     usage: { input_tokens: 1200, output_tokens: 80, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
   } as unknown as Anthropic.Beta.BetaMessage;
 };
@@ -387,6 +396,33 @@ describe('an AI run', () => {
     assert.equal(done.aiRun.costInr, 3 * AI_PROFILES.pro.priceInr);
     assert.equal(calls[0]!.tools, undefined, 'the plan step offers no tools');
     assert.deepEqual(calls[0]!.output_config, { effort: 'high' });
+  });
+
+  test('one call may fill a form and conclude: each action is its own step, only the call is billed (ADR-0046)', async () => {
+    await resetFleet();
+    scripts.set('Sign in in one turn', [{ tools: [
+      { tool: 'type_text', input: { index: 0, text: 'a@b.co', submit: false, why: 'the e-mail' } },
+      { tool: 'tap_element', input: { index: 1, why: 'log in' } },
+      { tool: 'finish', input: { passed: true, summary: 'Signed in', evidence: 'Log in shown', expect: 'Log in', why: 'done' } },
+    ] }]);
+    const { body } = await startRun({ prompt: 'Sign in in one turn', region: REGION });
+    const done = await settle(body.aiRun.id);
+    assert.equal(done.aiRun.status, 'passed', JSON.stringify(done.aiRun));
+    assert.equal(calls.length, 1, 'one model call');
+    assert.deepEqual(done.steps.map((s) => s.action?.tool), ['type_text', 'tap_element', 'finish']);
+    assert.equal(done.aiRun.costInr, AI_PROFILES.flash.priceInr, 'billed once, for the call');
+    const prices = await withSystem(async (c) => (await c.query(
+      'SELECT price_inr::float AS p FROM ai_steps WHERE ai_run_id = $1 ORDER BY n', [body.aiRun.id],
+    )).rows.map((r) => r.p as number));
+    assert.deepEqual(prices, [AI_PROFILES.flash.priceInr, 0, 0], 'the ledger charges the first step of the call');
+
+    // The e-mail field was tapped at its centre, then typed into; then Log in was tapped.
+    const taps = recorded.filter((r) => r.url.endsWith('/actions')).map((r) => {
+      const a = (r.body as { actions: { actions: { x: number; y: number }[] }[] }).actions[0]!.actions[0]!;
+      return [a.x, a.y];
+    });
+    assert.deepEqual(taps, [[540, 460], [540, 1210]]);
+    assert.equal((recorded.find((r) => r.url.endsWith('/element/el-1/value'))?.body as { text?: string })?.text, 'a@b.co');
   });
 
   test('stops at the step that would overspend the monthly budget, and says so', async () => {

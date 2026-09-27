@@ -304,7 +304,9 @@ export function toOpenAiRequest(params: Params, maxOutput: number | null = null)
       };
     });
     body.tool_choice = 'auto';
-    body.parallel_tool_calls = false;
+    // Several actions in one call is how the agent saves calls (ADR-0046); the Messages flag says whether it may.
+    const tc = params.tool_choice as { disable_parallel_tool_use?: boolean } | undefined;
+    body.parallel_tool_calls = tc?.disable_parallel_tool_use !== true;
   }
   const format = params.output_config?.format;
   if (format?.type === 'json_schema') {

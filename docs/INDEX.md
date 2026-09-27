@@ -42,7 +42,8 @@ The filename stays because a lot of things link to it.
   pricing, and the tracker of every AI capability
   ([0043](adrs/0043-mfarm-ai-is-an-agent-on-our-own-hub.md); nothing is started that cannot finish —
   [0044](adrs/0044-nothing-is-started-that-cannot-finish.md); a secret is named in a task, never written into
-  it — [0045](adrs/0045-a-secret-is-named-never-written.md)).
+  it — [0045](adrs/0045-a-secret-is-named-never-written.md); the model writes a test once, the farm runs it —
+  [0046](adrs/0046-the-model-writes-the-test-once.md)).
 - **The record** — [../HANDOFF.md](../HANDOFF.md), the numbered session log. **Trust its dated
   entries over its summary sections:** the entries have held up under two audits, the summaries have
   been found carrying seventeen and then twelve stale claims.

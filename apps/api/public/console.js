@@ -11249,7 +11249,7 @@ function aiStopText(r) {
   if (r.stopReason === 'model_error' && aiRateLimited(r.summary)) return 'The AI model provider\u2019s usage limit was reached.';
   return ({
     budget: 'Stopped: the monthly AI budget would have been exceeded by the next step.',
-    step_cap: `Stopped after ${r.stepCap} steps without reaching a verdict.`,
+    step_cap: `Stopped after ${r.stepCap} AI turns without reaching a verdict.`,
     no_action: 'The agent stopped choosing actions.',
     model_refused: 'The model declined this task.',
     model_error: 'The model could not be reached.',
@@ -11785,8 +11785,8 @@ function aiNewRun(off) {
             type: 'button', role: 'radio', 'aria-checked': String(d.profile === k),
             class: `lens${d.profile === k ? ' on' : ''}`, disabled: off,
             title: k === 'flash'
-              ? 'Acts every turn. Fastest and cheapest per step.'
-              : 'Plans checkpoints first, and confirms its verdict on a fresh screen before it counts.',
+              ? 'Acts every turn. Fastest and cheapest.'
+              : 'Plans checkpoints first; a verdict the screen cannot confirm is checked again on a fresh screen.',
             onclick: () => { state.ai.draft = { ...state.ai.draft, profile: k }; render(); },
           }, k === 'flash' ? 'Flash' : 'Pro')))),
       h('div', { class: 'stack tight' },
@@ -11823,8 +11823,8 @@ function aiNewRun(off) {
     off ? null : aiReadinessStrip(),
     h('div', { class: 'row between mt-md' },
       h('p', { class: 'caption', text: profileSpec
-        ? `${aiMoney(profileSpec.priceInr)} per step, up to ${profileSpec.stepCap} steps `
-          + `(at most ${aiMoney(profileSpec.priceInr * profileSpec.stepCap)}), plus device time.`
+        ? `${aiMoney(profileSpec.priceInr)} per AI turn — one turn can take several steps — up to `
+          + `${profileSpec.stepCap} turns (at most ${aiMoney(profileSpec.priceInr * profileSpec.stepCap)}), plus device time.`
         : ' ' }),
       btn(ai.busy ? 'Starting…' : 'Start AI run', 'primary', () => void startAiRun(),
         { disabled: off || ai.busy || !d.prompt.trim() || Boolean(aiBlocked()), title: aiBlocked()?.message || null }),

@@ -4970,3 +4970,17 @@ when the feature is broken. See issues 37 and 38.
     in `deploy/.env`. C1 was verified on hardware anyway (it only needs the hub, which the old build
     serves) and that run found two defects fixed in #209. C2–C10 have never met a real model or a
     real device; the prices in `ai/pricing.ts` are derived, not measured.
+
+98. **AN AI LOGIN COST ~11 PAID CALLS, AND EVERY RE-RUN PAID AGAIN.** 2026-09-27, ADR-0046 (amends
+    ADR-0043), tracker row C12. The owner: a login test costs ₹40–50 "and that's not even a test
+    started … not worth it". The ₹4 is a flat price per MODEL CALL (`pricing.ts`, derived from Opus 5
+    and never recalibrated; the farm runs on a free tier), and the loop spent one call per action: tap
+    a field, type, tap, type, tap, wait, finish. Saved tests and run-on-upload re-ran the whole loop.
+
+    The owner accepted ADR-0046 — the model writes and repairs a test, the farm runs it — and its
+    pricing (measured cost × margin; replays free). Phase 1a, this entry: one call names up to six
+    actions and is billed once; `type_text` taps its own field; the loop waits for the screen to settle,
+    answers permission prompts by rule, and checks the verdict's `expect` on the screen itself. The
+    agent's own unit suite (`ai-agent.test.ts`) was checked by planting each bug it guards — the first
+    version missed one (an element renumbered by a banner above it). **Not measured on hardware yet**;
+    1b, 1c and phase 2 (compiled replay) follow.
