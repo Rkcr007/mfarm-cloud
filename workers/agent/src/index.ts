@@ -29,7 +29,7 @@ import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.
 import { createAvdBackend } from './devices/avd.ts';
 import { parseProfileAssignments } from './devices/profiles.ts';
 import { createPhysicalBackend, PhysicalDevice } from './devices/physical.ts';
-import { AutomationOffer } from './automation-offer.ts';
+import { AutomationOffer, phoneBlocker } from './automation-offer.ts';
 import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DiscoveredDevice } from './devices/discovery.ts';
 import { AgentWindow, openInBrowser, type WindowDevice, type WindowNotice, type WindowPairing, type WindowState } from './window.ts';
@@ -612,6 +612,8 @@ async function main(): Promise<void> {
    * of its own arrival/departure callback.
    */
   let lastDiscovery: DiscoveredDevice[] = [];
+  /** Whether `lastDiscovery` is an answer yet, rather than the empty list it starts as. */
+  let discovered = false;
   /** The owner's sharing decisions, re-read whenever one changes. See `sharing.ts`. */
   let sharing: SharingPolicy = await loadSharing();
 
@@ -651,11 +653,13 @@ async function main(): Promise<void> {
       const health = agentRef?.healthOf(info.localId);
       const phone = b.control as Partial<PhysicalDevice>;
 
-      // Adopted at start-up and no longer in a discovery pass that found SOMETHING: the cable is
-      // out. Distinguished from `health === 'offline'` because the remedy is different and physical
-      // — replug it — where a degraded device needs looking at. Guarded on a non-empty pass so an
-      // adb hiccup, which returns [], does not report every phone as unplugged.
-      const vanished = info.tier === 'physical' && lastDiscovery.length > 0 && !seen;
+      // Adopted at start-up and missing from the last discovery pass: the cable is out, or the phone
+      // is restarting. Distinguished from `health === 'offline'` because the remedy is different and
+      // physical. NOT guarded on a non-empty pass any more: an adb hiccup throws (AdbUnavailableError)
+      // and never reaches `lastDiscovery`, so an empty list is the true answer — and that guard meant a
+      // machine with one phone never said it had gone. Seen rebooting the OnePlus (D61): the row read
+      // UNHEALTHY and offered to change a setting on a phone that was not there.
+      const vanished = info.tier === 'physical' && discovered && !seen;
 
       // What the phone itself is missing. A blocker outranks everything but an unplugged cable: it
       // is the row that says READY everywhere else while no session can start on it.
@@ -689,7 +693,8 @@ async function main(): Promise<void> {
             : seen?.remedy,
         // `undefined` for a tier that has no such setting, so the offer never appears on a
         // Cuttlefish instance, where the button would have nothing to press.
-        installVerification: typeof phone.installVerification === 'string' ? phone.installVerification : undefined,
+        // Not offered for a phone that is not there: the button would write to nothing.
+        installVerification: !vanished && typeof phone.installVerification === 'string' ? phone.installVerification : undefined,
         sessions,
       });
     }
@@ -923,14 +928,19 @@ async function main(): Promise<void> {
         if (typeof dev.prerequisites !== 'function') continue;
         const localId = b.control.info.localId;
         const was = offer.blockerOf(localId);
-        let blocker;
+        // A phone that has left is not asked anything: the reads would fail, and what it last said
+        // about itself is still the answer when it comes back.
+        const serial = b.control.info.adbSerial;
+        const onUsb = lastDiscovery.some((d) => d.serial === serial && d.state === 'device');
+        let prerequisite = blockerOf(localId);
         // A read that failed is not an answer, and must not un-block a phone.
-        try { blocker = (await dev.prerequisites()).find((p) => p.blocks); } catch { continue; }
-        offer.blockedBy(localId, blocker?.title);
-        if (blocker && !was) {
+        if (onUsb) { try { prerequisite = (await dev.prerequisites()).find((p) => p.blocks); } catch { /* keep */ } }
+        const blocker = phoneBlocker({ onUsb, health: agent.healthOf(localId), prerequisite });
+        offer.blockedBy(localId, blocker?.reason);
+        if (blocker && blocker.reason !== was) {
           console.warn(
-            `[agent] ${localId}: ${blocker.title} — \`webdriver\` withdrawn for it on the next `
-            + `heartbeat. ${blocker.remedy}`);
+            `[agent] ${localId}: ${blocker.reason} — \`webdriver\` withdrawn for it on the next `
+            + `heartbeat.${blocker.remedy ? ` ${blocker.remedy}` : ''}`);
         } else if (!blocker && was) {
           console.log(
             `[agent] ${localId} can start sessions again — \`webdriver\` `
@@ -1311,12 +1321,21 @@ async function main(): Promise<void> {
     // (`setShared`), so a watch that outlives one decision never has to learn the next.
     const sharedAtStart = sharing;
 
-    discoveryWatch = watchForChanges(knownSerials, (added, removed) => {
+    discoveryWatch = watchForChanges(knownSerials, (added, removed, returned) => {
       // Logged, never acted on — see the block comment. The health monitor owns departures.
       if (removed.length > 0) {
         console.warn(
           `[agent] no longer on USB: ${removed.join(', ')}. Health checks will report them offline; `
           + 'the agent stays up for the devices it still has.',
+        );
+      }
+      // A device this agent already has, back from a reboot or a replug. It used to be an arrival,
+      // so restarting a phone restarted the agent — and once D60's remedy said "restart the
+      // phone", following the instruction stopped the agent that gave it (D61).
+      if (returned.length > 0) {
+        console.log(
+          `[agent] back on USB: ${returned.join(', ')}. Already this agent's, so nothing restarts — `
+          + 'offered for sessions again once its health check passes.',
         );
       }
       if (added.length === 0) return;
@@ -1332,6 +1351,7 @@ async function main(): Promise<void> {
       // definition above — the usable set only changes on the tick after — but it is exactly the
       // moment the person watching wants their row to update.
       lastDiscovery = found;
+      discovered = true;
       win?.push();
       void refreshPrerequisites();
     }, (serial) => sharedAtStart.allows(serial, 'physical'));
@@ -1339,7 +1359,7 @@ async function main(): Promise<void> {
     // The first pass is ten seconds away, and a window that opens empty on a machine with a phone
     // already plugged into it reads as broken. One extra `adb devices` at start-up buys the row
     // being there when the browser is.
-    void discover().then((found) => { lastDiscovery = found; win?.push(); }).catch(() => { /* the poll will retry */ });
+    void discover().then((found) => { lastDiscovery = found; discovered = true; win?.push(); }).catch(() => { /* the poll will retry */ });
   }
 
 

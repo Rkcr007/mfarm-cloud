@@ -227,11 +227,19 @@ Arrival and departure are handled differently, on purpose:
   written by registration and nothing else — so the agent **drains and exits**, and systemd's
   `Restart=always` brings it back with both phones. The drain waits for live sessions to finish, so
   plugging in a second phone does not interrupt a suite running on the first.
-- **A phone leaves.** Nothing restarts. Health checks report it offline, an incident is recorded,
-  and the control plane stops scheduling it — while every other device on the host keeps working.
+- **A phone leaves.** Nothing restarts. The health check reports it offline at once, an incident is
+  recorded, and the agent withdraws `webdriver` for it on the next heartbeat — while every other
+  device on the host keeps working. The window says it is no longer on USB. **The console still
+  lists it as available**: its state only changes at registration, so a session started by hand
+  from the console in that window is allocated to a phone that is not there (D62).
+- **A phone comes back** — a reboot, a replug. **Nothing restarts either** (D61): it is a device the
+  agent already has, the held shell reopens on the next command, and `webdriver` returns once its
+  health check passes. Measured rebooting a OnePlus 8T: withdrawn within a second of the reboot,
+  offered again about 45 seconds later, same agent process throughout.
 
-If you run the agent by hand rather than under systemd, an arrival will exit the process and it is
-on you to start it again. Under the supplied unit this is invisible.
+If you run the agent by hand rather than under systemd, an arrival — a phone it has never had — will
+exit the process and it is on you to start it again (or set `MFARM_RELAUNCH=1`). Under the supplied
+unit this is invisible.
 
 Tune the poll with `PHYSICAL_DISCOVERY_INTERVAL_MS` (default 10000).
 
@@ -377,10 +385,8 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   detects it and withholds `webdriver` (D60 in [DEFECTS.md](DEFECTS.md)); it does not fix it, and
   only the OnePlus has been run. The device still reads `READY` in the console, because `READY` is
   about the lease and not about automation — the capability list is what changes.
-- **Restarting a phone restarts the agent.** A phone that reboots, or is replugged, comes back as an
-  arrival, and an arrival drains the agent to re-register (§5). Under the supplied unit, or run by
-  hand in a terminal, it comes straight back; started in the background with neither, it exits and
-  stays down unless `MFARM_RELAUNCH=1` is set. D61.
+- **A phone that is away still reads available in the console** (§5, D62). `webdriver` is withdrawn
+  and the window says so; the device's state is not.
 - **No live view or interactive control.** §20/§21 are unbuilt for this tier. Screenshots and the
   UI inspector work; a moving picture does not.
 - **No Windows agent.**
