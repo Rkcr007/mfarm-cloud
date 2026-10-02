@@ -362,6 +362,12 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
 
 ## 9. Known limitations
 
+- **A OnePlus on factory settings cannot run a session** — and the same is expected of OPPO and
+  realme, which share the ROM. OxygenOS refuses adb's `settings put`, `pm grant` and `pm clear`
+  until a developer option is changed; UiAutomator2 writes a setting at session start, so
+  `POST /session` fails at once with a `SecurityException`. The phone still enrols, reads `READY`,
+  and is listed as ready in the window. Measured 2026-10-03 on a OnePlus 8T (Android 14); see D60 in
+  [DEFECTS.md](DEFECTS.md). Every other phone this has run on was a Samsung, which allows all three.
 - **No live view or interactive control.** §20/§21 are unbuilt for this tier. Screenshots and the
   UI inspector work; a moving picture does not.
 - **No Windows agent.**

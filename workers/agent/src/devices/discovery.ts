@@ -302,6 +302,16 @@ export function watchForChanges(
    * the thing being diagnosed.
    */
   onPass?: (found: DiscoveredDevice[]) => void,
+  /**
+   * Would this phone become a backend? Only those are part of the set being compared.
+   *
+   * `known` is the caller's backends, and a usable phone the owner has not shared (ADR-0009 §2) is
+   * never one of them — so compared against that baseline it is an arrival on every start. The
+   * agent drained to register a device it had just declined to register, and took the window down
+   * with it: the one place the phone could have been shared. `onPass` is unaffected and still
+   * carries it, which is what keeps its row and its toggle on screen.
+   */
+  joins: (serial: string) => boolean = () => true,
 ): { stop: () => void } {
   let current = new Set(known);
   let stopped = false;
@@ -347,7 +357,7 @@ export function watchForChanges(
     if (onPass) {
       try { onPass(found); } catch (e) { console.error(`[discovery] pass listener threw: ${(e as Error).message}`); }
     }
-    const usable = new Set(found.filter((d) => d.state === 'device').map((d) => d.serial));
+    const usable = new Set(found.filter((d) => d.state === 'device' && joins(d.serial)).map((d) => d.serial));
     const added = [...usable].filter((s) => !current.has(s));
     const removed = [...current].filter((s) => !usable.has(s));
     if (added.length === 0 && removed.length === 0) return;

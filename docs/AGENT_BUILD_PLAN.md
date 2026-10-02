@@ -310,8 +310,12 @@ with the blast radius shown before anyone picks the sweep. **Not built yet**; it
 absent. So the window cannot show a row, cannot walk a checklist against a real device, and cannot
 confirm anything — the guide is blind exactly when it is needed.
 
-`system_profiler SPUSBDataType` returns in **0.15 s measured** and lists USB devices independently
-of adb. That gives the agent the state adb cannot report — *a Samsung is on this cable and it is not
+`system_profiler` lists USB devices independently of adb — **but under a name that has moved.**
+`SPUSBDataType` returned in 0.15 s when this was written; on macOS 26.6 it prints nothing at all,
+with a phone attached or without, and the list is under `SPUSBHostDataType` (measured 2026-10-03: a
+OnePlus 8T, with manufacturer, serial, vendor and product id; `ioreg -p IOUSB` shows it too). Try
+both, and read EMPTY OUTPUT as "this probe does not work here", never as "no phone on the cable".
+That gives the agent the state adb cannot report — *a Samsung is on this cable and it is not
 offering debugging* — and turns the prerequisites into a live walkthrough:
 
 | What the agent can see | What it says |

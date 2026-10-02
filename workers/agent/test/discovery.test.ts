@@ -270,6 +270,50 @@ describe('watchForChanges', () => {
   });
 
   /**
+   * A PHONE THE OWNER HAS NOT SHARED IS NOT AN ARRIVAL — found on a OnePlus 8T, 2026-10-03.
+   *
+   * It is usable and it is not a backend, so against a baseline of backends it looked new on every
+   * start. The agent said "plugged in and NOT shared", then drained to register it, one discovery
+   * interval later — taking the window down with it, which is the only place it can be shared.
+   */
+  test('a usable phone that is not shared is not an arrival', async () => {
+    let calls = 0;
+    const w = watchForChanges([], () => { calls += 1; }, 10, worlds(['PRIVATE']), undefined, () => false);
+    await settle();
+    w.stop();
+    assert.equal(calls, 0, 'draining for a phone that will not be registered restarts the agent for nothing');
+  });
+
+  test('a shared phone beside an unshared one is still an arrival, and only it', async () => {
+    const seen: Array<[string[], string[]]> = [];
+    const w = watchForChanges([], (a, r) => seen.push([a, r]), 10,
+      worlds(['PRIVATE'], ['PRIVATE', 'SHARED']), undefined, (serial) => serial === 'SHARED');
+    await settle();
+    w.stop();
+    assert.deepEqual(seen, [[['SHARED'], []]]);
+  });
+
+  /** It was never part of the fleet, so unplugging it is not the fleet losing a device either. */
+  test('an unshared phone leaving is not a departure', async () => {
+    let calls = 0;
+    const w = watchForChanges([], () => { calls += 1; }, 10, worlds(['PRIVATE'], []), undefined, () => false);
+    await settle();
+    w.stop();
+    assert.equal(calls, 0);
+  });
+
+  /** The window lists a withheld phone with a toggle, so every pass must still carry it. */
+  test('onPass still carries a phone that is not shared', async () => {
+    const passes: string[][] = [];
+    const w = watchForChanges([], () => {}, 10, worlds(['PRIVATE']),
+      (found) => passes.push(found.map((d) => d.serial)), () => false);
+    await settle();
+    w.stop();
+    assert.ok(passes.length > 0);
+    assert.deepEqual(passes[0], ['PRIVATE']);
+  });
+
+  /**
    * A failing probe must not read as "every phone was unplugged". adb hiccups, and a transient
    * failure that reported the whole fleet gone would be acted on as real.
    */
