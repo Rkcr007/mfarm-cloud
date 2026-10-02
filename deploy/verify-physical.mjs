@@ -153,6 +153,9 @@ async function main() {
   console.log(dim(`adb      ${ADB}`));
 
   const device = new PhysicalDevice({ serial, localId: `phone-${serial}`, model, osVersion: release });
+  // Set in the prerequisites section and read again where a reset is costed: a phone that refuses
+  // `pm clear` makes two later answers mean something else.
+  let adbRestricted = false;
 
   // ── 1. The held shell ─────────────────────────────────────────────────────────────────────────
   // start() waits for boot and opens the long-lived `adb shell`. Everything below the reset section
@@ -201,20 +204,26 @@ async function main() {
   //
   // This is the condition that produced the first three capture runs on this device: 2.2 fps, one
   // keyframe, 0.01 Mbps, all of them measurements of an always-on-display clock.
-  console.log(`\n${bold('Prerequisites')} ${dim('(PHYSICAL_DEVICES.md §1 — nothing in the agent checks these)')}`);
+  console.log(`\n${bold('Prerequisites')} ${dim('(PHYSICAL_DEVICES.md §1 — physical.ts prerequisites(), what the agent itself reads)')}`);
   const power = (await raw(['-s', serial, 'shell', 'dumpsys', 'power'], 15_000)).stdout;
   const wake = /mWakefulness=(\w+)/.exec(power)?.[1] ?? 'unknown';
-  const stayOn = (await raw(['-s', serial, 'shell', 'settings', 'get', 'global', 'stay_on_while_plugged_in'], 10_000)).stdout;
-  const locked = /mDreamingLockscreen=true/.test(
-    (await raw(['-s', serial, 'shell', 'dumpsys', 'window'], 20_000)).stdout);
-
   (wake === 'Awake' ? ok : warn)('screen is awake', `mWakefulness=${wake}`);
-  // 0 means the screen sleeps on its own timeout even while charging, which is what a farm device
-  // must not do. Any non-zero value covers at least one charging mode.
-  (stayOn !== '0' ? ok : warn)('"Stay awake" is enabled',
-    stayOn === '0' ? 'stay_on_while_plugged_in=0 — the phone will doze mid-session' : `stay_on_while_plugged_in=${stayOn}`);
-  (!locked ? ok : warn)('screen is unlocked',
-    locked ? 'the keyguard is up — input lands on the lockscreen and most automation fails' : 'no keyguard');
+
+  // THE AGENT'S OWN ANSWER, not a second copy of the reads. This script used to do its own, and so
+  // it could not say whether the product would notice — only that a person running a script would.
+  const tPre = performance.now();
+  const unmet = await device.prerequisites();
+  const preMs = Math.round(performance.now() - tPre);
+  const missing = (code) => unmet.find((p) => p.code === code);
+  // The one that stops a session. A phone in this state reads READY and fails every `POST /session`.
+  adbRestricted = Boolean(missing('adb-restricted'));
+  (adbRestricted ? bad : ok)('adb may write settings, grant permissions and clear app data',
+    adbRestricted ? missing('adb-restricted').remedy : 'a harmless privileged command was allowed');
+  (missing('stay-awake-off') ? warn : ok)('"Stay awake" is enabled',
+    missing('stay-awake-off') ? missing('stay-awake-off').remedy : 'the screen stays on while plugged in');
+  (missing('screen-locked') ? warn : ok)('screen is unlocked',
+    missing('screen-locked') ? missing('screen-locked').remedy : 'no keyguard');
+  console.log(`  ${dim(`all three read in ${preMs}ms — the agent repeats this on every discovery pass`)}`);
 
   // ── 3. Reset blast radius ─────────────────────────────────────────────────────────────────────
   console.log(`\n${bold('What a reset would clear')} ${dim('(physical.ts resetToSnapshot — NOT executed)')}`);
@@ -313,7 +322,12 @@ async function main() {
   const clearRes = await raw(['-s', serial, 'shell', 'pm', 'clear', bogus], 30_000);
   console.log(`  ${dim(`pm clear ${bogus} → exit ${clearRes.code}, stdout ${JSON.stringify(clearRes.stdout)}, stderr ${JSON.stringify(clearRes.stderr)}`)}`);
   const saysFailed = /fail/i.test(clearRes.stdout) || /fail/i.test(clearRes.stderr);
-  if (clearRes.code !== 0) {
+  if (/SecurityException/.test(clearRes.stderr + clearRes.stdout)) {
+    // Non-zero, so the pool-safety property technically holds — and for the wrong reason. This is
+    // not `pm` failing on a package that is not there; it is the phone refusing `pm clear` itself.
+    bad('this phone refuses every `pm clear`, not just this one',
+      'a full-sweep release can never finish here — each one would take the device out of the pool');
+  } else if (clearRes.code !== 0) {
     ok('a clear that fails exits non-zero', 'physical.ts rejects, the device leaves the pool');
   } else if (saysFailed) {
     bad('a clear that fails still exits 0',
@@ -333,8 +347,12 @@ async function main() {
   const estimate = (perClear * wouldClear.length) / 1000;
   console.log(`  ${dim(`one pm clear round trip ${perClear.toFixed(0)}ms × ${wouldClear.length} packages, run sequentially`)}`);
   // A real clear does more work than a no-op one, so this is a floor, and it is labelled as one.
-  (estimate < 60 ? ok : warn)('estimated reset duration',
-    `at least ${estimate.toFixed(0)}s — a floor; a clear that actually deletes data is slower`);
+  if (adbRestricted) {
+    warn('no estimate', 'the phone refuses `pm clear`, so the round trip above timed a refusal, not a clear');
+  } else {
+    (estimate < 60 ? ok : warn)('estimated reset duration',
+      `at least ${estimate.toFixed(0)}s — a floor; a clear that actually deletes data is slower`);
+  }
 
   // ── 6. The read paths ─────────────────────────────────────────────────────────────────────────
   // Each of these is parsed by a regex in physical.ts written against one vendor's output.

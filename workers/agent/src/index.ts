@@ -29,6 +29,7 @@ import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.
 import { createAvdBackend } from './devices/avd.ts';
 import { parseProfileAssignments } from './devices/profiles.ts';
 import { createPhysicalBackend, PhysicalDevice } from './devices/physical.ts';
+import { AutomationOffer } from './automation-offer.ts';
 import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DiscoveredDevice } from './devices/discovery.ts';
 import { AgentWindow, openInBrowser, type WindowDevice, type WindowNotice, type WindowPairing, type WindowState } from './window.ts';
@@ -257,6 +258,18 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
     } catch (e) {
       // Advice, not a gate: a phone that cannot answer this still enrolls and still works.
       console.warn(`[agent] ${dev.info.localId}: could not read the install-verification setting — ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * AND IS THE PHONE IN A STATE TO SERVE ONE? Asked before registration, so a handset that cannot
+   * start a session is never advertised as one that can — see `AutomationOffer`. Every line carries
+   * what to do, because the first OnePlus this met read `READY` everywhere and failed every session.
+   */
+  for (const b of backends) {
+    const dev = b.control as PhysicalDevice;
+    for (const p of await dev.prerequisites().catch(() => [])) {
+      console.warn(`[agent] ${dev.info.localId}: ${p.title}. ${p.remedy}`);
     }
   }
 
@@ -602,6 +615,12 @@ async function main(): Promise<void> {
   /** The owner's sharing decisions, re-read whenever one changes. See `sharing.ts`. */
   let sharing: SharingPolicy = await loadSharing();
 
+  /** The prerequisite that stops this device serving a session at all, as last read from it. */
+  const blockerOf = (localId: string) => {
+    const dev = backends.find((b) => b.control.info.localId === localId)?.control as Partial<PhysicalDevice> | undefined;
+    return dev?.unmetPrerequisites?.find((p) => p.blocks);
+  };
+
   /**
    * Ask the agent to re-register, from code that may run BEFORE there is anything to drain.
    *
@@ -638,11 +657,18 @@ async function main(): Promise<void> {
       // adb hiccup, which returns [], does not report every phone as unplugged.
       const vanished = info.tier === 'physical' && lastDiscovery.length > 0 && !seen;
 
+      // What the phone itself is missing. A blocker outranks everything but an unplugged cable: it
+      // is the row that says READY everywhere else while no session can start on it.
+      const unmet = phone.unmetPrerequisites ?? [];
+      const blocker = unmet.find((p) => p.blocks);
+
       const status: WindowDevice['status'] =
-        vanished || health === 'offline' || health === 'degraded' ? 'unhealthy'
-          : sessions > 0 ? 'busy'
-            : !deviceId ? 'starting'
-              : 'ready';
+        vanished ? 'unhealthy'
+          : blocker ? 'blocked'
+            : health === 'offline' || health === 'degraded' ? 'unhealthy'
+              : sessions > 0 ? 'busy'
+                : !deviceId ? 'starting'
+                  : 'ready';
 
       devices.push({
         serial: serial ?? info.localId,
@@ -658,7 +684,9 @@ async function main(): Promise<void> {
         status,
         remedy: vanished
           ? 'This phone is no longer on USB. Replug it — the agent picks it up again on its own.'
-          : seen?.remedy,
+          : (blocker ?? unmet[0])
+            ? `${(blocker ?? unmet[0]).title}. ${(blocker ?? unmet[0]).remedy}`
+            : seen?.remedy,
         // `undefined` for a tier that has no such setting, so the offer never appears on a
         // Cuttlefish instance, where the button would have nothing to press.
         installVerification: typeof phone.installVerification === 'string' ? phone.installVerification : undefined,
@@ -859,13 +887,61 @@ async function main(): Promise<void> {
     // agent — whatever AUTOMATION_ENDPOINT names, which stays host-level and must not be publicly
     // routable, because an open Appium port is unauthenticated device control.
     automationEndpoint: supervisors.length === 0 ? process.env.AUTOMATION_ENDPOINT : undefined,
-    automationEndpoints,
+    automationEndpoints: Object.fromEntries(
+      Object.entries(automationEndpoints).filter(([localId]) => !blockerOf(localId))),
     devices: backends,
     cores: cpus().length,
     memoryMb: Math.round(totalmem() / 1_048_576),
   });
   // The window has been rendering `agentRef?.` since before this existed. From here it is live.
   agentRef = agent;
+  // Seeded with what registration is about to say, blocked phones first so seeding advertises
+  // nothing: from here every change to `webdriver` goes through this and nowhere else.
+  const offer = new AutomationOffer((localId, url) => agent.setAutomationEndpoint(localId, url));
+  for (const b of backends) offer.blockedBy(b.control.info.localId, blockerOf(b.control.info.localId)?.title);
+  for (const [localId, url] of Object.entries(automationEndpoints)) offer.serverIs(localId, url);
+  for (const localId of Object.keys(automationEndpoints)) {
+    // The line above this in the log says "Appium ready … advertised at", written before anybody
+    // had asked the phone. It is not, and the log should not leave that standing.
+    if (offer.blockerOf(localId)) console.warn(`[agent] ${localId} registers WITHOUT \`webdriver\`: ${offer.blockerOf(localId)}`);
+  }
+
+  /**
+   * Ask each phone again, and move `webdriver` with the answer.
+   *
+   * ON THE DISCOVERY TICK, because the person this is for is standing at the phone with the window
+   * open: they flip a developer option and expect the row to change. One pass at a time — the reads
+   * are adb, and a slow USB stack must not stack them up behind each other.
+   */
+  let prerequisitesInFlight = false;
+  const refreshPrerequisites = async (): Promise<void> => {
+    if (prerequisitesInFlight) return;
+    prerequisitesInFlight = true;
+    try {
+      for (const b of backends) {
+        const dev = b.control as Partial<PhysicalDevice>;
+        if (typeof dev.prerequisites !== 'function') continue;
+        const localId = b.control.info.localId;
+        const was = offer.blockerOf(localId);
+        let blocker;
+        // A read that failed is not an answer, and must not un-block a phone.
+        try { blocker = (await dev.prerequisites()).find((p) => p.blocks); } catch { continue; }
+        offer.blockedBy(localId, blocker?.title);
+        if (blocker && !was) {
+          console.warn(
+            `[agent] ${localId}: ${blocker.title} — \`webdriver\` withdrawn for it on the next `
+            + `heartbeat. ${blocker.remedy}`);
+        } else if (!blocker && was) {
+          console.log(
+            `[agent] ${localId} can start sessions again — \`webdriver\` `
+            + (offer.offered(localId) ? 'advertised on the next heartbeat' : 'returns when its Appium is ready'));
+        }
+      }
+    } finally {
+      prerequisitesInFlight = false;
+    }
+    win?.push();
+  };
   // Registration is what clears the code from the screen; leaving it up beside a working fleet
   // would be an invitation to type it in again.
   pairing = undefined;
@@ -1140,11 +1216,12 @@ async function main(): Promise<void> {
      * The url is the GATEWAY's path for this device, not Appium's own address: the gateway is what
      * the control plane was told about, and it keeps listening either way.
      */
-    agent.setAutomationEndpoint(
-      localId,
-      healthy ? gatewayBase(gatewayPort, localId) : undefined,
-    );
+    offer.serverIs(localId, healthy ? gatewayBase(gatewayPort, localId) : undefined);
 
+    if (healthy && offer.blockerOf(localId)) {
+      console.log(`[agent] Appium for ${localId} is ready, and \`webdriver\` stays withdrawn: ${offer.blockerOf(localId)}`);
+      return;
+    }
     if (healthy) {
       /**
        * AND RECOVERY IS AUTOMATIC, including for a device that registered WITHOUT `webdriver`
@@ -1256,6 +1333,7 @@ async function main(): Promise<void> {
       // moment the person watching wants their row to update.
       lastDiscovery = found;
       win?.push();
+      void refreshPrerequisites();
     }, (serial) => sharedAtStart.allows(serial, 'physical'));
 
     // The first pass is ten seconds away, and a window that opens empty on a machine with a phone
