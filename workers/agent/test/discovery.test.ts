@@ -293,6 +293,39 @@ describe('watchForChanges', () => {
     assert.deepEqual(seen, [[['SHARED'], []]]);
   });
 
+  /**
+   * D61 — A PHONE THIS AGENT ALREADY HAS, COMING BACK, IS NOT AN ARRIVAL.
+   *
+   * An arrival drains and restarts the agent, because a new device can only be registered that way.
+   * A reboot or a replug brought back a device that was already registered, and restarted the agent
+   * anyway — so the instruction "restart the phone" stopped the agent that had just given it.
+   */
+  test('a phone this agent already has, coming back, is returned and not added', async () => {
+    const seen: Array<[string[], string[], string[]]> = [];
+    const w = watchForChanges(['AAA'], (a, r, back) => seen.push([a, r, back]), 10, worlds(['AAA'], [], ['AAA']));
+    await settle();
+    w.stop();
+    assert.deepEqual(seen, [[[], ['AAA'], []], [[], [], ['AAA']]]);
+  });
+
+  test('a new phone arriving beside a returning one is still an arrival', async () => {
+    const seen: Array<[string[], string[], string[]]> = [];
+    const w = watchForChanges(['AAA'], (a, r, back) => seen.push([a, r, back]), 10,
+      worlds(['AAA'], [], ['AAA', 'BBB']));
+    await settle();
+    w.stop();
+    assert.deepEqual(seen.at(-1), [['BBB'], [], ['AAA']]);
+  });
+
+  /** A phone that was never this agent's is new every time it appears, however often it has been seen. */
+  test('a phone that arrived, left and came back is an arrival again', async () => {
+    const seen: Array<[string[], string[], string[]]> = [];
+    const w = watchForChanges([], (a, r, back) => seen.push([a, r, back]), 10, worlds(['BBB'], [], ['BBB']));
+    await settle();
+    w.stop();
+    assert.deepEqual(seen.map((s) => s[0]), [['BBB'], [], ['BBB']]);
+  });
+
   /** It was never part of the fleet, so unplugging it is not the fleet losing a device either. */
   test('an unshared phone leaving is not a departure', async () => {
     let calls = 0;

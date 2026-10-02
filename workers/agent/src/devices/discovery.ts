@@ -275,7 +275,13 @@ export function localIdForSerial(serial: string): string {
  */
 export function watchForChanges(
   known: readonly string[],
-  onChange: (added: string[], removed: string[]) => void,
+  /**
+   * `returned` is a phone in `known` that left and came back — a reboot, a replug. It is NOT in
+   * `added`: the caller drains and restarts for an arrival, because a new device can only be
+   * registered that way, and a device it already has needs none of that. Reported so it can be
+   * said, and so a caller that does care can tell the two apart.
+   */
+  onChange: (added: string[], removed: string[], returned: string[]) => void,
   intervalMs = Number(process.env.PHYSICAL_DISCOVERY_INTERVAL_MS ?? 10_000),
   /**
    * How to look. Defaults to `discover`, and is a parameter so the change detection can be tested
@@ -314,6 +320,7 @@ export function watchForChanges(
   joins: (serial: string) => boolean = () => true,
 ): { stop: () => void } {
   let current = new Set(known);
+  const mine = new Set(known);
   let stopped = false;
   /**
    * One pass at a time.
@@ -358,11 +365,13 @@ export function watchForChanges(
       try { onPass(found); } catch (e) { console.error(`[discovery] pass listener threw: ${(e as Error).message}`); }
     }
     const usable = new Set(found.filter((d) => d.state === 'device' && joins(d.serial)).map((d) => d.serial));
-    const added = [...usable].filter((s) => !current.has(s));
+    const arrived = [...usable].filter((s) => !current.has(s));
+    const added = arrived.filter((s) => !mine.has(s));
+    const returned = arrived.filter((s) => mine.has(s));
     const removed = [...current].filter((s) => !usable.has(s));
-    if (added.length === 0 && removed.length === 0) return;
+    if (arrived.length === 0 && removed.length === 0) return;
     current = usable;
-    onChange(added, removed);
+    onChange(added, removed, returned);
   };
 
   const timer = setInterval(() => { void tick(); }, intervalMs);

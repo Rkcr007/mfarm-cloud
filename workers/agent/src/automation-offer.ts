@@ -11,6 +11,24 @@
  * the capability whatever the LAST caller said: Appium recovering would re-advertise a phone that
  * is still blocked, and the phone being unblocked would advertise an Appium that is still down.
  */
+/**
+ * Why a phone must not be offered for a session right now — the most immediate reason, or none.
+ *
+ * In this order because each one makes the next unanswerable: a phone that is not on the cable has
+ * no health, and one that is not answering cannot be asked what it is missing. `prerequisite` is
+ * the last thing the phone SAID, so it is still the reason once the phone is back and answering.
+ */
+export function phoneBlocker(state: {
+  onUsb: boolean;
+  health: 'healthy' | 'degraded' | 'offline' | undefined;
+  prerequisite?: { title: string; remedy: string };
+}): { reason: string; remedy?: string } | undefined {
+  if (!state.onUsb) return { reason: 'it is not on USB' };
+  if (state.health === 'offline') return { reason: 'it is not answering' };
+  if (state.prerequisite) return { reason: state.prerequisite.title, remedy: state.prerequisite.remedy };
+  return undefined;
+}
+
 export class AutomationOffer {
   private readonly server = new Map<string, string>();
   private readonly blocked = new Map<string, string>();

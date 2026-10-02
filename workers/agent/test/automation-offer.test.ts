@@ -7,7 +7,7 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { AutomationOffer } from '../src/automation-offer.ts';
+import { AutomationOffer, phoneBlocker } from '../src/automation-offer.ts';
 
 const URL = 'mfarm+tunnel:/automation/phone-A';
 
@@ -90,5 +90,43 @@ describe('AutomationOffer', () => {
     assert.equal(offer.offered('phone-B'), 'mfarm+tunnel:/automation/phone-B');
     assert.equal(offer.blockerOf('phone-A'), 'refuses adb');
     assert.equal(offer.blockerOf('phone-B'), undefined);
+  });
+});
+
+/**
+ * D61. A phone that reboots is gone, then back and not yet answering, then itself again — and in
+ * none of those moments but the last may a session be sent to it.
+ */
+describe('why a phone is not offered', () => {
+  const missing = { title: 'refuses adb', remedy: 'flip the switch' };
+
+  test('a phone on the cable, healthy, missing nothing is offered', () => {
+    assert.equal(phoneBlocker({ onUsb: true, health: 'healthy' }), undefined);
+  });
+
+  test('a phone nobody has health-checked yet is not held back for that', () => {
+    assert.equal(phoneBlocker({ onUsb: true, health: undefined }), undefined);
+  });
+
+  test('a phone that has left the cable is not offered', () => {
+    assert.equal(phoneBlocker({ onUsb: false, health: 'healthy' })?.reason, 'it is not on USB');
+  });
+
+  /** Back on USB is not back in service: adb answers a booting phone long before the phone does. */
+  test('a phone that is back and not yet answering is still not offered', () => {
+    assert.equal(phoneBlocker({ onUsb: true, health: 'offline' })?.reason, 'it is not answering');
+  });
+
+  test('a degraded phone is still offered — low battery is said, not enforced', () => {
+    assert.equal(phoneBlocker({ onUsb: true, health: 'degraded' }), undefined);
+  });
+
+  test('what the phone is missing is the reason once it is there to be asked', () => {
+    assert.deepEqual(phoneBlocker({ onUsb: true, health: 'healthy', prerequisite: missing }),
+      { reason: 'refuses adb', remedy: 'flip the switch' });
+  });
+
+  test('and being gone outranks it, because the remedy for gone is the cable', () => {
+    assert.equal(phoneBlocker({ onUsb: false, health: 'offline', prerequisite: missing })?.reason, 'it is not on USB');
   });
 });

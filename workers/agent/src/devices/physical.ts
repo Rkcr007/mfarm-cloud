@@ -276,6 +276,8 @@ export class PhysicalDevice implements DeviceControl {
   /** Held open for the life of the device. Reopening per event costs 57-77ms of pure overhead. */
   private shell?: ReturnType<typeof spawn>;
   private shellSeq = 0;
+  /** Set by `start()`. A shell that dies after that is the phone leaving, not a caller's mistake. */
+  private started = false;
 
   constructor(opts: PhysicalOptions) {
     this.serial = opts.serial;
@@ -333,6 +335,7 @@ export class PhysicalDevice implements DeviceControl {
   async start(): Promise<void> {
     await this.waitForBoot();
     await this.openShell();
+    this.started = true;
   }
 
   /**
@@ -342,6 +345,7 @@ export class PhysicalDevice implements DeviceControl {
    * simply stops holding a process against it.
    */
   async stop(): Promise<void> {
+    this.started = false;
     await this.closeShell();
   }
 
@@ -362,6 +366,12 @@ export class PhysicalDevice implements DeviceControl {
   private async openShell(): Promise<void> {
     await this.closeShell();
     const sh = spawn(ADB, ['-s', this.serial, 'shell'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    // THE SHELL DIES WITH THE CONNECTION — a pulled cable, a reboot — and the handle used to stay
+    // here looking open. Every later send wrote to a dead pipe and timed out, so a phone that came
+    // back was `offline` until the agent itself was restarted (D61). Forgotten on exit, so the next
+    // send opens a new one. Guarded on identity: a shell replaced on purpose exits later than its
+    // replacement was stored.
+    sh.on('exit', () => { if (this.shell === sh) this.shell = undefined; });
     // An unhandled 'error' on a stream is an uncaught exception, which would take down the agent and
     // with it every other phone on this host because one cable was pulled. Kept local: the in-flight
     // send() times out and health() reports the device offline.
@@ -380,18 +390,26 @@ export class PhysicalDevice implements DeviceControl {
   }
 
   /** Send a command down the held shell and wait for its echoed marker. */
-  private send(cmd: string, timeoutMs = 10_000): Promise<void> {
+  private async send(cmd: string, timeoutMs = 10_000): Promise<void> {
+    // One attempt per send, never a loop: while the phone is away the new shell dies at once, this
+    // send times out as it should, and the next one tries again.
+    if (!this.shell && this.started) await this.openShell();
     const sh = this.shell;
-    if (!sh?.stdin || !sh.stdout) return Promise.reject(new Error('shell not open; call start() first'));
+    if (!sh?.stdin || !sh.stdout) throw new Error('shell not open; call start() first');
     const marker = `__mf${++this.shellSeq}__`;
     return new Promise((resolve, reject) => {
       let buf = '';
-      const t = setTimeout(() => { sh.stdout!.off('data', onData); reject(new Error(`shell timeout: ${cmd}`)); }, timeoutMs);
+      const done = () => { clearTimeout(t); sh.stdout!.off('data', onData); sh.off('exit', onExit); };
+      const t = setTimeout(() => { done(); reject(new Error(`shell timeout: ${cmd}`)); }, timeoutMs);
       const onData = (d: Buffer) => {
         buf += d.toString();
-        if (buf.includes(marker)) { clearTimeout(t); sh.stdout!.off('data', onData); resolve(); }
+        if (buf.includes(marker)) { done(); resolve(); }
       };
+      // A shell that has gone will never echo the marker, and waiting out the timeout to learn that
+      // is five seconds of calling a missing phone slow rather than missing.
+      const onExit = () => { done(); reject(new Error(`shell closed: ${cmd}`)); };
       sh.stdout!.on('data', onData);
+      sh.once('exit', onExit);
       sh.stdin!.write(`${cmd}; echo ${marker}\n`);
     });
   }
