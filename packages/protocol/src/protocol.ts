@@ -269,6 +269,13 @@ export interface WorkerHostStats {
 export interface WorkerHeartbeatResponse {
   ok: boolean;
   hostState: string;
+  /**
+   * An operator retired this machine (056). A beat does not bring a retired host back and a
+   * registration does, so an agent that has just STARTED registers when it reads this — starting
+   * the agent is the deliberate act 056 says only registration can stand for. Absent from an older
+   * control plane, which reads as not retired.
+   */
+  retired?: boolean;
   /** Devices of THIS host sitting in CLEANING or PREPARING, with the fence to confirm against. */
   resets?: Array<{
     deviceId: string;

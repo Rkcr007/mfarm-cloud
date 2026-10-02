@@ -118,6 +118,12 @@ export async function workerRoutes(app: FastifyInstance) {
       const orgId = cred.kind === 'fleet' ? null : cred.orgId;
       const enrollmentId = cred.kind === 'enrollment' ? cred.enrollmentId : null;
 
+      // Read BEFORE the upsert, which clears it. Whether this registration is bringing a retired
+      // machine back decides what happens to the quarantine retiring put on it — see below.
+      const { rows: before } = await c.query<{ retired: boolean }>(
+        'SELECT retired_at IS NOT NULL AS retired FROM hosts WHERE hostname = $1', [reg.hostname]);
+      const wasRetired = before[0]?.retired === true;
+
       const { rows } = await c.query(
         `INSERT INTO hosts (region, hostname, state, protocol_version, capabilities,
                             cores, memory_mb, endpoint, automation_endpoint,
@@ -205,6 +211,21 @@ export async function workerRoutes(app: FastifyInstance) {
           'SELECT clear_silence_quarantine($1) AS n', [hostId],
         );
         if (Number(cleared[0]?.n ?? -1) >= 0) hostsRecovered.inc();
+      }
+
+      /**
+       * AND A RETIRED MACHINE THAT REGISTERS IS BACK — all the way (D59).
+       *
+       * Retiring quarantines the host as an OPERATOR before it sets `retired_at` (056), and the
+       * upsert above clears `retired_at` while rightly refusing to lift an operator's quarantine. So
+       * a retired laptop that ran its agent again came back into the fleet list as QUARANTINED,
+       * reason "retired: …", for good — while the retire screen had told the operator "running the
+       * agent on it again brings it back". This is that sentence being true: the same release the
+       * console's Resume uses, which gives each device back what it was doing. Only for a host that
+       * WAS retired; a drained host that registers stays drained.
+       */
+      if (wasRetired && rows[0].state === 'QUARANTINED' && rows[0].quarantine_source === 'operator') {
+        await c.query('SELECT release_host_quarantine($1)', [hostId]);
       }
 
       if (enrollmentId) await markRedeemed(c, enrollmentId, hostId);
@@ -312,6 +333,30 @@ export async function workerRoutes(app: FastifyInstance) {
       }
 
       /**
+       * A DEVICE NEW TO A HOST THAT IS STILL QUARANTINED IS NOT AVAILABLE (D59).
+       *
+       * The upsert keeps a device the host's quarantine already holds, but a device this host has
+       * never registered before is INSERTed as READY — so a phone plugged into a drained laptop was
+       * handed out by the allocator, which does not look at the host, while the agent's own log said
+       * "not accepting sessions". Seen on the farm with a OnePlus on a quarantined MacBook.
+       *
+       * Through `quarantine_host`, the one function that knows how to take devices out of circulation
+       * — it records what each was doing, so a Resume gives it back. Called with the host's own
+       * reason and source, and its timestamp put back afterwards: re-asserting a quarantine must not
+       * restart the "out of the pool since" clock a person is reading.
+       */
+      const { rows: held } = await c.query<{ state: string; quarantine_reason: string | null;
+                                             quarantine_source: string | null; quarantined_at: Date | null }>(
+        `SELECT state::text AS state, quarantine_reason, quarantine_source, quarantined_at
+           FROM hosts WHERE id = $1`, [hostId]);
+      if (held[0]?.state === 'QUARANTINED') {
+        await c.query('SELECT quarantine_host($1, $2, $3)', [
+          hostId, held[0].quarantine_reason ?? 'quarantined',
+          held[0].quarantine_source === 'reaper' ? 'reaper' : 'operator']);
+        await c.query('UPDATE hosts SET quarantined_at = $2 WHERE id = $1', [hostId, held[0].quarantined_at]);
+      }
+
+      /**
        * DEVICES THIS HOST NO LONGER HAS — the other half of "the last registration is the truth".
        *
        * Every field above is re-asserted on each registration precisely so a worker cannot leave a
@@ -416,7 +461,7 @@ export async function workerRoutes(app: FastifyInstance) {
              ELSE up_since
            END
           WHERE id = $1
-          RETURNING state, quarantine_source`,
+          RETURNING state, quarantine_source, retired_at IS NOT NULL AS retired`,
         [hostId],
       );
       /**
@@ -780,7 +825,9 @@ export async function workerRoutes(app: FastifyInstance) {
       };
     });
     // Told on every beat so a host that was quarantined while partitioned learns it must drain.
-    return { ok: true, hostState: row?.state ?? 'DOWN', resets, actions, proxies };
+    // `retired` so an agent that has just started knows a beat will not bring this machine back and
+    // a registration will (056, D59).
+    return { ok: true, hostState: row?.state ?? 'DOWN', retired: row?.retired === true, resets, actions, proxies };
   });
 
   /**
