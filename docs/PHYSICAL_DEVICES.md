@@ -22,15 +22,25 @@ On the handset:
 - **USB debugging enabled**, in Developer Options.
 - **ADB authorization accepted** — plug it in, then unlock the phone and tap **Allow USB
   debugging**. Tick *Always allow from this computer*, or you will do this again after every reboot.
-- **Stay awake while charging** (Developer Options). A locked screen fails most automation.
+- **Stay awake while charging** (Developer Options; "Keep screen on while charging" on a OnePlus).
+  A sleeping phone answers too slowly for the health check and drops out of the farm until it wakes.
+- **Screen lock set to None.** Automation can swipe a lock screen away and cannot enter a PIN.
+- **On a OnePlus, OPPO or realme: "Disable permission monitoring" ON** (Developer Options), **then
+  restart the phone.** These ship refusing adb's `settings put`, `pm grant` and `pm clear`, and no
+  session can start until that is lifted. The restart is part of it: measured on a OnePlus 8T, the
+  switch alone moved `pm clear` and left the other two as they were, in both directions.
 - **Enough storage.** The agent reports the device degraded below 500 MB free, because an APK
   install needs headroom and the failure otherwise reads like a broken test.
 - **Enough charge.** Below 15% the agent reports degraded; below ~10% installs and launches start
   failing outright.
 - A **reliable cable**. More physical-farm tickets are bad cables than are bad phones.
 
-The agent never changes these for you. Anything that needs a human is surfaced with the instruction
-attached — see §4.
+The agent never changes these for you. **It does check the last three**, at start-up and on every
+discovery pass, and says what it found with the instruction attached — in its log and on the phone's
+row in the window (§4a). A phone that refuses adb's privileged commands is shown as **blocked** and
+is not offered for WebDriver until it allows them: somebody asking for a session is told no device
+with an automation server is free, in a fifth of a second, instead of being sent a Java stack trace.
+The other two are warnings — the phone works now and will stop.
 
 ## 2. Host prerequisites
 
@@ -362,12 +372,15 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
 
 ## 9. Known limitations
 
-- **A OnePlus on factory settings cannot run a session** — and the same is expected of OPPO and
-  realme, which share the ROM. OxygenOS refuses adb's `settings put`, `pm grant` and `pm clear`
-  until a developer option is changed; UiAutomator2 writes a setting at session start, so
-  `POST /session` fails at once with a `SecurityException`. The phone still enrols, reads `READY`,
-  and is listed as ready in the window. Measured 2026-10-03 on a OnePlus 8T (Android 14); see D60 in
-  [DEFECTS.md](DEFECTS.md). Every other phone this has run on was a Samsung, which allows all three.
+- **A OnePlus on factory settings cannot run a session until §1's switch is on and the phone has
+  been restarted** — and the same is expected of OPPO and realme, which share the ROM. The agent now
+  detects it and withholds `webdriver` (D60 in [DEFECTS.md](DEFECTS.md)); it does not fix it, and
+  only the OnePlus has been run. The device still reads `READY` in the console, because `READY` is
+  about the lease and not about automation — the capability list is what changes.
+- **Restarting a phone restarts the agent.** A phone that reboots, or is replugged, comes back as an
+  arrival, and an arrival drains the agent to re-register (§5). Under the supplied unit, or run by
+  hand in a terminal, it comes straight back; started in the background with neither, it exits and
+  stays down unless `MFARM_RELAUNCH=1` is set. D61.
 - **No live view or interactive control.** §20/§21 are unbuilt for this tier. Screenshots and the
   UI inspector work; a moving picture does not.
 - **No Windows agent.**
@@ -387,13 +400,11 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   serving other devices does bounce. Adding a device in place needs the heartbeat to carry
   capabilities, which the protocol does not do yet.
 - **Input latency is reported but not yet enforced.** Nothing refuses a device for being slow.
-- **Nothing checks the §1 prerequisites.** "Stay awake" and an unlocked screen are asked of a human
-  in §1 and then confirmed by no code anywhere. A locked, dozing handset enrolls, schedules, and
-  fails everything — and §18 files those as test failures, because nothing knows better. On the
-  first handset this was run against, three capture runs reported 2.2 fps, a single keyframe and
-  0.01 Mbps, and all three were measurements of an always-on-display clock rather than of anything
-  in the agent. `deploy/verify-physical.mjs` reports all three states; the agent still does not.
-  This is what the phase-1 window in [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md) exists to show.
+- **A sleeping or locked phone is said, not prevented.** The agent reports "Stay awake" off and a
+  lock screen on the phone's row (§1), and neither withdraws the device: a dozing handset still
+  enrolls and schedules, and what it does is flap — asleep, the health check's input event outlasts
+  its five seconds, the device goes `offline` with a `device-disconnected` incident, and comes back.
+  No failure reason exists yet for "the phone was not ready", so §18 has nowhere to file one.
 
 ---
 

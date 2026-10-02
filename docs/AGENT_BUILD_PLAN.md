@@ -323,6 +323,8 @@ offering debugging* — and turns the prerequisites into a live walkthrough:
 | USB device, no adb interface | Developer Options and USB debugging are off — here is where to tap |
 | adb `unauthorized` | Unlock the phone and tap *Allow USB debugging* |
 | adb `device`, verification on | Play Protect will refuse test builds (✅ M2) |
+| adb `device`, privileged commands refused | **Built 2026-10-03 (D60).** Blocked, `webdriver` withheld: turn on "Disable permission monitoring" and restart the phone |
+| adb `device`, stay-awake off or a lock screen | **Built 2026-10-03.** Said on the row; the device is not withdrawn |
 | adb `device`, ready | Confirm, show the device, offer **share** |
 
 **Gate:** on a machine that has never seen MFARM, with a phone that has never had Developer Options

@@ -76,6 +76,87 @@ const INSTALL_BLOCKED = /INSTALL_FAILED_VERIFICATION_FAILURE|INSTALL_FAILED_USER
 export const ADB_VERIFY_SETTING = 'verifier_verify_adb_installs';
 
 /**
+ * Something a handset must have before it can serve a session, and does not.
+ *
+ * `blocks` separates the two kinds. A blocking one means a session cannot start at all, so the
+ * device must not be offered for automation while it holds; the other kind is a phone that works
+ * now and will stop, which a person should be told and the scheduler need not act on.
+ */
+export interface PhonePrerequisite {
+  code: 'adb-restricted' | 'stay-awake-off' | 'screen-locked';
+  blocks: boolean;
+  title: string;
+  /** What to do, in the words the window shows. Exported so the probe script says the same thing. */
+  remedy: string;
+}
+
+/**
+ * THE ONE THAT STOPS A SESSION — found on a OnePlus 8T (OxygenOS 14), 2026-10-03.
+ *
+ * With "permission monitoring" on, which is how the phone ships, adb's shell is refused
+ * `settings put`, `pm grant` and `pm clear` with a `SecurityException`, while `dumpsys package`
+ * lists all three permissions as granted. UiAutomator2 writes a setting at session start, so
+ * `POST /session` failed in a second and the customer was sent the Java stack trace; the Play
+ * Protect fix below is a `settings put` too, so it could not work either. Flipping the developer
+ * option was verified to clear all three on that handset.
+ */
+export const ADB_RESTRICTED: PhonePrerequisite = {
+  code: 'adb-restricted',
+  blocks: true,
+  title: 'This phone refuses adb\'s privileged commands, so no automation session can start on it',
+  // THE RESTART IS PART OF IT. On the OnePlus the switch alone moved `pm clear` and left the
+  // settings write and `pm grant` as they were, in both directions; all three followed it only
+  // across a reboot. Without that sentence somebody flips the switch and watches nothing change.
+  remedy: 'On the phone: Settings → Developer options → turn ON "Disable permission monitoring", '
+    + 'then restart the phone. That is its name on a OnePlus; OPPO and realme carry the same switch. '
+    + 'The agent picks the phone up again by itself once it allows them.',
+};
+
+/** Measured: asleep, `input` outlasts the health check's 5s and the phone flaps out of the pool. */
+export const STAY_AWAKE_OFF: PhonePrerequisite = {
+  code: 'stay-awake-off',
+  blocks: false,
+  title: 'This phone will go to sleep while it is plugged in',
+  remedy: 'On the phone: Settings → Developer options → turn ON "Stay awake" '
+    + '("Keep screen on while charging" on a OnePlus). A sleeping phone answers too slowly and '
+    + 'drops out of the farm until it wakes.',
+};
+
+export const SCREEN_LOCKED: PhonePrerequisite = {
+  code: 'screen-locked',
+  blocks: false,
+  title: 'This phone is showing its lock screen',
+  remedy: 'Unlock it, and set Settings → Security → Screen lock to None. Automation can swipe a '
+    + 'lock screen away and cannot enter a PIN.',
+};
+
+/**
+ * Three privileged commands aimed at things that do not exist, so none of them changes the phone
+ * and each still needs its permission: delete a settings row, grant to a package, clear a package.
+ *
+ * ALL THREE, because they do not move together. On the OnePlus, turning monitoring back on refused
+ * `pm grant` and `pm clear` at once and left the settings write allowed — a probe that tried only
+ * the settings write called that phone ready. One `adb shell`, so it costs one process.
+ *
+ * "ALLOWED" NEEDS EVIDENCE OF ITS OWN, not merely no refusal. A phone that is shutting down runs the
+ * shell and has no settings service left to refuse anything: the first version read that silence as
+ * the restriction lifting and advertised a rebooting phone. So allowed means the settings command
+ * said what it says when it works, the last command ran, and nothing was refused.
+ */
+const PROBE_DONE = 'mfarm-prerequisite-probe-ran';
+const PROBE_PACKAGE = 'dev.mfarm.probe.no.such.package';
+const PROBE = `settings delete global mfarm_prerequisite_probe; `
+  + `pm grant ${PROBE_PACKAGE} android.permission.CAMERA; pm clear ${PROBE_PACKAGE}; echo ${PROBE_DONE}`;
+/**
+ * The refusal, by the permission it names — not any `SecurityException`. A phone that allows these
+ * can still throw one for its own reasons, and reading that as the restriction would withdraw a
+ * working device. The three lines this matches are in physical-prerequisites.test.ts, verbatim.
+ */
+const PROBE_REFUSED = /SecurityException[^\n]*(WRITE_SECURE_SETTINGS|GRANT_RUNTIME_PERMISSIONS|CLEAR_APP_USER_DATA)/;
+/** What `settings delete` prints when it was allowed to look — "Deleted 0 rows" for a row that is not there. */
+const PROBE_SETTINGS_RAN = /^Deleted \d+ rows?$/m;
+
+/**
  * How a release cleans this device — ADR-0012.
  *
  * `install-scoped` IS THE DEFAULT, and the default is the whole decision. The alternative sweeps
@@ -133,6 +214,18 @@ function run(bin: string, args: string[], timeoutMs = 30_000): Promise<string> {
   });
 }
 
+/**
+ * Both streams, WITHOUT rejecting on a non-zero exit — for a command whose refusal is the answer
+ * being asked for. Whether adb reached the phone at all is the caller's to tell from the output.
+ */
+function runAnyExit(bin: string, args: string[], timeoutMs = 30_000): Promise<{ out: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (_err, stdout, stderr) => {
+      resolve({ out: `${stdout}\n${stderr}`.trim() });
+    });
+  });
+}
+
 /** Raw bytes, for the two commands whose output is not text. */
 function runBinary(bin: string, args: string[], timeoutMs = 30_000): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -176,6 +269,10 @@ export class PhysicalDevice implements DeviceControl {
    * written where the value is already known for certain.
    */
   private verifyState?: 'on' | 'off';
+  /** Whether adb's privileged commands are refused. Unset until the phone has answered once. */
+  private restricted?: boolean;
+  /** What the last `prerequisites()` found, cached for the same reason `verifyState` is. */
+  private unmet?: PhonePrerequisite[];
   /** Held open for the life of the device. Reopening per event costs 57-77ms of pure overhead. */
   private shell?: ReturnType<typeof spawn>;
   private shellSeq = 0;
@@ -599,11 +696,22 @@ export class PhysicalDevice implements DeviceControl {
    * setting the owner had deliberately turned off before we arrived.
    */
   async disableInstallVerification(): Promise<void> {
-    if (this.priorVerifySetting === undefined) {
-      this.priorVerifySetting = (await this.adb(
-        ['shell', 'settings', 'get', 'global', ADB_VERIFY_SETTING], 15_000)).trim();
+    const prior = this.priorVerifySetting ?? (await this.adb(
+      ['shell', 'settings', 'get', 'global', ADB_VERIFY_SETTING], 15_000)).trim();
+    try {
+      await this.adb(['shell', 'settings', 'put', 'global', ADB_VERIFY_SETTING, '0'], 15_000);
+    } catch (e) {
+      // The phone refused the write itself. Said with the remedy, because what adb prints here is
+      // forty lines of Java and none of them name the switch.
+      if (PROBE_REFUSED.test((e as Error).message)) {
+        this.restricted = true;
+        throw new Error(`${ADB_RESTRICTED.title}, and that includes this setting. ${ADB_RESTRICTED.remedy}`);
+      }
+      throw e;
     }
-    await this.adb(['shell', 'settings', 'put', 'global', ADB_VERIFY_SETTING, '0'], 15_000);
+    // Kept only once the write has landed: a prior value recorded for a change that never happened
+    // makes the restore at shutdown write to a phone nothing was done to.
+    this.priorVerifySetting = prior;
     this.verifyState = 'off';
   }
 
@@ -623,6 +731,47 @@ export class PhysicalDevice implements DeviceControl {
     // falling through to 'off'.
     this.verifyState = prior === '0' ? 'off' : 'on';
   }
+
+  /**
+   * What this phone is missing, asked of the phone — PHYSICAL_DEVICES.md §1.
+   *
+   * THE RESTRICTION IS FOUND BY ATTEMPTING, not by reading a property. On OxygenOS the switch is
+   * `persist.sys.permission.enable`, and reading that would be one maker's answer — and a wrong
+   * one: with the property back at `true`, the settings write stayed allowed. A harmless privileged
+   * command is refused or it is not, whoever built the ROM. See `PROBE`.
+   *
+   * AN UNANSWERED QUESTION KEEPS THE LAST ANSWER. A probe adb could not deliver, or one a phone ran
+   * while it was shutting down, is not evidence the restriction lifted — and treating it as such
+   * would offer a blocked phone for sessions for the length of every cable hiccup and every reboot.
+   *
+   * Three adb calls, 111-143ms together on the handset this was written against; cheap enough for
+   * the discovery tick, which is where somebody watching the window needs the row to change.
+   */
+  async prerequisites(): Promise<PhonePrerequisite[]> {
+    const probe = await runAnyExit(ADB, ['-s', this.serial, 'shell', PROBE], 15_000);
+    if (PROBE_REFUSED.test(probe.out)) this.restricted = true;
+    else if (PROBE_SETTINGS_RAN.test(probe.out) && probe.out.includes(PROBE_DONE)) this.restricted = false;
+
+    const unmet: PhonePrerequisite[] = [];
+    if (this.restricted) unmet.push(ADB_RESTRICTED);
+
+    // `null` is how an unset row reads, and unset means the screen sleeps on its own timeout.
+    // Anything that is not a number says nothing, and nothing is what is reported.
+    const stay = await this.adb(
+      ['shell', 'settings', 'get', 'global', 'stay_on_while_plugged_in'], 10_000).catch(() => undefined);
+    if (stay === '0' || stay === 'null') unmet.push(STAY_AWAKE_OFF);
+
+    // `window policy`, not `window`: 6 KB against 150 KB, and the full dump prints the flag once per
+    // display with the first one always false.
+    const policy = await this.adb(['shell', 'dumpsys', 'window', 'policy'], 10_000).catch(() => '');
+    if (/\bmIsShowing=true\b/.test(policy)) unmet.push(SCREEN_LOCKED);
+
+    this.unmet = unmet;
+    return unmet;
+  }
+
+  /** What the last `prerequisites()` found, without asking the phone again. Unset until it has run. */
+  get unmetPrerequisites(): PhonePrerequisite[] | undefined { return this.unmet; }
 
   /** See the Cuttlefish backend for why `monkey`, and why its output must be read on success. */
   async launchApp(packageName: string): Promise<void> {
