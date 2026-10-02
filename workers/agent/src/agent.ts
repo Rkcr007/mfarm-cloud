@@ -488,7 +488,17 @@ export class Agent {
     // Found by running the fake farm, not by a test.
     if (restored && restored.registered === fingerprint) {
       this.state = restored;
-      if (!(await this.heartbeat()).ok) this.state = undefined;
+      const beat = await this.heartbeat();
+      if (!beat.ok) this.state = undefined;
+      // RETIRED, AND THIS IS A START (D59). A beat deliberately does not bring a retired machine
+      // back (056) — but an agent being started is somebody setting it up again, the act 056 says
+      // only registration stands for. Resuming instead left it quarantined for good, with nothing
+      // on any screen saying why. Only here, never on a later beat: a process that slept through
+      // its retirement is not a person deciding anything.
+      else if (beat.retired) {
+        console.log('[agent] this machine was retired from the fleet — registering, which brings it back');
+        this.state = undefined;
+      }
     }
 
     if (!this.state) {
@@ -720,7 +730,7 @@ export class Agent {
     }
   }
 
-  async heartbeat(): Promise<{ ok: boolean; hostState?: string }> {
+  async heartbeat(): Promise<{ ok: boolean; hostState?: string; retired?: boolean }> {
     const token = this.state?.workerToken ?? (await this.loadState())?.workerToken;
     if (!token) return { ok: false };
     const stats = await this.beatStats();
@@ -778,7 +788,7 @@ export class Agent {
       void this.syncProxies(body.proxies ?? []);
       // A capability that appeared AFTER this agent started still has to reach the control plane.
       void this.republishIfChanged();
-      return { ok: true, hostState: body.hostState };
+      return { ok: true, hostState: body.hostState, retired: body.retired === true };
     } catch {
       return { ok: false };
     }

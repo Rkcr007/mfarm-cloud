@@ -1725,8 +1725,68 @@ describe('re-registration presents the host\'s own credential', () => {
  * unresponsive for a moment — and would make this file wait twelve seconds to observe a failure it
  * already knows about.
  */
+/**
+ * D59. A retired machine is brought back by registering and never by a beat (056) — and an agent
+ * whose device set had not changed only ever beat, so a laptop retired while it was away stayed
+ * quarantined for good once somebody started its agent again, with nothing saying why.
+ */
+describe('a retired machine whose agent is started again', () => {
+  /** What the console's Retire does to the rows — retireHost's two statements. */
+  const retire = (hostId: string) => withSystem(async (c) => {
+    await c.query(`SELECT quarantine_host($1, 'retired: a developer laptop', 'operator')`, [hostId]);
+    await c.query('UPDATE hosts SET retired_at = now() WHERE id = $1', [hostId]);
+  });
+  const hostRow = (hostId: string) => withSystem(async (c) => (await c.query(
+    `SELECT state::text AS state, retired_at FROM hosts WHERE id = $1`, [hostId])).rows[0]);
+
+  test('registers instead of resuming, and the machine is back in service', async () => {
+    const hostname = `retired-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('phone-1')], hostname);
+    const { hostId, deviceIds } = await first.start();
+    await first.shutdown();
+    await retire(hostId);
+
+    const again = makeAgent([fakeBackend('phone-1')], hostname);
+    await again.start();
+    assert.equal(again.registeredThisStart, true,
+      'an unchanged device set resumed onto a retired host, and a beat does not bring one back');
+    const row = await hostRow(hostId);
+    assert.equal(row.retired_at, null);
+    assert.equal(row.state, 'UP');
+    const device = await withSystem(async (c) => (await c.query(
+      'SELECT state::text AS state FROM devices WHERE id = $1', [deviceIds['phone-1']])).rows[0].state);
+    assert.equal(device, 'READY');
+    await again.shutdown();
+  });
+
+  /** A process that slept through its retirement is not a person deciding anything (056). */
+  test('a RUNNING agent whose machine is retired is not brought back by its beats', async () => {
+    const hostname = `retired-running-${randomUUID().slice(0, 8)}`;
+    const agent = makeAgent([fakeBackend('phone-1')], hostname);
+    const { hostId } = await agent.start();
+    await retire(hostId);
+
+    const beat = await agent.heartbeat();
+    assert.equal(beat.ok, true);
+    assert.equal(beat.retired, true, 'the agent is told');
+    assert.notEqual((await hostRow(hostId)).retired_at, null, 'and nothing it does on a beat un-retires the host');
+    await agent.shutdown();
+  });
+
+  test('an agent on a machine that is not retired still resumes', async () => {
+    const hostname = `not-retired-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('phone-1')], hostname);
+    await first.start();
+    await first.shutdown();
+    const again = makeAgent([fakeBackend('phone-1')], hostname);
+    await again.start();
+    assert.equal(again.registeredThisStart, false);
+    await again.shutdown();
+  });
+});
+
 describe('quarantine recovery', () => {
-  const fast = <T>(fn: () => Promise<T>) => async (): Promise<T> => {
+  const fast =<T>(fn: () => Promise<T>) => async (): Promise<T> => {
     process.env.RECOVERY_PROBE_ATTEMPTS = '1';
     process.env.RECOVERY_PROBE_GAP_MS = '1';
     try { return await fn(); } finally {
