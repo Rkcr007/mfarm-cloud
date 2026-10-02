@@ -1230,6 +1230,9 @@ async function main(): Promise<void> {
     const knownSerials = backends
       .map((b) => b.control.info.adbSerial)
       .filter((x): x is string => typeof x === 'string');
+    // The policy the backends above were chosen by. A change to it drains and restarts on its own
+    // (`setShared`), so a watch that outlives one decision never has to learn the next.
+    const sharedAtStart = sharing;
 
     discoveryWatch = watchForChanges(knownSerials, (added, removed) => {
       // Logged, never acted on — see the block comment. The health monitor owns departures.
@@ -1253,7 +1256,7 @@ async function main(): Promise<void> {
       // moment the person watching wants their row to update.
       lastDiscovery = found;
       win?.push();
-    });
+    }, (serial) => sharedAtStart.allows(serial, 'physical'));
 
     // The first pass is ten seconds away, and a window that opens empty on a machine with a phone
     // already plugged into it reads as broken. One extra `adb devices` at start-up buys the row
