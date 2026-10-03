@@ -5,7 +5,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { Capability } from '@mfarm/protocol';
 import type {
   DeviceBackend, DeviceControl, DeviceHealth, DeviceInfo, KeyName, LogcatHandle, MediaSource, Screen,
+  SignalChannel, SignalOptions,
 } from '../device.ts';
+import type { ScreenCapture } from './capture.ts';
+import { H264Fanout, InputMapper, PhoneVideoPeer, videoSizeFor } from './phone-stream.ts';
 
 /**
  * A physical Android handset on the end of a USB cable (ADR-0008, spec §9 "USB first").
@@ -187,6 +190,12 @@ const NEVER_CLEAR = [
 export interface PhysicalOptions {
   /** The adb serial. Stable across a USB replug, which is what makes it the identity. */
   serial: string;
+  /**
+   * Live video (M6): how to start this phone's screen capture, and the size to encode at. Absent
+   * means no live view — and then the device does not declare `screen-stream`, because a capability
+   * claimed without the machinery behind it sends a viewer to negotiate with nothing.
+   */
+  liveVideo?: { makeCapture: () => ScreenCapture; maxSize?: number };
   localId: string;
   /** Populated by discovery from `getprop`; a device that answers none of it still enrolls. */
   model?: string;
@@ -328,6 +337,8 @@ export class PhysicalDevice implements DeviceControl {
         // session gets clean applications when it does not.
         (opts.resetMode ?? 'install-scoped') === 'full-sweep' ? 'session-reset' : 'install-reset',
         'app-install', 'logcat', 'screenshot', 'ui-hierarchy',
+        // Only with the machinery behind it — see `liveVideo`.
+        ...(opts.liveVideo ? ['screen-stream'] : []),
       ] as Capability[],
       // A real panel, once discovery has read it. The fallback is a common phone geometry rather
       // than zeroes, because the console divides by these to map a click to a coordinate.
@@ -1035,11 +1046,37 @@ export class PhysicalDevice implements DeviceControl {
  * from two directions, and both are honest.
  */
 export class PhysicalMedia implements MediaSource {
+  /**
+   * Present only when the phone can stream (M6). The data plane offers no live view to a tier
+   * without it, and says so — which is what every phone was until the agent became its peer.
+   */
+  signal?: (opts: SignalOptions) => Promise<SignalChannel>;
+  private readonly live: boolean;
+
+  constructor(o?: { control: PhysicalDevice; liveVideo: NonNullable<PhysicalOptions['liveVideo']> }) {
+    this.live = Boolean(o);
+    if (!o) return;
+    const screen = o.control.info.screen ?? { width: 1080, height: 2400, density: 420 };
+    const video = videoSizeFor(screen, o.liveVideo.maxSize);
+    // One capture for every viewer of this phone; see `H264Fanout`.
+    const fanout = new H264Fanout(o.liveVideo.makeCapture);
+    this.signal = async (opts) => new PhoneVideoPeer({
+      signal: opts, fanout, video, label: o.control.info.localId,
+      input: new InputMapper(o.control, screen, video),
+    });
+  }
+
   async endpoint() {
-    return null;
+    // Not a url anybody dials: the agent itself is the peer, reached over the data plane's own
+    // signalling. Non-null because "this tier cannot stream" is what null means.
+    return this.live ? { url: 'mfarm+agent:/webrtc', kind: 'webrtc' as const } : null;
   }
 }
 
 export function createPhysicalBackend(opts: PhysicalOptions): DeviceBackend {
-  return { control: new PhysicalDevice(opts), media: new PhysicalMedia() };
+  const control = new PhysicalDevice(opts);
+  return {
+    control,
+    media: opts.liveVideo ? new PhysicalMedia({ control, liveVideo: opts.liveVideo }) : new PhysicalMedia(),
+  };
 }

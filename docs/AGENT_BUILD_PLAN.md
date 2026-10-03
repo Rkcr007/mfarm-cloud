@@ -125,7 +125,7 @@ Ordered by what a user hits first, not by what is architecturally interesting.
 | ~~M4~~ | ~~Operate a device without video~~ | **Built 2026-10-03** — see below. | — |
 | **S1** | Spike: iPhone on this Mac | Days, gates a quarter of the product. Run it alongside. | 1–2 d |
 | **M5** | The signed binary | Makes M2 and M3 a download instead of a checkout. | 3–5 d |
-| **M6** | Live video | Known to be useless for secure apps; still right for most. | 5–8 d |
+| ~~M6~~ | ~~Live video~~ | **Built 2026-10-03** — 60 fps, ~118 ms tap to pixels; see below. | — |
 | **M7** | iOS as a first-class device | The big surface, de-risked by S1. | 8–12 d |
 
 ---
@@ -426,6 +426,45 @@ p99 0.36 ms. **Spike SRTP and the actual send before committing the phase** — 
 
 **Gate:** open a non-secure app in the console, interact with it, and publish the latency rather than
 calling it responsive.
+
+**Built and verified live in the console 2026-10-03** (#254), on the OnePlus 8T against
+`farm.mfarm.dev`. The agent is the phone's WebRTC peer (`devices/phone-stream.ts`) and speaks the
+protocol Cuttlefish speaks, so the console's one live client drives both: the phone offers, the
+browser answers, the display stream is `display_<serial>`, and touches and keys come back on
+`input-channel` and go to the phone through the held adb shell. scrcpy's hardware H.264 goes into
+RTP as it arrives — nothing is decoded or re-encoded on the host — and one scrcpy serves every viewer
+of a phone.
+
+**The gate, measured — not called responsive:**
+
+| | |
+|---|---|
+| Tap → first new frame in the browser | **113–128 ms**, median ~118 ms (6 taps opening and closing a home-screen folder) |
+| …of which the phone carrying out the tap | 67–86 ms — adb's `input tap` through the held shell |
+| …and the first frame after it reaching the agent | 100–109 ms after the tap was sent |
+| Frame rate while the screen moves | 54 frames in the busiest second, median 16.0 ms apart — 60 fps; the console's pill read 59 |
+| Loss over the session | 627 frames received, 627 decoded, 0 dropped, 0 of 4,893 packets lost; 1.6 ms decode a frame |
+| Path | direct, 1–6 ms round trip (same network); 576×1280 at 4 Mbps, 1280 on the long side |
+
+Measured in the browser from the receiver's own delivery times (`getSynchronizationSources`), not
+from rendering — the window was behind others, which stops Chrome painting and makes every
+render-side number a fiction. The agent's half comes from `PHYSICAL_VIDEO_TRACE=1`, which logs it
+per touch. **The largest single cost is adb's input injection.** scrcpy's control socket injects in
+a few milliseconds and would take ~60 ms off every tap; it would also let the agent answer a
+browser's keyframe request (PLI), which it currently ignores — lost packets are re-sent on NACK,
+but a picture broken on a still screen mends only when the screen next moves. That is the next
+step, not this one. A drag is a swipe decided on release, as in M4, not one that follows the finger.
+
+**Six things stood between "it typechecks" and a picture, each found by running it:** the offer had
+no data section, so the browser's `input-channel` could never open (found by the werift-to-werift
+test); candidates went out in RTCIceCandidate's shape where the console reads the SDP's (`mid`,
+`mLineIndex`) — Chrome refused them; candidates went out before the offer they belong to — Chrome
+refused those too; the relay the console names was down and werift waited for it forever (D67);
+every frame waited for the next one, because a bare Annex-B stream says a frame has ended only when
+its successor begins — scrcpy's own 12-byte frame header now says how long each frame is; and scrcpy
+4.1 renamed the switch for its stream header, so it arrived first and misaligned every frame after
+it (a black picture, no error — the agent now says so). And one leak: werift's default bundle
+policy left three UDP sockets bound per viewer; `max-bundle` closes them, and a test counts them.
 
 ---
 
