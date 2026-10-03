@@ -136,7 +136,16 @@ export interface WindowActions {
    * the agent has NOT adopted: an unshared device has no local id, and requiring one would mean the
    * only devices you could share are the ones already shared.
    */
-  setShared?(serial: string, shared: boolean): Promise<void>;
+  setShared?(serial: string, shared: boolean): Promise<{ restarting: boolean } | void>;
+  /**
+   * Put a recorded sharing decision into effect — which restarts the agent.
+   *
+   * SEPARATE FROM `setShared`, AND CALLED ONLY ONCE THE REPLY HAS LEFT (D58). Applying it is a
+   * drain, and the first thing a drain does is close this server — which used to drop the very
+   * request that asked for it, so the person who pressed Share was shown an error for a share that
+   * had been saved.
+   */
+  applyShared?(): void;
 }
 
 export interface WindowOptions {
@@ -213,6 +222,12 @@ export class AgentWindow {
   }
 
   get port(): number | undefined { return this._port; }
+
+  /**
+   * The credential, for handing to the agent that replaces this one (D58) — so a page somebody has
+   * open keeps working across a restart instead of holding a link that died with the process.
+   */
+  get token(): string { return this._token; }
 
   /** The address to open. Contains the token — it is the credential, so treat the whole url as one. */
   get url(): string { return `http://127.0.0.1:${this._port}/?t=${encodeURIComponent(this._token)}`; }
@@ -498,17 +513,22 @@ export class AgentWindow {
     }
     const shared = await readBoolean(req, res, 'shared');
     if (shared === undefined) return;
+    let outcome: { restarting: boolean } | void;
     try {
-      await act(serial, shared);
+      outcome = await act(serial, shared);
     } catch (e) {
       return deny(res, { status: 500, error: 'not_recorded', message: (e as Error).message });
     }
-    const out = JSON.stringify({ ok: true, shared });
+    // `restarting` tells the page whether this agent will come back on its own, so it can say which
+    // of "reconnecting" and "start it again" is true — see `shouldRelaunch` in index.ts.
+    const out = JSON.stringify({ ok: true, shared, restarting: outcome?.restarting ?? false });
     res.writeHead(200, {
       'content-type': 'application/json',
       'content-length': Buffer.byteLength(out),
       'cache-control': 'no-store',
     });
+    const apply = this.opts.actions?.applyShared;
+    if (apply) res.once('finish', () => apply());
     res.end(out);
     this.push();
   }
