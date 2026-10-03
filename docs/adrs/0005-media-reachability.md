@@ -1,7 +1,7 @@
 ---
 id: ADR-0005
 title: Media reaches the browser through a TURN relay, not an overlay network
-status: Accepted
+status: Accepted — where coturn runs is amended by ADR-0047 (the control plane, since 2026-10-03)
 date: 2026-08-19
 authors:
   - Claude Code

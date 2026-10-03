@@ -777,12 +777,12 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://<your-host>/health     # 200
 sudo ss -tlnp | grep -E ':(80|443) '                                     # caddy, and only caddy
 sudo ss -tlnp | grep -E ':(9464|3000) '                                  # both still 127.0.0.1
 sudo ss -tlnp | grep -E ':(8080|8090) '     # on the DEVICE host: VPC or loopback, never 0.0.0.0
-sudo ss -ulnp | grep -E ':3478 '            # coturn, and this one IS meant to be public
+sudo ss -ulnp | grep -E ':3478 '            # on the CONTROL PLANE: coturn, and this one IS public (ADR-0047)
 ```
 
 The relay is the one thing here that has to answer from the internet, so verifying it from the box
-proves nothing. Use an ICE test page with the credentials `deploy/setup-turn.sh` printed, **from a
-phone on mobile data**, and confirm a candidate of type `relay`. ADR-0005: a viewer tested only on a
+proves nothing. Use an ICE test page with credentials from a session's `ice` block (`GET
+/v1/sessions/:id`), **from a phone on mobile data**, and confirm a candidate of type `relay`. ADR-0005: a viewer tested only on a
 LAN has not been tested.
 
 Then from a machine that is **not** the box, because binding and reachability are different

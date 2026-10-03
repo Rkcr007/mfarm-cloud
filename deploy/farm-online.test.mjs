@@ -104,7 +104,7 @@ test('both addresses matching their names is reported as a match, with no drift'
     publicHost: 'farm.mfarm.dev',
     turnHost: 'turn.mfarm.dev',
     addresses: { 'mfarm-cp': '34.100.138.213', 'mfarm-lab': '34.100.159.34' },
-    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.138.213' },
   });
   try {
     const out = f.run();
@@ -112,22 +112,26 @@ test('both addresses matching their names is reported as a match, with no drift'
     // addresses correct, and the old check called it DRIFT twice.
     assert.doesNotMatch(out, /DRIFT/, 'correct addresses must not be reported as drift');
     assert.doesNotMatch(out, new RegExp(REMEDIATION));
-    assert.match(out, /relay host \(mfarm-lab\) is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
+    assert.match(out, /relay host \(mfarm-cp\) is 34\.100\.138\.213, matching turn\.mfarm\.dev/);
     assert.match(out, /control plane is 34\.100\.138\.213, matching farm\.mfarm\.dev/);
   } finally { f.cleanup(); }
 });
 
-test('an address that really moved is reported as drift, with the remediation', () => {
+/**
+ * THE RELAY MOVED AND ITS NAME DID NOT (ADR-0047). The relay runs on the control plane now; a
+ * `turn.mfarm.dev` still pointing at the device host's old address hands every browser a relay that
+ * is not there — the D67 failure, from the other side. Exactly the drift this check exists for.
+ */
+test('a relay whose name still points at its old host is reported as drift, with the remediation', () => {
   const f = farm({
     publicHost: 'farm.mfarm.dev',
     turnHost: 'turn.mfarm.dev',
-    // The device host came back on a different address; DNS still points at the old one.
-    addresses: { 'mfarm-cp': '34.100.138.213', 'mfarm-lab': '35.200.1.1' },
+    addresses: { 'mfarm-cp': '34.100.138.213', 'mfarm-lab': '34.100.159.34' },
     dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
   });
   try {
     const out = f.run();
-    assert.match(out, /DRIFT: relay host \(mfarm-lab\) is 35\.200\.1\.1 but turn\.mfarm\.dev resolves to 34\.100\.159\.34/);
+    assert.match(out, /DRIFT: relay host \(mfarm-cp\) is 34\.100\.138\.213 but turn\.mfarm\.dev resolves to 34\.100\.159\.34/);
     assert.match(out, new RegExp(REMEDIATION));
     // The half that did NOT move must still read as fine, or the operator cannot tell which to fix.
     assert.match(out, /control plane is 34\.100\.138\.213, matching farm\.mfarm\.dev/);
@@ -143,7 +147,7 @@ test('a name that will not resolve is UNRESOLVED, and is not counted as drift', 
   });
   try {
     const out = f.run();
-    assert.match(out, /UNRESOLVED: relay host \(mfarm-lab\) is 34\.100\.159\.34/);
+    assert.match(out, /UNRESOLVED: relay host \(mfarm-cp\) is 34\.100\.138\.213/);
     // "DNS is down" and "the address moved" need different actions. Telling someone to re-reserve
     // an address because their resolver is broken sends them at the wrong problem.
     assert.doesNotMatch(out, /DRIFT/);
@@ -154,7 +158,7 @@ test('a name that will not resolve is UNRESOLVED, and is not counted as drift', 
 test('a bare IP in farm.env still works, so reverting the domain does not re-break this', () => {
   const f = farm({
     publicHost: '34.100.138.213',
-    turnHost: '34.100.159.34',
+    turnHost: '34.100.138.213',
     addresses: { 'mfarm-cp': '34.100.138.213', 'mfarm-lab': '34.100.159.34' },
     dns: {},   // nothing resolvable: an IP literal must not need the resolver at all
   });
@@ -179,7 +183,7 @@ test('one device host is still the default, and nothing about it changed', () =>
     publicHost: 'farm.mfarm.dev',
     turnHost: 'turn.mfarm.dev',
     addresses: { 'mfarm-cp': '34.100.138.213', 'mfarm-lab': '34.100.159.34' },
-    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.138.213' },
   });
   try {
     f.run();
@@ -196,7 +200,7 @@ test('MFARM_LABS starts every device host it names', () => {
       'mfarm-lab': '34.100.159.34',
       'mfarm-lab-2': '35.200.9.9',
     },
-    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.138.213' },
   });
   try {
     f.run({ MFARM_LABS: 'mfarm-lab mfarm-lab-2' });
@@ -221,33 +225,36 @@ test('only the relay host is compared to the turn address', () => {
       'mfarm-lab': '34.100.159.34',
       'mfarm-lab-2': '35.200.9.9',
     },
-    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.138.213' },
   });
   try {
     const out = f.run({ MFARM_LABS: 'mfarm-lab mfarm-lab-2' });
-    assert.match(out, /relay host \(mfarm-lab\) is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
+    assert.match(out, /relay host \(mfarm-cp\) is 34\.100\.138\.213, matching turn\.mfarm\.dev/);
     assert.ok(!/DRIFT/.test(out), `a second host must not read as drift:\n${out}`);
     assert.ok(!out.includes(REMEDIATION));
   } finally { f.cleanup(); }
 });
 
-test('MFARM_RELAY_LAB names which host publishes the turn address', () => {
-  const f = farm({
-    publicHost: 'farm.mfarm.dev',
-    turnHost: 'turn.mfarm.dev',
-    addresses: {
-      'mfarm-cp': '34.100.138.213',
-      'mfarm-lab': '35.200.9.9',
-      'mfarm-lab-2': '34.100.159.34',
-    },
-    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+/** The relay can live elsewhere again; `MFARM_RELAY_LAB` is the name runbooks used for that before. */
+for (const name of ['MFARM_RELAY_HOST', 'MFARM_RELAY_LAB']) {
+  test(`${name} names which machine publishes the turn address`, () => {
+    const f = farm({
+      publicHost: 'farm.mfarm.dev',
+      turnHost: 'turn.mfarm.dev',
+      addresses: {
+        'mfarm-cp': '34.100.138.213',
+        'mfarm-lab': '35.200.9.9',
+        'mfarm-lab-2': '34.100.159.34',
+      },
+      dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+    });
+    try {
+      const out = f.run({ MFARM_LABS: 'mfarm-lab mfarm-lab-2', [name]: 'mfarm-lab-2' });
+      assert.match(out, /relay host \(mfarm-lab-2\) is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
+      assert.ok(!/DRIFT/.test(out), out);
+    } finally { f.cleanup(); }
   });
-  try {
-    const out = f.run({ MFARM_LABS: 'mfarm-lab mfarm-lab-2', MFARM_RELAY_LAB: 'mfarm-lab-2' });
-    assert.match(out, /relay host \(mfarm-lab-2\) is 34\.100\.159\.34, matching turn\.mfarm\.dev/);
-    assert.ok(!/DRIFT/.test(out), out);
-  } finally { f.cleanup(); }
-});
+}
 
 /** `MFARM_LAB` is what every existing runbook, script and habit names. It must keep working. */
 test('the old single-host variable still works', () => {
@@ -255,11 +262,11 @@ test('the old single-host variable still works', () => {
     publicHost: 'farm.mfarm.dev',
     turnHost: 'turn.mfarm.dev',
     addresses: { 'mfarm-cp': '34.100.138.213', 'other-lab': '34.100.159.34' },
-    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.138.213' },
   });
   try {
     const out = f.run({ MFARM_LAB: 'other-lab' });
     assert.deepEqual(f.started().sort(), ['mfarm-cp', 'other-lab']);
-    assert.match(out, /relay host \(other-lab\)/);
+    assert.match(out, /relay host \(mfarm-cp\)/, 'the relay is the control plane\'s, whichever device host is named');
   } finally { f.cleanup(); }
 });

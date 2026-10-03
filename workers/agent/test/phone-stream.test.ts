@@ -14,7 +14,7 @@ import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import {
   packetizeNal, videoSizeFor, charFor, InputMapper, H264Fanout, PhoneVideoPeer, nalType,
-  parseIceUrl, answersOverUdp, answersOverTcp, reachableIceServers, spsSize,
+  parseIceUrl, agentIceServers, spsSize,
 } from '../src/devices/phone-stream.ts';
 import type { ScreenCapture, FrameMark, LiveControl } from '../src/devices/capture.ts';
 
@@ -501,7 +501,7 @@ async function silentRelay() {
   };
 }
 
-describe('a relay that does not answer does not hold the offer', () => {
+describe('the agent offers without a relay of its own', () => {
   test('the URLs the console sends, taken apart', () => {
     assert.deepEqual(parseIceUrl('turn:turn.example.test:3478'), { scheme: 'turn', host: 'turn.example.test', port: 3478, transport: 'udp' });
     assert.deepEqual(parseIceUrl('turn:turn.example.test:3478?transport=tcp')?.transport, 'tcp');
@@ -510,64 +510,29 @@ describe('a relay that does not answer does not hold the offer', () => {
     assert.equal(parseIceUrl('https://not.ice'), undefined);
   });
 
-  test('a STUN answer counts; silence does not, and is given up on in time', async () => {
-    const server = createSocket('udp4');
-    server.on('message', (m, from) => {
-      const reply = Buffer.from(m);
-      reply.writeUInt16BE(0x0101, 0);               // Binding success, same transaction
-      server.send(reply, from.port, from.address);
-    });
-    await new Promise<void>((r) => server.bind(0, '127.0.0.1', () => r()));
-    const silent = await silentRelay();
-    try {
-      assert.equal(await answersOverUdp('127.0.0.1', (server.address() as AddressInfo).port, 1000), true);
-      const t = Date.now();
-      assert.equal(await answersOverUdp('127.0.0.1', silent.port, 300), false);
-      assert.ok(Date.now() - t < 1000, 'the probe outlived its limit');
-    } finally {
-      server.close(); silent.close();
-    }
-  });
-
-  test('over TCP, an answer counts and an accepted-but-silent connection does not', async () => {
-    const srv = createServer((c) => c.once('data', (m: Buffer) => {
-      const reply = Buffer.from(m.subarray(0, 20));
-      reply.writeUInt16BE(0x0101, 0);
-      c.end(reply);
-    }));
-    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
-    const port = (srv.address() as AddressInfo).port;
-    const silent = await silentRelay();
-    try {
-      assert.equal(await answersOverTcp('127.0.0.1', port, 1000), true);
-      assert.equal(await answersOverTcp('127.0.0.1', silent.port, 300), false, 'accepted is not answered');
-    } finally {
-      silent.close();
-      await new Promise((r) => srv.close(r));
-    }
-    assert.equal(await answersOverTcp('127.0.0.1', port, 1000), false, 'nothing listening is not an answer');
-  });
-
-  test('the dead relay is left out, STUN kept, and a public-address server added when none is named', async () => {
-    const dropped: string[] = [];
-    const probe = { udp: async (host: string) => host !== 'dead.example.test', tcp: async () => false };
-    const out = await reachableIceServers([
-      { urls: ['turn:dead.example.test:3478', 'turn:dead.example.test:3478?transport=tcp'], username: 'u', credential: 'c' },
-      { urls: 'turn:alive.example.test:3478', username: 'u', credential: 'c' },
-    ], probe, (u) => dropped.push(u));
-    assert.deepEqual(out.map((s) => s.urls), [['turn:alive.example.test:3478'], 'stun:stun.l.google.com:19302']);
-    assert.deepEqual(dropped, ['turn:dead.example.test:3478', 'turn:dead.example.test:3478 (tcp)']);
-    assert.equal(out[0].credential, 'c', 'the credentials stay with the relay they belong to');
-
-    const named = await reachableIceServers([{ urls: 'stun:stun.example.test:3478' }], probe);
-    assert.deepEqual(named.map((s) => s.urls), [['stun:stun.example.test:3478']], 'a named STUN server is not doubled');
+  /**
+   * D70: the agent's werift is never given a relay. With one, werift sent down its own first-nominated
+   * pair — a relay pair — while Chrome listened on another, and the picture froze on both the direct
+   * and the relayed path. The browser has the relay; the agent keeps only STUN, for its public address.
+   */
+  test('the agent keeps STUN and drops every relay, adding a public-address server when none is named', () => {
+    const out = agentIceServers([
+      { urls: ['turn:turn.example.test:3478', 'turn:turn.example.test:3478?transport=tcp'], username: 'u', credential: 'c' },
+      { urls: ['stun:stun.example.test:3478', 'turns:turn.example.test:5349'], username: 'u', credential: 'c' },
+    ]);
+    assert.deepEqual(out, [{ urls: ['stun:stun.example.test:3478'] }], 'a relay, or a relay credential, reached werift');
+    assert.deepEqual(agentIceServers([{ urls: 'turn:turn.example.test:3478', username: 'u', credential: 'c' }]),
+      [{ urls: 'stun:stun.l.google.com:19302' }]);
+    assert.deepEqual(agentIceServers([]), [{ urls: 'stun:stun.l.google.com:19302' }]);
   });
 
   /**
-   * What the farm did: the console sent the minted relay, the relay host was down, and werift — which
-   * will not offer until every candidate is in — never offered. The page said "negotiating" for good.
+   * What the farm did (D67): the console sent the minted relay, the relay host was down, and werift —
+   * which will not offer until every candidate is in — never offered. The page said "negotiating" for
+   * good. Since D70 werift is never handed the relay at all, so a silent one cannot hold the offer, and
+   * the offer carries no relay candidate of the agent's own. Hand it the relay and this hangs.
    */
-  test('the offer goes out promptly while the relay the console named is silent', { timeout: 30_000 }, async () => {
+  test('the offer goes out promptly, with no relay candidate, whatever relay the console names', { timeout: 30_000 }, async () => {
     const silent = await silentRelay();
     const toBrowser: Array<Record<string, unknown>> = [];
     const peer = new PhoneVideoPeer({
@@ -583,7 +548,9 @@ describe('a relay that does not answer does not hold the offer', () => {
       while (!toBrowser.some((p) => p.type === 'offer') && Date.now() - t < 10_000) await new Promise((r) => setTimeout(r, 50));
       const took = Date.now() - t;
       assert.ok(toBrowser.some((p) => p.type === 'offer'), `no offer in ${took}ms — the silent relay held it`);
-      assert.ok(took < 8_000, `the offer took ${took}ms`);
+      assert.ok(took < 3_000, `the offer took ${took}ms`);
+      const sdp = String(toBrowser.find((p) => p.type === 'offer')!.sdp);
+      assert.doesNotMatch(sdp, / typ relay/, 'the agent offered a relay candidate of its own');
     } finally {
       peer.close();
       silent.close();

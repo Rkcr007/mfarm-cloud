@@ -505,6 +505,11 @@ Releasing that session found the worse one (D69): the released tab went on recei
 screen, with its input channel open, because nothing told the data plane a lease had ended. The
 reset request now closes the device's live connections and retires the allocation's grants.
 
+**The relay moved to the control plane** (ADR-0047), so a viewer off the phone's network gets a
+picture (D67 closed). That found D70: once the relay answered, the agent's werift relayed through
+it itself and Chrome's picture froze on every path. The agent now keeps STUN only and the browser
+holds the relay. Relayed, a touch reaches its frame in about 175 ms.
+
 Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
 grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above
 were. The agent's trace agrees: the first frame after a press reaches the agent 63–75 ms after it.

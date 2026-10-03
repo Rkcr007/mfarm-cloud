@@ -409,9 +409,10 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   its picture and its elements instead (see the top of this page); the picture is a few seconds
   behind the device — about the time a full-resolution `screencap` takes to cross the tunnel — and
   says so.
-- **A viewer on another network needs the relay, and the relay lives on the Cuttlefish host** (D67).
-  While `mfarm-lab` is stopped the agent offers without it — fine on the phone's own network, no
-  picture from anywhere else.
+- **A viewer on another network goes through the relay, on the control plane** (ADR-0047). That
+  adds a round trip through Mumbai: about 175 ms from a touch to its frame, against ~75 ms direct.
+  The agent itself never uses the relay (D70): a relayed browser reaches it at its public address.
+  So an agent on a network that blocks outbound UDP cannot be watched from anywhere else.
 - **Rotation is followed by live input only.** A touch states the size the stream is encoded at,
   read from the stream itself, so it lands right after the phone turns; the adb fallback still maps
   from the portrait panel.
