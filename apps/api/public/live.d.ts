@@ -135,5 +135,5 @@ export class LiveSession {
   /** A hardware button over the datachannel where one exists, else the data-plane socket. */
   pressButton(command: string): boolean;
   uiDump(): Promise<{ id: string; xml: string }>;
-  screenshot(): Promise<LiveScreenshot & { id: string }>;
+  screenshot(opts?: { silent?: boolean }): Promise<LiveScreenshot & { id: string }>;
 }

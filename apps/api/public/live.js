@@ -219,7 +219,7 @@ export class LiveSession {
         const r = this.pending.get(msg.id);
         this.pending.delete(msg.id);
         r?.resolve(msg);
-        this.o.onScreenshot?.(msg);
+        if (!r?.silent) this.o.onScreenshot?.(msg);
         return;
       }
       case 'screenshot-error': {
@@ -644,11 +644,16 @@ export class LiveSession {
     });
   }
 
-  screenshot() {
+  /**
+   * `silent` is for the frame that IS the screen on a device without video (M4): it is refreshed
+   * after every tap, and announcing each one as a capture would bury the screenshots somebody asked
+   * for under dozens nobody did.
+   */
+  screenshot({ silent = false } = {}) {
     const id = `s${Date.now()}${Math.random().toString(16).slice(2, 6)}`;
     return new Promise((resolve, reject) => {
       if (this.ws?.readyState !== WebSocket.OPEN) return reject(new Error('Not connected to the device.'));
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, silent });
       this.#send({ t: 'screenshot', id });
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error('The device did not answer the screenshot in 30s.'));
