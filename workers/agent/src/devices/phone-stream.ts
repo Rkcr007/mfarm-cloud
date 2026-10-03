@@ -34,6 +34,11 @@ import type { ScreenCapture, FrameMark, LiveControl } from './capture.ts';
 /** Payload bytes per RTP packet. Under a 1280-byte path MTU with room for SRTP and TURN headers. */
 const MAX_PAYLOAD = 1100;
 
+/**
+ * How long the screen must have been still before a PLI is taken for Chrome's stuck-stream probe
+ * (sent at 3 s) rather than a loss (sent within a round trip of it). See D68 at the PLI handler.
+ */
+const IDLE_PLI_MS = Number(process.env.PHYSICAL_IDLE_PLI_MS ?? 2000);
 /** One frame at 60 fps, in microseconds — the step a re-based clock carries on by. */
 const FRAME_US = 16_667;
 /** The fewest milliseconds between two encoder restarts asked for by viewers — see `requestKeyframe`. */
@@ -217,6 +222,8 @@ export class H264Fanout {
   size?: { w: number; h: number };
   /** Keyframes asked of the encoder, and requests turned away for coming too soon after one. */
   readonly keyframes = { asked: 0, limited: 0 };
+  /** When the encoder last produced a picture — how long the screen has been still. */
+  lastFrameAt = 0;
 
   constructor(make: () => ScreenCapture) { this.make = make; }
 
@@ -252,6 +259,7 @@ export class H264Fanout {
       this.capture = capture;
       this.starting = capture.start((nal, at, frame) => {
         const t = nalType(nal);
+        if (t === NAL_IDR || t === NAL_NON_IDR) this.lastFrameAt = at;
         if (t === NAL_SPS) { this.sps = Buffer.from(nal); this.size = spsSize(nal) ?? this.size; }
         else if (t === NAL_PPS) this.pps = Buffer.from(nal);
         for (const s of this.subs) s(nal, at, frame);
@@ -591,6 +599,8 @@ export class PhoneVideoPeer implements SignalChannel {
   private pc?: RTCPeerConnection;
   private unsubscribe?: () => void;
   private closed = false;
+  /** This viewer has been sent a keyframe, so it has a whole picture to hold on a still screen. */
+  private keyframeSent = false;
 
   constructor(o: { signal: SignalOptions; fanout: H264Fanout; input: InputMapper; label: string; video: { w: number; h: number } }) {
     this.o = o;
@@ -648,6 +658,20 @@ export class PhoneVideoPeer implements SignalChannel {
      * that is not moving there is no next one. See `H264Fanout.requestKeyframe` for the rate limit.
      */
     video.sender.onPictureLossIndication.subscribe(() => {
+      /**
+       * BUT NOT CHROME'S PROBE OF A STILL SCREEN (D68). Chrome also sends a PLI when no frame has come
+       * for 3 s while packets came within 5 — its "is this stream stuck?" check, not a loss. Answered,
+       * the restart's frames count as packets, so 3 s after them it asked again: on the farm, a still
+       * home screen restarted the encoder every ~4 s for as long as anybody watched it — 4 keyframes
+       * and 245 KB in 20 idle seconds. A PLI for a real loss comes while frames are flowing, within a
+       * round trip of the frame it lost; one that comes after the screen has been still this long,
+       * to a viewer already given a keyframe, is the probe. Left unanswered, Chrome asks once and stops.
+       */
+      const stillMs = Date.now() - this.o.fanout.lastFrameAt;
+      if (this.keyframeSent && stillMs >= IDLE_PLI_MS) {
+        if (TRACE) log(`the viewer asked for a keyframe (PLI) after ${stillMs}ms of a still screen — its picture is whole, so no restart`);
+        return;
+      }
       const asked = this.o.fanout.requestKeyframe();
       if (TRACE) log(`the viewer asked for a keyframe (PLI): ${asked ? 'encoder restarted' : 'not now'}`);
     });
@@ -775,6 +799,7 @@ export class PhoneVideoPeer implements SignalChannel {
           send(this.o.fanout.sps, ts, false);
           send(this.o.fanout.pps, ts, false);
         }
+        if (keyframe) this.keyframeSent = true;
         pending.forEach((slice, i) => send(slice, ts, i === pending.length - 1));
         pending = [];
         keyframe = false;

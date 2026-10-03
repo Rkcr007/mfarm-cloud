@@ -486,6 +486,21 @@ per gesture: one that began over adb finishes over adb.
 | Viewer's PLI → keyframe at the viewer | none until the screen moves | **156–162 ms** |
 | Typing "cal" into the launcher's search | batched, 120 ms | per key, exact |
 
+**Then in the console itself, in Chrome** — the same farm, the console's own peer connection, frames
+timed at the receiver's delivery (`getSynchronizationSources`), counting only inputs made on a
+screen that had been still for at least a quarter of a second:
+
+| In Chrome, through farm.mfarm.dev | input → first frame |
+|---|---|
+| Swipe up — the drawer follows the finger | 58, 68, 101, 112 ms |
+| Back · Recents · Home (the toolbar, as keycodes) | 73–77 · 57–121 · 92–115 ms |
+| Typing "cal" in the drawer's search, from the console's keyboard | each key on its own; "cal" exact |
+| The session | 682 of 682 frames decoded, 0 dropped, 0 packets lost, 1.4 ms a decode, 16 ms jitter buffer |
+
+Chrome found what the headless viewer could not (D68): it probes a stream that has sent nothing for
+3 s with a PLI, and answering it restarted the encoder every ~4 s on a still screen. A PLI that comes
+after 2 s of stillness, to a viewer that already has its keyframe, is now left unanswered.
+
 Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
 grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above
 were. The agent's trace agrees: the first frame after a press reaches the agent 63–75 ms after it.
