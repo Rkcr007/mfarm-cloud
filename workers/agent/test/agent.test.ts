@@ -812,6 +812,40 @@ describe('data plane', () => {
     ws.close();
   });
 
+  /**
+   * D69. Found on the OnePlus: released from the console, the session's live view went on receiving
+   * the phone's screen — the data plane only closed a viewer when the browser closed its socket, and a
+   * phone has no restore to kill its WebRTC the way a Cuttlefish device does. The input channel rode
+   * the same connection. This goes the way a release goes: CLEANING, then the heartbeat that carries
+   * the reset request — for a device this agent has no backend for, which must end the lease anyway.
+   */
+  test('a session that ends takes its live connection with it, and its grant cannot open the device again', async () => {
+    const created = await realSessionToken();
+    const ws = await connect();
+    ws.send(JSON.stringify({ t: 'hello', token: created.dataPlane.token }));
+    assert.equal((await nextMessage(ws)).t, 'ready');
+    const closed = new Promise<void>((r) => ws.once('close', () => r()));
+    const told = nextMessage(ws);
+
+    await withSystem(async (c) => c.query(`UPDATE devices SET state = 'CLEANING' WHERE id = $1`, [created.session.deviceId]));
+    try {
+      assert.equal((await agent.heartbeat()).ok, true);
+      const msg = await Promise.race([told, new Promise<null>((r) => setTimeout(() => r(null), 3000))]);
+      assert.ok(msg, 'the released session\'s live connection was left open');
+      assert.equal(msg.code, 'session_ended');
+      await closed;
+
+      const again = await connect();
+      again.send(JSON.stringify({ t: 'hello', token: created.dataPlane.token }));
+      const refused = await nextMessage(again);
+      assert.equal(refused.code, 'stale_fence', 'a grant from the ended session opened the device again');
+      again.close();
+    } finally {
+      // Out of the way of the tests after this one: a CLEANING device is asked to reset on every beat.
+      await withSystem(async (c) => c.query(`UPDATE devices SET state = 'OFFLINE' WHERE id = $1`, [created.session.deviceId]));
+    }
+  });
+
   test('a superseded session is rejected on reconnect', async () => {
     const created = await realSessionToken();
     const ws1 = await connect();

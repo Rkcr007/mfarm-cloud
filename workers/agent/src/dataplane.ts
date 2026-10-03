@@ -133,6 +133,19 @@ export class DataPlane {
 
   constructor(opts: DataPlaneOptions) {
     this.opts = opts;
+    // See D69 at `Agent.runRequestedResets`. Optional-called because a test's agent may be a stand-in.
+    opts.agent.onLeaseEnded?.((deviceId) => this.closeDevice(deviceId));
+  }
+
+  /**
+   * Close every live connection to a device whose lease has ended: its video (the signalling channel
+   * and, for a phone, the agent's own peer and capture), its input and its log stream. The viewer is
+   * told why, so the console can say "this session has ended" rather than "the connection dropped".
+   */
+  closeDevice(deviceId: string): number {
+    const gone = [...this.conns].filter(([, c]) => c.claims?.did === deviceId).map(([ws]) => ws);
+    for (const ws of gone) this.reject(ws, 'session_ended', 'This session has ended.');
+    return gone.length;
   }
 
   /** Returns the bound port. Pass 0 (the test default) to let the OS choose a free one. */
