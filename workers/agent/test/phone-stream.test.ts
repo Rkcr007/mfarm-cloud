@@ -444,6 +444,18 @@ describe('a viewer negotiates, receives the screen and sends a touch', () => {
     const idr = packets.slice(afterReset).find((p) => p.type === 5)!;
     assert.equal(((idr.ts - c.ts) >>> 0), 1500, 'a clock that stepped back must carry on one frame later, not go back');
 
+    /**
+     * AND NOT FOR CHROME'S PROBE OF A STILL SCREEN (D68). Chrome sends a PLI when no frame has come for
+     * 3 s; answering it made frames, which made Chrome ask again 3 s later — an encoder restarted every
+     * ~4 s for as long as anyone watched a still phone. werift never sends that probe, so this sends it.
+     */
+    const resets = ctl.calls.filter((x) => x[0] === 'reset').length;
+    await new Promise((r) => setTimeout(r, 2200));
+    await browser.getReceivers()[0].sendRtcpPLI(ssrc);
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(ctl.calls.filter((x) => x[0] === 'reset').length, resets,
+      'a still screen restarted the encoder for a viewer that already had its picture');
+
     await waitFor(() => inputChannel.readyState === 'open', 'the input channel');
     inputChannel.send(JSON.stringify({ type: 'multi-touch', id: [1], x: [288], y: [640], down: 1 }));
     inputChannel.send(JSON.stringify({ type: 'multi-touch', id: [1], x: [288], y: [640], down: 0 }));

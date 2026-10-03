@@ -13,11 +13,13 @@ plays the screen live — 60 fps while it moves, about 74 ms from a touch to the
 answers it, measured in [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md#m6--live-video). The phone
 advertises `screen-stream` only then. Touches go back as they happen, over scrcpy's own control
 socket — a drag follows the finger, a long press is long — and keys and text go the same way; a
-browser that loses a picture asks for a keyframe and gets one. `PHYSICAL_LIVE_INPUT=0` sends input
+browser that loses a picture asks for a keyframe and gets one (but not Chrome's "nothing for 3 s"
+probe of a still screen, which is not a loss — D68). `PHYSICAL_LIVE_INPUT=0` sends input
 over adb instead, where a press is a tap and a drag a swipe decided on release; it is also what
 happens by itself if the control socket will not open. `PHYSICAL_LIVE_VIDEO=0` turns the live view
 off, `PHYSICAL_VIDEO_MAX_SIZE` (default 1280) sets the long side, `PHYSICAL_KEYFRAME_MIN_MS`
-(default 1000) spaces the keyframes viewers may ask for, and `PHYSICAL_VIDEO_TRACE=1` logs the
+(default 1000) spaces the keyframes viewers may ask for, `PHYSICAL_IDLE_PLI_MS` (default 2000) is how
+long a screen must be still before a PLI is taken for that probe, and `PHYSICAL_VIDEO_TRACE=1` logs the
 phone's half of the latency per touch.
 
 **Without the jar (M4):** the cockpit shows the phone's screen as its latest picture, read again
