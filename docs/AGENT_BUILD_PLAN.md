@@ -510,6 +510,12 @@ picture (D67 closed). That found D70: once the relay answered, the agent's werif
 it itself and Chrome's picture froze on every path. The agent now keeps STUN only and the browser
 holds the relay. Relayed, a touch reaches its frame in about 175 ms.
 
+Checking the relay in the console the next night found two more:
+- **D71:** a 3.7 s stall over the relay showed "no display" over a playing picture.
+- **D72:** werift nominated Chrome's relay-over-TCP, which queued to a 6.2 s round trip. The agent now holds TCP relays back for 1.5 s.
+
+It also found the next gap. The stream is a fixed 4 Mbit/s, and on a 3 Mbit/s downlink nothing slows it down. **Bandwidth adaptation is the next step for M6**: Chrome's receiver reports could drive scrcpy's bitrate.
+
 Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
 grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above
 were. The agent's trace agrees: the first frame after a press reaches the agent 63–75 ms after it.
