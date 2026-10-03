@@ -945,7 +945,10 @@ async function main(): Promise<void> {
         const onUsb = lastDiscovery.some((d) => d.serial === serial && d.state === 'device');
         let prerequisite = blockerOf(localId);
         // A read that failed is not an answer, and must not un-block a phone.
-        if (onUsb) { try { prerequisite = (await dev.prerequisites()).find((p) => p.blocks); } catch { /* keep */ } }
+        // A phone in a session is not probed for privileges: its log is somebody's evidence (D65).
+        const deviceId = agent.deviceIdFor(localId);
+        const busy = deviceId ? agent.sessionsOn(deviceId) > 0 : false;
+        if (onUsb) { try { prerequisite = (await dev.prerequisites({ busy })).find((p) => p.blocks); } catch { /* keep */ } }
         const blocker = phoneBlocker({ onUsb, health: agent.healthOf(localId), prerequisite });
         offer.blockedBy(localId, blocker?.reason);
         agent.setAway(localId, blocker?.away ? blocker.reason : undefined);

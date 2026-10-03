@@ -66,6 +66,7 @@ refuse() { sed "s/VERB/$1/" "$d/refusal.txt" >&2; exit 255; }
 case "$*" in
   "settings delete global mfarm_prerequisite_probe; "*)
     # The three-command probe. What each mode prints is what the OnePlus printed in that state.
+    echo probe >> "$d/probes"
     [ "$mode" = unreachable ] && { echo "adb: device offline" >&2; exit 1; }
     # A phone on its way down: the shell still runs, and the services that would answer are gone.
     [ "$mode" = dying ] && { echo "cmd: Can't find service: settings" >&2; echo "cmd: Can't find service: package" >&2; echo mfarm-prerequisite-probe-ran; exit 0; }
@@ -97,6 +98,8 @@ exit 0
 `);
   await chmod(adb, 0o755);
   process.env.ADB_PATH = adb;
+  // Short, so the periodic re-check can be watched; read at import, like ADB_PATH (D65).
+  process.env.PHYSICAL_PRIVILEGED_PROBE_MS = '1500';
   // After ADB_PATH is set — a static import would bind the real adb and probe the phone on the desk.
   physical = await import('../src/devices/physical.ts');
 });
@@ -110,7 +113,10 @@ beforeEach(async () => {
   await set('keyguard', 'false');
   await rm(join(dir, 'verify'), { force: true });
   await rm(join(dir, 'writes'), { force: true });
+  await rm(join(dir, 'probes'), { force: true });
 });
+
+const probes = async () => (await get('probes')).split('\n').filter(Boolean).length;
 
 const phone = () => new physical.PhysicalDevice({ serial: 'FAKE8T', localId: 'phone-FAKE8T' });
 const codes = async (p: InstanceType<typeof physical.PhysicalDevice>) => (await p.prerequisites()).map((x) => x.code);
@@ -250,5 +256,44 @@ describe('turning install verification off on a phone that refuses the write', (
     assert.equal(p.installVerification, 'off');
     await p.restoreInstallVerification();
     assert.equal(await get('writes'), 'deleted', 'it was unset before, so restoring deletes the row');
+  });
+});
+
+/**
+ * D65. The probe writes an ERROR and a WARNING to the phone's own log each time, and it ran every
+ * ten seconds — into every session's logcat, the one place a tester goes looking for errors.
+ */
+describe('the privileged probe stays out of the phone\u2019s log', () => {
+  test('a phone known to allow it is not asked again on the next read', async () => {
+    const p = phone();
+    await p.prerequisites();
+    await p.prerequisites();
+    await p.prerequisites();
+    assert.equal(await probes(), 1);
+  });
+
+  test('a phone in a session is not asked at all — its log is somebody\u2019s evidence', async () => {
+    const p = phone();
+    await p.prerequisites({ busy: true });
+    assert.equal(await probes(), 0);
+    assert.deepEqual(p.unmetPrerequisites, [], 'and the quiet reads still answered');
+  });
+
+  test('it is asked again once the interval has passed', async () => {
+    const p = phone();
+    await p.prerequisites();
+    await new Promise((r) => setTimeout(r, 1_600));
+    await p.prerequisites();
+    assert.equal(await probes(), 2);
+  });
+
+  /** A fix has to be noticed, and nobody can drive a restricted phone through WebDriver anyway. */
+  test('a restricted phone is asked every time, so lifting it is seen at once', async () => {
+    await set('mode', 'restricted');
+    const p = phone();
+    await p.prerequisites();
+    await set('mode', 'open');
+    assert.deepEqual(await codes(p), []);
+    assert.equal(await probes(), 2);
   });
 });
