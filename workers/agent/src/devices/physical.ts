@@ -144,6 +144,8 @@ export const SCREEN_LOCKED: PhonePrerequisite = {
  * said what it says when it works, the last command ran, and nothing was refused.
  */
 const PROBE_DONE = 'mfarm-prerequisite-probe-ran';
+/** How often a phone already known to allow the probe is asked again. Overridable, for tests. */
+const PRIVILEGED_PROBE_EVERY_MS = Number(process.env.PHYSICAL_PRIVILEGED_PROBE_MS ?? 5 * 60_000);
 const PROBE_PACKAGE = 'dev.mfarm.probe.no.such.package';
 const PROBE = `settings delete global mfarm_prerequisite_probe; `
   + `pm grant ${PROBE_PACKAGE} android.permission.CAMERA; pm clear ${PROBE_PACKAGE}; echo ${PROBE_DONE}`;
@@ -271,6 +273,11 @@ export class PhysicalDevice implements DeviceControl {
   private verifyState?: 'on' | 'off';
   /** Whether adb's privileged commands are refused. Unset until the phone has answered once. */
   private restricted?: boolean;
+  /**
+   * When the privileged probe last ran. Cleared when the phone leaves, so it is asked again the
+   * moment it is back — the restriction moves only across a restart, and a restart is a departure.
+   */
+  private probedAt?: number;
   /** What the last `prerequisites()` found, cached for the same reason `verifyState` is. */
   private unmet?: PhonePrerequisite[];
   /** Held open for the life of the device. Reopening per event costs 57-77ms of pure overhead. */
@@ -371,7 +378,12 @@ export class PhysicalDevice implements DeviceControl {
     // back was `offline` until the agent itself was restarted (D61). Forgotten on exit, so the next
     // send opens a new one. Guarded on identity: a shell replaced on purpose exits later than its
     // replacement was stored.
-    sh.on('exit', () => { if (this.shell === sh) this.shell = undefined; });
+    sh.on('exit', () => {
+      if (this.shell !== sh) return;
+      this.shell = undefined;
+      // Left — rebooted or unplugged. The restriction moves only across a restart, so ask again.
+      this.probedAt = undefined;
+    });
     // An unhandled 'error' on a stream is an uncaught exception, which would take down the agent and
     // with it every other phone on this host because one cable was pulled. Kept local: the in-flight
     // send() times out and health() reports the device offline.
@@ -765,10 +777,28 @@ export class PhysicalDevice implements DeviceControl {
    * Three adb calls, 111-143ms together on the handset this was written against; cheap enough for
    * the discovery tick, which is where somebody watching the window needs the row to change.
    */
-  async prerequisites(): Promise<PhonePrerequisite[]> {
-    const probe = await runAnyExit(ADB, ['-s', this.serial, 'shell', PROBE], 15_000);
-    if (PROBE_REFUSED.test(probe.out)) this.restricted = true;
-    else if (PROBE_SETTINGS_RAN.test(probe.out) && probe.out.includes(PROBE_DONE)) this.restricted = false;
+  async prerequisites(opts: { busy?: boolean } = {}): Promise<PhonePrerequisite[]> {
+    /**
+     * THE PRIVILEGED PROBE IS NOT FREE, and it ran every ten seconds (D65). `pm grant` and `pm clear`
+     * on a package that does not exist each write a line to the phone's own log — an ERROR from
+     * PermissionManager and a WARNING from ActivityManager — so every session's logcat carried two
+     * lines a minute of MFARM asking about a package called dev.mfarm.probe.no.such.package, in the
+     * one place a tester goes looking for errors. Seen in the console on the OnePlus.
+     *
+     * So it is asked only when the answer can have changed: never yet, after the phone has been
+     * away (the restriction moves only across a restart), while it is restricted (nobody is driving
+     * it then, and a fix should be noticed), and otherwise once every few minutes. And never while a
+     * session holds the phone: that log is somebody's evidence. The other two reads below log
+     * nothing and still run every time.
+     */
+    const due = this.restricted !== false || this.probedAt === undefined
+      || Date.now() - this.probedAt >= PRIVILEGED_PROBE_EVERY_MS;
+    if (due && !opts.busy) {
+      const probe = await runAnyExit(ADB, ['-s', this.serial, 'shell', PROBE], 15_000);
+      if (PROBE_REFUSED.test(probe.out)) this.restricted = true;
+      else if (PROBE_SETTINGS_RAN.test(probe.out) && probe.out.includes(PROBE_DONE)) this.restricted = false;
+      this.probedAt = Date.now();
+    }
 
     const unmet: PhonePrerequisite[] = [];
     if (this.restricted) unmet.push(ADB_RESTRICTED);
