@@ -413,6 +413,11 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   adds a round trip through Mumbai: about 175 ms from a touch to its frame, against ~75 ms direct.
   The agent itself never uses the relay (D70): a relayed browser reaches it at its public address.
   So an agent on a network that blocks outbound UDP cannot be watched from anywhere else.
+- **The stream does not adapt to the viewer's bandwidth.** It is encoded at a fixed 4 Mbit/s and
+  nothing slows it down. A viewer on a link with less than that, relayed or not, sees it stall:
+  measured 2026-10-04 on a 3 Mbit/s downlink, the relayed view queued to a 1.7 s round trip and
+  Chrome's retransmission requests made it worse. `bitRate` in `index.ts` is the knob until
+  something adapts it.
 - **Rotation is followed by live input only.** A touch states the size the stream is encoded at,
   read from the stream itself, so it lands right after the phone turns; the adb fallback still maps
   from the portrait panel.

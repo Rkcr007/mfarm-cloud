@@ -14,7 +14,7 @@ import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import {
   packetizeNal, videoSizeFor, charFor, InputMapper, H264Fanout, PhoneVideoPeer, nalType,
-  parseIceUrl, agentIceServers, spsSize,
+  parseIceUrl, agentIceServers, relayOverTcp, spsSize,
 } from '../src/devices/phone-stream.ts';
 import type { ScreenCapture, FrameMark, LiveControl } from '../src/devices/capture.ts';
 
@@ -515,6 +515,44 @@ describe('the agent offers without a relay of its own', () => {
    * pair — a relay pair — while Chrome listened on another, and the picture froze on both the direct
    * and the relayed path. The browser has the relay; the agent keeps only STUN, for its public address.
    */
+  /**
+   * The priorities are the ones Chrome sent from the console on 2026-10-04: two relay candidates
+   * reached over TCP (16785407, top byte 1) and one over UDP (50340095, top byte 3). The TCP ones
+   * arrived first, werift nominated one, and a 4 Mbit/s stream queued down TURN-over-TCP to a 6.2 s
+   * round trip with the UDP relay sitting unused.
+   */
+  const chromeRelay = (priority: number, port: number) =>
+    `candidate:3829451234 1 udp ${priority} 34.100.138.213 ${port} typ relay raddr 0.0.0.0 rport 0 generation 0 ufrag Ab1c network-cost 999`;
+
+  test('a relay reached over TCP is told from one reached over UDP, by its priority', () => {
+    assert.equal(relayOverTcp(chromeRelay(16785407, 59233)), true, 'Chrome, TURN over TCP');
+    assert.equal(relayOverTcp(chromeRelay(50340095, 65162)), false, 'Chrome, TURN over UDP');
+    assert.equal(relayOverTcp({ candidate: chromeRelay(16785407, 61502), sdpMid: '0' }), true, 'as RTCIceCandidate JSON');
+    assert.equal(relayOverTcp(chromeRelay(255, 1)), true, 'TURN over TLS ranks lowest of all');
+    assert.equal(relayOverTcp(chromeRelay((5 << 24) + 255, 1)), false, 'Firefox ranks UDP relay 5');
+    assert.equal(relayOverTcp('candidate:1 1 udp 2122260223 192.168.0.11 50000 typ host'), false, 'a host candidate');
+    assert.equal(relayOverTcp('not a candidate'), false);
+    assert.equal(relayOverTcp(undefined), false);
+  });
+
+  test('the browser\'s relay over TCP is held back, so its relay over UDP can be nominated first', async () => {
+    const peer = new PhoneVideoPeer({
+      signal: { onPayload: () => {}, onClose: () => {} },
+      fanout: new H264Fanout(() => scriptedCapture()),
+      input: undefined as never, label: 'phone-hold', video: { w: 576, h: 1280 },
+    });
+    const added: string[] = [];
+    (peer as any).pc = { addIceCandidate: async (c: { candidate: string }) => { added.push(c.candidate.split(' ')[5]); }, close: async () => {} };
+    try {
+      peer.send({ type: 'ice-candidate', candidate: { candidate: chromeRelay(16785407, 59233), sdpMid: '0' } });
+      peer.send({ type: 'ice-candidate', candidate: { candidate: chromeRelay(50340095, 65162), sdpMid: '0' } });
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(added, ['65162'], 'the UDP relay must go in first, and the TCP one must not');
+      await new Promise((r) => setTimeout(r, 1_700));
+      assert.deepEqual(added, ['65162', '59233'], 'held, not dropped: on a UDP-blocking network it is the only way in');
+    } finally { peer.close(); }
+  });
+
   test('the agent keeps STUN and drops every relay, adding a public-address server when none is named', () => {
     const out = agentIceServers([
       { urls: ['turn:turn.example.test:3478', 'turn:turn.example.test:3478?transport=tcp'], username: 'u', credential: 'c' },

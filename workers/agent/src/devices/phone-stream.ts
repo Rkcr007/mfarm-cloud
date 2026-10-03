@@ -479,6 +479,8 @@ function iceServersFrom(raw: unknown): IceServer[] {
  */
 const TRACE = process.env.PHYSICAL_VIDEO_TRACE === '1';
 
+/** How long a browser's relay-over-TCP candidate is held back, so its relay-over-UDP one can win. */
+const TCP_RELAY_HOLD_MS = Number(process.env.PHYSICAL_TCP_RELAY_HOLD_MS ?? 1500);
 /** The longest an offer may take. Past it the viewer is told so, rather than left on "negotiating". */
 const OFFER_DEADLINE_MS = Number(process.env.PHYSICAL_OFFER_DEADLINE_MS ?? 15_000);
 /** werift's own default, kept when the console names no STUN server: the phone's public address. */
@@ -495,6 +497,28 @@ export function parseIceUrl(url: string): { scheme: string; host: string; port: 
     port: Number(m[3] ?? (tls ? 5349 : 3478)),
     transport: (m[4]?.toLowerCase() as 'udp' | 'tcp' | undefined) ?? (tls ? 'tcp' : 'udp'),
   };
+}
+
+/**
+ * A browser's relay candidate that reaches the relay over TCP or TLS rather than UDP.
+ *
+ * WHY IT MATTERS: werift nominates the first pair whose check succeeds, and never moves (see D70). A
+ * browser gathers its relay over UDP and over TCP; when the TCP allocation happens to finish first,
+ * werift locks onto it — and a 4 Mbit/s stream down TURN-over-TCP queues behind its own congestion
+ * control until consent checks time out. Measured in the console: a 6.2 s round trip, the view
+ * stalling, and a `disconnected` every few seconds, with a UDP relay candidate sitting unused.
+ *
+ * THE LINE DOES NOT SAY. A relay candidate's transport is always `udp` (the leg between the peers),
+ * whatever carries it to the relay. The priority says: browsers rank a relay by how they reach it,
+ * and put that in the top byte — Chrome 3 for UDP and 1 for TCP (0 for TLS), Firefox 5 and 0.
+ */
+export function relayOverTcp(candidate: unknown): boolean {
+  const line = typeof candidate === 'string' ? candidate : (candidate as { candidate?: unknown } | null)?.candidate;
+  if (typeof line !== 'string') return false;
+  const f = line.trim().replace(/^a=/, '').split(/\s+/);
+  const typ = f.indexOf('typ');
+  const priority = Number(f[3]);
+  return typ > 0 && f[typ + 1] === 'relay' && Number.isFinite(priority) && (priority >>> 24) < 2;
 }
 
 /**
@@ -549,7 +573,10 @@ export class PhoneVideoPeer implements SignalChannel {
       void this.pc.setRemoteDescription({ type: 'answer', sdp: p.sdp }).catch(fail);
     } else if (p.type === 'ice-candidate' && this.pc && p.candidate) {
       // A candidate the peer cannot use is not a reason to end the call; the others may still pair.
-      void this.pc.addIceCandidate(p.candidate as never).catch(() => {});
+      const add = () => { if (this.pc && !this.closed) void this.pc.addIceCandidate(p.candidate as never).catch(() => {}); };
+      // Held, not dropped: on a network that blocks UDP it is the only way in, and arrives late.
+      if (relayOverTcp(p.candidate)) setTimeout(add, TCP_RELAY_HOLD_MS).unref?.();
+      else add();
     }
   }
 

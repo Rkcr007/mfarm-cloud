@@ -79,14 +79,14 @@ describe('APP_CONTEXT.md says true things about the repo', () => {
   test('the defect count is not behind the register', () => {
     // Spelled in words here, because this one is in prose. Both spellings are checked so that
     // rewriting the sentence cannot quietly drop the check.
-    const WORDS = {
-      forty: 40, 'forty-one': 41, 'forty-two': 42, 'forty-three': 43, 'forty-four': 44,
-      'forty-five': 45, 'forty-six': 46, 'forty-seven': 47, 'forty-eight': 48, 'forty-nine': 49,
-      fifty: 50, 'fifty-one': 51, 'fifty-two': 52, 'fifty-three': 53, 'fifty-four': 54, 'fifty-five': 55,
-      'fifty-six': 56, 'fifty-seven': 57, 'fifty-eight': 58, 'fifty-nine': 59, sixty: 60,
-      'sixty-one': 61, 'sixty-two': 62, 'sixty-three': 63, 'sixty-four': 64, 'sixty-five': 65,
-      'sixty-six': 66, 'sixty-seven': 67, 'sixty-eight': 68, 'sixty-nine': 69, seventy: 70,
-    };
+    // Generated rather than listed: a hand-written table ran out at every new decade.
+    const WORDS = {};
+    const TENS = { forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+    const ONES = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+    for (const [t, tv] of Object.entries(TENS)) {
+      WORDS[t] = tv;
+      for (const [o, ov] of Object.entries(ONES)) WORDS[`${t}-${o}`] = tv + ov;
+    }
     const m = context.match(/\*\*([A-Za-z-]+) defects are recorded/);
     assert.ok(m, 'APP_CONTEXT.md should state how many defects are recorded');
     const claimed = WORDS[m[1].toLowerCase()];

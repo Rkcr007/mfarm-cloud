@@ -59,6 +59,12 @@ export const BUTTON_KEY = { power: 'power', back: 'back', home: 'home', menu: 'r
  * about. The guest is fine in that state: `adb screencap` returns a real frame.
  */
 const DISPLAY_GRACE_MS = 9_000;
+/**
+ * How long a `disconnected` media connection is given to come back before the view says it dropped.
+ * `disconnected` is the transient state by definition — ICE stopped hearing its consent checks, and
+ * usually starts again a moment later; `failed` is the terminal one, and the browser says so itself.
+ */
+const DROP_GRACE_MS = 8_000;
 
 /**
  * Cuttlefish's own scaling rule, kept verbatim.
@@ -112,6 +118,9 @@ export class LiveSession {
     this.stats = { fps: 0, kbps: 0, rtt: null, ice: null };
     this.statsTimer = null;
     this.displayTimer = null;
+    this.dropTimer = null;
+    /** A display track has arrived on this connection; a reconnect does not deliver it again. */
+    this.hasDisplay = false;
     this.activePointers = new Set();
   }
 
@@ -147,6 +156,7 @@ export class LiveSession {
   close() {
     this.closedByUs = true;
     clearTimeout(this.displayTimer);
+    clearTimeout(this.dropTimer);
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = null;
     try { this.pc?.close(); } catch { /* already closed */ }
@@ -290,6 +300,7 @@ export class LiveSession {
       // show a black rectangle.
       if (!stream.id.startsWith('display_')) return;
       this.label = stream.id;
+      this.hasDisplay = true;
       clearTimeout(this.displayTimer);
       this.o.onStream?.(stream, stream.id);
       this.#state('streaming');
@@ -305,6 +316,18 @@ export class LiveSession {
 
     pc.onconnectionstatechange = () => {
       if (pc !== this.pc) return;
+      if (pc.connectionState === 'connected') clearTimeout(this.dropTimer);
+      /**
+       * BACK FROM A DROP (D71). A connection that lost its consent checks for a moment and recovered
+       * is the same connection, carrying the same display track — and `ontrack` does not fire again.
+       * This used to fall through to the grace timer below, which then announced "connected, but no
+       * display" over a picture that was playing: found on the TURN relay, where a busy TCP leg
+       * stalls consent for a few seconds at a time.
+       */
+      if (pc.connectionState === 'connected' && this.state !== 'streaming' && this.hasDisplay) {
+        this.#state('streaming');
+        return;
+      }
       if (pc.connectionState === 'connected' && this.state !== 'streaming') {
         // Connected, but nothing has arrived on `ontrack` with a display stream yet. Give it a
         // moment, then stop pretending the negotiation is still in progress — it finished.
@@ -323,7 +346,14 @@ export class LiveSession {
             ? 'The media connection failed. The relay answered but no path to the device could be established.'
             : 'The media connection failed, and no TURN relay is configured — a direct path only exists on the same network as the farm.');
       }
-      if (pc.connectionState === 'disconnected') this.#state('failed', 'The media connection dropped.');
+      // Not at once: see DROP_GRACE_MS. Calling the first `disconnected` a failure tore the view down
+      // on hiccups the connection recovered from by itself (D71).
+      if (pc.connectionState === 'disconnected') {
+        clearTimeout(this.dropTimer);
+        this.dropTimer = setTimeout(() => {
+          if (pc === this.pc && pc.connectionState === 'disconnected') this.#state('failed', 'The media connection dropped.');
+        }, DROP_GRACE_MS);
+      }
     };
 
     // The device offers, we answer. `request-offer` carries the ice servers the DEVICE should use,
