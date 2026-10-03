@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@mfarm/protocol": "*",
+    "werift": "0.24.4",
     "ws": "^8.18.0"
   },
   "devDependencies": {

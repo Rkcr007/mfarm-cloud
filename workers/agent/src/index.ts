@@ -29,6 +29,7 @@ import { createCuttlefishBackend, CuttlefishDevice } from './devices/cuttlefish.
 import { createAvdBackend } from './devices/avd.ts';
 import { parseProfileAssignments } from './devices/profiles.ts';
 import { createPhysicalBackend, PhysicalDevice } from './devices/physical.ts';
+import { createCapture } from './devices/capture.ts';
 import { AutomationOffer, phoneBlocker } from './automation-offer.ts';
 import { discover, localIdForSerial, watchForChanges } from './devices/discovery.ts';
 import type { DiscoveredDevice } from './devices/discovery.ts';
@@ -205,6 +206,17 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
     );
   }
 
+  /**
+   * LIVE VIDEO FOR A PHONE (M6), when scrcpy is configured and not switched off. scrcpy rather than
+   * `screenrecord`: the latter fails the late-viewer check (a ten-second keyframe gap, measured at P0)
+   * and stops every three minutes. 1280 on the long side keeps a phone's stream to a few megabits —
+   * enough to read, little enough to cross a TURN relay — and is overridable.
+   */
+  const liveVideo = Boolean(process.env.SCRCPY_SERVER_PATH && process.env.SCRCPY_SERVER_VERSION)
+    && process.env.PHYSICAL_LIVE_VIDEO !== '0';
+  const liveVideoMaxSize = Number(process.env.PHYSICAL_VIDEO_MAX_SIZE ?? 1280);
+  if (liveVideo) console.log(`[agent] live video for phones: scrcpy ${process.env.SCRCPY_SERVER_VERSION}, ${liveVideoMaxSize}px on the long side`);
+
   const backends = usable.map((d) => {
     const localId = localIdForSerial(d.serial);
     console.log(
@@ -222,6 +234,14 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
       keepPackages: (process.env.PHYSICAL_KEEP_PACKAGES ?? '').split(',').map((s) => s.trim()).filter(Boolean),
       resetMode,
       aapt2Path,
+      ...(liveVideo ? {
+        liveVideo: {
+          maxSize: liveVideoMaxSize,
+          makeCapture: () => createCapture({
+            serial: d.serial, maxSize: liveVideoMaxSize, bitRate: 4_000_000, maxFps: 60,
+          }),
+        },
+      } : {}),
     });
   });
 

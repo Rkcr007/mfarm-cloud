@@ -7,11 +7,15 @@ a third backend behind the existing agent, not a second agent.
 **What works today:** enrollment, discovery, reservation, APK install, launch, logcat, screenshots,
 the UI inspector, and Appium/WebDriver automation.
 
-**What does not:** the live view. A handset publishes no WebRTC stream the way Cuttlefish does, and
-the honest options are scrcpy-over-RTP (unbuilt) or a screenshot loop presented as video (refused —
-it sets a performance baseline that is a lie).
+**The live view (M6):** where the agent has scrcpy's server jar (`SCRCPY_SERVER_PATH` and
+`SCRCPY_SERVER_VERSION`, which must match it), the agent is the phone's WebRTC peer and the console
+plays the screen live — 60 fps while it moves, about 118 ms from releasing a tap to the first new
+frame, measured in [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md#m6--live-video). The phone advertises
+`screen-stream` only then. Touches and keys go back over the same connection; a drag is a swipe,
+decided on release. `PHYSICAL_LIVE_VIDEO=0` turns it off, `PHYSICAL_VIDEO_MAX_SIZE` (default 1280)
+sets the long side, and `PHYSICAL_VIDEO_TRACE=1` logs the phone's half of the latency per touch.
 
-**What it has instead (M4):** the cockpit shows the phone's screen as its latest picture, read again
+**Without the jar (M4):** the cockpit shows the phone's screen as its latest picture, read again
 after every action and labelled with when it was taken — never passed off as live. Pressing the
 picture taps the phone there, a drag swipes, and a box under the screen types into it. The element
 tree is drawn over the picture while inspecting, and always when there is no picture worth trusting:
@@ -394,9 +398,18 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   detects it and withholds `webdriver` (D60 in [DEFECTS.md](DEFECTS.md)); it does not fix it, and
   only the OnePlus has been run. The device still reads `READY` in the console, because `READY` is
   about the lease and not about automation — the capability list is what changes.
-- **No live view.** §20/§21's video is unbuilt for this tier. A phone is operated from its picture and
-  its elements instead (see the top of this page); the picture is a few seconds behind the device —
-  about the time a full-resolution `screencap` takes to cross the tunnel — and says so.
+- **The live view needs scrcpy's jar on the agent's machine.** Without it a phone is operated from
+  its picture and its elements instead (see the top of this page); the picture is a few seconds
+  behind the device — about the time a full-resolution `screencap` takes to cross the tunnel — and
+  says so.
+- **A viewer on another network needs the relay, and the relay lives on the Cuttlefish host** (D67).
+  While `mfarm-lab` is stopped the agent offers without it — fine on the phone's own network, no
+  picture from anywhere else.
+- **A browser's keyframe request is not answered.** Lost packets are re-sent on NACK; a picture that
+  breaks anyway mends at the next keyframe, which on a still screen means the next time it moves.
+  scrcpy's control socket fixes this and takes ~60 ms off every tap — the next step for M6.
+- **A secure screen is black in the video**, as in every capture path; Inspect still shows and
+  operates its elements.
 - **No Windows agent.**
 - **Input latency over USB is ~33-55ms p50.** Measured 2026-08-25 on a Samsung SM-S918B (Android
   16): 33ms p50 / 55ms p95 over 100 key events, well inside the 100ms budget `health()` degrades at.

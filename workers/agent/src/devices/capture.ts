@@ -56,11 +56,22 @@ export interface CaptureStats {
   startedAt: number;
 }
 
+/**
+ * Where a NAL sits in its frame, when the source says. scrcpy does; `screenrecord` cannot — a bare
+ * Annex-B stream only shows a frame has ended when the next one begins.
+ */
+export interface FrameMark {
+  /** The last NAL of its frame: the frame is complete, and can be sent on now. */
+  last: boolean;
+  /** The encoder's presentation time, in microseconds. Absent on parameter sets. */
+  ptsUs?: number;
+}
+
 export interface ScreenCapture {
   /** Which source this is, for the console and for honest logging. */
   readonly kind: 'scrcpy' | 'screenrecord';
   /** Resolves once a first frame has genuinely arrived — see `start`'s comment. */
-  start(onNal: (nal: Buffer, receivedAt: number) => void): Promise<void>;
+  start(onNal: (nal: Buffer, receivedAt: number, frame?: FrameMark) => void): Promise<void>;
   stop(): Promise<void>;
   readonly stats: CaptureStats;
 }
@@ -109,6 +120,52 @@ export class NalSplitter {
   reset(): void { this.carry = Buffer.alloc(0); }
 }
 
+/** Whether a buffer begins with an Annex-B start code, as every frame scrcpy sends does. */
+export const startsAnnexB = (b: Buffer): boolean =>
+  b.length >= 3 && b[0] === 0 && b[1] === 0 && (b[2] === 1 || (b[2] === 0 && b.length >= 4 && b[3] === 1));
+
+/** Every NAL in a buffer that is known to be whole — one frame — the last one included. */
+export function splitAnnexB(data: Buffer): Buffer[] {
+  const out: Buffer[] = [];
+  const splitter = new NalSplitter();
+  splitter.push(data, (nal) => out.push(nal));
+  // The splitter keeps the last NAL back until a start code follows it; here nothing follows, by
+  // construction, so a start code is what ends it.
+  splitter.push(Buffer.from([0, 0, 0, 1]), (nal) => out.push(nal));
+  return out;
+}
+
+/** One packet of scrcpy's framed stream: a whole frame, or the codec's parameter sets. */
+export interface ScrcpyPacket { data: Buffer; config: boolean; key: boolean; ptsUs: number }
+
+/**
+ * scrcpy's per-frame header, across chunk boundaries: 8 bytes of PTS whose top two bits flag a
+ * config packet and a keyframe, then a 4-byte big-endian length, then that many bytes of frame.
+ */
+export class ScrcpyFramer {
+  private buf: Buffer = Buffer.alloc(0);
+
+  push(chunk: Buffer, emit: (packet: ScrcpyPacket) => void): void {
+    this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
+    let at = 0;
+    while (this.buf.length - at >= 12) {
+      const size = this.buf.readUInt32BE(at + 8);
+      if (this.buf.length - at - 12 < size) break;
+      const head = this.buf.readBigUInt64BE(at);
+      emit({
+        data: this.buf.subarray(at + 12, at + 12 + size),
+        config: (head >> 63n) === 1n,
+        key: ((head >> 62n) & 1n) === 1n,
+        ptsUs: Number(head & ((1n << 62n) - 1n)),
+      });
+      at += 12 + size;
+    }
+    this.buf = at === 0 ? this.buf : Buffer.from(this.buf.subarray(at));
+  }
+
+  reset(): void { this.buf = Buffer.alloc(0); }
+}
+
 /* ------------------------------------------------------------------------------------- scrcpy */
 
 /**
@@ -138,11 +195,15 @@ export class NalSplitter {
  *   3. THE STREAM WAS NOT WHAT THE PARSER EXPECTED. Without `raw_stream`, scrcpy prefixes a dummy
  *      byte, a 64-byte device name and codec metadata — which this parsed — and then a 12-byte
  *      header on EVERY frame, which it did not. Those headers would have been fed to the NAL
- *      splitter as if they were video. `raw_stream=true` turns all of it off and delivers a bare
- *      Annex-B elementary stream, which is exactly what the splitter wants and what `screenrecord`
- *      already produces. It also deletes the header-parsing code entirely, and with it a whole
- *      class of version drift: the metadata layout is a thing that changes between scrcpy majors,
- *      and now we do not read it.
+ *      splitter as if they were video. `raw_stream=true` turned all of it off.
+ *
+ *      AND THEN THE PER-FRAME HEADER CAME BACK, ON PURPOSE (M6). A bare stream says a frame has
+ *      ended only when the next one begins, so every frame waited for its successor: a frame late
+ *      while the screen moved, and on a still screen the last change never arrived at all. The
+ *      12-byte frame header is the one piece worth having — it says how long the frame is, so it
+ *      can go out the moment it is whole, and it carries the encoder's own timestamp. It is asked
+ *      for alone (`send_frame_meta`), with the device name, dummy byte and codec metadata still
+ *      off, and it has had the same layout since scrcpy 2.0.
  *
  * The handshake is still where version drift shows up, so that is still where the diagnostics are —
  * and the server's own log goes to STDOUT, not stderr, which is why both are surfaced now.
@@ -163,14 +224,14 @@ export class ScrcpyCapture implements ScreenCapture {
   private port = 0;
   /** Distinguishes a stream we ended from one that died, so only the latter is reported. */
   private stopped = false;
-  private readonly splitter = new NalSplitter();
+  private readonly framer = new ScrcpyFramer();
 
   // A plain field, not a parameter property: this package runs under Node's type stripping, where
   // `constructor(private readonly opts: …)` is syntax that cannot simply be erased.
   private readonly opts: CaptureOptions & { jarPath: string; version: string };
   constructor(opts: CaptureOptions & { jarPath: string; version: string }) { this.opts = opts; }
 
-  async start(onNal: (nal: Buffer, receivedAt: number) => void): Promise<void> {
+  async start(onNal: (nal: Buffer, receivedAt: number, frame?: FrameMark) => void): Promise<void> {
     const adb = adbPath();
     const serial = this.opts.serial;
     this.stats.startedAt = Date.now();
@@ -191,10 +252,18 @@ export class ScrcpyCapture implements ScreenCapture {
       'audio=false',            // video only; audio is a second socket and a second problem
       'control=false',          // input goes over the held adb shell, not through scrcpy
       'cleanup=false',
-      // Bare Annex-B, no framing of scrcpy's own. See the class comment: this is what makes the
-      // stream identical to `screenrecord`'s and what removes the metadata layout — which differs
-      // between scrcpy majors — from the set of things that can drift under us.
-      'raw_stream=true',
+      // Annex-B with scrcpy's 12-byte frame header and nothing else. See the class comment: the
+      // header is what lets a frame go out the moment it is whole.
+      'send_device_meta=false',
+      'send_dummy_byte=false',
+      // The same switch under both its names: `send_codec_meta` became `send_stream_meta` (4.1
+      // knows only the second). An unknown option is a warning in scrcpy's log; a missed one leaves
+      // a 12-byte stream header in front of the first frame, which the framer reads as a frame
+      // header — every frame after it misaligned, and a black picture with no error. Found on the
+      // OnePlus, where the first try sent only the old name.
+      'send_codec_meta=false',
+      'send_stream_meta=false',
+      'send_frame_meta=true',
       `video_bit_rate=${this.opts.bitRate ?? 8_000_000}`,
       // Passed straight to MediaFormat. The syntax is `key:type=value` and scrcpy rejects anything
       // else with `'=' expected` — which is only visible at all because the server's log is now
@@ -242,10 +311,27 @@ export class ScrcpyCapture implements ScreenCapture {
     });
 
     this.socket = socket;
+    let misaligned = false;
     const consume = (chunk: Buffer, at: number): void => {
       this.stats.bytes += chunk.length;
       if (this.stats.firstFrameMs === undefined) this.stats.firstFrameMs = at - this.stats.startedAt;
-      this.splitter.push(chunk, (nal) => { this.stats.frames += 1; onNal(nal, at); });
+      this.framer.push(chunk, (packet) => {
+        // Every frame begins with a start code. One that does not means the framer is reading
+        // something other than frame headers — said once, loudly, rather than as a black picture.
+        if (!startsAnnexB(packet.data)) {
+          if (!misaligned) {
+            misaligned = true;
+            console.error(`[scrcpy:${serial}] the stream is not framed as expected — does SCRCPY_SERVER_VERSION `
+              + `(${this.opts.version}) match the jar at ${this.opts.jarPath}?`);
+          }
+          return;
+        }
+        const nals = splitAnnexB(packet.data);
+        nals.forEach((nal, i) => {
+          this.stats.frames += 1;
+          onNal(nal, at, { last: i === nals.length - 1, ...(packet.config ? {} : { ptsUs: packet.ptsUs }) });
+        });
+      });
     };
     socket.on('data', (chunk: Buffer) => consume(chunk, Date.now()));
     // A stream that dies mid-session used to go silent and stay silent, with `stats.frames` frozen
@@ -271,7 +357,7 @@ export class ScrcpyCapture implements ScreenCapture {
     this.socket = undefined;
     this.server?.kill('SIGTERM');
     this.server = undefined;
-    this.splitter.reset();
+    this.framer.reset();
     if (this.port) {
       await run(adbPath(), ['-s', this.opts.serial, 'forward', '--remove', `tcp:${this.port}`], 5_000)
         .catch(() => { /* the forward goes with the adb server anyway */ });

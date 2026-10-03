@@ -15,7 +15,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { NalSplitter, connectWhenServing } from '../src/devices/capture.ts';
+import { NalSplitter, ScrcpyFramer, splitAnnexB, startsAnnexB, connectWhenServing } from '../src/devices/capture.ts';
+import type { ScrcpyPacket } from '../src/devices/capture.ts';
 
 /** Collect everything a sequence of chunks produces. */
 function feed(chunks: Buffer[]): Buffer[] {
@@ -162,6 +163,71 @@ describe('NalSplitter', () => {
  * So these tests bind an actual TCP server and make it behave the way adb does: accept, then close
  * having sent nothing, until it is ready. A mock would have agreed with the broken code.
  */
+/** scrcpy's frame header: PTS with the config and key flags in its top bits, then the length. */
+const framed = (data: Buffer, ptsUs: number, flags: { config?: boolean; key?: boolean } = {}) => {
+  const head = Buffer.alloc(12);
+  let pts = BigInt(ptsUs);
+  if (flags.config) pts |= 1n << 63n;
+  if (flags.key) pts |= 1n << 62n;
+  head.writeBigUInt64BE(pts, 0);
+  head.writeUInt32BE(data.length, 8);
+  return Buffer.concat([head, data]);
+};
+
+describe('scrcpy frames', () => {
+  const sc = Buffer.from([0, 0, 0, 1]);
+  const sps = Buffer.from([0x67, 1, 2, 3]);
+  const pps = Buffer.from([0x68, 4, 5]);
+  const idr = Buffer.concat([Buffer.from([0x65]), Buffer.alloc(3000, 0xab)]);
+
+  test('a whole frame splits into every NAL in it, the last one included', () => {
+    const nals = splitAnnexB(Buffer.concat([sc, sps, sc, pps, Buffer.from([0, 0, 1]), idr]));
+    assert.deepEqual(nals.map((n) => n[0]), [0x67, 0x68, 0x65]);
+    assert.deepEqual(nals[2], idr, 'the last NAL is the one a bare stream held back');
+  });
+
+  test('headers and frames are read across any chunking, flags and timestamps intact', () => {
+    const stream = Buffer.concat([
+      framed(Buffer.concat([sc, sps, sc, pps]), 0, { config: true }),
+      framed(Buffer.concat([sc, idr]), 16_666, { key: true }),
+      framed(Buffer.concat([sc, Buffer.from([0x41, 9, 9])]), 33_333),
+    ]);
+    for (const step of [stream.length, 1, 7, 13, 500]) {
+      const f = new ScrcpyFramer();
+      const got: ScrcpyPacket[] = [];
+      for (let i = 0; i < stream.length; i += step) f.push(stream.subarray(i, i + step), (p) => got.push({ ...p, data: Buffer.from(p.data) }));
+      assert.deepEqual(got.map((p) => [p.config, p.key, p.ptsUs, p.data.length]),
+        [[true, false, 0, 15], [false, true, 16_666, 3005], [false, false, 33_333, 7]], `chunks of ${step}`);
+    }
+  });
+
+  /**
+   * What the OnePlus showed: scrcpy 4.1 did not know `send_codec_meta`, so its 12-byte stream header
+   * ('h264', width, height) came first and was read as a frame header. The packets after it are
+   * garbage — and the tell is that they do not begin with a start code.
+   */
+  test('a leftover stream header shows up as packets that are not video', () => {
+    const header = Buffer.alloc(12);
+    header.write('h264', 0, 'latin1');
+    header.writeUInt32BE(576, 4);
+    header.writeUInt32BE(40, 8);
+    const f = new ScrcpyFramer();
+    const got: ScrcpyPacket[] = [];
+    f.push(Buffer.concat([header, framed(Buffer.concat([sc, sps, sc, pps]), 0, { config: true }), Buffer.alloc(64)]), (p) => got.push(p));
+    assert.ok(got.length > 0);
+    assert.equal(startsAnnexB(got[0].data), false, 'a misaligned packet looked like video');
+    assert.equal(startsAnnexB(Buffer.concat([sc, sps])), true);
+    assert.equal(startsAnnexB(Buffer.from([0, 0, 1, 0x65])), true);
+  });
+
+  test('a frame is emitted the moment its last byte arrives, not when the next one starts', () => {
+    const f = new ScrcpyFramer();
+    const got: number[] = [];
+    f.push(framed(Buffer.concat([sc, idr]), 5, { key: true }), (p) => got.push(p.ptsUs));
+    assert.deepEqual(got, [5], 'the frame waited for its successor');
+  });
+});
+
 describe('connectWhenServing', () => {
   /** A server that hangs up on its first `closeFirst` callers, then serves `payload`. */
   function flakyServer(closeFirst: number, payload: Buffer) {
