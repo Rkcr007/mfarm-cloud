@@ -2082,13 +2082,15 @@ kbd {
 .mf-glass .still[data-blind="yes"] .still-img { opacity: .12; }
 .mf-glass .still[data-inspect="on"] .still-surface { cursor: cell; }
 .mf-glass .still-boxes, .mf-glass .still-taps { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.mf-glass .still-box { position: absolute; border: 1px solid rgba(117, 94, 184, .38); border-radius: 2px; overflow: hidden; }
+/* A size container, so a label can be sized from its own box: the box is the phone's text bounds,
+   and a fixed font cut "Alphanumeric" to "Alphan…" on the OnePlus's PIN screen. */
+.mf-glass .still-box { position: absolute; border: 1px solid rgba(117, 94, 184, .38); border-radius: 2px; container-type: size; }
 .mf-glass .still-box.is-clickable { border-color: rgba(117, 94, 184, .75); }
 .mf-glass .still-box.is-picked { border: 2px solid var(--mf-accent, #755EB8); background: var(--mf-accent-soft, rgba(117, 94, 184, .14)); }
 .mf-glass .still-label {
-  position: absolute; left: 3px; right: 3px; top: 50%; transform: translateY(-50%);
-  font-size: 10px; line-height: 1.2; color: #D6D6D6; text-align: center;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  font-size: clamp(7px, 62cqh, 14px); line-height: 1.1; color: #D6D6D6; text-align: center;
+  white-space: nowrap;
 }
 .mf-glass .still-bar, .mf-glass .still-type {
   position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 6px;

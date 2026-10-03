@@ -255,7 +255,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 | Migrations | 52; 051 is deployed, **052 is not on the farm yet** |
 | Decisions | 45 ADRs, numbered to 0046 (there is no 0013) |
 | Merged PRs | 173 |
-| Defects | 65 recorded, **63 closed** |
+| Defects | 66 recorded, **64 closed** |
 | Fleet | 4 Cuttlefish + 1 physical handset |
 | Cold boot | ~30s per device |
 | Live view | 49–53 fps, ~39ms round trip, direct path |

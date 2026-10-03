@@ -85,6 +85,7 @@ describe('APP_CONTEXT.md says true things about the repo', () => {
       fifty: 50, 'fifty-one': 51, 'fifty-two': 52, 'fifty-three': 53, 'fifty-four': 54, 'fifty-five': 55,
       'fifty-six': 56, 'fifty-seven': 57, 'fifty-eight': 58, 'fifty-nine': 59, sixty: 60,
       'sixty-one': 61, 'sixty-two': 62, 'sixty-three': 63, 'sixty-four': 64, 'sixty-five': 65,
+      'sixty-six': 66, 'sixty-seven': 67, 'sixty-eight': 68, 'sixty-nine': 69, seventy: 70,
     };
     const m = context.match(/\*\*([A-Za-z-]+) defects are recorded/);
     assert.ok(m, 'APP_CONTEXT.md should state how many defects are recorded');
