@@ -1062,7 +1062,8 @@ export class PhysicalMedia implements MediaSource {
     const fanout = new H264Fanout(o.liveVideo.makeCapture);
     this.signal = async (opts) => new PhoneVideoPeer({
       signal: opts, fanout, video, label: o.control.info.localId,
-      input: new InputMapper(o.control, screen, video),
+      // Live through the fanout's control socket when it has one; through `o.control` (adb) when not.
+      input: new InputMapper(o.control, screen, video, fanout),
     });
   }
 

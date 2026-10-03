@@ -1,4 +1,5 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 
 /**
  * Getting H.264 off a physical handset (ADR-0008, spec §20).
@@ -46,6 +47,11 @@ export interface CaptureOptions {
    * is why this is 2 rather than 1.
    */
   keyFrameIntervalSeconds?: number;
+  /**
+   * Open scrcpy's control socket beside the video, so touches, keys and keyframe requests reach the
+   * phone as they happen rather than through `adb shell input`. scrcpy only; see `LiveControl`.
+   */
+  control?: boolean;
 }
 
 export interface CaptureStats {
@@ -74,6 +80,8 @@ export interface ScreenCapture {
   start(onNal: (nal: Buffer, receivedAt: number, frame?: FrameMark) => void): Promise<void>;
   stop(): Promise<void>;
   readonly stats: CaptureStats;
+  /** The phone's input, live, while the source has one open — scrcpy with `control` set. */
+  readonly control?: LiveControl;
 }
 
 /* ------------------------------------------------------------------------------ Annex-B framing */
@@ -166,6 +174,118 @@ export class ScrcpyFramer {
   reset(): void { this.buf = Buffer.alloc(0); }
 }
 
+/* ----------------------------------------------------------------------------- scrcpy control */
+
+/**
+ * The phone's input as it happens: a finger's down, move and up, a key, text, and a fresh keyframe.
+ *
+ * WHY NOT `adb shell input`. Each `input` call is a process on the phone, and a drag can only be
+ * replayed as a `swipe` once the finger has lifted — measured through the farm, a swipe took 270-300ms
+ * to begin moving, and the screen never followed the finger at all. scrcpy's server is already
+ * running for the video and injects events directly, so a drag is streamed point by point.
+ *
+ * Every method answers whether the message went out. `false` means the socket is gone, and the
+ * caller falls back to adb rather than dropping the input.
+ */
+export interface LiveControl {
+  /** One finger, in the VIDEO's pixels, with the video's size — scrcpy maps it back to the screen. */
+  touch(action: 'down' | 'move' | 'up', pointerId: number, x: number, y: number, video: { w: number; h: number }): boolean;
+  /** An Android keycode, pressed and released. */
+  key(keycode: number): boolean;
+  text(value: string): boolean;
+  /** Restart the encoder, which begins again on a keyframe — the answer to a viewer's PLI. */
+  resetVideo(): boolean;
+}
+
+/**
+ * scrcpy's control message types, as the 4.1 server numbers them. Read from the jar itself
+ * (`ControlMessage.TYPE_*` in its dex) rather than from memory: 4.x inserted camera messages, and a
+ * wrong number here is not an error anywhere — the server reads a different message and moves on.
+ */
+const MSG_INJECT_KEYCODE = 0;
+const MSG_INJECT_TEXT = 1;
+const MSG_INJECT_TOUCH = 2;
+const MSG_RESET_VIDEO = 17;
+const MOTION = { down: 0, up: 1, move: 2 } as const;
+/** scrcpy's own client never sends more text than this in one message. */
+const TEXT_MAX_BYTES = 300;
+
+/** 32 bytes: type, action, pointer id (i64), x, y (i32), width, height (u16), pressure, buttons. */
+export function encodeTouch(action: 'down' | 'move' | 'up', pointerId: number, x: number, y: number, video: { w: number; h: number }): Buffer {
+  const b = Buffer.alloc(32);
+  b.writeUInt8(MSG_INJECT_TOUCH, 0);
+  b.writeUInt8(MOTION[action], 1);
+  b.writeBigInt64BE(BigInt(Math.trunc(pointerId)), 2);
+  b.writeInt32BE(Math.round(x), 10);
+  b.writeInt32BE(Math.round(y), 14);
+  b.writeUInt16BE(video.w, 18);
+  b.writeUInt16BE(video.h, 20);
+  // Pressure is a 16-bit fixed-point fraction; a lifted finger presses with nothing.
+  b.writeUInt16BE(action === 'up' ? 0 : 0xffff, 22);
+  // action button and buttons stay 0: those are a mouse's, and this is a finger.
+  return b;
+}
+
+/** 14 bytes: type, action, keycode, repeat, meta state. */
+export function encodeKey(action: 'down' | 'up', keycode: number): Buffer {
+  const b = Buffer.alloc(14);
+  b.writeUInt8(MSG_INJECT_KEYCODE, 0);
+  b.writeUInt8(action === 'down' ? 0 : 1, 1);
+  b.writeInt32BE(keycode, 2);
+  return b;
+}
+
+/** Type, a 4-byte length, then UTF-8 — cut at characters, never inside one, to scrcpy's limit. */
+export function encodeText(value: string): Buffer[] {
+  const out: Buffer[] = [];
+  let part = '';
+  const flush = (): void => {
+    if (!part) return;
+    const t = Buffer.from(part, 'utf8');
+    const head = Buffer.alloc(5);
+    head.writeUInt8(MSG_INJECT_TEXT, 0);
+    head.writeUInt32BE(t.length, 1);
+    out.push(Buffer.concat([head, t]));
+    part = '';
+  };
+  for (const ch of value) {
+    if (Buffer.byteLength(part + ch, 'utf8') > TEXT_MAX_BYTES) flush();
+    part += ch;
+  }
+  flush();
+  return out;
+}
+
+/** The control socket, written to. Anything the server sends back is read and dropped. */
+export class ScrcpyControl implements LiveControl {
+  private readonly socket: import('node:net').Socket;
+  constructor(socket: import('node:net').Socket) {
+    this.socket = socket;
+    // The server's replies (clipboard, acknowledgements) are not used; an unread socket would fill.
+    socket.on('data', () => {});
+  }
+
+  get open(): boolean { return !this.socket.destroyed && this.socket.writable; }
+
+  private write(...msgs: Buffer[]): boolean {
+    if (!this.open) return false;
+    for (const m of msgs) this.socket.write(m);
+    return true;
+  }
+
+  touch(action: 'down' | 'move' | 'up', pointerId: number, x: number, y: number, video: { w: number; h: number }): boolean {
+    // Outside the picture is outside the screen; scrcpy would drop it, and an `up` must not be lost.
+    const cx = Math.min(Math.max(x, 0), video.w - 1);
+    const cy = Math.min(Math.max(y, 0), video.h - 1);
+    return this.write(encodeTouch(action, pointerId, cx, cy, video));
+  }
+
+  key(keycode: number): boolean { return this.write(encodeKey('down', keycode), encodeKey('up', keycode)); }
+  text(value: string): boolean { return this.write(...encodeText(value)); }
+  resetVideo(): boolean { return this.write(Buffer.from([MSG_RESET_VIDEO])); }
+  close(): void { this.socket.destroy(); }
+}
+
 /* ------------------------------------------------------------------------------------- scrcpy */
 
 /**
@@ -215,6 +335,27 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const CONNECT_RETRY_MS = 150;
 /** See `CaptureOptions.keyFrameIntervalSeconds`. scrcpy's own default is 10s. */
 const DEFAULT_KEYFRAME_SECONDS = 2;
+/** How long video may take to begin once the control socket is open, before control is given up. */
+const CONTROL_TIMEOUT_MS = 5_000;
+
+/** The control socket could not be opened — the video can still be had without it. */
+class ControlUnavailable extends Error {}
+
+/** The next chunk off a paused socket, or why it never came. Leaves the socket paused again. */
+function nextData(socket: import('node:net').Socket, ms: number, other?: import('node:net').Socket): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const done = (fn: () => void): void => {
+      clearTimeout(timer);
+      socket.off('data', onData); socket.off('close', onClose); other?.off('close', onClose);
+      fn();
+    };
+    const onData = (d: Buffer): void => { socket.pause(); done(() => resolve(d)); };
+    const onClose = (): void => done(() => reject(new Error('the server closed a socket before the video began')));
+    const timer = setTimeout(() => done(() => reject(new Error(`no video within ${ms}ms of opening control`))), ms);
+    socket.on('data', onData); socket.once('close', onClose); other?.once('close', onClose);
+    socket.resume();
+  });
+}
 
 export class ScrcpyCapture implements ScreenCapture {
   readonly kind = 'scrcpy';
@@ -225,6 +366,10 @@ export class ScrcpyCapture implements ScreenCapture {
   /** Distinguishes a stream we ended from one that died, so only the latter is reported. */
   private stopped = false;
   private readonly framer = new ScrcpyFramer();
+  private ctl?: ScrcpyControl;
+
+  /** Only while the socket is open: a dead one must send the caller to adb, not swallow input. */
+  get control(): LiveControl | undefined { return this.ctl?.open ? this.ctl : undefined; }
 
   // A plain field, not a parameter property: this package runs under Node's type stripping, where
   // `constructor(private readonly opts: …)` is syntax that cannot simply be erased.
@@ -232,6 +377,19 @@ export class ScrcpyCapture implements ScreenCapture {
   constructor(opts: CaptureOptions & { jarPath: string; version: string }) { this.opts = opts; }
 
   async start(onNal: (nal: Buffer, receivedAt: number, frame?: FrameMark) => void): Promise<void> {
+    if (!this.opts.control) return this.startOnce(onNal, false);
+    try {
+      return await this.startOnce(onNal, true);
+    } catch (e) {
+      // Live input is the better path, not a precondition for the picture: one try, then without it.
+      if (!(e instanceof ControlUnavailable) || this.stopped) throw e;
+      console.error(`[scrcpy:${this.opts.serial}] no control socket (${e.message}) — streaming without it; input goes over adb`);
+      await this.teardown();
+      return this.startOnce(onNal, false);
+    }
+  }
+
+  private async startOnce(onNal: (nal: Buffer, receivedAt: number, frame?: FrameMark) => void, withControl: boolean): Promise<void> {
     const adb = adbPath();
     const serial = this.opts.serial;
     this.stats.startedAt = Date.now();
@@ -244,18 +402,32 @@ export class ScrcpyCapture implements ScreenCapture {
 
     // 2. Start the server. `tunnel_forward=true` makes it listen on an abstract socket we then
     //    forward to, which is the direction that works without the device dialling out.
+    // A socket name of its own per start (`scrcpy_<scid>`), so a restart never meets a server that
+    // has not yet let go of the last one's name.
+    const scid = randomBytes(4).readUInt32BE(0) & 0x7fffffff;
+    const socketName = `scrcpy_${scid.toString(16).padStart(8, '0')}`;
     const args = [
       '-s', serial, 'shell',
       `CLASSPATH=${DEVICE_JAR}`,
       'app_process', '/', 'com.genymobile.scrcpy.Server', this.opts.version,
+      `scid=${scid.toString(16).padStart(8, '0')}`,
       'tunnel_forward=true',
       'audio=false',            // video only; audio is a second socket and a second problem
-      'control=false',          // input goes over the held adb shell, not through scrcpy
+      `control=${withControl}`,
       'cleanup=false',
       // Annex-B with scrcpy's 12-byte frame header and nothing else. See the class comment: the
       // header is what lets a frame go out the moment it is whole.
       'send_device_meta=false',
-      'send_dummy_byte=false',
+      /**
+       * THE DUMMY BYTE COMES BACK WITH CONTROL. The server accepts the video socket, then the control
+       * socket, and only then starts encoding — so with control on, no video arrives until control
+       * is connected, and the first byte (the only honest readiness signal, see `connectWhenServing`)
+       * would never come. The dummy byte is sent the moment the video socket is accepted.
+       */
+      `send_dummy_byte=${withControl}`,
+      // The phone's clipboard, pushed to us on every change — nothing here reads it, and it is the
+      // tester's data, so it is not asked for.
+      ...(withControl ? ['clipboard_autosync=false'] : []),
       // The same switch under both its names: `send_codec_meta` became `send_stream_meta` (4.1
       // knows only the second). An unknown option is a warning in scrcpy's log; a missed one leaves
       // a 12-byte stream header in front of the first frame, which the framer reads as a frame
@@ -296,21 +468,42 @@ export class ScrcpyCapture implements ScreenCapture {
     //
     //    NOT retried, and NOT a readiness check — see the class comment. `adb forward` succeeds
     //    whether or not the device end exists, so a failure here is a real adb failure and retrying
-    //    it only hides how long we waited. The socket is named `scrcpy` because no `scid` is passed;
-    //    scrcpy's own client passes one and gets `scrcpy_<scid>`, which is a different name.
+    //    it only hides how long we waited. The name carries the `scid` passed above; without one the
+    //    server listens on plain `scrcpy`, which is what this used to forward to.
     this.port = 27183 + (hashPort(serial) % 500);
-    await run(adb, ['-s', serial, 'forward', `tcp:${this.port}`, 'localabstract:scrcpy'], 5_000);
+    await run(adb, ['-s', serial, 'forward', `tcp:${this.port}`, `localabstract:${socketName}`], 5_000);
 
     // 4. Connect, and keep connecting until bytes actually arrive. The first byte is the readiness
     //    signal because it is the only one that cannot lie: everything earlier — the forward, the
     //    TCP handshake — succeeds against a server that is not yet listening.
-    const { socket, first } = await connectWhenServing({
+    const ready = await connectWhenServing({
       port: this.port,
       describe: serial,
       exited: () => serverExit,
     });
-
+    const socket = ready.socket;
+    let first = ready.first;
     this.socket = socket;
+
+    // 5. With control: the dummy byte is not video; the control socket is the server's second accept;
+    //    and the video that follows is what proves both ends are really there — adb accepts a TCP
+    //    connection on its own account whether or not the phone does.
+    if (withControl) {
+      socket.pause();
+      first = first.subarray(1);
+      const { createConnection } = await import('node:net');
+      const ctlSocket = createConnection({ port: this.port, host: '127.0.0.1' });
+      ctlSocket.on('error', () => { /* reported as the video not beginning */ });
+      try {
+        first = Buffer.concat([first, await nextData(socket, CONTROL_TIMEOUT_MS, ctlSocket)]);
+      } catch (e) {
+        ctlSocket.destroy();
+        throw new ControlUnavailable((e as Error).message);
+      }
+      ctlSocket.setNoDelay(true);   // a touch is 32 bytes; Nagle would hold it for the next one
+      this.ctl = new ScrcpyControl(ctlSocket);
+    }
+
     let misaligned = false;
     const consume = (chunk: Buffer, at: number): void => {
       this.stats.bytes += chunk.length;
@@ -334,6 +527,7 @@ export class ScrcpyCapture implements ScreenCapture {
       });
     };
     socket.on('data', (chunk: Buffer) => consume(chunk, Date.now()));
+    socket.resume();
     // A stream that dies mid-session used to go silent and stay silent, with `stats.frames` frozen
     // and nobody told. Saying so is the difference between "the view froze" and a diagnosable fault.
     socket.on('close', () => {
@@ -353,6 +547,12 @@ export class ScrcpyCapture implements ScreenCapture {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    await this.teardown();
+  }
+
+  private async teardown(): Promise<void> {
+    this.ctl?.close();
+    this.ctl = undefined;
     this.socket?.destroy();
     this.socket = undefined;
     this.server?.kill('SIGTERM');

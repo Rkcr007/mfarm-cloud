@@ -9,11 +9,16 @@ the UI inspector, and Appium/WebDriver automation.
 
 **The live view (M6):** where the agent has scrcpy's server jar (`SCRCPY_SERVER_PATH` and
 `SCRCPY_SERVER_VERSION`, which must match it), the agent is the phone's WebRTC peer and the console
-plays the screen live — 60 fps while it moves, about 118 ms from releasing a tap to the first new
-frame, measured in [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md#m6--live-video). The phone advertises
-`screen-stream` only then. Touches and keys go back over the same connection; a drag is a swipe,
-decided on release. `PHYSICAL_LIVE_VIDEO=0` turns it off, `PHYSICAL_VIDEO_MAX_SIZE` (default 1280)
-sets the long side, and `PHYSICAL_VIDEO_TRACE=1` logs the phone's half of the latency per touch.
+plays the screen live — 60 fps while it moves, about 74 ms from a touch to the first frame that
+answers it, measured in [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md#m6--live-video). The phone
+advertises `screen-stream` only then. Touches go back as they happen, over scrcpy's own control
+socket — a drag follows the finger, a long press is long — and keys and text go the same way; a
+browser that loses a picture asks for a keyframe and gets one. `PHYSICAL_LIVE_INPUT=0` sends input
+over adb instead, where a press is a tap and a drag a swipe decided on release; it is also what
+happens by itself if the control socket will not open. `PHYSICAL_LIVE_VIDEO=0` turns the live view
+off, `PHYSICAL_VIDEO_MAX_SIZE` (default 1280) sets the long side, `PHYSICAL_KEYFRAME_MIN_MS`
+(default 1000) spaces the keyframes viewers may ask for, and `PHYSICAL_VIDEO_TRACE=1` logs the
+phone's half of the latency per touch.
 
 **Without the jar (M4):** the cockpit shows the phone's screen as its latest picture, read again
 after every action and labelled with when it was taken — never passed off as live. Pressing the
@@ -405,9 +410,9 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
 - **A viewer on another network needs the relay, and the relay lives on the Cuttlefish host** (D67).
   While `mfarm-lab` is stopped the agent offers without it — fine on the phone's own network, no
   picture from anywhere else.
-- **A browser's keyframe request is not answered.** Lost packets are re-sent on NACK; a picture that
-  breaks anyway mends at the next keyframe, which on a still screen means the next time it moves.
-  scrcpy's control socket fixes this and takes ~60 ms off every tap — the next step for M6.
+- **Rotation is followed by live input only.** A touch states the size the stream is encoded at,
+  read from the stream itself, so it lands right after the phone turns; the adb fallback still maps
+  from the portrait panel.
 - **A secure screen is black in the video**, as in every capture path; Inspect still shows and
   operates its elements.
 - **No Windows agent.**

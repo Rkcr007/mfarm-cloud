@@ -15,7 +15,10 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { NalSplitter, ScrcpyFramer, splitAnnexB, startsAnnexB, connectWhenServing } from '../src/devices/capture.ts';
+import {
+  NalSplitter, ScrcpyFramer, splitAnnexB, startsAnnexB, connectWhenServing,
+  encodeTouch, encodeKey, encodeText, ScrcpyControl,
+} from '../src/devices/capture.ts';
 import type { ScrcpyPacket } from '../src/devices/capture.ts';
 
 /** Collect everything a sequence of chunks produces. */
@@ -305,5 +308,82 @@ describe('connectWhenServing', () => {
       socket.destroy();
       await closed;
     } finally { f.server.close(); }
+  });
+});
+
+/**
+ * scrcpy's control socket. The byte layouts are checked against the 4.1 server's own parser, read
+ * out of the jar (`ControlMessageReader`): a touch is a byte, a byte, a long, two ints, two shorts, a
+ * short and two ints. A layout that is off by one field is not an error on the phone — the server
+ * reads a different touch, or a different message, and carries on.
+ */
+describe('scrcpy control messages', () => {
+  const video = { w: 576, h: 1280 };
+
+  test('a touch is 32 bytes in the server\'s order', () => {
+    const b = encodeTouch('down', 7, 288, 640, video);
+    assert.equal(b.length, 32);
+    assert.equal(b[0], 2, 'INJECT_TOUCH_EVENT');
+    assert.equal(b[1], 0, 'ACTION_DOWN');
+    assert.equal(b.readBigInt64BE(2), 7n);
+    assert.equal(b.readInt32BE(10), 288);
+    assert.equal(b.readInt32BE(14), 640);
+    assert.equal(b.readUInt16BE(18), 576, 'the size the touch was aimed at — the server drops one that is not its own');
+    assert.equal(b.readUInt16BE(20), 1280);
+    assert.equal(b.readUInt16BE(22), 0xffff, 'a finger down presses fully');
+    assert.equal(b.readInt32BE(24), 0, 'no action button: a finger is not a mouse');
+    assert.equal(b.readInt32BE(28), 0);
+    assert.equal(encodeTouch('move', 7, 1, 1, video)[1], 2, 'ACTION_MOVE');
+    const up = encodeTouch('up', 7, 1, 1, video);
+    assert.equal(up[1], 1, 'ACTION_UP');
+    assert.equal(up.readUInt16BE(22), 0, 'a lifted finger presses with nothing');
+  });
+
+  test('a key is 14 bytes: type, action, keycode, repeat, meta', () => {
+    const b = encodeKey('down', 66);
+    assert.equal(b.length, 14);
+    assert.deepEqual([b[0], b[1], b.readInt32BE(2), b.readInt32BE(6), b.readInt32BE(10)], [0, 0, 66, 0, 0]);
+    assert.equal(encodeKey('up', 66)[1], 1);
+  });
+
+  test('text is a 4-byte length and UTF-8, cut between characters at 300 bytes', () => {
+    const [one] = encodeText('héllo');
+    assert.equal(one[0], 1, 'INJECT_TEXT');
+    assert.equal(one.readUInt32BE(1), 6);
+    assert.equal(one.subarray(5).toString('utf8'), 'héllo');
+    const long = 'é'.repeat(200);                     // 400 bytes
+    const parts = encodeText(long);
+    assert.equal(parts.length, 2);
+    for (const p of parts) assert.ok(p.readUInt32BE(1) <= 300 && p.length === 5 + p.readUInt32BE(1));
+    assert.equal(parts.map((p) => p.subarray(5).toString('utf8')).join(''), long, 'a character was split');
+    assert.deepEqual(encodeText(''), []);
+  });
+
+  test('written to the socket as they come, and refused once it is gone', async () => {
+    const got: Buffer[] = [];
+    let peer: import('node:net').Socket | undefined;
+    const server = createServer((s) => { peer = s; s.on('data', (d) => got.push(d)); });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { createConnection } = await import('node:net');
+    const sock = createConnection({ port: (server.address() as AddressInfo).port, host: '127.0.0.1' });
+    await new Promise((r) => sock.once('connect', r));
+    try {
+      const c = new ScrcpyControl(sock);
+      assert.ok(c.touch('down', 1, -5, 2000, video), 'outside the picture is clamped to it, not dropped');
+      assert.ok(c.key(4));
+      assert.ok(c.text('a'));
+      assert.ok(c.resetVideo());
+      const expected = Buffer.concat([
+        encodeTouch('down', 1, 0, 1279, video), encodeKey('down', 4), encodeKey('up', 4), ...encodeText('a'), Buffer.from([17]),
+      ]);
+      const end = Date.now() + 2000;
+      while (Buffer.concat(got).length < expected.length && Date.now() < end) await new Promise((r) => setTimeout(r, 10));
+      assert.deepEqual(Buffer.concat(got), expected);
+      peer!.destroy();
+      await new Promise((r) => sock.once('close', r));
+      assert.equal(c.open, false);
+      assert.equal(c.touch('up', 1, 0, 0, video), false, 'a dead socket must send the caller to adb, not swallow the input');
+      assert.equal(c.resetVideo(), false);
+    } finally { sock.destroy(); server.close(); }
   });
 });
