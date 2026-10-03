@@ -335,11 +335,15 @@ see exactly that one phone in the console.
 
 ## M4 — Operate a device without video
 
-**Built 2026-10-03.** The cockpit draws a device that has no `screen-stream` as its latest picture
-with its element tree over it. A press taps, a drag swipes, and a box types — all over the data plane,
-which carried those verbs already. The Inspector works without a stream, and an app that blanks its
-captures is operated from its labelled elements. None of the agent changed: it was a console feature
-that the transport had been waiting for.
+**Built and verified live in the console 2026-10-03** (#251, #252), on the OnePlus 8T. The cockpit
+draws a device that has no `screen-stream` as its latest picture with its element tree over it. A
+press taps, a drag swipes, and a box types — all over the data plane, which carried those verbs
+already. The Inspector works without a stream. **The gate, met with a stand-in for the Alaan build:**
+Android's own PIN-entry screen refuses capture outright, the frame showed it as labelled elements
+("Set Lock screen password", "Enter 6 digits.", the keypad), and tapping "Use a different password
+type" on those elements opened the next sheet — operated without a pixel. Taps opened Chrome from the
+home screen, Back returned, typing reached a search field, and the Inspector picked an element and
+graded its selectors.
 
 **The phase the `FLAG_SECURE` measurement created**, and for this customer it is worth more than M6.
 
