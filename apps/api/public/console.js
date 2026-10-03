@@ -2503,29 +2503,64 @@ function startWithBuild(d) {
 }
 
 /**
+ * What releasing THIS device does, in the words of the reset it declares — D64.
+ *
+ * The dialog said "restored to its clean snapshot … removes anything typed or cached" for every
+ * device. On a handset that is false and it is the dangerous kind of false: a phone's reset removes
+ * only what the session installed (ADR-0012), and an app the phone already had keeps everything the
+ * session typed into it — which the next person on the same phone can see. Seen releasing the
+ * OnePlus on the farm, 2026-10-03. The capture line was wrong the same way: a handset records no
+ * video, and promising "the recording" sends somebody looking for a file that will never exist.
+ */
+export function releaseStory(d) {
+  const caps = d?.capabilities || [];
+  const captured = ['the logcat', caps.includes('screenshot') ? 'a final screenshot' : null,
+    caps.includes('recording') ? 'the recording' : null].filter(Boolean);
+  const keeps = `${captured.length > 1 ? `${captured.slice(0, -1).join(', ')} and ${captured.at(-1)}` : captured[0]}`
+    + (captured.length > 1 ? ' are' : ' is') + ' captured as the device is released.';
+  const keepsText = keeps.charAt(0).toUpperCase() + keeps.slice(1);
+  if (!d || caps.includes('snapshot-reset')) {
+    return {
+      lead: 'The device will be restored to its clean snapshot.',
+      removes: ['the app and its data', 'session state, and anything typed or cached',
+        'the WebDriver session, if a suite is attached'],
+      keeps: d ? keepsText : 'The logcat, a final screenshot and the recording are captured as the device is released.',
+    };
+  }
+  if (caps.includes('session-reset')) {
+    return {
+      lead: 'Every third-party app on this phone has its data cleared. It is not a snapshot restore: '
+        + 'accounts, settings and anything outside those apps stay as they are.',
+      removes: ['the data of every third-party app on the phone', 'the WebDriver session, if a suite is attached'],
+      keeps: keepsText,
+    };
+  }
+  return {
+    lead: 'Only what this session installed is removed. Anything typed or saved in apps the phone '
+      + 'already had stays on it, for the next session to see.',
+    removes: ['the apps this session installed, and their data', 'the WebDriver session, if a suite is attached'],
+    keeps: keepsText,
+  };
+}
+
+/**
  * Release, behind a dialog.
  *
- * The second step is a real guard, not ceremony: releasing snapshot-restores the device, so this is
- * the button that deletes the build someone just installed, and the word "release" does not say so.
+ * The second step is a real guard, not ceremony: a release resets the device, so this is the button
+ * that deletes the build someone just installed, and the word "release" does not say so.
+ *
+ * CORRECTED 2026-09-08: the capture line once said nothing was kept; the artifact store (019), the
+ * on-demand captures (022, 040) and video (045) changed that. `releaseStory` now also says it only
+ * about what this device can actually capture.
  */
 function askRelease(sess) {
   const name = deviceLabel(sess);
+  const story = releaseStory(sess?.deviceId ? deviceById(sess.deviceId) : null);
   confirmDialog({
     title: `Release ${name}?`,
-    lead: 'The device will be restored to its clean snapshot.',
-    removes: [
-      'the app and its data',
-      'session state, and anything typed or cached',
-      'the WebDriver session, if a suite is attached',
-    ],
-    /**
-     * CORRECTED 2026-09-08. This used to read "None of those are captured anywhere in this system,
-     * so promising they survive would be a comforting lie" — true when written, and false since the
-     * artifact store (019), the on-demand captures (022, 040) and video (045). The evidence a
-     * release produces is now the main reason to press this button, and the dialog was still
-     * apologising for not having it.
-     */
-    keeps: 'The logcat, a final screenshot and the recording are captured as the device is released.',
+    lead: story.lead,
+    removes: story.removes,
+    keeps: story.keeps,
     confirm: 'Release & reset',
     onConfirm: () => releaseSession(sess.id),
   });
@@ -4840,7 +4875,12 @@ function bringupSteps(sess) {
 
   steps.push(bringupStep('ready', 'Device ready',
     sess?.state === 'ACTIVE' ? 'done' : (sess?.deviceId ? 'active' : 'pending'),
-    sess?.state === 'ALLOCATING' ? 'Restoring the clean snapshot' : null));
+    // A snapshot is restored only on a device that has one (D64): a handset is waiting for its
+    // agent, not restoring anything.
+    sess?.state === 'ALLOCATING'
+      ? ((device?.capabilities || []).includes('snapshot-reset') || !device
+        ? 'Restoring the clean snapshot' : 'Waiting for the device to confirm it is ready')
+      : null));
 
   /**
    * Attaching is its OWN step, separate from streaming, and the separation was earned.
