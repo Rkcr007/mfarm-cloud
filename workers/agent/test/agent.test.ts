@@ -79,6 +79,8 @@ class FakeDevice implements DeviceControl {
 class ViewableDevice extends FakeDevice {
   logcatRunning = 0;
   screenshotFails = false;
+  /** The app in front forbids capture — what the OnePlus's PIN screen does (M4). */
+  screenshotRefused = false;
   dumpFails = false;
   dumpText = '01-01 00:00:00.000  1  1 I Boot: hello\n';
   private emit?: (line: string) => void;
@@ -100,6 +102,9 @@ class ViewableDevice extends FakeDevice {
     // happened BEFORE the reset, which is the property the artifact tests exist to pin.
     this.calls.push('screenshot');
     if (this.screenshotFails) throw new Error('screencap did not return a PNG');
+    if (this.screenshotRefused) {
+      throw Object.assign(new Error('The screen cannot be captured'), { name: 'CaptureRefusedError' });
+    }
     return { bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]), contentType: 'image/png' };
   }
 }
@@ -1454,7 +1459,20 @@ describe('data plane — viewer', () => {
     const err = await until(ws, 'screenshot-error');
     assert.equal(err.id, 'shot-2');
     assert.match(String(err.message), /did not return a PNG/);
+    assert.equal(err.refused, undefined, 'a failure is not a refusal');
     backend.control.screenshotFails = false;
+    ws.close();
+  });
+
+  /** M4. The console shows a refusing screen's elements instead of an error, so it has to be told. */
+  test('a screen that forbids capture is said to have refused, not to have failed', async () => {
+    const ws = await authed();
+    backend.control.screenshotRefused = true;
+    ws.send(JSON.stringify({ t: 'screenshot', id: 'shot-3' }));
+    const err = await until(ws, 'screenshot-error');
+    assert.equal(err.id, 'shot-3');
+    assert.equal(err.refused, true);
+    backend.control.screenshotRefused = false;
     ws.close();
   });
 

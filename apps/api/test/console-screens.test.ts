@@ -1927,7 +1927,12 @@ describe('a device without video is operated from its picture and its elements',
     return { tree, live };
   }
 
-  afterEach(() => { clearTimeout(mod.state.still?.timer); mod.state.live = null; mod.state.stage = null; });
+  afterEach(() => {
+    clearTimeout(mod.state.still?.timer);
+    clearTimeout(mod.state.still?.settle);
+    mod.state.live = null;
+    mod.state.stage = null;
+  });
 
   test('a handset gets the screen, not a "No live view" panel', () => {
     const { tree } = cockpitFor(PHONE);
@@ -2011,6 +2016,50 @@ describe('a device without video is operated from its picture and its elements',
     assert.ok(inspect, `no inspect control among: ${(bar?.children ?? []).map((b: any) => b.getAttribute?.('title')).join(' | ')}`);
     assert.doesNotMatch(inspect.getAttribute('title'), /not available until the live view/,
       'inspecting was still gated on a video this device cannot have');
+  });
+
+  /**
+   * THE ONEPLUS'S PIN SCREEN. The capture was refused, and the first version went on showing the
+   * previous screen under an error line — the chooser, while the phone was on the PIN screen.
+   */
+  test('a screen that refuses capture drops the old picture and shows its elements', async () => {
+    cockpitFor(PHONE);
+    mod.state.still = { ...mod.state.still, url: 'data:image/png;base64,iVBORw0KGgo=', seq: 7, tried: true };
+    mod.state.inspect.nodes = [FORGOT];
+    mod.state.live = { sessionId: 'sess-1', sendControl: () => true, pressButton: () => true,
+      screenshot: async () => { throw Object.assign(new Error('cannot be captured'), { refused: true }); },
+      uiDump: async () => null };
+    await mod.refreshStill();
+    assert.equal(mod.state.still.url, null, 'the previous screen went on posing as the current one');
+    assert.equal(mod.state.still.secure, true);
+    assert.equal(mod.state.still.error, null, 'a refusal is not shown as a fault');
+    mod.state.stage = null;
+    const tree = mod.SCREENS.cockpit();
+    assert.match(textOf(findByClass(tree, 'still-boxes')), /Forgot Passcode\?/);
+    assert.match(textOf(findByClass(tree, 'still-status')), /hides its screen from capture/);
+    mod.state.inspect.nodes = [];
+  });
+
+  test('a capture that simply failed also drops the old picture, and says why', async () => {
+    cockpitFor(PHONE);
+    mod.state.still = { ...mod.state.still, url: 'data:image/png;base64,iVBORw0KGgo=', seq: 7, tried: true };
+    mod.state.live = { sessionId: 'sess-1', sendControl: () => true, pressButton: () => true,
+      screenshot: async () => { throw new Error('The device did not answer the screenshot in 30s.'); },
+      uiDump: async () => null };
+    await mod.refreshStill();
+    assert.equal(mod.state.still.url, null);
+    assert.match(String(mod.state.still.error), /did not answer/);
+  });
+
+  /** One read at 0.7s caught Chrome's splash; the second, later read is where the app landed. */
+  test('an input is followed by two reads — one as the screen changes, one once it settles', () => {
+    const { tree } = cockpitFor(PHONE);
+    const surface = findByClass(tree, 'still-surface');
+    surface.getBoundingClientRect = () => ({ left: 0, top: 0, width: 300, height: 666.6667 });
+    surface.dispatch('pointerdown', { clientX: 10, clientY: 10, pointerId: 1 });
+    surface.dispatch('pointerup', { clientX: 10, clientY: 10, pointerId: 1 });
+    assert.ok(mod.state.still.timer && mod.state.still.settle, 'only one read was scheduled');
+    clearTimeout(mod.state.still.settle);
   });
 
   /** The first sight of the screen is a read of it, not a blank frame waiting for a tap. */

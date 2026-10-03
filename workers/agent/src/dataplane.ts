@@ -442,7 +442,12 @@ export class DataPlane {
         takenAt: new Date().toISOString(),
       });
     } catch (e) {
-      this.send(ws, { t: 'screenshot-error', id, message: (e as Error).message });
+      // `refused`: the screen forbids capture (FLAG_SECURE). Told apart from a failure because the
+      // console then shows the screen's elements in place of a picture rather than an error (M4).
+      this.send(ws, {
+        t: 'screenshot-error', id, message: (e as Error).message,
+        ...((e as Error).name === 'CaptureRefusedError' ? { refused: true } : {}),
+      });
     }
   }
 
