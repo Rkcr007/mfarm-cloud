@@ -157,7 +157,11 @@ export async function deviceRoutes(app: FastifyInstance) {
            * a screen that said "Quarantined — Failed health checks" about a handset whose host had
            * simply stopped beating.
            */
-          ...(r.quarantined_at
+          // ONLY BESIDE A QUARANTINE (D63). A device returned to service by Resume kept these three
+          // columns until 068, and this sent them on — the Fleet then printed "its host was
+          // quarantined" next to AVAILABLE. 068 clears them; this keeps a stale row from ever
+          // reaching a screen again, whatever path leaves one.
+          ...(r.quarantined_at && r.state === 'QUARANTINED'
             ? {
               quarantine: {
                 at: r.quarantined_at,
@@ -267,7 +271,7 @@ export async function deviceRoutes(app: FastifyInstance) {
             },
           }
           : {}),
-        ...(row.quarantined_at
+        ...(row.quarantined_at && row.state === 'QUARANTINED'
           ? {
             quarantine: {
               at: row.quarantined_at,

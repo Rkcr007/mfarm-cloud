@@ -786,6 +786,39 @@ describe('a phone its agent cannot see says so', () => {
   });
 });
 
+/**
+ * D64. Releasing the OnePlus, the dialog promised a snapshot restore that removes "anything typed or
+ * cached", and a recording. A handset's reset removes only what the session installed, and an app
+ * the phone already had keeps whatever the session typed into it — for the next person to see.
+ */
+describe('the release dialog says what THIS device resets', () => {
+  const caps = (...c: string[]) => ({ capabilities: c });
+
+  test('a cuttlefish is restored to its snapshot, as before', () => {
+    const s = mod.releaseStory(caps('snapshot-reset', 'screenshot', 'recording', 'logcat'));
+    assert.match(s.lead, /clean snapshot/);
+    assert.ok(s.removes.some((r: string) => /typed or cached/.test(r)));
+    assert.match(s.keeps, /final screenshot and the recording/);
+  });
+
+  test('a handset says only what the session installed is removed, and what stays', () => {
+    const s = mod.releaseStory(caps('install-reset', 'screenshot', 'logcat'));
+    assert.doesNotMatch(s.lead, /snapshot/, 'a phone has no snapshot to restore');
+    assert.match(s.lead, /stays on it/);
+    assert.ok(!s.removes.some((r: string) => /typed or cached/.test(r)),
+      'promising typed data is removed on a borrowed phone is the dangerous kind of false');
+    assert.doesNotMatch(s.keeps, /recording/, 'a handset records nothing');
+    assert.match(s.keeps, /^The logcat and a final screenshot are captured/);
+  });
+
+  test('a phone on the full sweep says the sweep, and that it is not a restore', () => {
+    const s = mod.releaseStory(caps('session-reset', 'logcat'));
+    assert.match(s.lead, /not a snapshot restore/);
+    assert.ok(s.removes.some((r: string) => /every third-party app/.test(r)));
+    assert.equal(s.keeps, 'The logcat is captured as the device is released.');
+  });
+});
+
 describe('real and virtual devices are told apart', () => {
   /** A handset as the agent registers one: physical tier, session-reset, and no stream. */
   function withPhone() {
