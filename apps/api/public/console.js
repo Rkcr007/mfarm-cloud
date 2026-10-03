@@ -4428,6 +4428,7 @@ function closeLive() {
   state.shots = [];
   state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
   clearTimeout(state.still?.timer);
+  clearTimeout(state.still?.settle);
   state.still = { url: null, seq: 0, takenAt: null, tried: false, loading: false, again: false, error: null, secure: false, w: 0, h: 0, caps: [], device: null, timer: null };
   // The panel goes with the connection. Keeping it would re-show the last frame of a device
   // somebody else now holds, which is a stale screen presented as a live one.
@@ -8882,8 +8883,9 @@ export function stillMode(caps) {
   return !caps.includes('screen-stream') && (caps.includes('screenshot') || caps.includes('ui-hierarchy'));
 }
 
-/** How long the screen is given to settle after an input before it is read again. */
+/** How long the screen is given to change after an input, and then to settle, before each read. */
 const STILL_SETTLE_MS = 700;
+const STILL_SETTLED_MS = 2600;
 
 /**
  * Device pixels for a point on the frame. Clamped, because a drag that ends past the edge must
@@ -8943,7 +8945,7 @@ function looksBlank(img) {
  * dropped — three quick taps must end on a picture of the screen after the third. The picture is
  * taken silently: this is the screen, not a capture somebody asked to keep.
  */
-async function refreshStill() {
+export async function refreshStill() {
   const live = state.live;
   const s = state.still;
   if (!live) return;
@@ -8961,9 +8963,23 @@ async function refreshStill() {
   if (shot.status === 'fulfilled' && shot.value) {
     s.url = `data:${shot.value.contentType};base64,${shot.value.data}`;
     s.seq += 1;
+    s.secure = false;
     s.takenAt = shot.value.takenAt || new Date().toISOString();
   } else if (shot.status === 'rejected') {
-    s.error = shot.reason?.message || 'The device did not answer the screenshot.';
+    /**
+     * A PICTURE THAT COULD NOT BE TAKEN IS NOT KEPT AS IF IT WERE CURRENT.
+     *
+     * The first version kept the last good one under an error line, and on the OnePlus that showed
+     * the screen-lock chooser while the phone was on the PIN screen behind it — a stale screen
+     * presented as the live one, which is the lie this view exists not to tell. So the picture goes,
+     * and the frame shows the elements, which is what a screen that forbids capture (`refused`) is
+     * operated by anyway.
+     */
+    s.url = null;
+    s.seq += 1;
+    s.secure = shot.reason?.refused === true;
+    s.takenAt = new Date().toISOString();
+    if (!s.secure) s.error = shot.reason?.message || 'The device did not answer the screenshot.';
   }
   if (dump.status === 'fulfilled' && dump.value) {
     state.inspect.nodes = parseHierarchy(dump.value.xml);
@@ -8982,10 +8998,17 @@ async function refreshStill() {
   if (s.again) { s.again = false; void refreshStill(); }
 }
 
-/** Ask for a new picture once the screen has had a moment to change. */
+/**
+ * Ask for a new picture once the screen has had a moment to change — and once more after it has
+ * settled. One read at 0.7s caught Chrome's splash screen on the OnePlus: an app that is still
+ * launching changes again after the first picture, and the second read is what shows where it
+ * landed. A new input cancels both and starts over.
+ */
 function stillSoon() {
   clearTimeout(state.still.timer);
+  clearTimeout(state.still.settle);
   state.still.timer = setTimeout(() => void refreshStill(), STILL_SETTLE_MS);
+  state.still.settle = setTimeout(() => void refreshStill(), STILL_SETTLED_MS);
 }
 
 /** Send one input to the device, and read the screen again after it. */

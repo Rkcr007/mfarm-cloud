@@ -54,6 +54,14 @@ const KEYCODES: Record<KeyName, string> = {
  * a log line: this is the single most likely thing to stop somebody's first session, and the fix is
  * a setting on their phone that they, not we, have to agree to.
  */
+/** The app in front forbids screen capture (FLAG_SECURE). Not a fault: its elements still read. */
+export class CaptureRefusedError extends Error {
+  constructor(localId: string) {
+    super(`The screen on ${localId} cannot be captured — the app in front does not allow it. Its elements can still be read.`);
+    this.name = 'CaptureRefusedError';
+  }
+}
+
 export class InstallBlockedError extends Error {
   readonly remedy: string;
   constructor(message: string, remedy: string) {
@@ -859,6 +867,14 @@ export class PhysicalDevice implements DeviceControl {
   /** See the Cuttlefish backend: `exec-out` is the raw-bytes channel, and PNG magic is checked. */
   async screenshot(): Promise<{ bytes: Buffer; contentType: string }> {
     const bytes = await runBinary(ADB, ['-s', this.serial, 'exec-out', 'screencap', '-p'], 30_000);
+    /**
+     * NOTHING AT ALL is what a screen that forbids capture gives back — measured on a OnePlus 8T on
+     * Android's own PIN-entry screen: `screencap` exits 1 on the device, `exec-out` passes on zero
+     * bytes and exit 0. It is not a blank image, so nothing that looks at pixels can see it, and
+     * reported as "did not return a PNG" it read as a broken device. Named for what it is, so the
+     * console can say so and operate the screen from its elements instead (M4).
+     */
+    if (bytes.length === 0) throw new CaptureRefusedError(this.info.localId);
     if (bytes.length < 8 || bytes[0] !== 0x89 || bytes[1] !== 0x50) {
       throw new Error(`screencap did not return a PNG on ${this.info.localId}: ${bytes.subarray(0, 120).toString().trim()}`);
     }

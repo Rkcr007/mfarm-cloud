@@ -95,3 +95,20 @@ describe('the held shell across a phone that leaves and returns', () => {
     assert.equal((await p.health()).status, 'offline');
   });
 });
+
+/**
+ * M4. Measured on the OnePlus's PIN-entry screen: `screencap` exits 1 on the device and `exec-out`
+ * hands back zero bytes with exit 0. That is a refusal, not a broken device.
+ */
+describe('a screen that forbids capture', () => {
+  test('zero bytes from screencap is a refusal, named as one', async () => {
+    const { CaptureRefusedError } = await import('../src/devices/physical.ts');
+    const p = new PhysicalDevice({ serial: 'FAKE', localId: 'phone-FAKE' });
+    // This fake answers `exec-out` with nothing at all — what the secure screen produced.
+    await assert.rejects(p.screenshot(), (e: Error) => {
+      assert.ok(e instanceof CaptureRefusedError, `got ${e.name}: ${e.message}`);
+      assert.match(e.message, /cannot be captured/);
+      return true;
+    });
+  });
+});

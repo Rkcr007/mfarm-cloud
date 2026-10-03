@@ -225,7 +225,9 @@ export class LiveSession {
       case 'screenshot-error': {
         const r = this.pending.get(msg.id);
         this.pending.delete(msg.id);
-        r ? r.reject(new Error(msg.message)) : this.o.onNotice?.(msg.message);
+        // `refused` rides on the error: the screen forbids capture, which is not a fault (M4).
+        const err = Object.assign(new Error(msg.message), { refused: msg.refused === true });
+        r ? r.reject(err) : this.o.onNotice?.(msg.message);
         return;
       }
 
