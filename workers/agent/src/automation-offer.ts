@@ -22,10 +22,15 @@ export function phoneBlocker(state: {
   onUsb: boolean;
   health: 'healthy' | 'degraded' | 'offline' | undefined;
   prerequisite?: { title: string; remedy: string };
-}): { reason: string; remedy?: string } | undefined {
-  if (!state.onUsb) return { reason: 'it is not on USB' };
-  if (state.health === 'offline') return { reason: 'it is not answering' };
-  if (state.prerequisite) return { reason: state.prerequisite.title, remedy: state.prerequisite.remedy };
+}): { reason: string; remedy?: string; away: boolean } | undefined {
+  // `away` is the two that mean the phone is not there to use at all — so it leaves the pool for a
+  // person in the console too (D62), not only for WebDriver. A phone missing a prerequisite is
+  // there: its screen, its logs and a hand on it still work.
+  if (!state.onUsb) return { reason: 'it is not on USB', away: true };
+  if (state.health === 'offline') return { reason: 'it is not answering', away: true };
+  if (state.prerequisite) {
+    return { reason: state.prerequisite.title, remedy: state.prerequisite.remedy, away: false };
+  }
   return undefined;
 }
 

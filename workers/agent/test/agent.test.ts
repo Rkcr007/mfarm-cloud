@@ -1785,8 +1785,49 @@ describe('a retired machine whose agent is started again', () => {
   });
 });
 
+/**
+ * D62, from the agent's side. What it says about a device it cannot see has to reach the device row
+ * the console reads — on a beat, and on a registration that happens while the phone is away.
+ */
+describe('a device the agent cannot see', () => {
+  const stateOf = (deviceId: string) => withSystem(async (c) => (await c.query(
+    'SELECT state::text AS state, away_reason FROM devices WHERE id = $1', [deviceId])).rows[0]);
+
+  test('leaves the pool on the next beat and comes back on the one after it is seen', async () => {
+    const hostname = `away-agent-${randomUUID().slice(0, 8)}`;
+    const agent = makeAgent([fakeBackend('phone-1')], hostname);
+    const { deviceIds } = await agent.start();
+    const id = deviceIds['phone-1']!;
+
+    agent.setAway('phone-1', 'it is not on USB');
+    assert.equal((await agent.heartbeat()).ok, true);
+    assert.deepEqual(await stateOf(id), { state: 'OFFLINE', away_reason: 'it is not on USB' });
+
+    agent.setAway('phone-1', undefined);
+    await agent.heartbeat();
+    assert.deepEqual(await stateOf(id), { state: 'READY', away_reason: null });
+    await agent.shutdown();
+  });
+
+  test('a registration while it is away does not put it back for a beat', async () => {
+    const hostname = `away-rereg-${randomUUID().slice(0, 8)}`;
+    const first = makeAgent([fakeBackend('phone-1')], hostname);
+    const { deviceIds } = await first.start();
+    await first.shutdown();
+
+    // A second device forces the registration path — the same registration a withdrawn `webdriver`
+    // triggers in place, which is exactly when a phone has just left.
+    const again = makeAgent([fakeBackend('phone-1'), fakeBackend('phone-2')], hostname);
+    again.setAway('phone-1', 'it is not on USB');
+    await again.start();
+    assert.equal(again.registeredThisStart, true, 'fixture: this start must register');
+    assert.equal((await stateOf(deviceIds['phone-1']!)).state, 'OFFLINE');
+    await again.shutdown();
+  });
+});
+
 describe('quarantine recovery', () => {
-  const fast =<T>(fn: () => Promise<T>) => async (): Promise<T> => {
+  const fast = <T>(fn: () => Promise<T>) => async (): Promise<T> => {
     process.env.RECOVERY_PROBE_ATTEMPTS = '1';
     process.env.RECOVERY_PROBE_GAP_MS = '1';
     try { return await fn(); } finally {

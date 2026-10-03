@@ -268,6 +268,12 @@ export class Agent {
    * endpoint and advertised a server the hub could never reach.
    */
   private readonly automation = new Map<string, string>();
+  /**
+   * Devices this agent cannot see, with why (067, D62). Sent on every beat and at registration, so
+   * the control plane takes them out of the pool for everybody — not only for WebDriver, which
+   * `automation` above already withdraws — and gives them back when they are here again.
+   */
+  private readonly away = new Map<string, string>();
 
   // Explicit field + assignment rather than a constructor parameter property: those emit runtime
   // code, so Node's strip-only type removal rejects them and the no-build-step setup breaks.
@@ -307,6 +313,18 @@ export class Agent {
   automationEndpointFor(localId: string): string | undefined {
     return this.automation.get(localId);
   }
+
+  /**
+   * Say that a device is not there — `reason` — or (undefined) that it is again. Reaches the control
+   * plane on the next beat; nothing here waits for it, and saying the same thing twice says nothing.
+   */
+  setAway(localId: string, reason: string | undefined): void {
+    if (reason === undefined) this.away.delete(localId);
+    else this.away.set(localId, reason);
+  }
+
+  /** What `setAway` was last told, for the window and for tests. */
+  awayReason(localId: string): string | undefined { return this.away.get(localId); }
 
   /**
    * Point one device at a different automation server, or at none.
@@ -580,6 +598,7 @@ export class Agent {
       cores: this.opts.cores ?? 0,
       memoryMb: this.opts.memoryMb ?? 0,
       capabilities: this.capabilities(),
+      away: Object.fromEntries(this.away),
       devices: this.opts.devices.map((d) => {
         const localId = d.control.info.localId;
         const endpoint = this.automation.get(localId);
@@ -747,6 +766,9 @@ export class Agent {
           // Per-device since v2, for the same reason registration carries it: one string cannot
           // describe a host whose devices are served by different gateways.
           devices: Object.fromEntries(this.automation),
+          // Which of them this agent cannot see (067, D62). Always sent, `{}` included: an empty map
+          // is "all here" and gives back what an earlier beat took; an absent one changes nothing.
+          away: Object.fromEntries(this.away),
           // Measured just above, OUTSIDE the try — see `beatStats()`.
           stats,
         }),

@@ -37,7 +37,7 @@ export async function deviceRoutes(app: FastifyInstance) {
                   profile, screen, abis, last_reset_at,
                   reset_attempts, reset_escalated_at, reset_escalation_reason,
                   quarantined_at, quarantine_reason, quarantine_source,
-                  recovery_started_at, recovery_from_reason,
+                  recovery_started_at, recovery_from_reason, away_since, away_reason,
                   (org_id IS NOT NULL) AS dedicated
              FROM devices
             WHERE ($1::text IS NULL OR region = $1)
@@ -174,6 +174,10 @@ export async function deviceRoutes(app: FastifyInstance) {
               },
             }
             : {}),
+          // WHY AN OFFLINE DEVICE IS OFFLINE, when its own agent said (067, D62). Without it the
+          // console could only say "the host has not reported it" about a phone the host had
+          // reported, precisely, as not being on its cable.
+          ...(r.away_since ? { away: { since: r.away_since, reason: r.away_reason } } : {}),
         })),
         // Availability is what callers actually decide on, so it is computed here rather than
         // leaving every client to derive it from the state enum.
@@ -192,6 +196,7 @@ export async function deviceRoutes(app: FastifyInstance) {
                 d.reset_escalation_reason,
                 d.quarantined_at, d.quarantine_reason, d.quarantine_source,
                 d.recovery_started_at, d.recovery_from_reason, d.recovery_released_by,
+                d.away_since, d.away_reason,
                 -- Joined here rather than exposed as a bare uuid the console would have to resolve
                 -- against an endpoint it cannot reach: the users table is RLS-scoped to the
                 -- caller's org, and an operator releasing a SHARED device need not be in it. It
@@ -280,6 +285,7 @@ export async function deviceRoutes(app: FastifyInstance) {
             },
           }
           : {}),
+        ...(row.away_since ? { away: { since: row.away_since, reason: row.away_reason } } : {}),
       },
     };
   });
