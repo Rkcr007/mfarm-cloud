@@ -294,7 +294,8 @@ describe('the agent window', () => {
         body: JSON.stringify({ shared }),
       });
       assert.equal(res.status, 200);
-      assert.deepEqual(await res.json(), { ok: true, shared });
+      // `restarting` false: this fixture's action does not say it comes back (see D58 below).
+      assert.deepEqual(await res.json(), { ok: true, shared, restarting: false });
     }
     assert.deepEqual(sharedCalls, [{ serial: HOST, shared: true }, { serial: HOST, shared: false }]);
   });
@@ -512,5 +513,74 @@ describe('where the window binds', () => {
     } finally {
       await win.close();
     }
+  });
+});
+
+/**
+ * D58 — PRESSING SHARE IS ANSWERED, AND ONLY THEN DOES THE AGENT RESTART.
+ *
+ * Applying a share drains the agent, and the drain closes this server first thing. It used to run
+ * inside the request, so the reply to the person who pressed Share never left: `curl` saw "Empty
+ * reply from server", the page saw a failed fetch and re-enabled the button — for a share that had
+ * been saved. Found on the OnePlus, 2026-10-03.
+ */
+describe('a share that restarts the agent', () => {
+  test('the reply arrives in full before the restart begins, and says whether it comes back', async () => {
+    const order: string[] = [];
+    let win: AgentWindow;
+    win = new AgentWindow({
+      snapshot: () => fresh(),
+      token: TOKEN,
+      keepAliveMs: 60_000,
+      actions: {
+        setShared: async () => { order.push('recorded'); return { restarting: true }; },
+        // What the drain does first: close the window. Before D58 this ran inside the request.
+        applyShared: () => { order.push('applied'); void win.close(); },
+      },
+    });
+    const port = await win.listen(0);
+    const res = await fetch(`http://127.0.0.1:${port}/api/devices/SERIAL/shared?t=${encodeURIComponent(TOKEN)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ shared: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, shared: true, restarting: true },
+      'the person who pressed Share was told it failed');
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(order, ['recorded', 'applied'], 'the restart has to follow the reply, and follow it');
+  });
+
+  test('a refused share is not applied', async () => {
+    let applied = false;
+    const win = new AgentWindow({
+      snapshot: () => fresh(),
+      token: TOKEN,
+      actions: {
+        setShared: async () => { throw new Error('the disk is full'); },
+        applyShared: () => { applied = true; },
+      },
+    });
+    const port = await win.listen(0);
+    const res = await fetch(`http://127.0.0.1:${port}/api/devices/SERIAL/shared?t=${encodeURIComponent(TOKEN)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ shared: true }),
+    });
+    assert.equal(res.status, 500);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(applied, false, 'restarting to apply a choice that was never recorded');
+    await win.close();
+  });
+
+  /** The page somebody has open must keep working across the restart: same token, same address. */
+  test('a window given the previous token answers the previous link', async () => {
+    const handed = 'handed-on-token-0123456789abcdef0123456789';
+    const win = new AgentWindow({ snapshot: () => fresh(), token: handed });
+    const port = await win.listen(0);
+    assert.equal(win.token, handed);
+    const res = await fetch(`http://127.0.0.1:${port}/api/state?t=${encodeURIComponent(handed)}`);
+    assert.equal(res.status, 200);
+    await win.close();
   });
 });

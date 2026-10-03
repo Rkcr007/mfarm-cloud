@@ -152,7 +152,9 @@ laptop, and the phone on the end of the cable may well be their own.
   provisioned on purpose; nobody has one by accident. Only `tier: physical` defaults to off.
 - Sharing or un-sharing **restarts the agent** to re-register — the device list travels only at
   registration. A live session finishes first, so taking a device back never interrupts a suite
-  mid-run.
+  mid-run. The button is answered before the restart begins, and an agent that relaunches itself
+  keeps the window's address, so the page you pressed it on reconnects on its own. Run in the
+  background with nothing to restart it, the agent stops instead, and the page says so.
 - **The agent only re-registers when its capability fingerprint changes** — which a phone
   appearing or disappearing does. A restart that changes nothing resumes with a heartbeat and
   writes no device list, and the log says which happened (`registered as` vs `resumed as`).

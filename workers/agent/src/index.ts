@@ -768,8 +768,17 @@ async function main(): Promise<void> {
     };
   };
 
+  /**
+   * A token handed on by the agent this one replaced (D58), or nothing — in which case the window
+   * mints its own. Read once and taken out of the environment, so it is not passed on to Appium or
+   * anything else this process starts; a later relaunch hands it on again explicitly.
+   */
+  const handedToken = process.env.MFARM_WINDOW_TOKEN || undefined;
+  delete process.env.MFARM_WINDOW_TOKEN;
+
   const win = flagUnless('MFARM_WINDOW')
     ? new AgentWindow({
+        token: handedToken,
         snapshot: windowState,
         actions: {
           /**
@@ -789,7 +798,7 @@ async function main(): Promise<void> {
            * control plane never hears. Same drain as a hot-plug, so a live session finishes first —
            * un-sharing a phone must never yank it out from under somebody's suite.
            */
-          setShared: async (serial: string, share: boolean): Promise<void> => {
+          setShared: async (serial: string, share: boolean): Promise<{ restarting: boolean }> => {
             await setShared(serial, share);
             sharing = await loadSharing();
             win?.push();
@@ -797,8 +806,10 @@ async function main(): Promise<void> {
               `[agent] ${serial} is now ${share ? 'SHARED with this org' : 'NOT shared'} — `
               + 'draining to re-register, live sessions finish first',
             );
-            drainAndRestart('sharing-changed');
+            return { restarting: shouldRelaunch() };
           },
+          // After the reply has gone (D58) — the drain closes the server that is sending it.
+          applyShared: () => drainAndRestart('sharing-changed'),
           setInstallVerification: async (localId: string, enabled: boolean): Promise<void> => {
             const found = backends.find((b) => b.control.info.localId === localId);
             const dev = found?.control as Partial<PhysicalDevice> | undefined;
@@ -1176,7 +1187,26 @@ async function main(): Promise<void> {
      */
     if (relaunch && exitCode === 0 && shouldRelaunch()) {
       const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
-        detached: true, stdio: 'inherit', env: process.env, cwd: process.cwd(),
+        detached: true, stdio: 'inherit', cwd: process.cwd(),
+        /**
+         * THE SAME WINDOW, HANDED ON (D58). The token is minted at start-up and never written to
+         * disk, so a relaunched agent used to mint a new one — and the page somebody had open, the
+         * one they had just pressed Share on, held a link to a process that no longer existed. The
+         * port is free by now (the window closed first thing in the drain), so the replacement
+         * binds it again with the same token, the page's stream reconnects on its own, and no
+         * second tab is opened for a window that is already on screen.
+         *
+         * Through the environment of one child, never a file: the same token is already in this
+         * terminal and this process's own memory, and it lives no longer than they do.
+         */
+        env: {
+          ...process.env,
+          ...(win ? {
+            MFARM_WINDOW_TOKEN: win.token,
+            MFARM_WINDOW_PORT: String(win.port ?? process.env.MFARM_WINDOW_PORT ?? 7317),
+            MFARM_WINDOW_OPEN: '0',
+          } : {}),
+        },
       });
       child.unref();
       console.log(

@@ -337,9 +337,13 @@ footer { margin-top: 26px; color: var(--t-caption); font-size: 11px; line-height
         return res.json().then(function (body) { return { ok: res.ok, body: body }; });
       }).then(function (r) {
         if (r.ok) {
-          // The agent restarts to re-register. The stream drops and EventSource reconnects on its
-          // own, so say what is happening rather than letting the page look broken for a second.
-          note.textContent = 'saved \u2014 reconnecting\u2026';
+          // The agent restarts to re-register. When it comes back on its own it keeps this page's
+          // address (D58), the stream reconnects and the row updates; say so. When it does not —
+          // run in the background with nothing to restart it — say THAT, because a page that only
+          // ever says "reconnecting" about an agent that has stopped is a page that lies.
+          note.textContent = (r.body && r.body.restarting)
+            ? 'saved \u2014 the agent is restarting to apply it; this page reconnects by itself\u2026'
+            : 'saved \u2014 the agent has stopped to apply it. Start it again to finish.';
           return;
         }
         btn.disabled = false;
