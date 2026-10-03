@@ -14,9 +14,12 @@
  * both.
  *
  * `werift` is the peer: pure TypeScript, no native build, which is the whole point on somebody's
- * laptop (ADR-0009). Input still goes to the phone the way every other input does — through the held
- * adb shell — so a press is a tap and a drag a swipe, decided on release. A drag that follows the
- * finger live would need scrcpy's control socket; that is a separate step, not this one.
+ * laptop (ADR-0009).
+ *
+ * INPUT GOES THROUGH scrcpy'S CONTROL SOCKET when the capture has one open: a finger's down, every
+ * move and its up are streamed as they happen, so a drag follows the finger. Without one — the jar is
+ * absent, or the socket would not open — it goes the way every other input does, through the held
+ * adb shell, where a press is a tap and a drag a swipe replayed once the finger lifts.
  */
 import { createSocket } from 'node:dgram';
 import { connect } from 'node:net';
@@ -26,10 +29,15 @@ import {
   RTCPeerConnection, MediaStreamTrack, MediaStream, RTCRtpCodecParameters, RtpPacket, RtpHeader,
 } from 'werift';
 import type { SignalChannel, SignalOptions } from '../device.ts';
-import type { ScreenCapture, FrameMark } from './capture.ts';
+import type { ScreenCapture, FrameMark, LiveControl } from './capture.ts';
 
 /** Payload bytes per RTP packet. Under a 1280-byte path MTU with room for SRTP and TURN headers. */
 const MAX_PAYLOAD = 1100;
+
+/** One frame at 60 fps, in microseconds — the step a re-based clock carries on by. */
+const FRAME_US = 16_667;
+/** The fewest milliseconds between two encoder restarts asked for by viewers — see `requestKeyframe`. */
+const KEYFRAME_MIN_MS = Number(process.env.PHYSICAL_KEYFRAME_MIN_MS ?? 1000);
 
 /** NAL unit types this file has to tell apart (H.264, ITU-T H.264 table 7-1). */
 const NAL_NON_IDR = 1;
@@ -58,6 +66,117 @@ export function packetizeNal(nal: Buffer, max = MAX_PAYLOAD): Buffer[] {
     ]));
   }
   return out;
+}
+
+/** RBSP bits, read MSB first, as the SPS lays them out (ITU-T H.264 §7.2). */
+class Bits {
+  private readonly b: number[];
+  private i = 0;
+  constructor(b: number[]) { this.b = b; }
+  u(n: number): number {
+    let v = 0;
+    for (let k = 0; k < n; k++) {
+      const byte = this.b[this.i >> 3];
+      if (byte === undefined) throw new RangeError('SPS ended early');
+      v = v * 2 + ((byte >> (7 - (this.i & 7))) & 1);
+      this.i++;
+    }
+    return v;
+  }
+  ue(): number {
+    let zeros = 0;
+    while (this.u(1) === 0) if (++zeros > 31) throw new RangeError('bad Exp-Golomb code');
+    return 2 ** zeros - 1 + this.u(zeros);
+  }
+  se(): number { const k = this.ue(); return k % 2 ? (k + 1) / 2 : -k / 2; }
+}
+
+/** Profiles whose SPS carries chroma format, bit depth and scaling lists (§7.3.2.1.1). */
+const HIGH_PROFILES = new Set([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135]);
+/** Every profile an SPS may name: Baseline, Main, Extended, and the ones above. */
+const PROFILES = new Set([66, 77, 88, ...HIGH_PROFILES]);
+
+/**
+ * The picture size an SPS describes, cropping applied — what a browser reports as the video's size,
+ * and so the space a touch arrives in. Undefined for anything that does not parse.
+ *
+ * WHY READ IT RATHER THAN COMPUTE IT. scrcpy drops a touch whose stated size is not the size it is
+ * encoding at, silently, by design: it is how it ignores input aimed at a picture from before a
+ * rotation. A size computed from the panel is right until the phone turns, or a vendor encoder rounds
+ * differently — and then every touch vanishes. The stream says what it is.
+ */
+export function spsSize(nal: Buffer): { w: number; h: number } | undefined {
+  if (nal.length < 4 || (nal[0] & 0x1f) !== NAL_SPS) return undefined;
+  // Emulation prevention: `00 00 03` carries `00 00` and the 03 is not part of the syntax.
+  const rbsp: number[] = [];
+  let zeros = 0;
+  for (let i = 1; i < nal.length; i++) {
+    if (zeros >= 2 && nal[i] === 3) { zeros = 0; continue; }
+    zeros = nal[i] === 0 ? zeros + 1 : 0;
+    rbsp.push(nal[i]);
+  }
+  try {
+    /**
+     * EVERY FIELD WITHIN ITS RANGE, OR NO ANSWER. Exp-Golomb reads something out of any bytes at all,
+     * so a reader that only parses will turn junk into a confident, wrong size — the test's filler
+     * SPS came out as 14x28. A wrong size here is worse than none: every touch would name it, and
+     * scrcpy would drop every one. The ranges are the standard's (§7.4.2.1.1).
+     */
+    const bad = (): never => { throw new RangeError('not an SPS'); };
+    const r = new Bits(rbsp);
+    const profile = r.u(8);
+    if (!PROFILES.has(profile)) bad();
+    r.u(16);                                              // constraint flags, level
+    if (r.ue() > 31) bad();                               // seq_parameter_set_id
+    let chroma = 1;
+    if (HIGH_PROFILES.has(profile)) {
+      chroma = r.ue();
+      if (chroma > 3) bad();
+      if (chroma === 3) r.u(1);                           // separate_colour_plane_flag
+      if (r.ue() > 6 || r.ue() > 6) bad();                // bit depths, luma and chroma, minus 8
+      r.u(1);                                             // qpprime_y_zero_transform_bypass
+      if (r.u(1)) {                                       // seq_scaling_matrix_present_flag
+        for (let i = 0; i < (chroma === 3 ? 12 : 8); i++) {
+          if (!r.u(1)) continue;
+          let last = 8, next = 8;
+          for (let j = 0; j < (i < 6 ? 16 : 64); j++) {
+            if (next !== 0) next = (last + r.se() + 256) % 256;
+            last = next === 0 ? last : next;
+          }
+        }
+      }
+    }
+    if (r.ue() > 12) bad();                               // log2_max_frame_num_minus4
+    const pocType = r.ue();
+    if (pocType > 2) bad();
+    if (pocType === 0 && r.ue() > 12) bad();              // log2_max_pic_order_cnt_lsb_minus4
+    if (pocType === 1) {
+      r.u(1); r.se(); r.se();
+      const n = r.ue();
+      if (n > 255) bad();
+      for (let i = 0; i < n; i++) r.se();
+    }
+    if (r.ue() > 16) bad();                               // max_num_ref_frames
+    r.u(1);                                               // gaps_in_frame_num_value_allowed_flag
+    const wMbs = r.ue() + 1;
+    const hMaps = r.ue() + 1;
+    const frameMbsOnly = r.u(1);
+    if (!frameMbsOnly) r.u(1);                            // mb_adaptive_frame_field_flag
+    r.u(1);                                               // direct_8x8_inference_flag
+    let w = wMbs * 16;
+    let h = (2 - frameMbsOnly) * hMaps * 16;
+    if (r.u(1)) {                                         // frame_cropping_flag
+      const [left, right, top, bottom] = [r.ue(), r.ue(), r.ue(), r.ue()];
+      const cx = chroma === 1 || chroma === 2 ? 2 : 1;
+      const cy = (chroma === 1 ? 2 : 1) * (2 - frameMbsOnly);
+      w -= (left + right) * cx;
+      h -= (top + bottom) * cy;
+    }
+    // A phone's stream: at least a macroblock, and no more than the 16-bit size a touch can state.
+    return w >= 16 && h >= 16 && w <= 0xffff && h <= 0xffff ? { w, h } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -91,21 +210,49 @@ export class H264Fanout {
   private capture?: ScreenCapture;
   private starting?: Promise<void>;
   private readonly subs = new Set<(nal: Buffer, at: number, frame?: FrameMark) => void>();
+  private keyframeAt = 0;
   sps?: Buffer;
   pps?: Buffer;
+  /** What the encoder is producing now, from its latest SPS — see `spsSize`. */
+  size?: { w: number; h: number };
+  /** Keyframes asked of the encoder, and requests turned away for coming too soon after one. */
+  readonly keyframes = { asked: 0, limited: 0 };
 
   constructor(make: () => ScreenCapture) { this.make = make; }
 
   get viewers(): number { return this.subs.size; }
 
+  /** The phone's live input while the capture has it — undefined sends input the adb way. */
+  get control(): LiveControl | undefined { return this.capture?.control; }
+
+  /**
+   * A keyframe now, for a viewer that cannot decode what it has — its PLI — or has just joined.
+   *
+   * ONE PER KEYFRAME_MIN_MS, FOR EVERY VIEWER. Restarting the encoder costs every viewer a short gap
+   * and a large frame, and a browser that is losing packets asks again on each one it notices; the
+   * keyframe it gets answers all of them. Without the control socket there is nothing to ask, and the
+   * encoder's own interval (`keyFrameIntervalSeconds`) is the answer.
+   */
+  requestKeyframe(): boolean {
+    const now = Date.now();
+    if (now - this.keyframeAt < KEYFRAME_MIN_MS) { this.keyframes.limited += 1; return false; }
+    if (!this.control?.resetVideo()) return false;
+    this.keyframeAt = now;
+    this.keyframes.asked += 1;
+    return true;
+  }
+
   async subscribe(onNal: (nal: Buffer, at: number, frame?: FrameMark) => void): Promise<() => void> {
     this.subs.add(onNal);
+    // A viewer joining a capture already running starts on the NEXT keyframe — which, on a screen
+    // that is not moving, may not come for as long as nothing changes. So it asks for one.
+    const joining = Boolean(this.capture);
     if (!this.capture) {
       const capture = this.make();
       this.capture = capture;
       this.starting = capture.start((nal, at, frame) => {
         const t = nalType(nal);
-        if (t === NAL_SPS) this.sps = Buffer.from(nal);
+        if (t === NAL_SPS) { this.sps = Buffer.from(nal); this.size = spsSize(nal) ?? this.size; }
         else if (t === NAL_PPS) this.pps = Buffer.from(nal);
         for (const s of this.subs) s(nal, at, frame);
       }).catch((e) => {
@@ -115,6 +262,7 @@ export class H264Fanout {
       });
     }
     await this.starting;
+    if (joining) this.requestKeyframe();
     let gone = false;
     return () => {
       if (gone) return;
@@ -158,27 +306,57 @@ export function charFor(code: string, shift: boolean): string | undefined {
   return c ? c[shift ? 1 : 0] : undefined;
 }
 
+/** Android keycodes for the phone's buttons, sent over the control socket. */
+const BUTTON_KEYCODES: Record<'home' | 'back' | 'recents' | 'power', number> = { home: 3, back: 4, recents: 187, power: 26 };
+
 /**
- * The browser's `input-channel` messages, turned into the phone's verbs.
+ * `KeyboardEvent.code` to the Android keycode it presses, for the keys that type nothing. Over adb
+ * only Enter and Backspace go through; the control socket can press any key, so the ones a form needs
+ * — Tab, the arrows, Delete — come with it.
+ */
+const KEYCODES: Record<string, number> = {
+  Enter: 66, NumpadEnter: 66, Backspace: 67, Delete: 112, Tab: 61, Escape: 111,
+  ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22,
+};
+
+/** Where live input goes: the fanout, which knows the capture's control socket and the encoded size. */
+export interface LiveInput {
+  readonly control?: LiveControl;
+  readonly size?: { w: number; h: number };
+}
+
+/**
+ * The browser's `input-channel` messages, turned into the phone's input.
  *
- * A PRESS IS A TAP AND A DRAG IS A SWIPE, decided on release, exactly as the screen-without-video view
- * decides it (M4) — the distance is the only honest test, and deciding on press would tap at the
- * start of every scroll. Typed characters are gathered for a moment and sent as one `input text`,
- * because each call spawns a process on the phone and a person types faster than that.
+ * LIVE WHEN IT CAN BE. With a control socket open, a finger's down, its moves and its up go to the
+ * phone as they arrive, in the video's own pixels — a drag follows the finger, a long press is long,
+ * and a press is decided by the phone, as a real one is. Keys and text go the same way, unbatched.
+ *
+ * OTHERWISE, OVER adb: a press is a tap and a drag a swipe, decided on release, exactly as the screen-
+ * without-video view decides it (M4) — the distance is the only honest test, and deciding on press
+ * would tap at the start of every scroll. Typed characters are gathered for a moment and sent as one
+ * `input text`, because each call spawns a process on the phone and a person types faster than that.
+ *
+ * A gesture stays on the path it began on: one that started over adb is finished over adb even if the
+ * control socket opens halfway through, or the phone would be told about an up it never saw go down.
  */
 export class InputMapper {
   private readonly input: PhoneInput;
+  private readonly live?: LiveInput;
+  private readonly video: { w: number; h: number };
   private readonly kx: number;
   private readonly ky: number;
-  private readonly downs = new Map<number, { x: number; y: number; at: number; lx: number; ly: number }>();
+  private readonly downs = new Map<number, { x: number; y: number; at: number; lx: number; ly: number; live: boolean }>();
   private shift = false;
   private typed = '';
   private flush?: ReturnType<typeof setTimeout>;
   /** The latest thing sent to the phone, and when — what `PHYSICAL_VIDEO_TRACE` times a frame against. */
   last?: { verb: string; at: number; doneAt?: number; framed?: boolean };
 
-  constructor(input: PhoneInput, screen: { width: number; height: number }, video: { w: number; h: number }) {
+  constructor(input: PhoneInput, screen: { width: number; height: number }, video: { w: number; h: number }, live?: LiveInput) {
     this.input = input;
+    this.live = live;
+    this.video = video;
     this.kx = screen.width / video.w;
     this.ky = screen.height / video.h;
   }
@@ -195,29 +373,55 @@ export class InputMapper {
     let m: Record<string, unknown>;
     try { m = JSON.parse(String(raw)); } catch { return; }
     const name = BUTTONS[String(m.command ?? '')];
-    if (name && m.button_state === 'down') this.send(name, () => this.input.key(name));
+    if (!name || m.button_state !== 'down') return;
+    if (this.live?.control?.key(BUTTON_KEYCODES[name])) return this.record(name);
+    this.send(name, () => this.input.key(name));
   }
 
-  /** Every verb goes out through here, so the latest one is on record with its timing. */
+  /** Every adb verb goes out through here, so the latest one is on record with its timing. */
   private send(verb: string, act: () => Promise<void>): void {
     const rec: NonNullable<InputMapper['last']> = { verb, at: Date.now() };
     this.last = rec;
     void act().then(() => { rec.doneAt = Date.now(); }, () => {});
   }
 
+  /** A live one is done when it is written: the phone has it as soon as the socket does. */
+  private record(verb: string): void {
+    const at = Date.now();
+    this.last = { verb, at, doneAt: at };
+  }
+
+  private liveTouch(action: 'down' | 'move' | 'up', id: number, x: number, y: number): boolean {
+    const control = this.live?.control;
+    return Boolean(control?.touch(action, id, x, y, this.live?.size ?? this.video));
+  }
+
   private touch(m: Record<string, unknown>): void {
     const id = Number((m.id as unknown[])?.[0] ?? 0);
-    const x = Math.round(Number((m.x as unknown[])?.[0]) * this.kx);
-    const y = Math.round(Number((m.y as unknown[])?.[0]) * this.ky);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const vx = Number((m.x as unknown[])?.[0]);
+    const vy = Number((m.y as unknown[])?.[0]);
+    if (!Number.isFinite(vx) || !Number.isFinite(vy) || !Number.isFinite(id)) return;
+    const x = Math.round(vx * this.kx);
+    const y = Math.round(vy * this.ky);
     const d = this.downs.get(id);
     if (m.down) {
-      if (!d) this.downs.set(id, { x, y, at: Date.now(), lx: x, ly: y });
-      else { d.lx = x; d.ly = y; }
+      if (!d) {
+        const live = this.liveTouch('down', id, vx, vy);
+        this.downs.set(id, { x, y, at: Date.now(), lx: x, ly: y, live });
+        if (live) this.record('press');
+      } else {
+        d.lx = x; d.ly = y;
+        if (d.live) this.liveTouch('move', id, vx, vy);
+      }
       return;
     }
     if (!d) return;
     this.downs.delete(id);
+    if (d.live) {
+      this.liveTouch('up', id, vx, vy);
+      this.record('release');
+      return;
+    }
     const moved = Math.hypot(x - d.x, y - d.y);
     // 24 device pixels — about the width of a fingertip's wobble at 480dpi.
     if (moved < 24) this.send('tap', () => this.input.tap(d.x, d.y));
@@ -227,6 +431,16 @@ export class InputMapper {
   private keyboard(code: string, kind: string): void {
     if (/^Shift(Left|Right)$/.test(code)) { this.shift = kind === 'keydown'; return; }
     if (kind !== 'keydown') return;
+    const control = this.live?.control;
+    if (control) {
+      const keycode = KEYCODES[code];
+      const ch = keycode === undefined ? charFor(code, this.shift) : undefined;
+      if (keycode === undefined && !ch) return;
+      this.sendTyped();   // anything still gathered for adb goes first, so the order holds
+      if (keycode !== undefined ? control.key(keycode) : control.text(ch!)) {
+        return this.record(keycode !== undefined ? code : 'text');
+      }
+    }
     if (code === 'Enter' || code === 'NumpadEnter') { this.sendTyped(); this.send('enter', () => this.input.key('enter')); return; }
     if (code === 'Backspace') { this.sendTyped(); this.send('backspace', () => this.input.key('backspace')); return; }
     const ch = charFor(code, this.shift);
@@ -426,7 +640,17 @@ export class PhoneVideoPeer implements SignalChannel {
     });
     this.pc = pc;
     const track = new MediaStreamTrack({ kind: 'video' });
-    pc.addTransceiver(track, { direction: 'sendonly', streams: [new MediaStream({ id: `display_${this.o.label}` })] });
+    const video = pc.addTransceiver(track, { direction: 'sendonly', streams: [new MediaStream({ id: `display_${this.o.label}` })] });
+    /**
+     * A PLI IS ANSWERED. The browser sends one when it cannot decode what it has — a lost packet in a
+     * keyframe, a decoder reset — and until it gets a keyframe the picture is frozen or smeared. Left
+     * unanswered (as it was), that lasted until the encoder's next scheduled keyframe, and on a screen
+     * that is not moving there is no next one. See `H264Fanout.requestKeyframe` for the rate limit.
+     */
+    video.sender.onPictureLossIndication.subscribe(() => {
+      const asked = this.o.fanout.requestKeyframe();
+      if (TRACE) log(`the viewer asked for a keyframe (PLI): ${asked ? 'encoder restarted' : 'not now'}`);
+    });
 
     /**
      * OPENED BY THE DEVICE, AND THAT IS WHAT LETS THE BROWSER'S CHANNEL EXIST AT ALL.
@@ -518,6 +742,7 @@ export class PhoneVideoPeer implements SignalChannel {
      * (FrameMark); one that cannot gets a frame per slice, which is what this did for every source.
      */
     let pts0: number | undefined;
+    let lastUs: number | undefined;
     let pending: Buffer[] = [];
     let keyframe = false;
     try {
@@ -534,7 +759,15 @@ export class PhoneVideoPeer implements SignalChannel {
         let ts: number;
         if (frame?.ptsUs !== undefined) {
           pts0 ??= frame.ptsUs;
-          ts = Math.round(((frame.ptsUs - pts0) * 90) / 1000) >>> 0;
+          /**
+           * FORWARD ONLY. A restarted encoder — a keyframe asked for, a rotation — may start its clock
+           * again, and a receiver takes a frame whose timestamp went backwards as a late copy of an old
+           * one and drops it: the very keyframe that was asked for. So a clock that steps back is
+           * re-based to carry on one frame after the last.
+           */
+          if (lastUs !== undefined && frame.ptsUs - pts0 <= lastUs) pts0 = frame.ptsUs - (lastUs + FRAME_US);
+          lastUs = frame.ptsUs - pts0;
+          ts = Math.round((lastUs * 90) / 1000) >>> 0;
         } else {
           ts = ((at - t0) * 90) >>> 0;
         }

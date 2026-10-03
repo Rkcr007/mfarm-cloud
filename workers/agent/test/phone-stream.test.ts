@@ -14,9 +14,9 @@ import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import {
   packetizeNal, videoSizeFor, charFor, InputMapper, H264Fanout, PhoneVideoPeer, nalType,
-  parseIceUrl, answersOverUdp, answersOverTcp, reachableIceServers,
+  parseIceUrl, answersOverUdp, answersOverTcp, reachableIceServers, spsSize,
 } from '../src/devices/phone-stream.ts';
-import type { ScreenCapture, FrameMark } from '../src/devices/capture.ts';
+import type { ScreenCapture, FrameMark, LiveControl } from '../src/devices/capture.ts';
 
 /** A NAL of `type` and `size` bytes — the header byte carries NRI 3. */
 const nal = (type: number, size: number) => { const b = Buffer.alloc(size, 0xab); b[0] = 0x60 | type; return b; };
@@ -53,6 +53,126 @@ describe('the size scrcpy encodes at', () => {
   });
   test('landscape keeps its orientation', () => {
     assert.deepEqual(videoSizeFor({ width: 2400, height: 1080 }, 1280), { w: 1280, h: 576 });
+  });
+});
+
+/**
+ * Two real parameter sets: the OnePlus's own, captured off the farm through the console's path, and a
+ * 1080p High-profile one from x264 — a cropped height (1088 coded, 1080 shown) and emulation
+ * prevention bytes in the middle, the two things a naive reader gets wrong.
+ */
+const SPS_ONEPLUS_576x1280 = Buffer.from('6742800ada0240286948283030368509a8', 'hex');
+const SPS_X264_HIGH_1080P = Buffer.from('67640028acd940780227e5c044000003000400000300f03c60c658', 'hex');
+
+describe('the picture size, read from the stream itself', () => {
+  test('the phone\'s own SPS is the size it streams at', () => {
+    assert.deepEqual(spsSize(SPS_ONEPLUS_576x1280), { w: 576, h: 1280 });
+  });
+  test('High profile, cropped, with emulation prevention bytes', () => {
+    assert.deepEqual(spsSize(SPS_X264_HIGH_1080P), { w: 1920, h: 1080 });
+  });
+  test('anything else is no answer, not a wrong one', () => {
+    assert.equal(spsSize(nal(8, 4)), undefined, 'a PPS');
+    // Filler that Exp-Golomb happily reads as 14x28 — the size every touch would then have named.
+    assert.equal(spsSize(nal(7, 20)), undefined, 'junk read as a picture size');
+    assert.equal(spsSize(SPS_X264_HIGH_1080P.subarray(0, 8)), undefined, 'cut short');
+    assert.equal(spsSize(Buffer.alloc(0)), undefined);
+  });
+});
+
+/** A control socket that records what it is asked to send, and can be made to have died. */
+function fakeControl() {
+  const calls: unknown[][] = [];
+  const c = {
+    calls,
+    alive: true,
+    touch(action: string, id: number, x: number, y: number, v: { w: number; h: number }) { calls.push(['touch', action, id, x, y, v.w, v.h]); return c.alive; },
+    key(k: number) { calls.push(['key', k]); return c.alive; },
+    text(t: string) { calls.push(['text', t]); return c.alive; },
+    resetVideo() { calls.push(['reset']); return c.alive; },
+  };
+  return c satisfies LiveControl & { calls: unknown[][]; alive: boolean };
+}
+
+describe('input over scrcpy\'s control socket, as it happens', () => {
+  const setup = (size?: { w: number; h: number }) => {
+    const adb: unknown[][] = [];
+    const input = {
+      tap: async (...a: unknown[]) => { adb.push(['tap', ...a]); },
+      swipe: async (...a: unknown[]) => { adb.push(['swipe', ...a]); },
+      key: async (...a: unknown[]) => { adb.push(['key', ...a]); },
+      text: async (...a: unknown[]) => { adb.push(['text', ...a]); },
+    };
+    const live: { control?: LiveControl; size?: { w: number; h: number } } = { control: fakeControl(), size };
+    const m = new InputMapper(input, { width: 1080, height: 2400 }, { w: 576, h: 1280 }, live);
+    return { adb, m, live, ctl: () => live.control as ReturnType<typeof fakeControl> };
+  };
+  const touch = (down: number, x: number, y: number, id = 1) => JSON.stringify({ type: 'multi-touch', id: [id], x: [x], y: [y], down });
+
+  test('a drag goes down, every move, then up — in the video\'s pixels, while the finger moves', () => {
+    const { adb, m, ctl } = setup();
+    m.handle(touch(1, 288, 1000));
+    assert.deepEqual(ctl().calls, [['touch', 'down', 1, 288, 1000, 576, 1280]], 'the phone heard nothing until the finger lifted');
+    m.handle(touch(1, 288, 600));
+    m.handle(touch(1, 288, 200));
+    m.handle(touch(0, 288, 200));
+    assert.deepEqual(ctl().calls.map((c) => c[1]), ['down', 'move', 'move', 'up']);
+    assert.deepEqual(adb, [], 'the same drag also went over adb');
+    assert.equal(m.last?.verb, 'release');
+  });
+
+  test('two fingers are two pointers', () => {
+    const { m, ctl } = setup();
+    m.handle(touch(1, 100, 100, 1));
+    m.handle(touch(1, 400, 400, 2));
+    m.handle(touch(0, 100, 100, 1));
+    m.handle(touch(0, 400, 400, 2));
+    assert.deepEqual(ctl().calls.map((c) => `${c[1]}:${c[2]}`), ['down:1', 'down:2', 'up:1', 'up:2']);
+  });
+
+  test('the size the encoder says it is producing wins over the one computed at start', () => {
+    // Turned to landscape: the stream is 1280x576 now, and a touch stating 576x1280 would be dropped.
+    const { m, ctl } = setup({ w: 1280, h: 576 });
+    m.handle(touch(1, 640, 288));
+    assert.deepEqual(ctl().calls[0], ['touch', 'down', 1, 640, 288, 1280, 576]);
+  });
+
+  test('a gesture finishes on the path it began on', () => {
+    const { adb, m, live, ctl } = setup();
+    const control = live.control;
+    live.control = undefined;
+    m.handle(touch(1, 288, 640));                    // began over adb
+    live.control = control;                          // the socket opens mid-press
+    m.handle(touch(0, 288, 640));
+    assert.deepEqual(adb, [['tap', 540, 1200]]);
+    assert.deepEqual(ctl().calls, [], 'an up the phone never saw go down');
+  });
+
+  test('a socket that has died sends the press over adb instead of dropping it', () => {
+    const { adb, m, ctl } = setup();
+    ctl().alive = false;
+    m.handle(touch(1, 288, 640));
+    m.handle(touch(0, 288, 640));
+    assert.deepEqual(adb, [['tap', 540, 1200]]);
+  });
+
+  test('keys are keycodes and characters go one by one, unbatched', () => {
+    const { adb, m, ctl } = setup();
+    const key = (code: string, kind = 'keydown') => m.handle(JSON.stringify({ type: 'keyboard', keycode: code, event_type: kind }));
+    key('ShiftLeft'); key('KeyH'); key('ShiftLeft', 'keyup'); key('KeyI');
+    key('Tab'); key('ArrowDown'); key('Enter'); key('Backspace'); key('F5');
+    assert.deepEqual(ctl().calls, [['text', 'H'], ['text', 'i'], ['key', 61], ['key', 20], ['key', 66], ['key', 67]]);
+    assert.deepEqual(adb, []);
+  });
+
+  test('buttons are the phone\'s keycodes; menu is Recents', () => {
+    const { adb, m, ctl } = setup();
+    m.button(JSON.stringify({ command: 'home', button_state: 'down' }));
+    m.button(JSON.stringify({ command: 'home', button_state: 'up' }));
+    m.button(JSON.stringify({ command: 'menu', button_state: 'down' }));
+    m.button(JSON.stringify({ command: 'power', button_state: 'down' }));
+    assert.deepEqual(ctl().calls, [['key', 3], ['key', 187], ['key', 26]]);
+    assert.deepEqual(adb, []);
   });
 });
 
@@ -128,14 +248,15 @@ describe('the browser input channel, to the phone', () => {
   });
 });
 
-/** A capture the test drives by hand. */
-function scriptedCapture() {
+/** A capture the test drives by hand — with a control socket when given one. */
+function scriptedCapture(control?: LiveControl) {
   let emit: ((n: Buffer, at: number, frame?: FrameMark) => void) | undefined;
   let starts = 0;
   let stops = 0;
   const capture: ScreenCapture & { push(n: Buffer, frame?: FrameMark): void; starts: () => number; stops: () => number } = {
     kind: 'scrcpy',
     stats: { frames: 0, bytes: 0, startedAt: 0 },
+    control,
     async start(onNal) { starts += 1; emit = onNal; },
     async stop() { stops += 1; emit = undefined; },
     push(n, frame) { emit?.(n, Date.now(), frame); },
@@ -162,6 +283,35 @@ describe('one capture per phone, however many viewers', () => {
     offB();
     assert.equal(cap.stops(), 1);
   });
+
+  test('the encoder\'s size is read from its SPS', async () => {
+    const cap = scriptedCapture();
+    const fan = new H264Fanout(() => cap);
+    await fan.subscribe(() => {});
+    cap.push(SPS_ONEPLUS_576x1280);
+    assert.deepEqual(fan.size, { w: 576, h: 1280 });
+    cap.push(nal(7, 3));                             // unreadable: the last good answer stands
+    assert.deepEqual(fan.size, { w: 576, h: 1280 });
+  });
+
+  test('a viewer who joins a running capture is given a keyframe; requests are limited', async () => {
+    const ctl = fakeControl();
+    const cap = scriptedCapture(ctl);
+    const fan = new H264Fanout(() => cap);
+    await fan.subscribe(() => {});
+    assert.deepEqual(ctl.calls, [], 'the first viewer starts the encoder, which begins on a keyframe anyway');
+    await fan.subscribe(() => {});
+    assert.deepEqual(ctl.calls, [['reset']], 'a late viewer waits for a keyframe that a still screen never sends');
+    assert.equal(fan.requestKeyframe(), false, 'a second restart straight after the first');
+    assert.deepEqual(fan.keyframes, { asked: 1, limited: 1 });
+  });
+
+  test('without a control socket there is nothing to ask, and nothing breaks', async () => {
+    const fan = new H264Fanout(() => scriptedCapture());
+    await fan.subscribe(() => {});
+    assert.equal(fan.requestKeyframe(), false);
+    assert.equal(fan.control, undefined);
+  });
 });
 
 /**
@@ -169,13 +319,14 @@ describe('one capture per phone, however many viewers', () => {
  * agent's peer is the production class over a scripted capture.
  */
 describe('a viewer negotiates, receives the screen and sends a touch', () => {
-  test('offer, answer, a keyframe on the wire, and a tap back', { timeout: 30_000 }, async () => {
+  test('offer, answer, a keyframe on the wire, and a tap back', { timeout: 30_000 }, async (t) => {
     /** Bound UDP sockets in this process — the ICE transports. */
     // A socket mid-close throws from `address()`; that one is going, so it does not count.
     const bound = (h: any) => { try { return Boolean(typeof h.address === 'function' && h.address()?.port); } catch { return false; } };
     const udp = () => (process as any)._getActiveHandles().filter(bound).length;
     const before = udp();
-    const cap = scriptedCapture();
+    const ctl = fakeControl();
+    const cap = scriptedCapture(ctl);
     const taps: number[][] = [];
     const input = {
       tap: async (x: number, y: number) => { taps.push([x, y]); },
@@ -183,10 +334,12 @@ describe('a viewer negotiates, receives the screen and sends a touch', () => {
     };
     const toBrowser: Array<Record<string, unknown>> = [];
     let closedWith: string | undefined;
+    // Wired exactly as `PhysicalMedia` wires it: the fanout is the mapper's live input.
+    const fanout = new H264Fanout(() => cap);
     const peer = new PhoneVideoPeer({
       signal: { onPayload: (p) => toBrowser.push(p as Record<string, unknown>), onClose: (r) => { closedWith = r; } },
-      fanout: new H264Fanout(() => cap),
-      input: new InputMapper(input, { width: 1080, height: 2400 }, { w: 576, h: 1280 }),
+      fanout,
+      input: new InputMapper(input, { width: 1080, height: 2400 }, { w: 576, h: 1280 }, fanout),
       label: 'phone-test', video: { w: 576, h: 1280 },
     });
 
@@ -194,12 +347,18 @@ describe('a viewer negotiates, receives the screen and sends a touch', () => {
       codecs: { audio: [], video: [new RTCRtpCodecParameters({ mimeType: 'video/H264', clockRate: 90000,
         parameters: 'profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1' })] },
     });
+    // Torn down even when an assertion fails: left open, both peers' sockets keep the process alive
+    // and the run hangs with the failure unreported.
+    let drain: ReturnType<typeof setInterval> | undefined;
+    t.after(() => { clearInterval(drain); peer.close(); void browser.close(); });
     const inputChannel = browser.createDataChannel('input-channel');
     const received: number[] = [];
     const packets: Array<{ type: number; ts: number; marker: boolean }> = [];
     let streamId = '';
+    let ssrc = 0;
     browser.onTrack.subscribe((track) => {
       track.onReceiveRtp.subscribe((rtp) => {
+        ssrc = rtp.header.ssrc;
         const t = rtp.payload[0] & 0x1f;
         received.push(t === 28 ? rtp.payload[1] & 0x1f : t);
         packets.push({ type: t === 28 ? rtp.payload[1] & 0x1f : t, ts: rtp.header.timestamp, marker: rtp.header.marker });
@@ -231,7 +390,7 @@ describe('a viewer negotiates, receives the screen and sends a touch', () => {
     peer.send({ type: 'answer', sdp: browser.localDescription!.sdp });
     let sent = 0;
     // Read exactly as live.js reads a device's candidate — the SDP's field names, not RTCIceCandidate's.
-    const drain = setInterval(() => {
+    drain = setInterval(() => {
       for (const p of toBrowser.slice(sent)) {
         if (p.type === 'ice-candidate') {
           void browser.addIceCandidate({ sdpMid: p.mid, sdpMLineIndex: p.mLineIndex, candidate: p.candidate } as never);
@@ -252,7 +411,7 @@ describe('a viewer negotiates, receives the screen and sends a touch', () => {
     await waitFor(() => cap.starts() === 1, 'the capture to start');
     // A P-frame before any keyframe must not be sent; the keyframe must arrive with its parameter sets.
     cap.push(nal(1, 400));
-    cap.push(nal(7, 20)); cap.push(nal(8, 6)); cap.push(nal(5, 3000));
+    cap.push(SPS_ONEPLUS_576x1280); cap.push(nal(8, 6)); cap.push(nal(5, 3000));
     await waitFor(() => received.includes(5), 'a keyframe on the wire');
     assert.deepEqual(received.slice(0, 3), [7, 8, 5], 'the viewer started on the keyframe, parameter sets first');
 
@@ -271,7 +430,28 @@ describe('a viewer negotiates, receives the screen and sends a touch', () => {
     assert.deepEqual([a.marker, b.marker], [false, true], 'the marker must end the frame, not each slice');
     assert.equal(((c.ts - b.ts) >>> 0), 3000, 'the encoder\'s 33.3 ms is 3000 ticks of the 90 kHz clock');
 
+    /**
+     * THE VIEWER ASKS FOR A KEYFRAME, AND GETS ONE. A PLI from the browser restarts the encoder; the
+     * restarted encoder's clock may begin again, and the keyframe it sends must still go out AFTER the
+     * last frame — a receiver drops a frame whose timestamp went backwards as a stale copy.
+     */
+    await browser.getReceivers()[0].sendRtcpPLI(ssrc);
+    await waitFor(() => ctl.calls.some((x) => x[0] === 'reset'), 'the PLI to restart the encoder');
+    const afterReset = packets.length;
+    cap.push(nal(7, 20)); cap.push(nal(8, 6));
+    cap.push(nal(5, 600), { last: true, ptsUs: 40_000 });   // the encoder's clock, started again
+    await waitFor(() => packets.slice(afterReset).some((p) => p.type === 5), 'the keyframe after the restart');
+    const idr = packets.slice(afterReset).find((p) => p.type === 5)!;
+    assert.equal(((idr.ts - c.ts) >>> 0), 1500, 'a clock that stepped back must carry on one frame later, not go back');
+
     await waitFor(() => inputChannel.readyState === 'open', 'the input channel');
+    inputChannel.send(JSON.stringify({ type: 'multi-touch', id: [1], x: [288], y: [640], down: 1 }));
+    inputChannel.send(JSON.stringify({ type: 'multi-touch', id: [1], x: [288], y: [640], down: 0 }));
+    // Live: straight to the control socket, in the video's pixels, at the size the phone's SPS declared.
+    await waitFor(() => ctl.calls.filter((x) => x[0] === 'touch').length === 2, 'the touch');
+    assert.deepEqual(ctl.calls.filter((x) => x[0] === 'touch'), [['touch', 'down', 1, 288, 640, 576, 1280], ['touch', 'up', 1, 288, 640, 576, 1280]]);
+    // And over adb when the socket has gone.
+    ctl.alive = false;
     inputChannel.send(JSON.stringify({ type: 'multi-touch', id: [1], x: [288], y: [640], down: 1 }));
     inputChannel.send(JSON.stringify({ type: 'multi-touch', id: [1], x: [288], y: [640], down: 0 }));
     await waitFor(() => taps.length === 1, 'the tap');

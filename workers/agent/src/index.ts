@@ -215,7 +215,12 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
   const liveVideo = Boolean(process.env.SCRCPY_SERVER_PATH && process.env.SCRCPY_SERVER_VERSION)
     && process.env.PHYSICAL_LIVE_VIDEO !== '0';
   const liveVideoMaxSize = Number(process.env.PHYSICAL_VIDEO_MAX_SIZE ?? 1280);
-  if (liveVideo) console.log(`[agent] live video for phones: scrcpy ${process.env.SCRCPY_SERVER_VERSION}, ${liveVideoMaxSize}px on the long side`);
+  // Touches over scrcpy's control socket, streamed as they happen; `0` sends them over adb instead.
+  const liveInput = process.env.PHYSICAL_LIVE_INPUT !== '0';
+  if (liveVideo) {
+    console.log(`[agent] live video for phones: scrcpy ${process.env.SCRCPY_SERVER_VERSION}, ${liveVideoMaxSize}px on the long side`
+      + `, input ${liveInput ? 'live over scrcpy' : 'over adb'}`);
+  }
 
   const backends = usable.map((d) => {
     const localId = localIdForSerial(d.serial);
@@ -238,7 +243,7 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
         liveVideo: {
           maxSize: liveVideoMaxSize,
           makeCapture: () => createCapture({
-            serial: d.serial, maxSize: liveVideoMaxSize, bitRate: 4_000_000, maxFps: 60,
+            serial: d.serial, maxSize: liveVideoMaxSize, bitRate: 4_000_000, maxFps: 60, control: liveInput,
           }),
         },
       } : {}),

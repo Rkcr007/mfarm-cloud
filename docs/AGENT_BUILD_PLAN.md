@@ -125,7 +125,7 @@ Ordered by what a user hits first, not by what is architecturally interesting.
 | ~~M4~~ | ~~Operate a device without video~~ | **Built 2026-10-03** — see below. | — |
 | **S1** | Spike: iPhone on this Mac | Days, gates a quarter of the product. Run it alongside. | 1–2 d |
 | **M5** | The signed binary | Makes M2 and M3 a download instead of a checkout. | 3–5 d |
-| ~~M6~~ | ~~Live video~~ | **Built 2026-10-03** — 60 fps, ~118 ms tap to pixels; see below. | — |
+| ~~M6~~ | ~~Live video~~ | **Built 2026-10-03** — 60 fps; with live input, ~74 ms from a touch to the first frame; see below. | — |
 | **M7** | iOS as a first-class device | The big surface, de-risked by S1. | 8–12 d |
 
 ---
@@ -454,6 +454,7 @@ a few milliseconds and would take ~60 ms off every tap; it would also let the ag
 browser's keyframe request (PLI), which it currently ignores — lost packets are re-sent on NACK,
 but a picture broken on a still screen mends only when the screen next moves. That is the next
 step, not this one. A drag is a swipe decided on release, as in M4, not one that follows the finger.
+(Both built the same day — see **Live input** below.)
 
 **Six things stood between "it typechecks" and a picture, each found by running it:** the offer had
 no data section, so the browser's `input-channel` could never open (found by the werift-to-werift
@@ -465,6 +466,40 @@ its successor begins — scrcpy's own 12-byte frame header now says how long eac
 4.1 renamed the switch for its stream header, so it arrived first and misaligned every frame after
 it (a black picture, no error — the agent now says so). And one leak: werift's default bundle
 policy left three UDP sockets bound per viewer; `max-bundle` closes them, and a test counts them.
+
+### Live input — scrcpy's control socket (2026-10-03)
+
+Measuring M6 through the deployed farm found the cost the browser numbers above did not show: a
+drag reached the phone only as a `swipe` replayed after the finger lifted, so it took 270–300 ms to
+begin moving and never followed the finger. scrcpy's server, already running for the video, now
+takes the input too: a finger's down, every move and its up are written to its control socket as
+they arrive, in the video's own pixels; keys are Android keycodes (Tab, the arrows and Delete come
+with it), text goes per keystroke, and a browser's PLI restarts the encoder for a keyframe — at
+most once a second for every viewer, and once for a viewer joining a capture already running, which
+on a still screen would otherwise wait for a keyframe that never comes. adb remains the fallback,
+per gesture: one that began over adb finishes over adb.
+
+| Through farm.mfarm.dev to the OnePlus, 3 samples each | adb (M6) | control socket |
+|---|---|---|
+| Swipe → first moving frame at the viewer | 269–297 ms | **68–82 ms** |
+| Back → first frame at the viewer | 111–127 ms | **67–75 ms** |
+| Viewer's PLI → keyframe at the viewer | none until the screen moves | **156–162 ms** |
+| Typing "cal" into the launcher's search | batched, 120 ms | per key, exact |
+
+Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
+grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above
+were. The agent's trace agrees: the first frame after a press reaches the agent 63–75 ms after it.
+
+**Three things the run found:** a size has to be read, not computed — scrcpy silently drops a touch
+that states a size other than the one it is encoding at, so the size comes from the stream's own SPS
+(which follows a rotation); the SPS reader then turned the test's filler bytes into a confident
+14×28 (Exp-Golomb reads something out of anything), so every field is now range-checked and junk is
+no answer; and the control socket's message numbers were read out of the 4.1 jar itself, since 4.x
+inserted camera messages and a wrong number is no error on the phone — the server reads a different
+message and carries on. With control on, the server sends no video until the control socket is
+accepted, so the dummy byte comes back as the readiness signal. A first key typed one second after
+opening the launcher's search was lost and the rest arrived — the app was not ready yet, the same
+as for a person typing too soon; typed after it settled, every key arrived.
 
 ---
 
