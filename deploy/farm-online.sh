@@ -36,14 +36,14 @@ CP="${MFARM_CP:-mfarm-cp}"
 # already calls this script changes. See `docs/SECOND_HOST.md`.
 LABS="${MFARM_LABS:-${MFARM_LAB:-mfarm-lab}}"
 
-# WHICH device host publishes `MFARM_TURN_HOST`, because only one of them does.
+# WHICH machine publishes `MFARM_TURN_HOST`: the CONTROL PLANE, since 2026-10-03 (ADR-0047).
 #
-# coturn is a RELAY, not a device service: a browser watching a device on host B is perfectly happy
-# relaying through a coturn on host A, so a second device host needs no second relay and no second
-# reserved address. Defaulting to the first name in the list is what makes a one-host farm behave
-# exactly as it did — and naming the concept separately is what stops somebody adding a host and
-# then wondering why the address check started failing for it.
-RELAY_LAB="${MFARM_RELAY_LAB:-$(set -- $LABS; echo "$1")}"
+# coturn is a RELAY, not a device service: a browser watching a device on any host is perfectly happy
+# relaying through a coturn somewhere else. It used to run on the first device host, and was down
+# whenever that host was — while a phone, streaming from somebody's laptop, needed it with no device
+# host running at all (D67). `MFARM_RELAY_HOST` names another machine; `MFARM_RELAY_LAB`, its old
+# name from when the answer was always a device host, still works.
+RELAY_HOST="${MFARM_RELAY_HOST:-${MFARM_RELAY_LAB:-$CP}}"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -72,7 +72,7 @@ for host in "$CP" $LABS; do
 done
 
 say "Checking the public addresses are still what the configuration says"
-LAB_IP="$(g instances describe "$RELAY_LAB" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
+RELAY_IP="$(g instances describe "$RELAY_HOST" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
 CP_IP="$(g instances describe "$CP" --zone "$ZONE" --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
 
 # BOTH NAMES IN farm.env ARE NOW DOMAINS, so the comparison has to go through DNS.
@@ -116,11 +116,11 @@ check_address() {
   fi
 }
 
-# ONLY THE RELAY HOST IS CHECKED AGAINST `MFARM_TURN_HOST`. A second device host has no reserved
-# address and publishes nothing, so comparing its ephemeral IP to the relay's name would report
-# DRIFT on every start — which is precisely the always-on warning this check was rewritten to stop
-# being. See the twelve-day note above.
-check_address "relay host ($RELAY_LAB)" "$MFARM_TURN_HOST" "$LAB_IP"
+# ONLY THE RELAY HOST IS CHECKED AGAINST `MFARM_TURN_HOST`. A device host has no reserved address
+# of its own any more and publishes nothing, so comparing its ephemeral IP to the relay's name would
+# report DRIFT on every start — which is precisely the always-on warning this check was rewritten to
+# stop being. See the twelve-day note above.
+check_address "relay host ($RELAY_HOST)" "$MFARM_TURN_HOST" "$RELAY_IP"
 # The console's address is load-bearing twice over: the name resolves to it, and the Let's Encrypt
 # certificate was issued for that name. If this drifts, the URL and the cert die together and no
 # amount of restarting fixes it.
@@ -129,8 +129,8 @@ check_address "control plane" "$MFARM_PUBLIC_HOST" "$CP_IP"
 if [ "$DRIFT" -eq 1 ]; then
   printf '\n\033[33m  An address moved. Both are supposed to be reserved:\n'
   printf '    gcloud compute addresses list --project %s\n' "$PROJECT"
-  printf '  Re-attach it, or update deploy/farm.env and re-run deploy/setup-turn.sh on the\n'
-  printf '  device host and deploy/setup-ingress.sh on the control plane.\033[0m\n'
+  printf '  Re-attach it, or update deploy/farm.env and re-run deploy/setup-turn.sh and\n'
+  printf '  deploy/setup-ingress.sh on the control plane.\033[0m\n'
 fi
 
 say "Online"

@@ -63,10 +63,11 @@ gcloud compute instances create mfarm-lab-2 \
 instance.** Cuttlefish needs KVM; without it `cvd start` fails in a way that reads like a Cuttlefish
 problem rather than a VM one.
 
-**No reserved address, and it needs none.** The relay (`coturn`, `turn.mfarm.dev`) stays on the
-first device host: a browser watching a device on host 2 relays through host 1's coturn perfectly
-well, because TURN is a relay and not a device service. That is why `farm-online.sh` checks only the
-**relay host** against `MFARM_TURN_HOST` — see §5.
+**No reserved address, and it needs none.** The relay (`coturn`, `turn.mfarm.dev`) runs on the
+control plane (ADR-0047): a browser watching a device on any host relays through it, because TURN is
+a relay and not a device service. Add the new host's PRIVATE address to `MFARM_RELAY_PEERS` in
+`deploy/farm.env` and re-run `deploy/setup-turn.sh` on the control plane, or the relay will refuse to
+forward to it. `farm-online.sh` checks only the **relay host** against `MFARM_TURN_HOST` — see §5.
 
 ---
 
@@ -154,10 +155,11 @@ Put it in your shell profile, or in `deploy/farm.env` if every operator should g
 
 **Two things the scripts now distinguish, and both matter:**
 
-- **`MFARM_RELAY_LAB`** — which device host publishes `MFARM_TURN_HOST`. Defaults to the first name
-  in `MFARM_LABS`. Only that one is compared against the turn address, because a second host has no
-  reserved address; comparing its ephemeral IP would report DRIFT on every start, which is the
-  always-on warning that check was rewritten to stop being.
+- **`MFARM_RELAY_HOST`** — which machine publishes `MFARM_TURN_HOST`. Defaults to the control plane
+  (ADR-0047); `MFARM_RELAY_LAB` is its old name and still works. Only that machine is compared
+  against the turn address, because a device host has no reserved address; comparing its ephemeral
+  IP would report DRIFT on every start, which is the always-on warning that check was rewritten to
+  stop being.
 - **A host that cannot be described** is now reported as an error rather than as "stopped".
   `check-deployed.sh` used to treat any non-`RUNNING` status as stopped, and an empty status means
   *gcloud could not read the instance* — a typo in the list, or a VM that no longer exists. On a
@@ -210,4 +212,4 @@ you removed all of them:
 |---|---|
 | **The control plane** | one VM, one API process. Rate limiting is in-memory and `TunnelRegistry` is per process — `EXECUTION_ROADMAP.md` S7.3 has the order in which that would have to be fixed. |
 | **Postgres** | one instance on `mfarm-cp`, with backups (`deploy/backup.sh`) and a restore drill. |
-| **The relay** | one coturn, on the relay host. If that host goes, the live view degrades to the direct path — which works on the same network and not across NAT. |
+| **The relay** | one coturn, on the control plane (ADR-0047), so it goes when the control plane does. Without it the live view degrades to the direct path, which works on the same network and not across NAT. |

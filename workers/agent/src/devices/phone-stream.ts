@@ -21,10 +21,6 @@
  * absent, or the socket would not open — it goes the way every other input does, through the held
  * adb shell, where a press is a tap and a drag a swipe replayed once the finger lifts.
  */
-import { createSocket } from 'node:dgram';
-import { connect } from 'node:net';
-import { connect as connectTls } from 'node:tls';
-import { randomBytes } from 'node:crypto';
 import {
   RTCPeerConnection, MediaStreamTrack, MediaStream, RTCRtpCodecParameters, RtpPacket, RtpHeader,
 } from 'werift';
@@ -483,8 +479,6 @@ function iceServersFrom(raw: unknown): IceServer[] {
  */
 const TRACE = process.env.PHYSICAL_VIDEO_TRACE === '1';
 
-/** How long a relay gets to answer before the offer goes without it. */
-const RELAY_PROBE_MS = Number(process.env.PHYSICAL_RELAY_PROBE_MS ?? 1500);
 /** The longest an offer may take. Past it the viewer is told so, rather than left on "negotiating". */
 const OFFER_DEADLINE_MS = Number(process.env.PHYSICAL_OFFER_DEADLINE_MS ?? 15_000);
 /** werift's own default, kept when the console names no STUN server: the phone's public address. */
@@ -503,89 +497,28 @@ export function parseIceUrl(url: string): { scheme: string; host: string; port: 
   };
 }
 
-/** A STUN Binding request with no attributes, and the transaction id an answer must carry. */
-function bindingRequest(): { req: Buffer; id: Buffer } {
-  const id = randomBytes(12);
-  const req = Buffer.alloc(20);
-  req.writeUInt16BE(0x0001, 0);
-  req.writeUInt32BE(0x2112a442, 4);       // the magic cookie
-  id.copy(req, 8);
-  return { req, id };
-}
-
-/** Whether a STUN or TURN server answers a Binding request over UDP within `ms`. Any answer counts. */
-export function answersOverUdp(host: string, port: number, ms = RELAY_PROBE_MS): Promise<boolean> {
-  return new Promise((resolve) => {
-    const { req, id } = bindingRequest();
-    const sock = createSocket(host.includes(':') ? 'udp6' : 'udp4');
-    let done = false;
-    const finish = (ok: boolean) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      try { sock.close(); } catch { /* already closed */ }
-      resolve(ok);
-    };
-    const timer = setTimeout(() => finish(false), ms);
-    sock.on('message', (m) => { if (m.length >= 20 && m.subarray(8, 20).equals(id)) finish(true); });
-    sock.on('error', () => finish(false));
-    sock.send(req, port, host, (e) => { if (e) finish(false); });
-  });
-}
-
 /**
- * The same question over TCP, or TLS for `turns:`. A connection that is accepted and never answered
- * is not an answer: werift would wait on it exactly as long as on a port that drops everything.
- */
-export function answersOverTcp(host: string, port: number, ms = RELAY_PROBE_MS, tls = false): Promise<boolean> {
-  return new Promise((resolve) => {
-    const { req, id } = bindingRequest();
-    const s = tls ? connectTls({ host, port, servername: host }) : connect({ host, port });
-    let got = Buffer.alloc(0);
-    const finish = (ok: boolean) => { clearTimeout(timer); s.destroy(); resolve(ok); };
-    const timer = setTimeout(() => finish(false), ms);
-    s.once(tls ? 'secureConnect' : 'connect', () => s.write(req));
-    s.on('data', (d: Buffer) => {
-      got = Buffer.concat([got, d]);
-      if (got.length >= 20) finish(got.subarray(8, 20).equals(id));
-    });
-    s.once('error', () => finish(false));
-  });
-}
-
-/**
- * ONLY THE RELAYS THAT ANSWER.
+ * THE AGENT NEVER RELAYS ITSELF (D70) — STUN only, whatever the console names.
  *
- * werift will not hand over an offer until every candidate is gathered, and it puts no limit on the
- * relay: a TURN server that never answers holds the offer forever. On the farm that is exactly what
- * happened — the relay host was down, the agent never offered, and the console sat on "negotiating"
- * with a phone on the same desk. So each relay is asked first, briefly, and one that does not answer
- * is left out: a direct path still works, and a relay that is down was never going to carry the call.
- * STUN is left alone — werift bounds that itself.
+ * werift sends every packet down the first pair IT nominated and never moves, and with a relay of its
+ * own that pair can be one of its relay pairs while the browser — the controlled side — settles on
+ * another. Then the media goes out through the relay to a path the browser is not listening on. Found
+ * the day the relay moved to the control plane and became reachable (ADR-0047): with the agent
+ * holding an allocation, Chrome's direct path froze after its first frames and its relayed path
+ * received a megabyte it threw away; a werift viewer, which accepts packets from anywhere, saw none
+ * of it. Without the agent's relay both paths streamed.
+ *
+ * Nothing is lost by it. A browser that needs the relay has its own allocation, and a relayed browser
+ * reaches the agent's public address — that is what STUN is kept for. Only an agent whose network
+ * blocks outbound UDP outright is beyond reach, and that agent's werift relay was the broken path.
+ *
+ * It also retires the relay probe (D67): a relay werift is never given cannot hold its offer.
  */
-export async function reachableIceServers(
-  servers: IceServer[],
-  probe: { udp: typeof answersOverUdp; tcp: typeof answersOverTcp } = { udp: answersOverUdp, tcp: answersOverTcp },
-  onDropped?: (url: string) => void,
-): Promise<IceServer[]> {
-  const checked = await Promise.all(servers.map(async (s): Promise<IceServer | undefined> => {
-    const urls = ([] as string[]).concat(s.urls);
-    const kept = await Promise.all(urls.map(async (url) => {
-      const u = parseIceUrl(url);
-      if (!u) return undefined;
-      if (!u.scheme.startsWith('turn')) return url;
-      const ok = u.transport === 'udp'
-        ? await probe.udp(u.host, u.port)
-        : await probe.tcp(u.host, u.port, RELAY_PROBE_MS, u.scheme === 'turns');
-      if (!ok) onDropped?.(url.replace(/\?.*$/, '') + (u.transport === 'tcp' ? ' (tcp)' : ''));
-      return ok ? url : undefined;
-    }));
-    const live = kept.filter((u): u is string => Boolean(u));
-    return live.length ? { ...s, urls: live } : undefined;
-  }));
-  const out = checked.filter((s): s is IceServer => Boolean(s));
-  const hasStun = out.some((s) => ([] as string[]).concat(s.urls).some((u) => parseIceUrl(u)?.scheme.startsWith('stun')));
-  return hasStun ? out : [...out, { urls: DEFAULT_STUN }];
+export function agentIceServers(servers: IceServer[]): IceServer[] {
+  const stun = servers
+    .map((s) => ({ urls: ([] as string[]).concat(s.urls).filter((u) => parseIceUrl(u)?.scheme.startsWith('stun')) }))
+    .filter((s) => s.urls.length);
+  return stun.length ? stun : [{ urls: DEFAULT_STUN }];
 }
 
 /**
@@ -623,9 +556,7 @@ export class PhoneVideoPeer implements SignalChannel {
   private async offer(iceServers: unknown): Promise<void> {
     if (this.pc || this.closed) return;
     const log = (line: string) => console.log(`[video:${this.o.label}] ${line}`);
-    const servers = await reachableIceServers(iceServersFrom(iceServers), undefined,
-      (url) => log(`the relay ${url} did not answer within ${RELAY_PROBE_MS}ms — offering without it`));
-    if (this.pc || this.closed) return;
+    const servers = agentIceServers(iceServersFrom(iceServers));
     const pc = new RTCPeerConnection({
       iceServers: servers,
       /**

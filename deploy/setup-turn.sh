@@ -13,10 +13,18 @@
 # for a few hours; it names no device and opens no session. Driving a device still requires the
 # Ed25519 grant the worker verifies offline, and ADR-0005 is explicit that the relay is a route.
 #
-# WHERE IT RUNS. On the DEVICE host by preference — the relay wants to be near the media source, and
-# that machine already has the ports. It is the only part of the farm that is deliberately reachable
-# on UDP from the internet, so the cloud firewall has to be opened for it: 3478/udp, 3478/tcp, and
-# 49152-65535/udp for the relayed streams themselves.
+# WHERE IT RUNS. On the CONTROL PLANE, since 2026-10-03 (ADR-0047). It used to run on the device
+# host, near the media source — and was down whenever that host was, which is most of the time now
+# that the host is stopped to save ₹65/hour: a phone streams from somebody's laptop and needs the
+# relay while no Cuttlefish host is running at all (D67). The control plane is the one machine that
+# is always up. It is the only part of the farm that is deliberately reachable on UDP from the
+# internet, so the cloud firewall has to be opened for it: 3478/udp, 3478/tcp, and 49152-65535/udp
+# for the relayed streams themselves — the `mfarm-allow-turn` rule, by the instance tag `mfarm-turn`.
+#
+#   sudo PUBLIC_IP=<the relay's public address> SECRET_FILE=<the API's turn_secret> deploy/setup-turn.sh
+#
+# On the control plane SECRET_FILE is the API's own `deploy/secrets/turn_secret`: the one value both
+# sides must share. `TURN_CONF_OUT=<path>` renders the config there and touches nothing else.
 #
 # WHAT IT COSTS. Bandwidth, and this is the one number in the whole system that scales with VIEWERS
 # rather than with devices (ADR-0005 says so plainly). A relayed 720p-ish software-rendered stream is
@@ -49,7 +57,13 @@ REALM_DEFAULT="${_turn_host:-mfarm.local}"
 PRIVATE_IP="${PRIVATE_IP:-$(hostname -I | awk '{print $1}')}"
 REALM="${TURN_REALM:-$REALM_DEFAULT}"
 STATE_DIR="${STATE_DIR:-$(cd "$(dirname "$0")" && pwd)/.state}"
-SECRET_FILE="$STATE_DIR/turn_secret"
+SECRET_FILE="${SECRET_FILE:-$STATE_DIR/turn_secret}"
+# Render only: write the config here, install nothing, restart nothing. For tests and for review.
+CONF_OUT="${TURN_CONF_OUT:-}"
+CONF_PATH="${CONF_OUT:-/etc/turnserver.conf}"
+# The DEVICE HOSTS' private addresses — the only private addresses the relay may forward to. See the
+# peer rules in the config below.
+RELAY_PEERS="${MFARM_RELAY_PEERS:-}"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
@@ -57,7 +71,9 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 [ -n "$PRIVATE_IP" ] || { echo "Set PRIVATE_IP — coturn must bind its relay sockets to a real local address."; exit 1; }
 
 say "Installing coturn"
-if ! command -v turnserver >/dev/null 2>&1; then
+if [ -n "$CONF_OUT" ]; then
+  echo "    skipped: rendering to $CONF_OUT"
+elif ! command -v turnserver >/dev/null 2>&1; then
   sudo apt-get update -qq
   sudo apt-get install -y -qq coturn
 else
@@ -65,9 +81,9 @@ else
 fi
 
 say "Secret"
-mkdir -p "$STATE_DIR"
-chmod 700 "$STATE_DIR"
 if [ ! -f "$SECRET_FILE" ]; then
+  mkdir -p "$(dirname "$SECRET_FILE")"
+  chmod 700 "$(dirname "$SECRET_FILE")"
   # Generated here and never committed, like every other secret in deploy/. The API derives every
   # per-session credential from it with HMAC-SHA1 (`apps/api/src/turn.ts`), so this one value is the
   # whole trust relationship between the control plane and the relay.
@@ -78,15 +94,22 @@ else
   echo "    reusing $SECRET_FILE"
 fi
 SECRET=$(cat "$SECRET_FILE")
+[ -n "$SECRET" ] || { echo "$SECRET_FILE is empty — coturn and the API must share a real secret."; exit 1; }
 
-say "Writing /etc/turnserver.conf"
+# One `allowed-peer-ip` per device host. Written out before the heredoc so the config stays literal.
+PEER_LINES=""
+for p in ${RELAY_PEERS//,/ }; do PEER_LINES+="allowed-peer-ip=$p"$'\n'; done
+
+write_conf() { if [ -n "$CONF_OUT" ]; then cat > "$CONF_OUT"; else sudo tee "$CONF_PATH" >/dev/null; fi; }
+
+say "Writing $CONF_PATH"
 # NOTE THE ESCAPED BACKTICKS BELOW. This heredoc is deliberately UNQUOTED, because it has to
 # interpolate $PUBLIC_IP, $SECRET and $REALM — which also means the shell performs command
 # substitution on anything in backticks. Two prose comments containing `use-auth-secret` and a
 # filename were executed as commands on the first real run, printing "Permission denied" from a
 # script whose output otherwise read as success. The config values were fine; the comments were
 # silently blanked. Escape every backtick here, or use none.
-sudo tee /etc/turnserver.conf >/dev/null <<EOF
+write_conf <<EOF
 # MFARM media relay. Managed by setup-turn.sh — edit there, not here.
 
 listening-port=3478
@@ -125,16 +148,23 @@ realm=$REALM
 no-loopback-peers
 no-multicast-peers
 denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
 denied-peer-ip=127.0.0.0-127.255.255.255
 denied-peer-ip=169.254.0.0-169.254.255.255
 denied-peer-ip=172.16.0.0-172.31.255.255
 denied-peer-ip=192.168.0.0-192.168.255.255
-# The device host's own VPC range is allowed back in, because the media source IS on this network.
-# Narrow it to the device host's address on a box that shares its subnet with anything else.
-allowed-peer-ip=10.160.0.0-10.160.255.255
-
-# A single stream is a few hundred kbit/s. This caps one viewer, so a bug in a client cannot take
-# the farm's whole uplink.
+# EVERY PRIVATE RANGE IS DENIED, and only the device hosts are let back in, one address each. This
+# used to allow the whole VPC range (10.160.0.0/16) — written for a relay that ran ON the device
+# host, and at that it never denied the rest of 10/8 at all. On the control plane the VPC range
+# includes the control plane itself, so a viewer with ordinary relay credentials could have reached
+# whatever it serves on its private address. 100.64/10 is Tailscale's, which is how operators reach
+# the farm's private services. coturn lets an allowed address through a denied range, which is what
+# makes this shape work. A public peer — a phone's agent on someone's laptop — needs no entry.
+${PEER_LINES}
+# A Cuttlefish stream is a few hundred kbit/s and a phone's up to 4 Mbit/s. \`max-bps\` is BYTES per
+# second per session, so this is 16 Mbit/s: room for a phone, and still a cap on one viewer, so a bug
+# in a client cannot take the farm's whole uplink.
 #
 # Read 486 as a configuration error before believing these numbers: coturn returns "Allocation Quota
 # Reached" for several conditions that have nothing to do with a quota, including having no usable
@@ -150,6 +180,8 @@ no-tlsv1_1
 simple-log
 EOF
 
+[ -n "$CONF_OUT" ] && { echo "    rendered $CONF_OUT"; exit 0; }
+
 say "Restarting coturn"
 # Ubuntu ships coturn disabled behind this flag, and forgetting it produces a service that reports
 # active and exits immediately.
@@ -164,7 +196,9 @@ cat <<EOF
 Add to the API's environment (deploy/.env on the control plane) and restart it:
 
     TURN_URLS=turn:${_turn_host:-$PUBLIC_IP}:3478,turn:${_turn_host:-$PUBLIC_IP}:3478?transport=tcp
-    TURN_SECRET=$SECRET
+    TURN_SECRET=<the contents of $SECRET_FILE>
+
+(Named, not printed — ADR-0045. On the control plane SECRET_FILE already IS the API's secret.)
 
 Then open the cloud firewall for 3478/udp, 3478/tcp and 49152-65535/udp to this host — the same
 range as min-port/max-port above.
