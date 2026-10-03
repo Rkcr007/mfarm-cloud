@@ -501,6 +501,10 @@ Chrome found what the headless viewer could not (D68): it probes a stream that h
 3 s with a PLI, and answering it restarted the encoder every ~4 s on a still screen. A PLI that comes
 after 2 s of stillness, to a viewer that already has its keyframe, is now left unanswered.
 
+Releasing that session found the worse one (D69): the released tab went on receiving the phone's
+screen, with its input channel open, because nothing told the data plane a lease had ended. The
+reset request now closes the device's live connections and retires the allocation's grants.
+
 Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
 grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above
 were. The agent's trace agrees: the first frame after a press reaches the agent 63–75 ms after it.

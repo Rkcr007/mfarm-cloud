@@ -7503,6 +7503,10 @@ function screenCockpit(id) {
   // only place that has both the session detail and the knowledge that the cockpit is on screen.
   // Arriving from the bring-up screen finds a connection already open and reuses it.
   if (live) ensureLive(sess);
+  // ENDED, AND STILL CONNECTED (D69): the cockpit used to open a session's connection and never
+  // close it when the session ended under it, so a released phone went on streaming into this tab.
+  // The agent now closes it from its end; this is the same rule from ours, for any host that does not.
+  else if (state.live?.sessionId === sess.id) closeLive();
   const st = SESSION_STATE[sess.state] || { label: sess.state, tone: '' };
   const device = deviceById(sess.deviceId);
   const app = installedOn(sess.id);

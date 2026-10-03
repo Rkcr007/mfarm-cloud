@@ -228,6 +228,7 @@ export class Agent {
   private readonly fenceHighWater = new Map<string, number>();
   /** Devices currently being restored, so a re-sent heartbeat request cannot start a second one. */
   private readonly resetsInFlight = new Set<string>();
+  private readonly leaseEndedListeners = new Set<(deviceId: string, sessionId?: string) => void>();
   /** Same guard, same reason: the beat re-offers an action that is still running. */
   private readonly actionsInFlight = new Set<string>();
   /** Outcomes waiting to be reported. Flushed alongside metering and resets. */
@@ -867,6 +868,15 @@ export class Agent {
     while (this.republishing) await this.republishing;
   }
 
+  /**
+   * Told when a device's lease is over — the data plane closes that device's live connections.
+   * Returns the unsubscribe.
+   */
+  onLeaseEnded(fn: (deviceId: string, sessionId?: string) => void): () => void {
+    this.leaseEndedListeners.add(fn);
+    return () => { this.leaseEndedListeners.delete(fn); };
+  }
+
   startHeartbeat(intervalMs = 10_000): void {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => { void this.heartbeat(); }, intervalMs);
@@ -1366,6 +1376,24 @@ export class Agent {
     }>,
   ): Promise<void> {
     for (const { deviceId, fence, sessionId, recovery, keepVideo } of requests) {
+      /**
+       * THE LEASE IS OVER, SO ITS LIVE VIEW IS TOO (D69). A reset request is the one signal that
+       * reaches the agent on every way a session ends — a release, an expiry, the reaper — and until
+       * this, nothing passed it on to the data plane, which only tore a viewer down when the browser
+       * closed its socket. A Cuttlefish device hid that: its restore kills the WebRTC it served. A
+       * phone has no restore, so the released console went on receiving its screen — and could have
+       * gone on touching it, under whoever held it next. First, and before every guard below: a
+       * re-sent request, or one for a device this agent cannot reset, ends nobody's lease any less.
+       */
+      // And its grants with it: a grant is verified offline and lives 120 s, so a released browser
+      // could otherwise open the device again inside that window. Every allocation moves the fence
+      // on by one, so the next holder's grants carry `fence + 1` and still pass.
+      this.retireFence(deviceId, fence);
+      for (const fn of this.leaseEndedListeners) {
+        try { fn(deviceId, sessionId); } catch (e) {
+          console.error(`[agent] closing the live view of ${deviceId} failed: ${(e as Error).message}`);
+        }
+      }
       if (this.resetsInFlight.has(deviceId)) continue;
       const backend = this.backendForDeviceId(deviceId);
       if (!backend) {
@@ -1929,6 +1957,11 @@ export class Agent {
     if (fence < high) return false;
     this.fenceHighWater.set(deviceId, fence);
     return true;
+  }
+
+  /** The allocation at `fence` is over: no grant it carried may open the device again (D69). */
+  retireFence(deviceId: string, fence: number): void {
+    if (fence + 1 > (this.fenceHighWater.get(deviceId) ?? 0)) this.fenceHighWater.set(deviceId, fence + 1);
   }
 
   highWater(deviceId: string): number {

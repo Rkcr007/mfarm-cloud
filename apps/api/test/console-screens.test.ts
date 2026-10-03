@@ -1617,6 +1617,25 @@ describe('the copy rules hold', () => {
     assert.match(text, /Released by you/);
     assert.match(text, /back in the pool/);
   });
+
+  /**
+   * D69, from the console's side. Released on the OnePlus, the cockpit kept the session's peer
+   * connection open and the phone went on streaming into the tab. The render is where the cockpit
+   * learns the session ended, so it is where the connection it opened is closed.
+   */
+  test('an ended session\'s connection is closed, and only that session\'s', () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.sessions = [{ ...mod.state.sessions[0], state: 'ENDED', endReason: 'client_request', endedAt: new Date().toISOString() }];
+    mod.state.detail = { ...mod.state.sessions[0] };
+    let closed = 0;
+    mod.state.live = { sessionId: 'sess-other', close: () => { closed += 1; } };
+    mod.SCREENS.cockpit();
+    assert.equal(closed, 0, 'closed a connection belonging to another session');
+    mod.state.live = { sessionId: 'sess-1', close: () => { closed += 1; } };
+    mod.SCREENS.cockpit();
+    assert.equal(closed, 1, 'the ended session\'s connection was left open');
+    assert.equal(mod.state.live, null);
+  });
 });
 
 
