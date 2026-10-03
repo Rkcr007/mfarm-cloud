@@ -18,7 +18,7 @@
 process.env.RATE_LIMIT_MAX = '10000';
 process.env.WORKER_REGISTRATION_TOKEN = 'test-registration-secret';
 
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1869,6 +1869,173 @@ describe('the fleet', () => {
  * These tests are written against the RENDERED RAIL rather than against `toolBtn`, because the bug
  * was at the call site: the component was innocent and the ternary in front of it was not.
  */
+/**
+ * M4 — OPERATE A DEVICE WITHOUT VIDEO.
+ *
+ * On the OnePlus the cockpit said "No live view", and its Inspector read 46 elements off the screen
+ * and then told the tester to "tap anything on the device" with nothing to tap. Every handset is
+ * this device: the physical tier never streams (ADR-0008).
+ */
+describe('a device without video is operated from its picture and its elements', () => {
+  const PHONE = ['input-datachannel', 'install-reset', 'app-install', 'logcat', 'screenshot', 'ui-hierarchy', 'webdriver'];
+
+  /** Every element carrying a class, in document order — the shim's own finder returns the first. */
+  const findAllByClass = (node: any, cls: string): any[] => {
+    const out: any[] = [];
+    const walk = (n: any) => {
+      if (!n || typeof n !== 'object') return;
+      if (typeof n.className === 'string' && n.className.split(/\s+/).includes(cls)) out.push(n);
+      for (const c of n.children ?? []) walk(c);
+    };
+    walk(node);
+    return out;
+  };
+
+  /** A data-plane session that records what the console sends it, and answers reads. */
+  function fakeLive() {
+    const sent: Array<Record<string, unknown>> = [];
+    return {
+      sent,
+      sessionId: 'sess-1',
+      sendControl: (msg: Record<string, unknown>) => { sent.push(msg); return true; },
+      pressButton: () => true,
+      screenshot: async () => ({ id: 's', contentType: 'image/png', data: 'iVBORw0KGgo=', takenAt: new Date().toISOString() }),
+      // The shim parses no XML, so the tree arrives already parsed (see `FORGOT`) rather than read.
+      uiDump: async () => null,
+    };
+  }
+
+  /** What `parseHierarchy` returns for a secure passcode screen's one button. */
+  const FORGOT = {
+    cls: 'android.widget.Button', text: 'Forgot Passcode?', desc: '', id: 'com.app:id/forgot',
+    clickable: true, scrollable: false, enabled: true, x1: 100, y1: 1800, x2: 980, y2: 1920,
+  };
+
+  function cockpitFor(caps: string[], liveState = 'nostream') {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].capabilities = caps;
+    mod.state.devices[0].screen = { width: 1080, height: 2400, density: 480 };
+    mod.state.stage = null;
+    // Earlier suites leave the inspector on; a press while inspecting picks instead of tapping.
+    mod.state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
+    const live = fakeLive();
+    mod.state.live = live;
+    mod.state.liveState = liveState;
+    // Already read, so the first paint does not start a read that outlives the test.
+    mod.state.still = { ...mod.state.still, takenAt: new Date().toISOString(), tried: true, loading: false, error: null };
+    const tree = mod.SCREENS.cockpit();
+    return { tree, live };
+  }
+
+  afterEach(() => { clearTimeout(mod.state.still?.timer); mod.state.live = null; mod.state.stage = null; });
+
+  test('a handset gets the screen, not a "No live view" panel', () => {
+    const { tree } = cockpitFor(PHONE);
+    assert.ok(findByClass(tree, 'still'), 'no screen was drawn for a device that has a picture and elements');
+    assert.doesNotMatch(textOf(tree), /No live view/);
+  });
+
+  test('a device that streams is left to its video', () => {
+    assert.equal(mod.stillMode(['screen-stream', 'screenshot', 'ui-hierarchy']), false);
+    assert.equal(mod.stillMode(PHONE), true);
+    assert.equal(mod.stillMode(['logcat']), false, 'nothing to show, so the old panel is the honest one');
+  });
+
+  /** The verb that was missing. A press on the picture is a tap at that device pixel. */
+  test('pressing the screen taps the device there, and reads the screen again', () => {
+    const { tree, live } = cockpitFor(PHONE);
+    const surface = findByClass(tree, 'still-surface');
+    surface.getBoundingClientRect = () => ({ left: 0, top: 0, width: 300, height: 666.6667 });
+    surface.dispatch('pointerdown', { clientX: 150, clientY: 333.33, pointerId: 1 });
+    surface.dispatch('pointerup', { clientX: 150, clientY: 333.33, pointerId: 1 });
+    assert.deepEqual(live.sent, [{ t: 'tap', x: 540, y: 1200 }]);
+    assert.ok(mod.state.still.timer, 'nothing asked for a new picture of the screen it just changed');
+  });
+
+  test('a drag is a swipe, from where it started to where it ended', () => {
+    const { tree, live } = cockpitFor(PHONE);
+    const surface = findByClass(tree, 'still-surface');
+    surface.getBoundingClientRect = () => ({ left: 0, top: 0, width: 300, height: 666.6667 });
+    surface.dispatch('pointerdown', { clientX: 150, clientY: 600, pointerId: 1 });
+    surface.dispatch('pointerup', { clientX: 150, clientY: 100, pointerId: 1 });
+    assert.equal(live.sent.length, 1);
+    assert.equal(live.sent[0].t, 'swipe');
+    assert.deepEqual([live.sent[0].x1, live.sent[0].y1, live.sent[0].x2, live.sent[0].y2], [540, 2160, 540, 360]);
+  });
+
+  /** Reading a screen for a selector must not be navigating it. */
+  test('while inspecting, a press picks the element and nothing reaches the device', async () => {
+    const { tree, live } = cockpitFor(PHONE);
+    mod.state.inspect.on = true;
+    mod.state.inspect.nodes = [FORGOT];
+    const surface = findByClass(tree, 'still-surface');
+    surface.getBoundingClientRect = () => ({ left: 0, top: 0, width: 300, height: 666.6667 });
+    surface.dispatch('pointerdown', { clientX: 150, clientY: 516, pointerId: 1 });
+    surface.dispatch('pointerup', { clientX: 150, clientY: 516, pointerId: 1 });
+    assert.deepEqual(live.sent, []);
+    assert.equal(mod.state.inspect.picked?.text, 'Forgot Passcode?');
+    mod.state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
+  });
+
+  /**
+   * THE GATE M4 WAS WRITTEN AGAINST: a secure app's picture is blank, and its elements are not.
+   * With no picture the boxes carry the labels, so "Forgot Passcode?" can be found and pressed.
+   */
+  test('with no picture to trust, the elements are drawn with their labels', () => {
+    cockpitFor(PHONE);
+    mod.state.inspect.nodes = [FORGOT];
+    mod.state.still.url = null;
+    mod.state.stage = null;
+    const tree = mod.SCREENS.cockpit();
+    assert.match(textOf(findByClass(tree, 'still-boxes')), /Forgot Passcode\?/);
+    mod.state.inspect.nodes = [];
+  });
+
+  test('typing goes to the device as text, and Enter and Backspace as keys', () => {
+    const { tree, live } = cockpitFor(PHONE);
+    const input = findByClass(tree, 'still-input');
+    input.value = 'hello world';
+    findByClass(tree, 'still-type').dispatch('submit', { preventDefault() {} });
+    const keys = findAllByClass(tree, 'still-key');
+    keys.find((k: any) => k.getAttribute('title') === 'Enter').click();
+    keys.find((k: any) => k.getAttribute('title') === 'Backspace').click();
+    assert.deepEqual(live.sent, [
+      { t: 'text', value: 'hello world' }, { t: 'key', name: 'enter' }, { t: 'key', name: 'backspace' },
+    ]);
+  });
+
+  test('the inspector is offered without a stream', () => {
+    const { tree } = cockpitFor(PHONE);
+    const bar = findByClass(tree, 'devbar');
+    const inspect = (bar?.children ?? []).find((b: any) => /^Inspect elements/.test(b.getAttribute?.('title') ?? ''));
+    assert.ok(inspect, `no inspect control among: ${(bar?.children ?? []).map((b: any) => b.getAttribute?.('title')).join(' | ')}`);
+    assert.doesNotMatch(inspect.getAttribute('title'), /not available until the live view/,
+      'inspecting was still gated on a video this device cannot have');
+  });
+
+  /** The first sight of the screen is a read of it, not a blank frame waiting for a tap. */
+  test('opening the session reads the screen once, silently', async () => {
+    seed({ name: 'cockpit', id: 'sess-1' });
+    mod.state.devices[0].capabilities = PHONE;
+    mod.state.stage = null;
+    const calls: unknown[] = [];
+    mod.state.live = { sessionId: 'sess-1', sendControl: () => true, pressButton: () => true,
+      screenshot: async (o: unknown) => { calls.push(o); return null; }, uiDump: async () => null };
+    mod.state.liveState = 'nostream';
+    mod.state.still = { ...mod.state.still, url: null, takenAt: null, tried: false, loading: false, error: null };
+    mod.SCREENS.cockpit();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(calls, [{ silent: true }],
+      'one silent read — not a capture that fills "Captured this session", and not a read per render');
+  });
+
+  test('device pixels follow the frame proportionally and stay on the screen', () => {
+    const rect = { left: 10, top: 20, width: 300, height: 600 };
+    assert.deepEqual(mod.stillPoint(rect, 160, 320, { w: 1080, h: 2400 }), [540, 1200]);
+    assert.deepEqual(mod.stillPoint(rect, -50, 900, { w: 1080, h: 2400 }), [0, 2400]);
+  });
+});
+
 describe('the cockpit rail explains what it cannot do', () => {
   function railFor(caps: string[]) {
     seed({ name: 'cockpit', id: 'sess-1' });
@@ -2571,7 +2738,10 @@ describe('the cockpit', () => {
    */
   test('a device with no stream names everything that still works', () => {
     const { device } = seed({ name: 'cockpit', id: 'sess-1' });
-    device.capabilities = device.capabilities.filter((c: string) => c !== 'screen-stream');
+    // Nothing to show at all — no stream, no picture, no element tree. A device that HAS a picture or
+    // a tree is operated from them instead (M4); that is tested with the screen-without-video view.
+    device.capabilities = device.capabilities.filter((c: string) =>
+      !['screen-stream', 'screenshot', 'ui-hierarchy'].includes(c));
     const text = textOf(mod.SCREENS.cockpit());
     assert.match(text, /Everything else works/);
     assert.match(text, /Input, keyboard, install, launch, logcat and WebDriver/);

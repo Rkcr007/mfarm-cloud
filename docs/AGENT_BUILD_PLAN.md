@@ -122,7 +122,7 @@ Ordered by what a user hits first, not by what is architecturally interesting.
 | ~~M1~~ | ~~Installing an app actually works~~ | **Done** — shipped as `4cdb6a5`, verified on the handset. | — |
 | ~~M2~~ | ~~The window~~ | **Done** — see below for what it does and does not do. | — |
 | **M3** | Pairing + per-device sharing | The other half of "somebody else can use this". | 3–5 d |
-| **M4** | Operate a device without video | Works on secure apps, where video never will. | 4–6 d |
+| ~~M4~~ | ~~Operate a device without video~~ | **Built 2026-10-03** — see below. | — |
 | **S1** | Spike: iPhone on this Mac | Days, gates a quarter of the product. Run it alongside. | 1–2 d |
 | **M5** | The signed binary | Makes M2 and M3 a download instead of a checkout. | 3–5 d |
 | **M6** | Live video | Known to be useless for secure apps; still right for most. | 5–8 d |
@@ -334,6 +334,12 @@ see exactly that one phone in the console.
 ---
 
 ## M4 — Operate a device without video
+
+**Built 2026-10-03.** The cockpit draws a device that has no `screen-stream` as its latest picture
+with its element tree over it. A press taps, a drag swipes, and a box types — all over the data plane,
+which carried those verbs already. The Inspector works without a stream, and an app that blanks its
+captures is operated from its labelled elements. None of the agent changed: it was a console feature
+that the transport had been waiting for.
 
 **The phase the `FLAG_SECURE` measurement created**, and for this customer it is worth more than M6.
 

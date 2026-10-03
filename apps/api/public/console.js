@@ -22,6 +22,8 @@
  */
 
 import { ATTACHED, LiveSession, parseLogLine, parseHierarchy, nodeAt, selectorsFor } from '/live.js';
+// Re-exported for the tests that drive the screen-without-video view (M4) with a real tree.
+export { parseHierarchy };
 import {
   geometryText, hasChrome, widthDp, classBlurb,
   deviceName, deviceClass, capacityText, freeText as classFreeText,
@@ -377,6 +379,8 @@ export const state = {
    * is no longer there.
    */
   inspect: { on: false, nodes: [], picked: null, at: null, loading: false, error: null },
+  // The screen of a device with no video (M4) — see `stillMode`.
+  still: { url: null, seq: 0, takenAt: null, tried: false, loading: false, again: false, error: null, secure: false, w: 0, h: 0, caps: [], device: null, timer: null },
   /**
    * The device panel's live DOM, kept across renders so the <video> is never destroyed.
    * See `stagePanel`. Cleared only when the viewer closes.
@@ -4423,6 +4427,8 @@ function closeLive() {
   state.log = { lines: [], filter: '', levels: state.log.levels || { E: true, W: true, I: true, D: false }, follow: true, dropped: 0, streaming: false, paused: false };
   state.shots = [];
   state.inspect = { on: false, nodes: [], picked: null, at: null, loading: false, error: null };
+  clearTimeout(state.still?.timer);
+  state.still = { url: null, seq: 0, takenAt: null, tried: false, loading: false, again: false, error: null, secure: false, w: 0, h: 0, caps: [], device: null, timer: null };
   // The panel goes with the connection. Keeping it would re-show the last frame of a device
   // somebody else now holds, which is a stale screen presented as a live one.
   state.stage = null;
@@ -5518,10 +5524,14 @@ function paintToolbar(sess, live, caps) {
    */
   const ctrl = attached;
 
+  // On a device with no video the screen is a picture, so every button that changes the screen
+  // has to ask for a new one (M4).
+  const still = stillMode(caps);
   const press = (cmd) => () => {
     if (!state.live?.pressButton(cmd)) toast('Not connected', 'The device control channel is not open yet.', 'warn');
+    else if (still) stillSoon();
   };
-  const send = (msg) => () => state.live?.sendControl(msg);
+  const send = (msg) => () => { if (state.live?.sendControl(msg) && still) stillSoon(); };
 
   /**
    * `.filter(Boolean)` because the last entry is CONDITIONAL, and `replaceChildren` is not `add()`.
@@ -5555,8 +5565,9 @@ function paintToolbar(sess, live, caps) {
      */
     toolBtn('camera', 'Screenshot', Boolean(live), () => void takeScreenshot(),
       { requires: 'screenshot', declared: caps }),
+    // Inspecting needs a screen to pick from — the video, or on a device without one, its picture.
     toolBtn('inspect', state.inspect.on ? 'Stop inspecting' : 'Inspect elements',
-      streaming, () => setDockTab(state.inspect.on ? 'logs' : 'inspector'),
+      streaming || (still && attached), () => setDockTab(state.inspect.on ? 'logs' : 'inspector'),
       { active: state.inspect.on, requires: 'ui-hierarchy', declared: caps }),
     toolBtn('refresh', 'Reconnect', Boolean(live), () => reconnectLive()),
     h('span', { class: 'devbar-sep' }),
@@ -5679,6 +5690,21 @@ function paintOverlay(sess, live, caps) {
    * DOES still work is the half that stops somebody abandoning a device that would have served
    * them perfectly well.
    */
+  st.overlay.classList.remove('is-still');
+  /**
+   * A DEVICE WITHOUT VIDEO IS STILL OPERATED — M4.
+   *
+   * This panel used to end the story at "No live view", and on a handset that is every session:
+   * the Inspector read the whole screen and then told you to "tap anything on the device" with
+   * nothing to tap. Now the screen is its latest picture, refreshed after everything you do, with
+   * the element tree drawn over it — and taps, drags and typing go to the device by coordinate over
+   * the data plane, which carried those verbs all along.
+   */
+  if (!canStream && stillMode(caps) && ATTACHED.has(state.liveState)) {
+    show(paintStill(deviceById(sess.deviceId), caps));
+    st.overlay.classList.add('is-still');
+    return;
+  }
   if (!canStream) {
     return show(
       // Amber, not grey: document 04 marks this state. It is not a fault, but it IS the reason the
@@ -7646,7 +7672,8 @@ function cockpitDock(sess, live, device, acts) {
   if (!tabs.some((t) => t.key === state.dock)) state.dock = 'logs';
 
   // Arrived on the Inspector (by `I`, or a remembered tab) before the stream was up: start it now.
-  if (state.dock === 'inspector' && live && state.live && state.liveState === 'streaming'
+  if (state.dock === 'inspector' && live && state.live
+    && (state.liveState === 'streaming' || (stillMode(caps) && ATTACHED.has(state.liveState)))
     && !state.inspect.on && !state.inspect.loading) {
     setTimeout(() => { if (state.dock === 'inspector' && !state.inspect.on) void toggleInspect(); }, 0);
   }
@@ -7673,7 +7700,7 @@ function cockpitDock(sess, live, device, acts) {
     steps: () => [sessionFailureCard(sess, live), sessionTestsCard(sess, live), stepsCard(sess)],
     actions: () => [toolsCard(sess, live), actionsCard(sess, acts)],
     evidence: () => [evidenceCard(sess, live), capturesCard()],
-    inspector: () => inspectorCard(caps) || inspectorIdle(live),
+    inspector: () => inspectorCard(caps) || inspectorIdle(live, caps),
     connect: () => [connectCard(sess), vitalsCard()],
   };
 
@@ -7713,11 +7740,11 @@ function cockpitDock(sess, live, device, acts) {
 }
 
 /** The Inspector tab before there is anything to inspect. */
-function inspectorIdle(live) {
+function inspectorIdle(live, caps = []) {
   return h('div', { class: 'ws-note' },
     h('p', { class: 'help', text: !live
       ? 'This session has ended. Inspecting reads the screen of a device you are holding.'
-      : state.liveState === 'streaming'
+      : state.liveState === 'streaming' || (stillMode(caps) && ATTACHED.has(state.liveState))
         ? 'Tap anything on the device and MFARM hands you a selector you can paste into your test. Taps select while this tab is open — nothing reaches the app.'
         : 'Inspecting reads the live screen, so it starts once the live view is connected.' }),
   );
@@ -8839,6 +8866,277 @@ function paintHighlight() {
     width: `${(n.x2 - n.x1) * k}px`, height: `${(n.y2 - n.y1) * k}px`,
   });
   layer.append(box);
+}
+
+/* --------------------------------------------------------- the screen without video (M4) */
+
+/**
+ * Does this device get the screen-without-video view?
+ *
+ * Any device that cannot stream but can show its screen some other way — a picture, its element
+ * tree, or both. That is every handset (ADR-0008: no stream on the physical tier), and it is the
+ * case M4 exists for: an app that sets FLAG_SECURE renders as a black rectangle even in a video,
+ * while its element tree reads back whole, so the tree is how such a screen is operated at all.
+ */
+export function stillMode(caps) {
+  return !caps.includes('screen-stream') && (caps.includes('screenshot') || caps.includes('ui-hierarchy'));
+}
+
+/** How long the screen is given to settle after an input before it is read again. */
+const STILL_SETTLE_MS = 700;
+
+/**
+ * Device pixels for a point on the frame. Clamped, because a drag that ends past the edge must
+ * still name a point on the screen rather than one off it.
+ */
+export function stillPoint(rect, clientX, clientY, size) {
+  const fx = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  const fy = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+  return [Math.round(fx * size.w), Math.round(fy * size.h)];
+}
+
+/** The nodes worth drawing: the ones a person can press or read. A zero-size node is neither. */
+export function stillBoxes(nodes) {
+  return nodes.filter((n) => n.x2 > n.x1 && n.y2 > n.y1 && (n.clickable || n.text || n.desc));
+}
+
+/**
+ * The size of the screen being shown — the picture's own, once there is one, because it follows the
+ * device's orientation and the profile's numbers do not.
+ */
+function stillSize(device) {
+  const s = state.still;
+  if (s.w && s.h) return { w: s.w, h: s.h };
+  return { w: device?.screen?.width || 1080, h: device?.screen?.height || 2400 };
+}
+
+/**
+ * Is this picture blank — the FLAG_SECURE case?
+ *
+ * The middle of the frame only: the status bar is a system window and survives a secure app's
+ * capture, so the top would always look like content. A canvas the browser cannot read (a test,
+ * a tainted image) answers "not blank", which keeps the picture on screen rather than hiding it.
+ */
+function looksBlank(img) {
+  try {
+    const c = document.createElement('canvas');
+    c.width = 24; c.height = 40;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, img.naturalHeight * 0.15, img.naturalWidth, img.naturalHeight * 0.7, 0, 0, 24, 40);
+    const d = g.getImageData(0, 0, 24, 40).data;
+    let lo = 255, hi = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const l = (d[i] + d[i + 1] + d[i + 2]) / 3;
+      if (l < lo) lo = l;
+      if (l > hi) hi = l;
+    }
+    return hi - lo < 10;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the screen: its picture and its element tree, together.
+ *
+ * ONE AT A TIME, and a request made while one is in flight runs once after it rather than being
+ * dropped — three quick taps must end on a picture of the screen after the third. The picture is
+ * taken silently: this is the screen, not a capture somebody asked to keep.
+ */
+async function refreshStill() {
+  const live = state.live;
+  const s = state.still;
+  if (!live) return;
+  if (s.loading) { s.again = true; return; }
+  s.loading = true;
+  s.tried = true;
+  s.error = null;
+  paintStillStatus();
+  const caps = s.caps || [];
+  const [shot, dump] = await Promise.allSettled([
+    caps.includes('screenshot') ? live.screenshot({ silent: true }) : Promise.resolve(null),
+    caps.includes('ui-hierarchy') ? live.uiDump() : Promise.resolve(null),
+  ]);
+  if (state.live !== live) return;
+  if (shot.status === 'fulfilled' && shot.value) {
+    s.url = `data:${shot.value.contentType};base64,${shot.value.data}`;
+    s.seq += 1;
+    s.takenAt = shot.value.takenAt || new Date().toISOString();
+  } else if (shot.status === 'rejected') {
+    s.error = shot.reason?.message || 'The device did not answer the screenshot.';
+  }
+  if (dump.status === 'fulfilled' && dump.value) {
+    state.inspect.nodes = parseHierarchy(dump.value.xml);
+    state.inspect.at = dump.value.takenAt || new Date().toISOString();
+    if (!s.takenAt) s.takenAt = state.inspect.at;
+    // The old pick describes the old screen. Keep it only if the same node is still there.
+    if (state.inspect.picked) {
+      const p = state.inspect.picked;
+      state.inspect.picked = state.inspect.nodes.find((n) => n.cls === p.cls && n.x1 === p.x1 && n.y1 === p.y1) || null;
+    }
+  } else if (dump.status === 'rejected' && !s.error) {
+    s.error = dump.reason?.message || 'The device did not answer the inspector.';
+  }
+  s.loading = false;
+  render();
+  if (s.again) { s.again = false; void refreshStill(); }
+}
+
+/** Ask for a new picture once the screen has had a moment to change. */
+function stillSoon() {
+  clearTimeout(state.still.timer);
+  state.still.timer = setTimeout(() => void refreshStill(), STILL_SETTLE_MS);
+}
+
+/** Send one input to the device, and read the screen again after it. */
+function stillAct(msg) {
+  if (!state.live?.sendControl(msg)) {
+    toast('Not connected', 'The device control channel is not open yet.', 'warn');
+    return;
+  }
+  stillSoon();
+}
+
+/**
+ * The view, built ONCE per stage and kept — like the video beside it. Rebuilding it on the five-
+ * second poll would reload a two-megabyte picture and drop a half-typed line every time.
+ */
+function ensureStill() {
+  const st = state.stage;
+  if (st.still) return st.still;
+  const img = h('img', { class: 'still-img', alt: 'The device screen', draggable: 'false' });
+  const boxes = h('div', { class: 'still-boxes' });
+  const taps = h('div', { class: 'still-taps' });
+  const surface = h('div', { class: 'still-surface', tabindex: '0' }, img, boxes, taps);
+  const status = h('span', { class: 'still-status' });
+  const refresh = h('button', { type: 'button', class: 'still-key', title: 'Read the screen again',
+    onclick: () => void refreshStill() }, icon('refresh', 14));
+  const input = h('input', { class: 'still-input', type: 'text', placeholder: 'Type into the device',
+    'aria-label': 'Type into the device', autocomplete: 'off', spellcheck: 'false' });
+  const form = h('form', { class: 'still-type', onsubmit: (e) => {
+    e.preventDefault();
+    if (!input.value) return;
+    stillAct({ t: 'text', value: input.value });
+    input.value = '';
+  } },
+    input,
+    h('button', { type: 'button', class: 'still-key', title: 'Backspace', text: '⌫', onclick: () => stillAct({ t: 'key', name: 'backspace' }) }),
+    h('button', { type: 'button', class: 'still-key', title: 'Enter', onclick: () => stillAct({ t: 'key', name: 'enter' }) }, icon('enter', 14)));
+  const root = h('div', { class: 'still' }, surface, h('div', { class: 'still-bar' }, status, refresh), form);
+
+  img.addEventListener('load', () => {
+    state.still.w = img.naturalWidth;
+    state.still.h = img.naturalHeight;
+    state.still.secure = looksBlank(img);
+    paintStillBoxes();
+    paintStillStatus();
+  });
+
+  /**
+   * A PRESS IS A TAP AND A DRAG IS A SWIPE, decided on release — the distance is the only honest
+   * way to tell them apart, and deciding on press would send a tap at the start of every scroll.
+   * While inspecting, a press picks instead and nothing reaches the device: reading a screen for a
+   * selector must not be navigating it (the same rule the video follows).
+   */
+  let down = null;
+  surface.addEventListener('pointerdown', (e) => {
+    down = { x: e.clientX, y: e.clientY, at: performance.now(), id: e.pointerId };
+    surface.setPointerCapture?.(e.pointerId);
+    surface.focus();
+  });
+  surface.addEventListener('pointercancel', () => { down = null; });
+  surface.addEventListener('pointerup', (e) => {
+    if (!down || e.pointerId !== down.id) return;
+    const from = down;
+    down = null;
+    const rect = surface.getBoundingClientRect();
+    const size = stillSize(state.still.device);
+    const [x1, y1] = stillPoint(rect, from.x, from.y, size);
+    if (state.inspect.on) { inspectPick(x1, y1); return; }
+    const dot = h('span', { class: 'tap-ripple' });
+    dot.style.left = `${from.x - rect.left}px`;
+    dot.style.top = `${from.y - rect.top}px`;
+    taps.append(dot);
+    setTimeout(() => dot.remove(), 600);
+    if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > 16) {
+      const [x2, y2] = stillPoint(rect, e.clientX, e.clientY, size);
+      const durationMs = Math.max(120, Math.min(1500, Math.round(performance.now() - from.at)));
+      stillAct({ t: 'swipe', x1, y1, x2, y2, durationMs });
+    } else {
+      stillAct({ t: 'tap', x: x1, y: y1 });
+    }
+  });
+
+  st.still = { root, img, boxes, taps, status, input };
+  return st.still;
+}
+
+/** What the bar says about the picture: how old, refreshing, or why it failed. */
+function paintStillStatus() {
+  const v = state.stage?.still;
+  if (!v) return;
+  const s = state.still;
+  v.status.textContent = s.loading
+    ? 'Reading the screen…'
+    : s.error
+      ? s.error
+      : s.secure
+        ? 'This app hides its screen from capture — operate it by its elements'
+        : s.takenAt
+          ? `Screen as of ${when(s.takenAt).split(', ').pop()} — it is read again after each action`
+          : 'Reading the screen…';
+  v.root.dataset.state = s.error ? 'error' : s.loading ? 'loading' : 'ready';
+}
+
+/**
+ * The element tree, over the picture.
+ *
+ * ALWAYS where the picture cannot be trusted — none yet, or a secure app's blank one — because
+ * then the boxes, with their labels, ARE the screen. Over a real picture they appear only while
+ * inspecting, so an ordinary screen is not drawn over: the standing rule that nothing covers the
+ * device has one exception, and it is a mode you turned on.
+ */
+function paintStillBoxes() {
+  const v = state.stage?.still;
+  if (!v) return;
+  const s = state.still;
+  const size = stillSize(s.device);
+  const blind = s.secure || !s.url;
+  const picked = state.inspect.on ? state.inspect.picked : null;
+  const list = blind || state.inspect.on ? stillBoxes(state.inspect.nodes) : [];
+  if (picked && !list.includes(picked)) list.push(picked);
+  const pct = (n) => `${(n * 100).toFixed(3)}%`;
+  v.boxes.replaceChildren(...list.map((n) => {
+    const box = h('div', { class: `still-box${n.clickable ? ' is-clickable' : ''}${n === picked ? ' is-picked' : ''}` },
+      blind && (n.text || n.desc) ? h('span', { class: 'still-label', text: n.text || n.desc }) : null);
+    Object.assign(box.style, {
+      left: pct(n.x1 / size.w), top: pct(n.y1 / size.h),
+      width: pct((n.x2 - n.x1) / size.w), height: pct((n.y2 - n.y1) / size.h),
+    });
+    return box;
+  }));
+  v.root.dataset.blind = blind ? 'yes' : 'no';
+}
+
+/** Bring the view up to date with state, and read the screen the first time it is shown. */
+function paintStill(device, caps) {
+  const v = ensureStill();
+  const s = state.still;
+  s.caps = caps;
+  s.device = device;
+  if (s.url && v.img.dataset.seq !== String(s.seq)) {
+    v.img.src = s.url;
+    v.img.dataset.seq = String(s.seq);
+  }
+  v.img.hidden = !s.url;
+  v.root.dataset.inspect = state.inspect.on ? 'on' : 'off';
+  paintStillBoxes();
+  paintStillStatus();
+  // ONCE. Keyed on having tried, not on having an answer: a read that came back with nothing would
+  // otherwise start another on the render it caused, and that one another — found by a test that
+  // never finished.
+  if (!s.tried) void refreshStill();
+  return v.root;
 }
 
 const QUALITY = {

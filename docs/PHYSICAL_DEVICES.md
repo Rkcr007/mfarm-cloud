@@ -8,9 +8,15 @@ a third backend behind the existing agent, not a second agent.
 the UI inspector, and Appium/WebDriver automation.
 
 **What does not:** the live view. A handset publishes no WebRTC stream the way Cuttlefish does, and
-the honest options are scrcpy-over-RTP (unbuilt) or a screenshot loop (refused — it sets a
-performance baseline that is a lie). A real device shows no live screen and no interactive control
-in the console. It runs tests.
+the honest options are scrcpy-over-RTP (unbuilt) or a screenshot loop presented as video (refused —
+it sets a performance baseline that is a lie).
+
+**What it has instead (M4):** the cockpit shows the phone's screen as its latest picture, read again
+after every action and labelled with when it was taken — never passed off as live. Pressing the
+picture taps the phone there, a drag swipes, and a box under the screen types into it. The element
+tree is drawn over the picture while inspecting, and always when there is no picture worth trusting:
+an app that sets `FLAG_SECURE` captures as a blank frame, and then its elements, with their labels,
+are the screen — which is how a secure passcode screen is operated at all.
 
 ---
 
@@ -388,8 +394,9 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   detects it and withholds `webdriver` (D60 in [DEFECTS.md](DEFECTS.md)); it does not fix it, and
   only the OnePlus has been run. The device still reads `READY` in the console, because `READY` is
   about the lease and not about automation — the capability list is what changes.
-- **No live view or interactive control.** §20/§21 are unbuilt for this tier. Screenshots and the
-  UI inspector work; a moving picture does not.
+- **No live view.** §20/§21's video is unbuilt for this tier. A phone is operated from its picture and
+  its elements instead (see the top of this page); the picture is a few seconds behind the device —
+  about the time a full-resolution `screencap` takes to cross the tunnel — and says so.
 - **No Windows agent.**
 - **Input latency over USB is ~33-55ms p50.** Measured 2026-08-25 on a Samsung SM-S918B (Android
   16): 33ms p50 / 55ms p95 over 100 key events, well inside the 100ms budget `health()` degrades at.
