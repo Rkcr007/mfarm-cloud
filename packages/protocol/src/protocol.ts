@@ -115,6 +115,13 @@ export function canTakeTenantSession(capabilities: readonly string[]): boolean {
 
 export interface WorkerRegistration {
   protocolVersion: number;
+  /**
+   * Devices this agent cannot see right now, by local id, with a short reason — "it is not on USB",
+   * "it is not answering" (067, D62). The same map rides every heartbeat. An away device registers
+   * OFFLINE and is given back when the agent stops naming it. Absent from an older agent, which
+   * changes nothing; `{}` means all of its devices are here.
+   */
+  away?: Record<string, string>;
   hostId?: string;
   hostname: string;
   region: string;

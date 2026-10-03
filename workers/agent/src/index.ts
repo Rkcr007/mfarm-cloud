@@ -937,6 +937,7 @@ async function main(): Promise<void> {
         if (onUsb) { try { prerequisite = (await dev.prerequisites()).find((p) => p.blocks); } catch { /* keep */ } }
         const blocker = phoneBlocker({ onUsb, health: agent.healthOf(localId), prerequisite });
         offer.blockedBy(localId, blocker?.reason);
+        agent.setAway(localId, blocker?.away ? blocker.reason : undefined);
         if (blocker && blocker.reason !== was) {
           console.warn(
             `[agent] ${localId}: ${blocker.reason} — \`webdriver\` withdrawn for it on the next `

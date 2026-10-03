@@ -36,6 +36,49 @@ type Credential =
   | { kind: 'rereg'; orgId: string | null }                  // a host that already has an identity
   | { kind: 'bad'; why: string };
 
+/**
+ * What an agent says about which of its devices are AWAY — D62, migration 067.
+ *
+ * `away` maps a device's local id to a short reason ("it is not on USB"). Coerced, not trusted: a
+ * worker is authenticated and still not trusted to send well-formed data, and a bad entry is dropped
+ * rather than allowed to fail the beat it rides on. An agent too old to send the field sends
+ * `undefined`, which is NOT the same as `{}` — the first changes nothing, the second says "all of
+ * mine are here" and gives back anything the beat took.
+ */
+export function awayOf(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string' && k.length <= 200) out[k] = v.slice(0, 200);
+  }
+  return out;
+}
+
+/**
+ * Take the away devices out of the pool, and give back the ones that are here again.
+ *
+ * Two statements that write nothing on an ordinary beat. ONLY READY IS TAKEN — a lease, a reset or a
+ * quarantine owns its device — and only a device this took (`away_since` set) is given back, so the
+ * other meanings of OFFLINE are never promoted. See 067.
+ */
+async function applyAway(
+  c: { query: (sql: string, params: unknown[]) => Promise<unknown> },
+  hostId: string, away: Record<string, string>,
+): Promise<void> {
+  await c.query(
+    `UPDATE devices d
+        SET state = 'OFFLINE', away_since = now(), away_reason = w.value, updated_at = now()
+       FROM jsonb_each_text($2::jsonb) w
+      WHERE d.host_id = $1 AND d.local_id = w.key AND d.state = 'READY'`,
+    [hostId, JSON.stringify(away)]);
+  await c.query(
+    `UPDATE devices
+        SET state = 'READY', away_since = NULL, away_reason = NULL, updated_at = now()
+      WHERE host_id = $1 AND away_since IS NOT NULL AND state = 'OFFLINE'
+        AND NOT (local_id = ANY($2::text[]))`,
+    [hostId, Object.keys(away)]);
+}
+
 export async function workerRoutes(app: FastifyInstance) {
   /**
    * Bootstrap. This is the one endpoint a worker can reach before it has an identity, and it is
@@ -231,15 +274,18 @@ export async function workerRoutes(app: FastifyInstance) {
       if (enrollmentId) await markRedeemed(c, enrollmentId, hostId);
 
       const schedulable = new Set(result.schedulable);
+      // What the agent says about which of these it cannot see (067). Absent from an older agent.
+      const awayAtRegistration = awayOf((reg as { away?: unknown }).away) ?? {};
       const deviceIds: Record<string, string> = {};
       for (const d of reg.devices ?? []) {
         const { rows: dev } = await c.query(
           `INSERT INTO devices (host_id, region, platform, tier, model, os_version,
                                 capabilities, local_id, state, automation_endpoint,
                                 adb_serial, system_port, mjpeg_server_port, org_id,
-                                profile, screen, abis)
+                                profile, screen, abis, away_since, away_reason)
            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,
-                   $15,$16::jsonb,$17::jsonb)
+                   $15,$16::jsonb,$17::jsonb,
+                   CASE WHEN $18::text IS NULL THEN NULL ELSE now() END, $18::text)
            ON CONFLICT (host_id, local_id) WHERE local_id IS NOT NULL DO UPDATE SET
              capabilities = EXCLUDED.capabilities,
              -- Re-asserted every registration, exactly like model and os_version above. A device
@@ -310,13 +356,30 @@ export async function workerRoutes(app: FastifyInstance) {
                WHEN devices.state IN ('READY', 'OFFLINE', 'QUARANTINED') THEN EXCLUDED.state
                ELSE devices.state
              END,
+             -- AWAY IS RE-ASSERTED LIKE THE STATE BESIDE IT (067): the agent's word at registration
+             -- is the truth, so a device it can see again sheds the mark and one it cannot is
+             -- marked. Except a device its host's quarantine is holding: that one keeps the mark it
+             -- had, because the release will put it back to the state it was taken from and the
+             -- next beat needs the mark to know whether it may give it back.
+             away_since = CASE
+               WHEN devices.state = 'QUARANTINED' AND devices.quarantined_from IS NOT NULL
+                 THEN devices.away_since
+               WHEN $18::text IS NULL THEN NULL
+               ELSE COALESCE(devices.away_since, now())
+             END,
+             away_reason = CASE
+               WHEN devices.state = 'QUARANTINED' AND devices.quarantined_from IS NOT NULL
+                 THEN devices.away_reason
+               ELSE $18::text
+             END,
              updated_at = now()
            RETURNING id`,
           [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,
            JSON.stringify(d.capabilities), d.localId,
            // A device that can reset by neither mechanism, or lacks persistent input, registers so
            // it stays visible and monitorable, but starts OFFLINE — it is never handed to a tenant.
-           schedulable.has(d.localId) ? 'READY' : 'OFFLINE',
+           // An away device starts OFFLINE whatever else is true of it: it is not there to schedule.
+           schedulable.has(d.localId) && !awayAtRegistration[d.localId] ? 'READY' : 'OFFLINE',
            // v1 workers name one server for the whole host; v2 names one per device. Resolved in
            // `packages/protocol` so the hub's COALESCE and this write cannot drift apart.
            deviceAutomationEndpoint(reg, d) ?? null,
@@ -327,7 +390,8 @@ export async function workerRoutes(app: FastifyInstance) {
            // nothing and block every install on it (ADR-0016).
            d.profile ?? null,
            d.screen ? JSON.stringify(d.screen) : null,
-           d.abis ? JSON.stringify(d.abis) : null],
+           d.abis ? JSON.stringify(d.abis) : null,
+           (d.localId && awayAtRegistration[d.localId]) || null],
         );
         if (d.localId && dev[0]?.id) deviceIds[d.localId] = dev[0].id as string;
       }
@@ -604,6 +668,11 @@ export async function workerRoutes(app: FastifyInstance) {
            num('memAvailableMb'), num('memTotalMb'), num('cores')],
         );
       }
+
+      // Which devices the agent cannot see. Before the endpoint reconciliation below, which does not
+      // read state and so is unaffected by the order.
+      const away = awayOf((beat as { away?: unknown }).away);
+      if (away) await applyAway(c, hostId, away);
 
       if (beat.devices && typeof beat.devices === 'object' && !Array.isArray(beat.devices)) {
         const serving = beat.devices as Record<string, unknown>;

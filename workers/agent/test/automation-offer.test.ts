@@ -123,10 +123,20 @@ describe('why a phone is not offered', () => {
 
   test('what the phone is missing is the reason once it is there to be asked', () => {
     assert.deepEqual(phoneBlocker({ onUsb: true, health: 'healthy', prerequisite: missing }),
-      { reason: 'refuses adb', remedy: 'flip the switch' });
+      { reason: 'refuses adb', remedy: 'flip the switch', away: false });
   });
 
   test('and being gone outranks it, because the remedy for gone is the cable', () => {
     assert.equal(phoneBlocker({ onUsb: false, health: 'offline', prerequisite: missing })?.reason, 'it is not on USB');
+  });
+
+  /**
+   * D62. Gone and not answering take the phone out of the pool for everybody; a missing prerequisite
+   * takes it away from WebDriver only — the phone is there, and a person can still use its screen.
+   */
+  test('only a phone that is not there is away', () => {
+    assert.equal(phoneBlocker({ onUsb: false, health: 'healthy' })?.away, true);
+    assert.equal(phoneBlocker({ onUsb: true, health: 'offline' })?.away, true);
+    assert.equal(phoneBlocker({ onUsb: true, health: 'healthy', prerequisite: missing })?.away, false);
   });
 });

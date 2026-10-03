@@ -748,6 +748,44 @@ describe('outcome reporting in the console', () => {
  * A physical handset and a Cuttlefish differ in what a result from them means, and a console that
  * renders them identically quietly invites someone to trust an emulator run as if it were a phone.
  */
+/**
+ * D62. A rebooting OnePlus read AVAILABLE with a Start button while its agent knew it was gone. Now
+ * the agent says so, the farm takes it OFFLINE — and this is the sentence that says why, in place of
+ * OFFLINE's generic "The host has not reported it", which was false: the host had reported it.
+ */
+describe('a phone its agent cannot see says so', () => {
+  const away = (state: string, awayField?: Record<string, unknown>) => {
+    seed({ name: 'devices' });
+    mod.state.devices = [
+      ...mod.state.devices,
+      {
+        id: 'dev-away', region: 'lab', platform: 'android', tier: 'physical',
+        model: 'KB2001', osVersion: '14', state, dedicated: true,
+        capabilities: ['input-datachannel', 'install-reset', 'app-install'],
+        screen: { width: 1080, height: 2400, density: 480 },
+        ...(awayField ? { away: awayField } : {}),
+      },
+    ];
+  };
+
+  test('the fleet names what the agent said, not that the host was silent', () => {
+    away('OFFLINE', { since: new Date(Date.now() - 90_000).toISOString(), reason: 'it is not on USB' });
+    const text = textOf(mod.SCREENS.devices());
+    assert.match(text, /Its agent says it is not on USB/);
+  });
+
+  test('an offline device nobody explained still reads as the host not reporting it', () => {
+    away('OFFLINE');
+    assert.match(textOf(mod.SCREENS.devices()), /The host has not reported it/);
+  });
+
+  /** The mark means nothing beside any other state, and must not leak onto an available row. */
+  test('an available device never carries the sentence', () => {
+    away('READY', { since: new Date().toISOString(), reason: 'it is not on USB' });
+    assert.doesNotMatch(textOf(mod.SCREENS.devices()), /Its agent says/);
+  });
+});
+
 describe('real and virtual devices are told apart', () => {
   /** A handset as the agent registers one: physical tier, session-reset, and no stream. */
   function withPhone() {

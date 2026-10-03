@@ -432,6 +432,15 @@ const DEVICE_STATE = {
 };
 
 /**
+ * An OFFLINE device whose own agent said why — "Its agent says it is not on USB" — or nothing.
+ *
+ * D62. Before the agent could say so, OFFLINE's generic note ("The host has not reported it") was
+ * the only sentence available, and for a phone that was rebooting it was false: the host had
+ * reported it, precisely. Only for OFFLINE — the mark means nothing beside any other state.
+ */
+const awayNote = (d) => (d?.state === 'OFFLINE' && d.away?.reason ? `Its agent says ${d.away.reason}` : null);
+
+/**
  * States a device comes back from ON ITS OWN — the ones "busy" honestly describes.
  *
  * Deliberately a set of the states that RESOLVE, not the complement of READY. `QUARANTINED`,
@@ -2658,7 +2667,7 @@ function deviceCard(d) {
     // look at a phone that is fine. Same rule as the Launch screen's "busy" fix: two screens must
     // not describe one device differently, and neither may describe it wrongly.
     h('p', { class: 'help row tight' }, h('span', { class: `dot ${st.tone}` }),
-      d.quarantine?.reason || d.recovery?.fromReason || st.note),
+      awayNote(d) || d.quarantine?.reason || d.recovery?.fromReason || st.note),
 
     h('div', { class: 'device-meta' },
       // Screen joins the four facts that were always here, and it is the one a tester reads first:
@@ -3169,9 +3178,11 @@ function fleetCapacity() {
           // a quarantine has stood. Both are facts the state alone does not carry.
           sess?.expiresAt
             ? ticker('until', sess.expiresAt, { suffix: ' left', cls: 'caption' })
-            : d.quarantine?.at
-              ? h('span', { class: 'caption', text: ago(d.quarantine.at) })
-              : null,
+            : awayNote(d)
+              ? h('span', { class: 'caption', text: ago(d.away.since) })
+              : d.quarantine?.at
+                ? h('span', { class: 'caption', text: ago(d.quarantine.at) })
+                : null,
         )),
 
         /**
@@ -3197,7 +3208,7 @@ function fleetCapacity() {
             ? h('span', { class: 'stack none' },
                 h('span', { class: 'caption bad-text', text: 'its reset gave up' }),
                 h('span', { class: 'caption', text: `${ago(d.resetEscalation.at)} — open it to resume` }))
-            : h('span', { class: 'caption', text: d.quarantine?.reason || (d.state === 'READY' ? '—' : st.note) })),
+            : h('span', { class: 'caption', text: awayNote(d) || d.quarantine?.reason || (d.state === 'READY' ? '—' : st.note) })),
 
         /**
          * ONE ACTION PER ROW, and it is the one that applies to THIS device in THIS state. Start
