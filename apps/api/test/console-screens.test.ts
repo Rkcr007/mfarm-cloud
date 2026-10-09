@@ -1805,6 +1805,19 @@ describe('the fleet', () => {
     });
 
     /**
+     * D73. A phone on a laptop its own org enrolled is out of the pool the same way while that
+     * laptop sleeps — and "Start host…" beside it opened the confirmation to start the DEVICE HOST:
+     * a different machine, at ₹65 an hour, that would not have brought the phone back.
+     */
+    test('a device on a machine its own org enrolled is offered neither Start host nor Recover', () => {
+      hostOff('its host stopped beating');
+      mod.state.devices = [{ ...mod.state.devices[0], dedicated: true }];
+      const tree = mod.SCREENS.fleet();
+      assert.ok(!findByText(tree, 'Start host…'), 'the farm\'s host was offered for somebody else\'s laptop');
+      assert.ok(!findByText(tree, 'Recover'), 'Recover asks the laptop that is not answering');
+    });
+
+    /**
      * "NOT RUNNING", NEVER "OFF". Fleet does not load the infrastructure snapshot, so a start may be
      * in flight and unknown here — and it was, on the farm, thirty seconds after Start was pressed.
      */
@@ -5001,15 +5014,46 @@ describe('the infrastructure operations centre', () => {
   test('an operator sees a powered-on host and what it costs an hour', () => {
     seed({ name: 'fleet' });
     mod.state.me.operator = true;
-    mod.state.hosts = { list: [{ id: 'h1', uptimeSeconds: 3600 }, { id: 'h2', uptimeSeconds: null }], rate: { hourly: 65, currency: '₹' }, loaded: true, failed: false };
+    mod.state.hosts = {
+      list: [
+        { id: 'h1', kind: 'fleet', ratePerHour: 65, uptimeSeconds: 3600 },
+        { id: 'h2', kind: 'fleet', ratePerHour: 65, uptimeSeconds: null },
+      ],
+      rate: { hourly: 65, currency: '₹' }, loaded: true, failed: false,
+    };
     assert.deepEqual(mod.hostSegment(), { text: 'Host on · ₹65/hr', tone: 'warn' });
 
     mod.state.hosts.list[1].uptimeSeconds = 60;
     assert.equal(mod.hostSegment().text, '2 hosts on · ₹130/hr');
 
+    // Each host at its OWN rate, not the default times the count.
+    mod.state.hosts.list[1].ratePerHour = 140;
+    assert.equal(mod.hostSegment().text, '2 hosts on · ₹205/hr');
+
     // No rate configured is not a zero.
+    for (const hst of mod.state.hosts.list) hst.ratePerHour = null;
     mod.state.hosts.rate = null;
     assert.equal(mod.hostSegment().text, '2 hosts on');
+  });
+
+  /**
+   * D73. With the device host switched off and a MacBook connected to share two phones, the bar
+   * read "Host on · ₹65/hr". Nothing the farm pays for was on.
+   */
+  test('a laptop somebody enrolled is not a host that is on', () => {
+    seed({ name: 'fleet' });
+    mod.state.me.operator = true;
+    mod.state.hosts = {
+      list: [
+        { id: 'lab', kind: 'fleet', ratePerHour: 65, uptimeSeconds: null },
+        { id: 'mac', kind: 'enrolled', ratePerHour: null, uptimeSeconds: 7200 },
+      ],
+      rate: { hourly: 65, currency: '₹' }, loaded: true, failed: false,
+    };
+    assert.deepEqual(mod.hostSegment(), { text: 'Hosts off', tone: '' });
+
+    mod.state.hosts.list[0].uptimeSeconds = 60;
+    assert.equal(mod.hostSegment().text, 'Host on · ₹65/hr', 'the laptop was counted beside the lab');
   });
 
   test('a refused hosts request is not "Hosts off"', () => {
@@ -5030,6 +5074,95 @@ describe('the infrastructure operations centre', () => {
   test('the console no longer paints a burn segment anywhere', async () => {
     const js = await readFile(join(PUBLIC, 'console.js'), 'utf8');
     assert.ok(!/\$\('fs-burn'\)/.test(js), 'console.js still writes the burn segment');
+  });
+
+  /* ---------------------------------------------------------------- enrolled agents (D73, ADR-0050) */
+
+  /** What the overview sends for a closed laptop that enrolled itself to share two phones. */
+  const enrolledHost = (over: Record<string, unknown> = {}) => ({
+    id: 'mac-1', hostname: 'someones-macbook.local', kind: 'enrolled',
+    owner: { orgId: 'org-1', name: 'Acme Phones' }, region: 'lab', state: 'QUARANTINED',
+    power: 'away', reachability: 'unavailable', tunnelConnected: false,
+    upSince: null, uptimeSeconds: null, lastHeartbeatAt: new Date(Date.now() - 3 * 3600_000).toISOString(),
+    heartbeatAgeSeconds: 3 * 3600, protocolVersion: 2, specs: { cores: 8, memoryMb: 16384 },
+    machine: { at: null, ageSeconds: null, status: 'unknown' },
+    devices: { total: 2, ready: 0, allocated: 0, quarantined: 2, offline: 0 },
+    sessions: { active: 0 }, powerable: false,
+    maintenance: { drained: false, since: null, reason: null, source: 'reaper' },
+    cost: { perHour: null, sinceUp: null, today: null, monthToDate: null },
+    utilisationPct: null, alerts: [], ...over,
+  });
+
+  /**
+   * A button whose label is EXACTLY this. `findByText` matches by substring, so asking it for
+   * "Start" would also find "Start host…" or "Starting…" — and a test that a button is ABSENT has to
+   * be one that could have found it.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const buttonNamed = (node: unknown, label: string): any => {
+    const n = node as { tagName?: string; children?: unknown[] };
+    if (Array.isArray(node)) {
+      for (const c of node) { const hit = buttonNamed(c, label); if (hit) return hit; }
+      return null;
+    }
+    if (!n || typeof n !== 'object') return null;
+    if (n.tagName === 'BUTTON' && textOf(n).trim() === label) return n;
+    for (const c of n.children || []) { const hit = buttonNamed(c, label); if (hit) return hit; }
+    return null;
+  };
+
+  test('an enrolled agent is listed apart from the farm\'s hosts, as away rather than as a fault', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({
+      capabilities: { drain: true, power: true, services: false, retire: true },
+      enrolled: [enrolledHost()],
+    });
+    const text = textOf(mod.SCREENS.infra());
+
+    assert.match(text, /Enrolled agents/);
+    assert.match(text, /someones-macbook\.local/);
+    assert.match(text, /enrolled by Acme Phones/);
+    assert.match(text, /away/);
+    assert.match(text, /last seen/);
+    // Nothing a farm host's card says about money or wasted capacity is said about it.
+    assert.ok(!/someones-macbook\.local[^]*since it came up[^]*someones-macbook/.test(text));
+    assert.match(text, /they cost it nothing/);
+  });
+
+  test('an enrolled agent is never offered Start or Stop, and can still be retired once it is gone', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    // No fleet host at all, so any power button on the page could only belong to the laptop.
+    mod.state.infra.data = infraPayload({
+      capabilities: { drain: true, power: true, services: false, retire: true },
+      hosts: [],
+      enrolled: [enrolledHost()],
+    });
+    const tree = mod.SCREENS.infra();
+
+    for (const label of ['Start', 'Stop', 'Restart']) {
+      assert.equal(buttonNamed(tree, label), null, `a ${label} button was drawn for somebody's laptop`);
+    }
+    assert.ok(buttonNamed(tree, 'Retire'), 'a machine that is not coming back cannot be taken off the page');
+    const text = textOf(tree);
+    assert.match(text, /The farm has no host of its own/);
+    assert.ok(!/No host has ever registered/.test(text), 'a connected agent was reported as no host at all');
+  });
+
+  test('the farm\'s counts and its headline do not include an enrolled agent', () => {
+    seed({ name: 'infra', lens: 'overview' });
+    mod.state.infra.data = infraPayload({ enrolled: [enrolledHost(), enrolledHost({ id: 'mac-2', power: 'running', reachability: 'live' })] });
+    const text = textOf(mod.SCREENS.infra());
+    // Two fleet hosts in the fixture, both running. Four machines are connected in all.
+    assert.match(text, /2 of 2 hosts powered on/);
+    assert.ok(!/of 4 hosts|3 of|4 of 4/.test(text), 'an enrolled agent was counted as one of the farm\'s hosts');
+  });
+
+  test('the capacity page says what it left out, in words', () => {
+    seed({ name: 'infra', lens: 'devices' });
+    const data = infraPayload();
+    (data.fleet as Record<string, unknown>).enrolledDevices = { total: 2, ready: 0, allocated: 0 };
+    mod.state.infra.data = data;
+    assert.match(textOf(mod.SCREENS.infra()), /Not counted above: 2 devices on machines orgs enrolled themselves/);
   });
 
   /* ---------------------------------------------------------------- freshness */

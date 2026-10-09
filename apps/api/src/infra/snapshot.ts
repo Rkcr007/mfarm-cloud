@@ -3,6 +3,7 @@ import { loadConfig } from '../config.ts';
 import { backupState, volumeState } from './storage.ts';
 import { giveUpMs } from './reconcile.ts';
 import { stopGraceMs } from './stopGrace.ts';
+import { hostHourlyRate, hostKind, type HostKind } from './rates.ts';
 
 /**
  * Everything the Infrastructure page reads, assembled once.
@@ -97,6 +98,15 @@ export interface Measurement<T> {
 export interface HostSnapshot {
   id: string;
   hostname: string;
+  /**
+   * The farm's own machine, or one an org enrolled (D73, ADR-0050).
+   *
+   * An enrolled host is somebody's laptop sharing their phones. It is not capacity the farm rents,
+   * so it has no rate, its silence is not an incident, and nothing below counts it in a rollup.
+   */
+  kind: HostKind;
+  /** The org that enrolled it. Null for a fleet host. */
+  owner: { orgId: string; name: string | null } | null;
   region: string;
   /** The control plane's own state machine: UP, DOWN, QUARANTINED. */
   state: string;
@@ -105,7 +115,11 @@ export interface HostSnapshot {
    * `state`. A drained host is RUNNING and QUARANTINED at the same time, and an operations page
    * that showed only one of those would be hiding the expensive half.
    */
-  power: 'running' | 'starting' | 'stopping' | 'stopped' | 'unknown';
+  /**
+   * `away` is an enrolled host that is not connected. It is not `unknown`: a laptop that is closed
+   * is doing exactly what laptops do, and nobody is going to start it from here.
+   */
+  power: 'running' | 'starting' | 'stopping' | 'stopped' | 'unknown' | 'away';
   reachability: Freshness;
   /** True only while the agent's tunnel socket is open. The live-view path depends on this. */
   tunnelConnected: boolean;
@@ -179,6 +193,7 @@ export interface HealthComponent {
 
 interface HostRow {
   id: string; hostname: string; region: string; state: string;
+  org_id: string | null; org_name: string | null;
   up_since: Date | null; last_heartbeat_at: Date | null; protocol_version: number;
   cores: number | null; memory_mb: number | null;
   quarantined_at: Date | null; quarantine_reason: string | null; quarantine_source: string | null;
@@ -236,12 +251,10 @@ export async function hostSnapshots(
   reachable: (hostId: string) => boolean,
   providerStopped: ReadonlySet<string> = new Set(),
 ): Promise<HostSnapshot[]> {
-  const cfg = loadConfig();
-  const hourly = cfg.hostHourlyCost;
-
   const rows = await withSystem(async (c) => {
     const { rows } = await c.query<HostRow>(
       `SELECT h.id, h.hostname, h.region, h.state, h.up_since, h.last_heartbeat_at,
+              h.org_id, o.name AS org_name,
               h.protocol_version, h.cores, h.memory_mb,
               h.quarantined_at, h.quarantine_reason, h.quarantine_source,
               h.disk_free_bytes, h.disk_total_bytes, h.load1,
@@ -254,6 +267,9 @@ export async function hostSnapshots(
               op.action AS power_op_action, op.result AS power_op_result,
               op.requested_at AS power_op_at
          FROM hosts h
+         -- Whose machine it is. The name is for the operator's page, which is fleet-wide by
+         -- definition; no tenant route reads this.
+         LEFT JOIN orgs o ON o.id = h.org_id
          LEFT JOIN LATERAL (
            SELECT count(*)                                              AS device_count,
                   count(*) FILTER (WHERE dv.state = 'READY')            AS ready_count,
@@ -319,6 +335,10 @@ export async function hostSnapshots(
 
   const now = Date.now();
   return rows.map((h) => {
+    const kind = hostKind(h.org_id);
+    const fleet = kind === 'fleet';
+    // Per host, not one figure for the page: see `rates.ts`. Null for an enrolled host.
+    const hourly = hostHourlyRate({ hostname: h.hostname, orgId: h.org_id });
     const tunnelConnected = reachable(h.id);
     const reach = freshness(h.last_heartbeat_at, tunnelConnected);
     const beatAge = h.last_heartbeat_at
@@ -377,8 +397,14 @@ export async function hostSnapshots(
       && h.power_op_at !== null
       && now - h.power_op_at.getTime() < stopGraceMs();
 
-    const power: HostSnapshot['power'] =
-      startPending ? 'starting'
+    /**
+     * AN ENROLLED HOST IS CONNECTED OR AWAY, and none of the four states below describe it. Nobody
+     * starts or stops a customer's laptop from this console, the provider has never heard of it,
+     * and "we cannot tell whether it is running" is not a question anybody is asking about it.
+     */
+    const power: HostSnapshot['power'] = !fleet
+      ? (reach === 'live' || reach === 'stale' ? 'running' : 'away')
+      : startPending ? 'starting'
         : stopPending && (reach === 'live' || reach === 'stale') ? 'stopping'
           : h.state === 'DOWN' ? 'stopped'
         : reach === 'live' || reach === 'stale' ? 'running'
@@ -435,7 +461,7 @@ export async function hostSnapshots(
      * was off" is not underutilisation, and colouring it as such would put a permanent red number
      * next to the hosts that are costing nothing.
      */
-    const capacitySeconds = poweredToday !== null && Number(h.device_count) > 0
+    const capacitySeconds = fleet && poweredToday !== null && Number(h.device_count) > 0
       ? poweredToday * Number(h.device_count) : null;
     const utilisationPct = capacitySeconds && capacitySeconds > 0 && deviceSecondsToday !== null
       ? Math.min(100, Math.round((deviceSecondsToday / capacitySeconds) * 1000) / 10)
@@ -449,14 +475,29 @@ export async function hostSnapshots(
      * the host". Those have different fixes: one is "stop the machine", the other is "look at the
      * suite".
      */
-    const utilisationBasis = capacitySeconds === null || capacitySeconds === 0
+    const utilisationBasis = !fleet
+      // Not underuse: the farm bought none of this machine's time, so there is nothing to waste.
+      ? 'it belongs to the org that enrolled it, so the farm pays for none of its time'
+      : capacitySeconds === null || capacitySeconds === 0
       ? 'the machine was not powered on today'
       : deviceSecondsToday === 0
         ? 'no session ran on it today'
         : 'device-seconds used over device-seconds paid for';
 
     const alerts: Alert[] = [];
-    if (power === 'stopping') {
+    /**
+     * AN ENROLLED HOST RAISES NO ALARM FOR BEING AWAY OR FOR ITS OWN DISK (D73).
+     *
+     * A closed laptop produced a CRITICAL "No heartbeat for 3 hours" every time its owner went to
+     * lunch, and its sleeping wake-ups produced the same alert eighty-five times a day. Its devices
+     * do leave the pool while it is away — the reaper still does that, correctly — but nothing is
+     * wrong and nobody here can fix it. Its load and its disk are its owner's business. What it
+     * keeps are the two alerts further down that concern the product itself: a drain somebody
+     * applied, and a tunnel that is down while the agent is up.
+     */
+    if (!fleet) {
+      // Nothing from this chain. See above.
+    } else if (power === 'stopping') {
       // Its devices are already out of the pool (058) and the bill stops when the machine is off.
       // Said here because the Overview is where an operator watches a stop they just asked for.
       alerts.push({
@@ -489,7 +530,7 @@ export async function hostSnapshots(
       });
     }
     // A stopped machine's figures are old because it is off — expected, not a warning.
-    if (power !== 'stopped' && (machineStatus === 'unavailable' || machineStatus === 'unknown')) {
+    if (fleet && power !== 'stopped' && (machineStatus === 'unavailable' || machineStatus === 'unknown')) {
       alerts.push({
         severity: 'warning', code: 'machine-stats-stale',
         message: machineStatus === 'unknown'
@@ -500,7 +541,7 @@ export async function hostSnapshots(
     }
     // Gauges are only worth an alert while the reading is current — see `machineStatus`. A full disk
     // reported an hour ago may have been cleared fifty minutes ago.
-    if (machineStatus === 'live' || machineStatus === 'stale') {
+    if (fleet && (machineStatus === 'live' || machineStatus === 'stale')) {
       if (diskUsedPct !== null && diskUsedPct >= DISK_CRIT_PCT) {
         alerts.push({ severity: 'critical', code: 'disk-full',
           message: `Disk is ${diskUsedPct}% full. Device resets fail before it reaches 100%.` });
@@ -522,8 +563,10 @@ export async function hostSnapshots(
     }
     if (h.quarantine_source === 'operator') {
       alerts.push({ severity: 'warning', code: 'drained',
-        message: 'This host is drained: it is powered on and costing money, and the allocator will '
-          + 'not put new sessions on it.' });
+        message: fleet
+          ? 'This host is drained: it is powered on and costing money, and the allocator will '
+            + 'not put new sessions on it.'
+          : 'This host is drained: the allocator will not put new sessions on its devices.' });
     }
     if (power === 'running' && !tunnelConnected && reach !== 'unavailable') {
       /**
@@ -539,6 +582,8 @@ export async function hostSnapshots(
     return {
       id: h.id,
       hostname: h.hostname,
+      kind,
+      owner: h.org_id === null ? null : { orgId: h.org_id, name: h.org_name },
       region: h.region,
       state: h.state,
       power,
@@ -588,10 +633,13 @@ export async function hostSnapshots(
 /* ------------------------------------------------------------------------------ the fleet */
 
 export interface FleetSnapshot {
+  /** The farm's own capacity: devices on current fleet hosts. See `fleetSnapshot`. */
   devices: {
     total: number; ready: number; allocated: number; quarantined: number;
     offline: number; preparing: number; cleaning: number;
   };
+  /** Devices on hosts orgs enrolled themselves. Theirs alone, so never counted as capacity. */
+  enrolledDevices: { total: number; ready: number; allocated: number };
   sessions: { active: number; queued: number; oldestQueuedSeconds: number | null };
   /** Allocated devices over devices that could be allocated. The farm's instantaneous load. */
   loadPct: number | null;
@@ -599,16 +647,31 @@ export interface FleetSnapshot {
 
 export async function fleetSnapshot(): Promise<FleetSnapshot> {
   return withSystem(async (c) => {
-    const d = await c.query<{ state: string; n: string }>(
-      `SELECT state::text AS state, count(*)::text AS n FROM devices GROUP BY 1`);
+    /**
+     * THE FARM'S DEVICES ARE THE ONES ON ITS OWN, CURRENT HOSTS — two predicates this query lacked.
+     *
+     * It counted every row in `devices`. So two phones on a sleeping laptop were "offline devices"
+     * in the farm's capacity, and with the lab switched off they were the reason "Device farm" read
+     * DOWN rather than off (D73). And a RETIRED host's devices, which `retireHost` quarantines and
+     * leaves in place for the record, were counted as quarantined for ever: the host list filtered
+     * on `retired_at` (056) and this did not, so retiring a machine removed its card and kept its
+     * amber light — the exact state 056 was written to end.
+     */
+    const d = await c.query<{ state: string; enrolled: boolean; n: string }>(
+      `SELECT d.state::text AS state, (h.org_id IS NOT NULL) AS enrolled, count(*)::text AS n
+         FROM devices d JOIN hosts h ON h.id = d.host_id
+        WHERE h.retired_at IS NULL
+        GROUP BY 1, 2`);
     const s = await c.query<{ state: string; n: string }>(
       `SELECT state::text AS state, count(*)::text AS n FROM sessions GROUP BY 1`);
     const q = await c.query<{ oldest: string | null }>(
       `SELECT EXTRACT(EPOCH FROM (now() - min(created_at)))::text AS oldest
          FROM sessions WHERE state = 'QUEUED'`);
 
-    const byState = new Map(d.rows.map((r) => [r.state, Number(r.n)]));
+    const byState = new Map(d.rows.filter((r) => !r.enrolled).map((r) => [r.state, Number(r.n)]));
     const at = (k: string) => byState.get(k) ?? 0;
+    const theirs = new Map(d.rows.filter((r) => r.enrolled).map((r) => [r.state, Number(r.n)]));
+    const theirsAt = (k: string) => theirs.get(k) ?? 0;
     const total = [...byState.values()].reduce((a, b) => a + b, 0);
     const allocated = at('RESERVED') + at('SESSION_ACTIVE');
     const ready = at('READY');
@@ -626,6 +689,11 @@ export async function fleetSnapshot(): Promise<FleetSnapshot> {
         preparing: at('PREPARING'),
         cleaning: at('CLEANING'),
       },
+      enrolledDevices: {
+        total: [...theirs.values()].reduce((a, b) => a + b, 0),
+        ready: theirsAt('READY'),
+        allocated: theirsAt('RESERVED') + theirsAt('SESSION_ACTIVE'),
+      },
       sessions: {
         active: (sess.get('ACTIVE') ?? 0) + (sess.get('ALLOCATING') ?? 0),
         queued: sess.get('QUEUED') ?? 0,
@@ -640,6 +708,10 @@ export async function fleetSnapshot(): Promise<FleetSnapshot> {
 /* ------------------------------------------------------------------------------ cost */
 
 export interface CostSnapshot {
+  /**
+   * The DEFAULT rate, and the currency. A host can have its own (`rates.ts`), so this is not what
+   * every figure below was multiplied by — `hosts[].cost.perHour` is.
+   */
   rate: { hourly: number; currency: string } | null;
   /** What the farm is burning per hour RIGHT NOW, across everything powered on. */
   runningPerHour: number | null;
@@ -666,51 +738,107 @@ const IDLE_UTILISATION_PCT = 5;
 /** ...but only if it was on long enough for the number to mean anything. */
 const IDLE_MIN_HOURS = 2;
 
-export async function costSnapshot(hosts: HostSnapshot[]): Promise<CostSnapshot> {
+export async function costSnapshot(allHosts: HostSnapshot[]): Promise<CostSnapshot> {
   const cfg = loadConfig();
-  const hourly = cfg.hostHourlyCost;
-  const rate = hourly === null ? null : { hourly, currency: cfg.costCurrency };
+  /**
+   * ONLY THE FARM'S OWN MACHINES COST THE FARM ANYTHING (D73). Filtered here as well as by the
+   * caller, so that no future caller can put a customer's laptop on the bill by passing the wrong
+   * list.
+   */
+  const hosts = allHosts.filter((h) => h.kind === 'fleet');
+  const rate = cfg.hostHourlyCost === null
+    ? null : { hourly: cfg.hostHourlyCost, currency: cfg.costCurrency };
 
   const { trend, totals } = await withSystem(async (c) => {
     /**
-     * POWERED HOURS PER DAY over the trailing fortnight.
+     * POWERED HOURS PER DAY over the trailing fortnight, PER HOST.
      *
      * `generate_series` on the LEFT so a day on which nothing was powered appears as a zero instead
      * of vanishing. A trend line that silently skips its cheapest days is a trend line that slopes
      * the wrong way.
+     *
+     * Per host because each host is priced at its own rate, and fleet hosts only because the ledger
+     * records every machine that beats — it is a record of powered TIME, and an enrolled laptop's
+     * time is not the farm's money. Retired fleet hosts stay in: what a machine cost last week is
+     * still what it cost.
      */
-    const t = await c.query<{ day: Date; seconds: string }>(
+    const t = await c.query<{ day: Date; hostname: string | null; seconds: string }>(
       `WITH days AS (
          SELECT generate_series(date_trunc('day', now()) - interval '13 days',
                                 date_trunc('day', now()), interval '1 day') AS day
        )
-       SELECT d.day,
+       SELECT d.day, i.hostname,
               COALESCE(SUM(EXTRACT(EPOCH FROM (
                 LEAST(COALESCE(i.ended_at, now()), d.day + interval '1 day')
                 - GREATEST(i.started_at, d.day)
               ))), 0)::text AS seconds
          FROM days d
-         LEFT JOIN host_power_intervals i
-                ON i.started_at < d.day + interval '1 day'
-               AND COALESCE(i.ended_at, now()) > d.day
-        GROUP BY d.day ORDER BY d.day`);
+         LEFT JOIN (
+           SELECT p.started_at, p.ended_at, h.hostname
+             FROM host_power_intervals p JOIN hosts h ON h.id = p.host_id
+            WHERE h.org_id IS NULL
+         ) i ON i.started_at < d.day + interval '1 day'
+            AND COALESCE(i.ended_at, now()) > d.day
+        GROUP BY d.day, i.hostname ORDER BY d.day`);
 
-    const tot = await c.query<{ today: string; month: string }>(
-      `SELECT
+    const tot = await c.query<{ hostname: string; today: string; month: string }>(
+      `SELECT h.hostname,
          COALESCE(SUM(EXTRACT(EPOCH FROM (
            LEAST(COALESCE(i.ended_at, now()), now()) - GREATEST(i.started_at, date_trunc('day', now()))
          ))) FILTER (WHERE COALESCE(i.ended_at, now()) > date_trunc('day', now())), 0)::text AS today,
          COALESCE(SUM(EXTRACT(EPOCH FROM (
            LEAST(COALESCE(i.ended_at, now()), now()) - GREATEST(i.started_at, date_trunc('month', now()))
-         ))) FILTER (WHERE COALESCE(i.ended_at, now()) > date_trunc('month', now())), 0)::text AS month
-       FROM host_power_intervals i`);
+         ))), 0)::text AS month
+       FROM host_power_intervals i JOIN hosts h ON h.id = i.host_id
+      WHERE h.org_id IS NULL
+        AND COALESCE(i.ended_at, now()) > date_trunc('month', now())
+      GROUP BY h.hostname`);
 
-    return { trend: t.rows, totals: tot.rows[0] };
+    return { trend: t.rows, totals: tot.rows };
   });
 
-  const running = hosts.filter((h) => h.power === 'running').length;
-  const todaySeconds = Number(totals?.today ?? 0);
-  const monthSeconds = Number(totals?.month ?? 0);
+  /** What a fleet host's hour costs, by the name it registered under. */
+  const rateOf = (hostname: string): number | null => hostHourlyRate({ hostname, orgId: null });
+
+  /**
+   * Seconds on several hosts, as money. NULL WHEN NONE OF THEM IS PRICED, never zero — an unpriced
+   * farm shows hours and no currency (`config.ts`). A host with no rate adds its time and no money.
+   */
+  const priced = (parts: Array<{ hostname: string | null; seconds: number }>): number | null => {
+    let sum = 0;
+    let any = false;
+    for (const part of parts) {
+      const r = part.hostname === null ? null : rateOf(part.hostname);
+      if (r === null) continue;
+      any = true;
+      sum += (part.seconds / 3600) * r;
+    }
+    return any ? Number(sum.toFixed(2)) : (rate === null ? null : 0);
+  };
+
+  const running = hosts.filter((h) => h.power === 'running');
+  const runningRates = running.map((h) => h.cost.perHour).filter((r): r is number => r !== null);
+  const anyRate = rate !== null || hosts.some((h) => h.cost.perHour !== null);
+  const runningPerHour = !anyRate ? null
+    : Number(runningRates.reduce((a, b) => a + b, 0).toFixed(2));
+
+  const today = priced(totals.map((r) => ({ hostname: r.hostname, seconds: Number(r.today) })));
+  const monthToDate = priced(totals.map((r) => ({ hostname: r.hostname, seconds: Number(r.month) })));
+
+  // The trend, folded back to one row a day.
+  const days = new Map<string, { seconds: number; parts: Array<{ hostname: string | null; seconds: number }> }>();
+  for (const r of trend) {
+    const key = r.day.toISOString().slice(0, 10);
+    const day = days.get(key) ?? { seconds: 0, parts: [] };
+    day.seconds += Number(r.seconds);
+    day.parts.push({ hostname: r.hostname, seconds: Number(r.seconds) });
+    days.set(key, day);
+  }
+  const trendOut = [...days.entries()].map(([date, day]) => ({
+    date,
+    poweredHours: Math.round((day.seconds / 3600) * 10) / 10,
+    cost: priced(day.parts),
+  }));
 
   /**
    * THE PROJECTION, and it is deliberately the conservative one: what the month costs if the farm
@@ -721,19 +849,18 @@ export async function costSnapshot(hosts: HostSnapshot[]): Promise<CostSnapshot>
   const now = new Date();
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const hoursLeft = (daysInMonth - now.getDate()) * 24 + (24 - now.getHours());
-  const runningPerHour = hourly === null ? null : Number((running * hourly).toFixed(2));
 
   return {
     rate,
     runningPerHour,
-    today: money(todaySeconds, hourly),
-    monthToDate: money(monthSeconds, hourly),
+    today,
+    monthToDate,
     estimatedMonth: {
-      value: hourly === null ? null
-        : Number(((monthSeconds / 3600) * hourly + hoursLeft * running * hourly).toFixed(2)),
-      basis: running === 0
+      value: monthToDate === null || runningPerHour === null ? null
+        : Number((monthToDate + hoursLeft * runningPerHour).toFixed(2)),
+      basis: running.length === 0
         ? 'Nothing is powered on, so this is the month to date and nothing further.'
-        : `Assumes the ${running} host${running === 1 ? '' : 's'} that ${running === 1 ? 'is' : 'are'} `
+        : `Assumes the ${running.length} host${running.length === 1 ? '' : 's'} that ${running.length === 1 ? 'is' : 'are'} `
           + 'powered on now stay on for the rest of the month.',
     },
     /**
@@ -749,35 +876,29 @@ export async function costSnapshot(hosts: HostSnapshot[]): Promise<CostSnapshot>
      * being asked to worry about.
      */
     estimatedMonthAtRecentRate: (() => {
-      if (hourly === null) return { value: null, basis: 'No rate is configured.' };
-      const days = trend.length || 1;
-      const recentSeconds = trend.reduce((sum, r) => sum + Number(r.seconds), 0);
-      const perDay = recentSeconds / days;
+      if (monthToDate === null) return { value: null, basis: 'No rate is configured.' };
+      const n = trendOut.length || 1;
+      const recentCost = trendOut.reduce((sum, r) => sum + (r.cost ?? 0), 0);
+      const recentHours = trendOut.reduce((sum, r) => sum + r.poweredHours, 0);
       const daysLeft = daysInMonth - now.getDate();
       return {
-        value: Number(((monthSeconds + perDay * daysLeft) / 3600 * hourly).toFixed(2)),
-        basis: `Assumes the rest of the month looks like the last ${days} days, which averaged `
-          + `${Math.round((perDay / 3600) * 10) / 10} powered hours a day.`,
+        value: Number((monthToDate + (recentCost / n) * daysLeft).toFixed(2)),
+        basis: `Assumes the rest of the month looks like the last ${n} days, which averaged `
+          + `${Math.round((recentHours / n) * 10) / 10} powered hours a day.`,
       };
     })(),
-    trend: trend.map((r) => {
-      const seconds = Number(r.seconds);
-      return {
-        date: r.day.toISOString().slice(0, 10),
-        poweredHours: Math.round((seconds / 3600) * 10) / 10,
-        cost: money(seconds, hourly),
-      };
-    }),
+    trend: trendOut,
     idle: hosts
       .filter((h) => {
-        const poweredHours = h.cost.today !== null && hourly
-          ? h.cost.today / hourly
+        const poweredHours = h.cost.today !== null && h.cost.perHour
+          ? h.cost.today / h.cost.perHour
           : null;
         return poweredHours !== null && poweredHours >= IDLE_MIN_HOURS
           && h.utilisationPct !== null && h.utilisationPct < IDLE_UTILISATION_PCT;
       })
       .map((h) => {
-        const poweredHours = hourly ? (h.cost.today ?? 0) / hourly : 0;
+        const perHour = h.cost.perHour;
+        const poweredHours = perHour ? (h.cost.today ?? 0) / perHour : 0;
         return {
           hostId: h.id,
           hostname: h.hostname,
@@ -786,8 +907,8 @@ export async function costSnapshot(hosts: HostSnapshot[]): Promise<CostSnapshot>
           // What was spent on the part of the day nothing was using. Not a promise of a saving —
           // a device has to be ready before somebody can ask for it — but it is the number that
           // makes "stop it when you are done" concrete.
-          wastedCost: hourly === null ? null
-            : Number((poweredHours * hourly * (1 - (h.utilisationPct ?? 0) / 100)).toFixed(2)),
+          wastedCost: perHour === null ? null
+            : Number((poweredHours * perHour * (1 - (h.utilisationPct ?? 0) / 100)).toFixed(2)),
         };
       }),
   };
@@ -816,12 +937,18 @@ function someOf(names: string[], limit = 3): string {
 }
 
 export async function healthComponents(
-  hosts: HostSnapshot[],
+  allHosts: HostSnapshot[],
   fleet: FleetSnapshot,
   dbLatencyMs: number | null,
 ): Promise<HealthComponent[]> {
   const cfg = loadConfig();
   const out: HealthComponent[] = [];
+  /**
+   * THE FARM'S HEALTH IS ABOUT THE FARM'S MACHINES (D73). An enrolled laptop that is asleep is not
+   * a host that is down, and one that is awake does not make a switched-off farm "on". Filtered
+   * here rather than trusted to the caller: every light below reads this list.
+   */
+  const hosts = allHosts.filter((h) => h.kind === 'fleet');
 
   /* -------- hosts */
   const running = hosts.filter((h) => h.power === 'running');

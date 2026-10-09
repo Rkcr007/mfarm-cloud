@@ -3,6 +3,7 @@ import { withSystem } from '../../db.ts';
 import { requireUser } from '../server.ts';
 import { forbidden } from '../errors.ts';
 import { loadConfig } from '../../config.ts';
+import { hostHourlyRate, hostKind } from '../../infra/rates.ts';
 
 /**
  * The MACHINES, as an operator sees them — and what leaving them on is costing.
@@ -41,6 +42,7 @@ function requireOrgAdmin(req: FastifyRequest): { orgId: string } {
 interface HostRow {
   id: string;
   hostname: string;
+  org_id: string | null;
   region: string;
   state: string;
   up_since: Date | null;
@@ -84,7 +86,7 @@ export async function hostRoutes(app: FastifyInstance): Promise<void> {
 
     const rows = await withSystem(async (c) => {
       const r = await c.query<HostRow>(
-        `SELECT h.id, h.hostname, h.region, h.state, h.up_since, h.last_heartbeat_at,
+        `SELECT h.id, h.hostname, h.org_id, h.region, h.state, h.up_since, h.last_heartbeat_at,
                 h.protocol_version, h.cores, h.memory_mb,
                 h.quarantined_at, h.quarantine_reason,
                 h.disk_free_bytes, h.disk_total_bytes, h.load1,
@@ -150,10 +152,20 @@ export async function hostRoutes(app: FastifyInstance): Promise<void> {
         const uptimeSeconds = poweredSince
           ? Math.max(0, Math.round((now - poweredSince.getTime()) / 1000))
           : null;
+        /**
+         * PER HOST, and null for a machine this org enrolled itself (D73). The org's own laptop used
+         * to be priced at the device host's rate here, so the people who plugged in two phones were
+         * shown a bill for their own computer.
+         */
+        const ratePerHour = hostHourlyRate({ hostname: h.hostname, orgId: h.org_id });
 
         return {
           id: h.id,
           hostname: h.hostname,
+          /** `fleet` is the farm's machine; `enrolled` is this org's own. See `infra/rates.ts`. */
+          kind: hostKind(h.org_id),
+          /** What an hour of it costs the farm. Null when unpriced, and always null for `enrolled`. */
+          ratePerHour,
           region: h.region,
           state: h.state,
           /** Null means the control plane does not know — a host that has not registered since 050. */
@@ -163,8 +175,8 @@ export async function hostRoutes(app: FastifyInstance): Promise<void> {
            * What this host has cost since it came up. Null whenever either half is unknown, never
            * zero: zero is a measurement and "we have no rate configured" is not one.
            */
-          costSinceUp: cfg.hostHourlyCost !== null && uptimeSeconds !== null
-            ? Number(((uptimeSeconds / 3600) * cfg.hostHourlyCost).toFixed(2))
+          costSinceUp: ratePerHour !== null && uptimeSeconds !== null
+            ? Number(((uptimeSeconds / 3600) * ratePerHour).toFixed(2))
             : null,
           lastHeartbeatAt: h.last_heartbeat_at ? h.last_heartbeat_at.toISOString() : null,
           protocolVersion: h.protocol_version,

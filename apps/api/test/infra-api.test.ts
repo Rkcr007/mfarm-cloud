@@ -386,7 +386,9 @@ describe('switched off is not down (2026-09-26)', () => {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const host = (over: Record<string, any>) => ({
-    hostname: 'h', power: 'running', reachability: 'live', tunnelConnected: true,
+    // A FLEET host: the health board reads only those (D73), so a fixture without a kind is a host
+    // the board does not see — which is what these two tests reported the day the filter landed.
+    hostname: 'h', kind: 'fleet', power: 'running', reachability: 'live', tunnelConnected: true,
     maintenance: { drained: false }, machine: { status: 'live', diskUsedPct: 30 }, ...over,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as any;

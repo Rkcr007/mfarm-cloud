@@ -496,6 +496,30 @@ describe('fleet collectors', () => {
     }
   });
 
+  /**
+   * D73. Every non-retired host was exported, so a laptop an org enrolled to share a phone paged
+   * `MfarmHostSilent` each time its lid closed and was "a device host powered on and unused" to
+   * `MfarmHostIdleAndBilling` whenever it was open. Neither alert is about somebody's laptop.
+   */
+  test('a host an org enrolled itself is not exported as one of the farm\'s hosts', async () => {
+    const up = async () => {
+      await collectFleet();
+      return sample(registry.render(), 'mfarm_hosts', 'state="UP"') ?? 0;
+    };
+    const before = await up();
+    await withSystem((c) => c.query(
+      `INSERT INTO hosts (region,hostname,state,protocol_version,cores,memory_mb,last_heartbeat_at,org_id)
+       VALUES ($1,'metrics-enrolled-laptop','UP',2,8,16384, now() - interval '3 hours', $2)`,
+      [REGION, orgId]));
+
+    assert.equal(await up(), before, 'an enrolled laptop was counted in mfarm_hosts{state="UP"}');
+    assert.equal(
+      sample(registry.render(), 'mfarm_host_last_heartbeat_timestamp_seconds', 'hostname="metrics-enrolled-laptop"'),
+      undefined, 'its heartbeat age is exported, which is what MfarmHostSilent fires on');
+    // The control: the farm's own host is still there.
+    assert.ok(sample(registry.render(), 'mfarm_host_last_heartbeat_timestamp_seconds', 'hostname="metrics-test-host"'));
+  });
+
   test('runtime metrics need no database', () => {
     collectRuntime();
     const out = registry.render();

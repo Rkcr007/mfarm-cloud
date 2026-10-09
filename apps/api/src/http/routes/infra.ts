@@ -170,7 +170,18 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
     // other queries on the same pool would measure the contention this page creates rather than the
     // database's own health.
     const dbLatencyMs = await probeDatabase();
-    const [hosts, fleet] = await Promise.all([hostSnapshots(reachable, await providerStopped()), fleetSnapshot()]);
+    const [every, fleet] = await Promise.all([hostSnapshots(reachable, await providerStopped()), fleetSnapshot()]);
+    /**
+     * TWO LISTS, SPLIT ON THE SERVER (D73, ADR-0050).
+     *
+     * `hosts` is the farm's own machines and is everything the page counts, costs, alerts on and
+     * offers to power. `enrolled` is machines orgs connected themselves — laptops sharing phones.
+     * One list with a `kind` on each row would have left every count on the page to remember a
+     * filter, and the one that forgot would put a customer's laptop back in "2 of 3 hosts powered
+     * on". Separate lists make the fleet figures right by construction.
+     */
+    const hosts = every.filter((h) => h.kind === 'fleet');
+    const enrolled = every.filter((h) => h.kind === 'enrolled');
     const [cost, components, events] = await Promise.all([
       costSnapshot(hosts),
       healthComponents(hosts, fleet, dbLatencyMs),
@@ -200,6 +211,9 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
        * derived from anything a worker sends; see `config.ts`.
        */
       hosts: hosts.map((h) => ({ ...h, powerable: instanceFor(h.hostname) !== null })),
+      // Never powerable: the allow-list is about the farm's cloud instances, and a machine somebody
+      // enrolled is not one whatever name it registered under.
+      enrolled: enrolled.map((h) => ({ ...h, powerable: false })),
       cost,
       events,
       /**
@@ -494,6 +508,9 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
           payload.hosts.map((h) => [h.id, h.power, h.reachability, h.machine.status,
             h.maintenance.drained, h.devices, h.sessions.active,
             h.alerts.map((a) => a.code)]),
+          // Connected or away, and what it carries. Not its heartbeat age, which moves every tick.
+          payload.enrolled.map((h) => [h.id, h.power, h.maintenance.drained, h.devices,
+            h.sessions.active, h.alerts.map((a) => a.code)]),
           payload.fleet,
           payload.capabilities,
         ]);

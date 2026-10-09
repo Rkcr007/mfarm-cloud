@@ -3,8 +3,9 @@ import { withSystem, withTenant } from '../../db.ts';
 import { loadConfig } from '../../config.ts';
 import {
   attributeRunCost, shapeHistory, HISTORY_RUNS,
-  type DeviceHold, type HistoryRow, type TestHistory,
+  type DeviceHold, type HistoryRow, type HostShare, type TestHistory,
 } from '../../runs.ts';
+import { hostHourlyRate, hostKind } from '../../infra/rates.ts';
 import { requireTenant } from '../server.ts';
 import { badRequest, notFound } from '../errors.ts';
 import { timeline, recordRunEvent, subscribe, type PublishedEvent } from '../../executionEvents.ts';
@@ -519,16 +520,29 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
      */
     const cfg = loadConfig();
     const hostIds = [...new Set(holds.map((h) => h.hostId).filter((h): h is string => h !== null))];
-    const devicesPerHost = cfg.hostHourlyCost === null || hostIds.length === 0
-      ? new Map<string, number>()
+    /**
+     * ...AND WHOSE MACHINE EACH ONE IS, from the same read (D73). A host the org enrolled itself is
+     * not charged, and a fleet host is charged at its own rate rather than at one figure for the
+     * whole farm. `org_id` and the name are read here and only turned into a rate and a flag: the
+     * caller learns nothing about a host beyond what its own sessions already ran on.
+     */
+    const hostShares = hostIds.length === 0
+      ? new Map<string, HostShare>()
       : await withSystem(async (c) => {
-          const { rows } = await c.query<{ host_id: string; devices: string }>(
-            'SELECT host_id, count(*) AS devices FROM devices WHERE host_id = ANY($1::uuid[]) GROUP BY host_id',
+          const { rows } = await c.query<{ host_id: string; devices: string; hostname: string; org_id: string | null }>(
+            `SELECT d.host_id, count(*) AS devices, h.hostname, h.org_id
+               FROM devices d JOIN hosts h ON h.id = d.host_id
+              WHERE d.host_id = ANY($1::uuid[])
+              GROUP BY d.host_id, h.hostname, h.org_id`,
             [hostIds],
           );
-          return new Map(rows.map((r) => [r.host_id, Number(r.devices)]));
+          return new Map(rows.map((r): [string, HostShare] => [r.host_id, {
+            devices: Number(r.devices),
+            rate: hostHourlyRate({ hostname: r.hostname, orgId: r.org_id }),
+            enrolled: hostKind(r.org_id) === 'enrolled',
+          }]));
         });
-    const usage = attributeRunCost(holds, devicesPerHost, cfg.hostHourlyCost, cfg.costCurrency);
+    const usage = attributeRunCost(holds, hostShares, cfg.hostHourlyCost, cfg.costCurrency);
 
     /**
      * Every failing test's recent history in this org, in ONE statement for all of them (ADR-0039).

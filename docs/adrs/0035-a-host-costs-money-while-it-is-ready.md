@@ -1,6 +1,6 @@
 # ADR-0035 — a host costs money while it is ready, and the meter cannot see it
 
-**Status:** Accepted · 2026-09-11 · migration 050
+**Status:** Accepted · 2026-09-11 · migration 050 · **amended by ADR-0050**: the rate is per host, and a host an org enrolled has none
 
 ## Context
 
