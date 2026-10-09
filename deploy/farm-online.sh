@@ -50,7 +50,12 @@ note() { printf '    %s\n' "$*"; }
 die()  { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
 g()   { gcloud compute "$@" --project "$PROJECT"; }
-onbox() { gcloud compute ssh "$SSH_USER@$1" --project "$PROJECT" --zone "$ZONE" --command "$2" 2>/dev/null; }
+# THROUGH THE IAP TUNNEL, ALWAYS (ADR-0049). Without the flag gcloud dials the machine's public
+# address on port 22, which works only while the project's firewall opens SSH to the whole internet.
+# The tunnel is what lets that rule admit Google's IAP range (35.235.240.0/20) and nobody else. Once
+# it does, a call that forgets the flag does not fail with a message: it hangs until SSH times out,
+# and the loop below reports a healthy machine as one that "never answered SSH".
+onbox() { gcloud compute ssh "$SSH_USER@$1" --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap --command "$2" 2>/dev/null; }
 
 say "Starting the control plane and $(set -- $LABS; echo $#) device host(s)"
 # Started together on purpose: the worker registers with the control plane over its PUBLIC url, so a

@@ -35,7 +35,7 @@ You need, from the **existing** control plane:
 ```bash
 # The registration token the new worker will present. It is the SAME token — it authenticates
 # "a machine allowed to join this farm", not a particular machine.
-gcloud compute ssh mfarm-cp --zone asia-south1-c \
+gcloud compute ssh mfarm-cp --zone asia-south1-c --tunnel-through-iap \
   --command 'sudo cat ~/mfarm/deploy/secrets/worker_registration_token'
 ```
 
@@ -56,8 +56,15 @@ gcloud compute instances create mfarm-lab-2 \
   --machine-type n2-standard-16 \
   --enable-nested-virtualization \
   --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud \
-  --boot-disk-size 200GB --boot-disk-type pd-balanced
+  --boot-disk-size 200GB --boot-disk-type pd-balanced \
+  --service-account mfarm-lab@mfarm-lab.iam.gserviceaccount.com \
+  --scopes logging-write,monitoring-write
 ```
+
+**The service account is not optional either (ADR-0049).** Left out, the instance gets the Compute
+Engine default account, which can read the control plane's database backups — on the one machine
+that runs tenants' apps. `mfarm-lab@…` is created once, in `docs/RUNBOOK.md` under "Close what the
+cloud leaves open"; changing it later needs the instance stopped.
 
 **`--enable-nested-virtualization` is not optional and is not fixable later without recreating the
 instance.** Cuttlefish needs KVM; without it `cvd start` fails in a way that reads like a Cuttlefish

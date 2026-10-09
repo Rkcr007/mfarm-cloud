@@ -1,7 +1,7 @@
 ---
 id: ADR-0006
 title: The control plane and the device host are separate machines
-status: Accepted
+status: Accepted — what each machine may reach is amended by ADR-0049 (SSH through IAP; the device host runs as its own account)
 date: 2026-08-19
 authors:
   - Claude Code

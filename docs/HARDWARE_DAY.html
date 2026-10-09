@@ -1023,8 +1023,8 @@ tar --exclude=node_modules --exclude=.git \
     --exclude=deploy/secrets --exclude=deploy/.env \
     -czf mfarm.tgz MFARM_CLOUD
 
-gcloud compute scp mfarm.tgz mfarm-lab:~ --zone=asia-south1-c
-gcloud compute ssh mfarm-lab --zone=asia-south1-c \
+gcloud compute scp mfarm.tgz mfarm-lab:~ --zone=asia-south1-c --tunnel-through-iap
+gcloud compute ssh mfarm-lab --zone=asia-south1-c --tunnel-through-iap \
   --command 'tar xzf mfarm.tgz && mv MFARM_CLOUD mfarm && ls mfarm'</code></pre>
     </div>
     <div class="panel stop">
@@ -1369,7 +1369,7 @@ gcloud compute instances create mfarm-lab \
       <div class="cmd-head"><span>from your Mac or Cloud Shell</span><button class="copy" type="button">Copy</button></div>
 <pre><code>gcloud compute scp --recurse \
   mfarm-lab:/tmp/cf_start.log mfarm-lab:/tmp/cf_build.log . \
-  --zone=asia-south1-c</code></pre>
+  --zone=asia-south1-c --tunnel-through-iap</code></pre>
     </div>
   </div>
 </div>

@@ -19,5 +19,7 @@ SSH_USER="${MFARM_SSH_USER:-rkcr070707}"
 CP="${MFARM_CP:-mfarm-cp}"
 WAIT="${DEVICE_WAIT_SECONDS:-600}"
 
-gcloud compute ssh "$SSH_USER@$CP" --project "$PROJECT" --zone "$ZONE" \
+# Through the IAP tunnel, as every ssh in this directory is: port 22 is not meant to be open to the
+# internet (ADR-0049), and a call without the flag hangs rather than failing with a message.
+gcloud compute ssh "$SSH_USER@$CP" --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap \
   --command "cd ~/mfarm && DEVICE_WAIT_SECONDS=$WAIT bash deploy/verify-live.sh" 2>/dev/null
