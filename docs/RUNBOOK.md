@@ -323,8 +323,16 @@ deleted.
 MFARM_SNAPSHOT_DISKS=mfarm-cp:asia-south1-c,mfarm-lab:asia-south1-c
 ```
 
-Restart the API. The startup log prints `snapshotDisks: mfarm-cp@asia-south1-c, …`, and
-`capabilities.snapshots` in `/v1/infra/overview` turns true.
+**Recreate the API, do not restart it.** A plain restart keeps the old environment, so the new
+line would never be read. This is the command the deploy uses, and it keeps the image already
+running because `deploy/.env` pins it:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml up -d --no-deps api
+```
+
+The startup log prints `snapshotDisks: mfarm-cp@asia-south1-c, …`, and `capabilities.snapshots` in
+`/v1/infra/overview` turns true.
 
 **The first snapshot you take from the console is the first time this meets the real cloud.** It is
 tested against a fake provider only. If the provider refuses, the toast says which permission.
