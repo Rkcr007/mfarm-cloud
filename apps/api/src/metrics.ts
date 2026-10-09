@@ -737,8 +737,13 @@ interface AgeRow { cleaning_age: string; preparing_age: string; queue_age: strin
 export async function collectFleet(): Promise<void> {
   const { deviceRows, sessionRows, hostRows, ages } = await withSystem(async (client) => {
     const d = await client.query<DeviceRow>(
-      `SELECT state::text AS state, region, platform, tier, count(*)::text AS n
-         FROM devices GROUP BY 1,2,3,4`,
+      // Devices on CURRENT hosts. A retired host's devices are left quarantined for the record
+      // (056), and counting them kept mfarm_devices{state="QUARANTINED"} above zero for ever on a
+      // farm that had retired one machine — an alert that could never clear.
+      `SELECT d.state::text AS state, d.region, d.platform, d.tier, count(*)::text AS n
+         FROM devices d JOIN hosts h ON h.id = d.host_id
+        WHERE h.retired_at IS NULL
+        GROUP BY 1,2,3,4`,
     );
     const s = await client.query<SessionRow>(
       `SELECT state::text AS state, count(*)::text AS n FROM sessions GROUP BY 1`,

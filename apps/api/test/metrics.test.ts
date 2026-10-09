@@ -520,6 +520,30 @@ describe('fleet collectors', () => {
     assert.ok(sample(registry.render(), 'mfarm_host_last_heartbeat_timestamp_seconds', 'hostname="metrics-test-host"'));
   });
 
+  /**
+   * `retireHost` leaves a retired machine's devices quarantined, for the record (056). They were
+   * still exported, so one retired host kept mfarm_devices{state="QUARANTINED"} above zero for good.
+   */
+  test('a retired host\'s devices are not exported as part of the fleet', async () => {
+    const quarantined = async () => {
+      await collectFleet();
+      return sample(registry.render(), 'mfarm_devices', `state="QUARANTINED",region="${REGION}"`) ?? 0;
+    };
+    const before = await quarantined();
+    const gone = (await withSystem((c) => c.query(
+      `INSERT INTO hosts (region,hostname,state,protocol_version,retired_at)
+       VALUES ($1,'metrics-retired-host','QUARANTINED',2, now()) RETURNING id`, [REGION]))).rows[0].id;
+    await withSystem((c) => c.query(
+      `INSERT INTO devices (host_id, region, platform, tier, model, os_version, state, local_id)
+       VALUES ($1,$2,'android','cuttlefish','cf_x86_64','17','QUARANTINED',$3)`,
+      [gone, REGION, `metrics-${randomUUID()}`]));
+    assert.equal(await quarantined(), before, 'a device on a retired host was counted');
+
+    // The control: the same device on a current host is counted.
+    await seedDevice('QUARANTINED');
+    assert.equal(await quarantined(), before + 1);
+  });
+
   test('runtime metrics need no database', () => {
     collectRuntime();
     const out = registry.render();

@@ -64,20 +64,33 @@ export async function deviceRoutes(app: FastifyInstance) {
        * rather than two.
        */
       const heartbeats = new Map<string, string>();
+      /**
+       * DEVICES WHOSE HOST WAS RETIRED ARE NOT IN THE FLEET (056) — and this list was still showing
+       * them. Retiring a machine says "N devices went with it"; they then sat in every tenant's
+       * Fleet as QUARANTINED, reason "retired: …", for good, with a Recover button that asked a
+       * machine nobody would ever switch on again. The rows stay — a session that ran on one still
+       * names it, and `GET /devices/:id` still answers — but a list of what the fleet HAS leaves
+       * them out. Read in the same system-pool query as the beat, for the reason given above: the
+       * tenant cannot join `hosts`.
+       */
+      const onRetiredHost = new Set<string>();
       if (rows.length) {
         await withSystem(async (c) => {
-          const { rows: beats } = await c.query(
-            `SELECT d.id, h.last_heartbeat_at
+          const { rows: hostFacts } = await c.query(
+            `SELECT d.id, h.last_heartbeat_at, (h.retired_at IS NOT NULL) AS retired
                FROM devices d JOIN hosts h ON h.id = d.host_id
-              WHERE d.id = ANY($1::uuid[]) AND h.last_heartbeat_at IS NOT NULL`,
+              WHERE d.id = ANY($1::uuid[])`,
             [rows.map((r) => r.id)],
           );
-          for (const b of beats) heartbeats.set(b.id as string, b.last_heartbeat_at as string);
+          for (const b of hostFacts) {
+            if (b.last_heartbeat_at) heartbeats.set(b.id as string, b.last_heartbeat_at as string);
+            if (b.retired) onRetiredHost.add(b.id as string);
+          }
         });
       }
 
       return {
-        devices: rows.map((r) => ({
+        devices: rows.filter((r) => !onRetiredHost.has(r.id)).map((r) => ({
           id: r.id, region: r.region, platform: r.platform, tier: r.tier,
           model: r.model, osVersion: r.os_version, state: r.state,
           capabilities: r.capabilities, dedicated: r.dedicated,
