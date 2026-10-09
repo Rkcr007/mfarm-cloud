@@ -35,6 +35,10 @@ const MAX_PAYLOAD = 1100;
  * (sent at 3 s) rather than a loss (sent within a round trip of it). See D68 at the PLI handler.
  */
 const IDLE_PLI_MS = Number(process.env.PHYSICAL_IDLE_PLI_MS ?? 2000);
+/** RTCP sender and receiver report packet types (RFC 3550). */
+const RTCP_SR = 200;
+const RTCP_RR = 201;
+let viewerCount = 0;
 /** One frame at 60 fps, in microseconds — the step a re-based clock carries on by. */
 const FRAME_US = 16_667;
 /** The fewest milliseconds between two encoder restarts asked for by viewers — see `requestKeyframe`. */
@@ -200,6 +204,236 @@ export function videoSizeFor(screen: { width: number; height: number }, maxSize?
   return portrait ? { w: minor, h: major } : { w: major, h: minor };
 }
 
+/** Milliseconds from the NTP epoch (1900) to the Unix one (1970). */
+const NTP_EPOCH_OFFSET_MS = 2_208_988_800_000;
+
+/** A 64-bit NTP timestamp (RFC 3550 §4): whole seconds since 1900, then the fraction in 1/2^32 s. */
+export function ntpNow(epochMs = performance.timeOrigin + performance.now()): bigint {
+  const ms = epochMs + NTP_EPOCH_OFFSET_MS;
+  const sec = Math.floor(ms / 1000);
+  const frac = Math.floor(((ms - sec * 1000) / 1000) * 2 ** 32);
+  return (BigInt(sec) << 32n) | BigInt(Math.min(frac, 2 ** 32 - 1));
+}
+
+/**
+ * GIVE A werift SENDER A CLOCK THE RECEIVER'S REPORTS CAN BE MATCHED AGAINST.
+ *
+ * Round trip is what the bitrate governor steers by, and werift's came back as 4 ms and −56 ms on a
+ * path whose floor is ~90 ms — enough on its own to step a healthy stream down to 0.8 Mbit/s. Two
+ * defects in werift 0.24.4, both found by running it:
+ *
+ *   1. Its `ntpTime()` writes the DECIMAL digits after the point as the binary fraction (1234.567 s
+ *      becomes fraction 567, not 0.567 x 2^32), so every sender report within one second carries the
+ *      same compact timestamp (LSR) — and a receiver report echoing an older one is matched to the
+ *      newest, yielding a round trip short by up to a second, or negative.
+ *   2. The report's timestamp is the time of the last RTP packet, so on a still screen consecutive
+ *      reports carry the SAME timestamp, which brings the ambiguity back however good the clock.
+ *
+ * `ntpTimestamp` is a plain field on the sender (the ESM bundle's `ntpTime` is private, so it cannot
+ * be patched at the source). Replaced by an accessor, it reads as the correct time NOW whenever werift
+ * builds a report, and werift's write after each packet is ignored. The report and the
+ * `lastSRtimestamp` matched against it are read in the same synchronous block, and the value is held
+ * for exactly that long, so the two are identical. Video only, so the report's NTP and RTP times need not describe the same instant.
+ */
+export function fixSenderClock(sender: object): void {
+  let cached: bigint | undefined;
+  Object.defineProperty(sender, 'ntpTimestamp', {
+    configurable: true,
+    enumerable: true,
+    // Held until the synchronous block that read it is done: werift reads it twice back to back, and a
+    // millisecond boundary between the two reads would make the report and its LSR disagree.
+    get: () => {
+      if (cached === undefined) {
+        cached = ntpNow();
+        queueMicrotask(() => { cached = undefined; });
+      }
+      return cached;
+    },
+    set: () => { /* werift's own value is the defect; see above */ },
+  });
+}
+
+/** What a viewer's receiver reports said, most recently. */
+export interface LinkReport {
+  /** Round trip from the RTCP sender/receiver reports, in ms. Includes the forward path's queue. */
+  rttMs?: number;
+  /** Fraction of packets lost since the receiver's previous report, 0..1. */
+  fractionLost?: number;
+  at: number;
+}
+
+/** The rates the stream can step between, highest first. 576x1280 stays readable at the bottom. */
+export const BITRATE_TIERS = [4_000_000, 2_500_000, 1_500_000, 800_000, 400_000];
+/** The fewest milliseconds between two steps down: long enough for a step to show in the reports. */
+const DOWN_GAP_MS = 4_000;
+/** How long the link must look healthy before a step up is tried, at first. */
+const UP_HOLD_MS = Number(process.env.PHYSICAL_BITRATE_UP_HOLD_MS ?? 15_000);
+/** The longest that wait grows to after steps up that did not hold. */
+const UP_HOLD_MAX_MS = 120_000;
+/** A step down this soon after a step up means the step up did not hold. */
+const UP_FAILED_WITHIN_MS = 20_000;
+/** A report older than this is about a link that may have changed; it no longer counts. */
+const REPORT_FRESH_MS = 5_000;
+/**
+ * Below this share of its rate the stream is not what fills a queue, so a queue is not its to answer.
+ * Found live: on a still screen the round trip drifted from 115 to 300 ms on a home link at 4 a.m.,
+ * and the stream was stepped down twice for a queue it was not causing.
+ */
+const ACTIVE_SHARE = 0.3;
+
+/**
+ * BANDWIDTH ADAPTATION: what rate the phone's encoder should run at, from what its viewers report.
+ *
+ * WHY. The stream was a fixed 4 Mbit/s and a link that could not carry it was not told so: measured
+ * on a 3 Mbit/s downlink, the relayed view queued to a 1.7 s round trip, Chrome asked for the packets
+ * it lost, the retransmissions joined the queue, and 1,992 packets arrived of which 106 were new.
+ *
+ * THE SIGNAL IS THE QUEUE, NOT AN ESTIMATE. Chrome's REMB starts near 300 kbit/s and only grows while
+ * traffic flows, and a phone's screen is still most of the time and then bursts — so its estimate
+ * reads as congestion at the start of every session. What a congested link does unmistakably is
+ * queue: the round trip of the RTCP reports, which travel with the media, climbs from its floor. That,
+ * and loss, are what move the rate.
+ *
+ * DOWN FAST, UP SLOWLY. Two congested reports in a row step down — straight to the bottom tier the
+ * round trip suggests rather than one at a time, because a queue of seconds needs relief now. A step
+ * up is one tier, after the link has looked healthy for a while, and when a step up does not hold the
+ * wait for the next one doubles: otherwise the rate would saw between two tiers on a link that sits
+ * between them.
+ *
+ * ONE ENCODER FOR EVERY VIEWER, so the slowest viewer sets the rate.
+ */
+export class BitrateGovernor {
+  private readonly tiers: number[];
+  private index: number;
+  private readonly reports = new Map<string, LinkReport>();
+  /** The lowest round trip each viewer has shown: its link's floor, with no queue in it. */
+  private readonly floors = new Map<string, number>();
+  private congestedTicks = 0;
+  private healthySince?: number;
+  private lastSwitchAt = -Infinity;
+  /** Steps down are spaced from each other only: a step up that did not hold is undone at once. */
+  private lastDownAt = -Infinity;
+  private lastUpAt?: number;
+  private upHold = UP_HOLD_MS;
+  /** Why the last change was made, for the log line. */
+  reason = '';
+
+  /**
+   * `start` is also the ceiling: it is the rate an operator chose (`PHYSICAL_VIDEO_BIT_RATE`), and a
+   * stream capped below the top tier must not climb past it on a clear link. A start between two
+   * tiers is itself the top rate, so the encoder and the governor agree on where they began.
+   */
+  constructor(start: number, tiers: number[] = BITRATE_TIERS) {
+    const below = [...tiers].filter((t) => t < start).sort((a, b) => b - a);
+    this.tiers = [start, ...below];
+    this.index = 0;
+  }
+
+  get bitRate(): number { return this.tiers[this.index]; }
+
+  report(viewer: string, r: LinkReport): void {
+    // A round trip of zero or less is a clock that could not be matched, not a fast link.
+    if (r.rttMs !== undefined && !(r.rttMs > 0)) { const { rttMs: _, ...rest } = r; r = rest; }
+    const prev = this.reports.get(viewer);
+    this.reports.set(viewer, { ...prev, ...r });
+    if (r.rttMs !== undefined && r.rttMs > 0) {
+      this.floors.set(viewer, Math.min(this.floors.get(viewer) ?? Infinity, r.rttMs));
+    }
+  }
+
+  forget(viewer: string): void {
+    this.reports.delete(viewer);
+    this.floors.delete(viewer);
+  }
+
+  /** How congested one viewer's link looks: 0 is clear; >= 1 is congested. */
+  private pressure(viewer: string, r: LinkReport): number {
+    let p = 0;
+    const floor = this.floors.get(viewer);
+    if (r.rttMs !== undefined && floor !== undefined) {
+      // A queue of more than 150 ms — or of more than the floor itself on a long path — is congestion.
+      p = Math.max(p, (r.rttMs - floor) / Math.max(150, floor));
+    }
+    if (r.fractionLost !== undefined) p = Math.max(p, r.fractionLost / 0.05);
+    return p;
+  }
+
+  /**
+   * Called about once a second, with what the stream has actually been sending (bits per second, over
+   * the last few seconds). Returns the new rate when the stream should change, else undefined.
+   */
+  tick(now: number, sendingBps = Infinity): number | undefined {
+    let worst = 0;
+    let worstViewer: string | undefined;
+    for (const [viewer, r] of this.reports) {
+      if (now - r.at > REPORT_FRESH_MS) continue;
+      const p = this.pressure(viewer, r);
+      if (p > worst) { worst = p; worstViewer = viewer; }
+    }
+    // Nothing fresh: no viewer, or a still screen sending nothing to report on. Nothing to decide.
+    if (worstViewer === undefined && ![...this.reports.values()].some((r) => now - r.at <= REPORT_FRESH_MS)) {
+      return undefined;
+    }
+
+    // A queue the stream is not filling is somebody else's: neither a reason to go down nor proof the
+    // link is clear enough to go up.
+    if (sendingBps < this.bitRate * ACTIVE_SHARE) {
+      this.congestedTicks = 0;
+      if (worst < 0.5) this.healthySince ??= now;
+      else this.healthySince = undefined;
+      return this.maybeStepUp(now);
+    }
+    if (worst >= 1) {
+      this.congestedTicks += 1;
+      this.healthySince = undefined;
+    } else {
+      this.congestedTicks = 0;
+      // "Healthy" is well clear of the line, not merely under it.
+      if (worst < 0.5) this.healthySince ??= now;
+      else this.healthySince = undefined;
+    }
+
+    if (this.congestedTicks >= 2 && now - this.lastDownAt >= DOWN_GAP_MS && this.index < this.tiers.length - 1) {
+      // The deeper the queue, the further down: one tier per doubling of the pressure, at most two at
+      // once — a queue of seconds wants relief now, and a further step is four seconds away if not.
+      const steps = Math.min(2, Math.max(1, Math.floor(Math.log2(worst)) + 1));
+      const from = this.bitRate;
+      this.index = Math.min(this.tiers.length - 1, this.index + steps);
+      if (this.lastUpAt !== undefined && now - this.lastUpAt < UP_FAILED_WITHIN_MS) {
+        this.upHold = Math.min(this.upHold * 2, UP_HOLD_MAX_MS);
+      }
+      const r = this.reports.get(worstViewer!)!;
+      const floor = this.floors.get(worstViewer!);
+      this.reason = `${fmtRate(from)} → ${fmtRate(this.bitRate)}: `
+        + `round trip ${Math.round(r.rttMs ?? 0)} ms against ${Math.round(floor ?? 0)} ms at best, `
+        + `${Math.round((r.fractionLost ?? 0) * 100)}% lost`;
+      this.lastSwitchAt = now;
+      this.lastDownAt = now;
+      this.congestedTicks = 0;
+      this.healthySince = undefined;
+      return this.bitRate;
+    }
+
+    return this.maybeStepUp(now);
+  }
+
+  private maybeStepUp(now: number): number | undefined {
+    if (this.healthySince !== undefined && this.index > 0
+      && now - this.healthySince >= this.upHold && now - this.lastSwitchAt >= this.upHold) {
+      const from = this.bitRate;
+      this.index -= 1;
+      this.reason = `${fmtRate(from)} → ${fmtRate(this.bitRate)}: ${Math.round(this.upHold / 1000)} s without congestion`;
+      this.lastSwitchAt = now;
+      this.lastUpAt = now;
+      this.healthySince = undefined;
+      return this.bitRate;
+    }
+    return undefined;
+  }
+}
+
+const fmtRate = (bps: number): string => `${(bps / 1_000_000).toFixed(1)} Mbit/s`;
+
 /**
  * ONE capture per phone, however many viewers. scrcpy binds one server and one forwarded port per
  * device; a second tab starting a second one would fight the first for both. Started by the first
@@ -207,9 +441,18 @@ export function videoSizeFor(screen: { width: number; height: number }, maxSize?
  * can be given them before the keyframe it starts on.
  */
 export class H264Fanout {
-  private readonly make: () => ScreenCapture;
+  private readonly make: (o: { bitRate: number }) => ScreenCapture;
   private capture?: ScreenCapture;
   private starting?: Promise<void>;
+  /** Decides the encoder's rate from the viewers' reports; absent when adaptation is off. */
+  readonly governor?: BitrateGovernor;
+  private bitRate: number;
+  private adaptTimer?: ReturnType<typeof setInterval>;
+  private restarting = false;
+  /** Every rate change made, in order — for the log, and for tests. */
+  readonly changes: Array<{ at: number; bitRate: number; reason: string }> = [];
+  /** Bytes the encoder produced, per second, for the last few seconds — what the stream is sending. */
+  private readonly sent: Array<{ at: number; bytes: number }> = [];
   private readonly subs = new Set<(nal: Buffer, at: number, frame?: FrameMark) => void>();
   private keyframeAt = 0;
   sps?: Buffer;
@@ -221,7 +464,88 @@ export class H264Fanout {
   /** When the encoder last produced a picture — how long the screen has been still. */
   lastFrameAt = 0;
 
-  constructor(make: () => ScreenCapture) { this.make = make; }
+  /**
+   * `make` builds a capture at the rate given. `adapt` lets the viewers' reports move that rate
+   * (BitrateGovernor); without it the stream stays at `bitRate`, as it always did.
+   */
+  constructor(make: (o: { bitRate: number }) => ScreenCapture, o: { bitRate?: number; adapt?: boolean } = {}) {
+    this.make = make;
+    this.bitRate = o.bitRate ?? BITRATE_TIERS[0];
+    if (o.adapt) this.governor = new BitrateGovernor(this.bitRate);
+  }
+
+  /** The rate the encoder is running at now. */
+  get currentBitRate(): number { return this.bitRate; }
+
+  /** A viewer's receiver report, for the governor. */
+  report(viewer: string, r: LinkReport): void { this.governor?.report(viewer, r); }
+  forget(viewer: string): void { this.governor?.forget(viewer); }
+
+  private startCapture(): ScreenCapture {
+    const capture = this.make({ bitRate: this.bitRate });
+    this.capture = capture;
+    this.starting = capture.start((nal, at, frame) => {
+      const t = nalType(nal);
+      if (t === NAL_IDR || t === NAL_NON_IDR) this.lastFrameAt = at;
+      if (this.governor) this.sent.push({ at, bytes: nal.length });
+      if (t === NAL_SPS) { this.sps = Buffer.from(nal); this.size = spsSize(nal) ?? this.size; }
+      else if (t === NAL_PPS) this.pps = Buffer.from(nal);
+      for (const s of this.subs) s(nal, at, frame);
+    }).catch((e) => {
+      // A capture that could not start leaves nobody holding it, so the next viewer tries afresh.
+      if (this.capture === capture) { this.capture = undefined; this.starting = undefined; }
+      throw e;
+    });
+    if (this.governor && !this.adaptTimer) {
+      this.adaptTimer = setInterval(() => this.adapt(), 1_000);
+      this.adaptTimer.unref?.();
+    }
+    return capture;
+  }
+
+  /**
+   * Put the governor's decision into effect: the encoder is restarted at the new rate.
+   *
+   * A RESTART, BECAUSE THERE IS NO OTHER WAY IN. scrcpy 4.1 has no control message for the bitrate
+   * (its message types were read from the jar), so a new rate is a new server. The viewers keep their
+   * connections: the new encoder begins on a keyframe with its parameter sets, and `stream()` re-bases
+   * its clock (the same path a keyframe request takes). The old capture stops first, because a phone
+   * serves one scrcpy server per forwarded port.
+   */
+  async setBitRate(bitRate: number, reason = ''): Promise<void> {
+    if (bitRate === this.bitRate || this.restarting) return;
+    this.bitRate = bitRate;
+    this.changes.push({ at: Date.now(), bitRate, reason });
+    const old = this.capture;
+    if (!old || this.subs.size === 0) return;
+    this.restarting = true;
+    try {
+      await old.stop();
+      if (this.subs.size === 0) return;
+      this.startCapture();
+      await this.starting;
+    } catch (e) {
+      console.error(`[video] restarting the encoder at ${fmtRate(bitRate)} failed: ${(e as Error).message}`);
+    } finally {
+      this.restarting = false;
+    }
+  }
+
+  /** What the stream has sent over the last three seconds, in bits per second. */
+  sendingBps(now = Date.now()): number {
+    while (this.sent.length && now - this.sent[0].at > 3_000) this.sent.shift();
+    return (this.sent.reduce((n, x) => n + x.bytes, 0) * 8) / 3;
+  }
+
+  private adapt(): void {
+    if (!this.governor || this.restarting || !this.capture) return;
+    const now = Date.now();
+    const next = this.governor.tick(now, this.sendingBps(now));
+    if (next !== undefined) {
+      console.log(`[video] the stream ${next < this.bitRate ? 'drops' : 'rises'} to ${fmtRate(next)} — ${this.governor.reason}`);
+      void this.setBitRate(next, this.governor.reason);
+    }
+  }
 
   get viewers(): number { return this.subs.size; }
 
@@ -250,21 +574,7 @@ export class H264Fanout {
     // A viewer joining a capture already running starts on the NEXT keyframe — which, on a screen
     // that is not moving, may not come for as long as nothing changes. So it asks for one.
     const joining = Boolean(this.capture);
-    if (!this.capture) {
-      const capture = this.make();
-      this.capture = capture;
-      this.starting = capture.start((nal, at, frame) => {
-        const t = nalType(nal);
-        if (t === NAL_IDR || t === NAL_NON_IDR) this.lastFrameAt = at;
-        if (t === NAL_SPS) { this.sps = Buffer.from(nal); this.size = spsSize(nal) ?? this.size; }
-        else if (t === NAL_PPS) this.pps = Buffer.from(nal);
-        for (const s of this.subs) s(nal, at, frame);
-      }).catch((e) => {
-        // A capture that could not start leaves nobody holding it, so the next viewer tries afresh.
-        if (this.capture === capture) { this.capture = undefined; this.starting = undefined; }
-        throw e;
-      });
-    }
+    if (!this.capture) this.startCapture();
     await this.starting;
     if (joining) this.requestKeyframe();
     let gone = false;
@@ -276,6 +586,8 @@ export class H264Fanout {
         const c = this.capture;
         this.capture = undefined;
         this.starting = undefined;
+        clearInterval(this.adaptTimer);
+        this.adaptTimer = undefined;
         void c.stop();
       }
     };
@@ -558,6 +870,10 @@ export class PhoneVideoPeer implements SignalChannel {
   private closed = false;
   /** This viewer has been sent a keyframe, so it has a whole picture to hold on a still screen. */
   private keyframeSent = false;
+  /** Who this viewer is to the governor: one phone can have several. */
+  private readonly viewer = `viewer-${++viewerCount}`;
+  private reports = 0;
+  private lastReport?: { lost: number; seq: number };
 
   constructor(o: { signal: SignalOptions; fanout: H264Fanout; input: InputMapper; label: string; video: { w: number; h: number } }) {
     this.o = o;
@@ -609,12 +925,47 @@ export class PhoneVideoPeer implements SignalChannel {
     this.pc = pc;
     const track = new MediaStreamTrack({ kind: 'video' });
     const video = pc.addTransceiver(track, { direction: 'sendonly', streams: [new MediaStream({ id: `display_${this.o.label}` })] });
+    fixSenderClock(video.sender);
     /**
      * A PLI IS ANSWERED. The browser sends one when it cannot decode what it has — a lost packet in a
      * keyframe, a decoder reset — and until it gets a keyframe the picture is frozen or smeared. Left
      * unanswered (as it was), that lasted until the encoder's next scheduled keyframe, and on a screen
      * that is not moving there is no next one. See `H264Fanout.requestKeyframe` for the rate limit.
      */
+    /**
+     * THE VIEWER'S RECEIVER REPORTS, FOR THE GOVERNOR. werift has read each report by the time this
+     * runs: its smoothed round trip (from the report's echo of our last sender report — the SR rides
+     * with the media, so the round trip carries the forward queue) and the fraction lost since the
+     * previous report. Private fields, read once per report; the werift version is pinned.
+     */
+    video.sender.onRtcp.subscribe((packet) => {
+      if (packet.type !== RTCP_SR && packet.type !== RTCP_RR) return;
+      const s = video.sender as unknown as { rtt?: number; ssrc: number };
+      /**
+       * LOSS OVER ENOUGH PACKETS TO MEAN SOMETHING. The report's own fraction is over whatever arrived
+       * since the last one, and on a still screen that is a packet or two: one lost read as "50% lost"
+       * and counted as congestion. The cumulative counters give the span; under 30 packets, no verdict.
+       */
+      const rep = (packet as unknown as { reports?: Array<{ ssrc: number; packetsLost: number; highestSequence: number }> })
+        .reports?.find((r) => r.ssrc === s.ssrc);
+      let fractionLost: number | undefined;
+      if (rep) {
+        const prev = this.lastReport;
+        this.lastReport = { lost: rep.packetsLost, seq: rep.highestSequence };
+        const expected = prev ? rep.highestSequence - prev.seq : 0;
+        if (prev && expected >= 30) fractionLost = Math.max(0, rep.packetsLost - prev.lost) / expected;
+      }
+      if (TRACE && ++this.reports % 5 === 0) {
+        log(`link: round trip ${s.rtt !== undefined ? Math.round(s.rtt * 1000) : '?'} ms, `
+          + `${fractionLost === undefined ? 'loss n/a' : `${Math.round(fractionLost * 100)}% lost`}, `
+          + `sending ${(this.o.fanout.sendingBps() / 1e6).toFixed(2)} of ${(this.o.fanout.currentBitRate / 1e6).toFixed(1)} Mbit/s`);
+      }
+      this.o.fanout.report(this.viewer, {
+        ...(s.rtt !== undefined ? { rttMs: s.rtt * 1000 } : {}),
+        ...(fractionLost !== undefined ? { fractionLost } : {}),
+        at: Date.now(),
+      });
+    });
     video.sender.onPictureLossIndication.subscribe(() => {
       /**
        * BUT NOT CHROME'S PROBE OF A STILL SCREEN (D68). Chrome also sends a PLI when no frame has come
@@ -781,6 +1132,7 @@ export class PhoneVideoPeer implements SignalChannel {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.o.fanout.forget(this.viewer);
     this.unsubscribe?.();
     void this.pc?.close().catch(() => {});
   }

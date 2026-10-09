@@ -217,9 +217,14 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
   const liveVideoMaxSize = Number(process.env.PHYSICAL_VIDEO_MAX_SIZE ?? 1280);
   // Touches over scrcpy's control socket, streamed as they happen; `0` sends them over adb instead.
   const liveInput = process.env.PHYSICAL_LIVE_INPUT !== '0';
+  // The rate a phone's stream starts at, and whether the viewers' links may move it (BitrateGovernor):
+  // a fixed rate is what a link narrower than it cannot carry at all.
+  const liveVideoBitRate = Number(process.env.PHYSICAL_VIDEO_BIT_RATE ?? 4_000_000);
+  const adaptBitRate = process.env.PHYSICAL_ADAPT_BITRATE !== '0';
   if (liveVideo) {
     console.log(`[agent] live video for phones: scrcpy ${process.env.SCRCPY_SERVER_VERSION}, ${liveVideoMaxSize}px on the long side`
-      + `, input ${liveInput ? 'live over scrcpy' : 'over adb'}`);
+      + `, input ${liveInput ? 'live over scrcpy' : 'over adb'}`
+      + `, ${liveVideoBitRate / 1_000_000} Mbit/s${adaptBitRate ? ' adapting to the viewer' : ' fixed'}`);
   }
 
   const backends = usable.map((d) => {
@@ -242,8 +247,11 @@ async function choosePhysicalBackends(): Promise<DeviceBackend[]> {
       ...(liveVideo ? {
         liveVideo: {
           maxSize: liveVideoMaxSize,
-          makeCapture: () => createCapture({
-            serial: d.serial, maxSize: liveVideoMaxSize, bitRate: 4_000_000, maxFps: 60, control: liveInput,
+          // The rate the stream starts at; with adaptation on, the viewers' links move it from there.
+          bitRate: liveVideoBitRate,
+          adapt: adaptBitRate,
+          makeCapture: ({ bitRate }) => createCapture({
+            serial: d.serial, maxSize: liveVideoMaxSize, bitRate, maxFps: 60, control: liveInput,
           }),
         },
       } : {}),
