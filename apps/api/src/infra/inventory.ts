@@ -1,4 +1,6 @@
-import { cloudGet, instanceFor, CloudError, powerConfigured, snapshotsConfigured } from './cloud.ts';
+import {
+  cloudGet, instanceFor, CloudError, powerConfigured, snapshotTakenAt, snapshotsConfigured,
+} from './cloud.ts';
 import { loadConfig } from '../config.ts';
 
 /**
@@ -282,13 +284,15 @@ export async function cloudInventory(fleetHostnames: Set<string>): Promise<Cloud
    * `removeSnapshot` enforces, computed from the same fields, so the page and the operation cannot
    * disagree about which one it is.
    */
-  const newest = new Map<string, { name: string; at: string }>();
+  const newest = new Map<string, { name: string; at: number }>();
   for (const s of rawSnapshots) {
     if (s.status !== 'READY') continue;
     const disk = leaf(s.sourceDisk);
-    const at = String(s.creationTimestamp ?? '');
+    // By instant, with the same function the operation uses: the provider's timestamps carry an
+    // offset that changes with the season, and their text does not sort the way their times do.
+    const at = snapshotTakenAt(s.creationTimestamp);
     const seen = newest.get(disk);
-    if (!seen || at.localeCompare(seen.at) > 0) newest.set(disk, { name: String(s.name ?? ''), at });
+    if (!seen || at > seen.at) newest.set(disk, { name: String(s.name ?? ''), at });
   }
   const snapshots: CloudSnapshot[] = rawSnapshots
     .map((s) => {

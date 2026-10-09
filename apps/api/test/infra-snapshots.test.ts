@@ -256,6 +256,30 @@ describe('deleting a snapshot', () => {
     assert.equal(asked('DELETE').length, 0);
   });
 
+  /**
+   * THE REAL PROVIDER'S TIMESTAMPS, which the fixtures above do not use. GCE answers in local time
+   * with an offset — `…-07:00` in summer, `…-08:00` in winter — and in the hour the clocks go back
+   * the text sorts the wrong way round: 01:30-07:00 is 08:30 UTC, and 01:10-08:00 is 09:10 UTC.
+   * Compared as text, the EARLIER one is "newest", so the later one — the real newest restore
+   * point — was deletable, and the page said so too.
+   */
+  test('"newest" is decided by when it was taken, not by how its timestamp sorts as text', async () => {
+    snaps.set('lab-earlier', { status: 'READY', disk: 'lab-disk', at: '2026-11-01T01:30:00.000-07:00' });
+    snaps.set('lab-later', { status: 'READY', disk: 'lab-disk', at: '2026-11-01T01:10:00.000-08:00' });
+
+    const body = (await get('/v1/infra/cloud?refresh=1')).json();
+    const snap = (n: string) => body.snapshots.find((x: { name: string }) => x.name === n);
+    assert.equal(snap('lab-later').deletable, false, 'the page offers Delete on the newest restore point');
+    assert.equal(snap('lab-earlier').deletable, true);
+
+    const refused = await post('operator', '/v1/infra/cloud/snapshots/lab-later/delete');
+    assert.equal(refused.json().result, 'failed', refused.body);
+    assert.match(refused.json().message, /newest restore point/);
+    assert.equal(asked('DELETE').length, 0, 'the newest restore point was deleted');
+
+    assert.equal((await post('operator', '/v1/infra/cloud/snapshots/lab-earlier/delete')).json().result, 'succeeded');
+  });
+
   test('a snapshot of a disk that is NOT on the list is refused whatever it is called', async () => {
     // Named exactly like a snapshot this console would make of an allow-listed disk.
     have('cp-disk-20260101-0000', 'other-disk', 90);

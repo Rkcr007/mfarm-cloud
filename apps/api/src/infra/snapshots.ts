@@ -7,7 +7,7 @@ import { infraChanged } from './stream.ts';
 import { withSystem } from '../db.ts';
 import {
   CloudError, createSnapshot, deleteSnapshot, listSnapshots, snapshotDisk, snapshotInfo,
-  snapshotsConfigured, type SnapshotInfo, type SnapshotState,
+  snapshotTakenAt, snapshotsConfigured, type SnapshotInfo, type SnapshotState,
 } from './cloud.ts';
 import { resetInventoryCache } from './inventory.ts';
 import { cleanReason, type OperationOutcome } from './operations.ts';
@@ -165,7 +165,8 @@ function newestOf(disk: string, all: Array<Record<string, unknown>>): string | n
   const leaf = (u: unknown) => (typeof u === 'string' ? u.slice(u.lastIndexOf('/') + 1) : '');
   const ready = all
     .filter((s) => leaf(s.sourceDisk) === disk && s.status === 'READY')
-    .sort((a, b) => String(b.creationTimestamp ?? '').localeCompare(String(a.creationTimestamp ?? '')));
+    // By INSTANT, never by the text of the timestamp — see `snapshotTakenAt`.
+    .sort((a, b) => snapshotTakenAt(b.creationTimestamp) - snapshotTakenAt(a.creationTimestamp));
   return ready.length ? String(ready[0].name ?? '') : null;
 }
 
