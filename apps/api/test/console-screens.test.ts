@@ -5165,6 +5165,64 @@ describe('the infrastructure operations centre', () => {
     assert.match(textOf(mod.SCREENS.infra()), /Not counted above: 2 devices on machines orgs enrolled themselves/);
   });
 
+  /* ---------------------------------------------------------------- retired hosts */
+
+  /** What the overview sends for a machine somebody took out of the fleet. */
+  const retiredHost = (over: Record<string, unknown> = {}) => ({
+    id: 'gone-1', hostname: 'old-laptop.local', kind: 'fleet', owner: null,
+    retiredAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
+    retiredBy: 'ops@example.test', reason: 'sold the laptop',
+    lastHeartbeatAt: new Date(Date.now() - 9 * 86_400_000).toISOString(), devices: 2, ...over,
+  });
+
+  test('a retired host is listed with who, when and why, and can be restored', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({ retired: [retiredHost()] });
+    const tree = mod.SCREENS.infra();
+    const text = textOf(tree);
+
+    assert.match(text, /Retired/);
+    assert.match(text, /old-laptop\.local/);
+    assert.match(text, /by ops@example\.test/);
+    assert.match(text, /sold the laptop/);
+    assert.match(text, /2 devices/);
+    assert.ok(buttonNamed(tree, 'Restore'), 'a retired host can be seen and still not put back');
+    // It is a record, not a host: the fleet's count above it has not moved.
+    assert.ok(!/3 of 3|of 3 hosts/.test(text));
+  });
+
+  test('pressing Restore asks first, and says it will not make the machine answer', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({ retired: [retiredHost()] });
+    // One handler, and it is the one that opens the confirmation — a button wired to nothing fires zero.
+    assert.equal(buttonNamed(mod.SCREENS.infra(), 'Restore').click(), 1);
+    const dialog = textOf((globalThis as unknown as {
+      document: { getElementById(id: string): unknown };
+    }).document.getElementById('dialog'));
+    assert.match(dialog, /Restore old-laptop\.local\?/);
+    assert.match(dialog, /does not start the machine or its agent/);
+  });
+
+  test('Restore is not drawn where the server says retiring is not available', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({
+      capabilities: { drain: false, power: false, services: false, retire: false },
+      retired: [retiredHost()],
+    });
+    const tree = mod.SCREENS.infra();
+    assert.match(textOf(tree), /old-laptop\.local/, 'the record is still shown');
+    assert.equal(buttonNamed(tree, 'Restore'), null);
+  });
+
+  test('a farm whose every host was retired says that, not that none ever registered', () => {
+    seed({ name: 'infra', lens: 'hosts' });
+    mod.state.infra.data = infraPayload({ hosts: [], enrolled: [], retired: [retiredHost()] });
+    const text = textOf(mod.SCREENS.infra());
+    assert.match(text, /No host is in the fleet right now/);
+    assert.ok(!/No host has ever registered/.test(text));
+    assert.match(text, /old-laptop\.local/);
+  });
+
   /* ---------------------------------------------------------------- freshness */
 
   test('a host whose gauges are stale is marked stale and keeps its numbers', () => {

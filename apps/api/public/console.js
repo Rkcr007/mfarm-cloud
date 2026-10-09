@@ -9707,6 +9707,54 @@ function askRetire(host) {
 }
 
 /**
+ * RESTORE — the undo for a retire, from the place the retire was done.
+ *
+ * Not a danger dialog: nothing is removed and nothing is switched on. It says the one thing somebody
+ * might otherwise expect and not get — putting a machine back in the fleet does not make it answer.
+ */
+function askRestore(host) {
+  confirmDialog({
+    title: `Restore ${host.hostname}?`,
+    lead: 'It becomes part of the fleet again: counted, watched and alerted on like any other host.',
+    removesLabel: 'What happens',
+    removes: [
+      host.devices
+        ? `its ${host.devices} device${host.devices === 1 ? '' : 's'} return to the state ${host.devices === 1 ? 'it was' : 'they were'} in before it was retired`
+        : 'it has no devices to return',
+      'if its agent is not running it will read as not answering, which is true of it',
+    ],
+    keeps: 'Nothing else changes. Restoring does not start the machine or its agent.',
+    confirm: 'Restore host',
+    confirmClass: 'primary',
+    onConfirm: () => runInfraOperation(
+      `/v1/infra/hosts/${encodeURIComponent(host.id)}/restore`, {},
+      { pending: `Restoring ${host.hostname}…` },
+    ),
+  });
+}
+
+/**
+ * A retired host, as one line. It is not in the fleet, so it has no card: who retired it, when and
+ * why is everything there is to say, and the one thing to do is put it back.
+ */
+function infraRetiredRow(host, caps) {
+  return h('div', { class: 'buildrow' },
+    h('span', { class: 'row tight idc' },
+      h('span', { class: 'dot' }),
+      h('span', { class: 'secondary', text: host.hostname }),
+      host.kind === 'enrolled' ? pill('enrolled', '', { dot: false }) : null),
+    h('span', { class: 'caption', text: [
+      `retired ${ago(host.retiredAt)}${host.retiredBy ? ` by ${host.retiredBy}` : ''}`,
+      host.reason || null,
+      `${host.devices} device${host.devices === 1 ? '' : 's'}`,
+    ].filter(Boolean).join(' · ') }),
+    h('span', { class: 'spacer' }),
+    // The same capability that offers Retire. A deployment that cannot retire cannot un-retire.
+    caps?.retire ? btn('Restore', 'tiny ghost', () => askRestore(host)) : null,
+  );
+}
+
+/**
  * The controls a host card offers, which is exactly what the SERVER says this deployment can do.
  *
  * `capabilities` is read per operation rather than per page: `drain` being available says nothing
@@ -10314,9 +10362,33 @@ function infraEnrolledCard(host) {
 
 function infraHosts(data) {
   const enrolled = data.enrolled || [];
+  const retired = data.retired || [];
+  /**
+   * WHAT WAS RETIRED, AND THE WAY BACK. Retiring took a machine off every screen, including any
+   * that could have shown it had been retired — so a mis-click could only be undone by getting to
+   * that machine and running its agent. Listed last and plainly: it is a record, not part of the
+   * fleet above it.
+   */
+  const retiredGroup = retired.length
+    ? [
+        h('h2', { class: 'card-title mt-md', text: 'Retired' }),
+        h('p', { class: 'page-sub mb-gap', text:
+          'Machines somebody took out of the fleet. They are in none of the counts, the health or '
+          + 'the cost above, and their history is kept. Running the agent on one brings it back, '
+          + 'and so does Restore.' }),
+        card(null, { class: 'flush' },
+          h('div', null, retired.map((host) => infraRetiredRow(host, data.capabilities)))),
+      ]
+    : null;
   if (!(data.hosts || []).length && !enrolled.length) {
-    return [empty('No host has ever registered with this control plane.',
-      'Start a worker agent and it appears within a heartbeat.')];
+    return [
+      // "Ever" was the word. With a retired host in the record it is no longer true.
+      retired.length
+        ? empty('No host is in the fleet right now.', 'Every machine that registered has been retired.')
+        : empty('No host has ever registered with this control plane.',
+          'Start a worker agent and it appears within a heartbeat.'),
+      retiredGroup,
+    ];
   }
   return [
     h('p', { class: 'page-sub mb-gap', text:
@@ -10336,6 +10408,7 @@ function infraHosts(data) {
           h('div', { class: 'stack' }, enrolled.map((host) => infraEnrolledCard(host))),
         ]
       : null,
+    retiredGroup,
   ];
 }
 
@@ -14452,6 +14525,7 @@ function pollSignature() {
       // Connected or away, and what it carries. Not its heartbeat age, which moves on every poll.
       ...(state.infra.data.enrolled || []).map((h) => `e:${h.id}:${h.power}:${h.devices?.total}:`
         + `${h.devices?.ready}:${h.maintenance?.drained ? 'd' : ''}`),
+      ...(state.infra.data.retired || []).map((h) => `r:${h.id}`),
     ].join(',') : '',
   });
 }

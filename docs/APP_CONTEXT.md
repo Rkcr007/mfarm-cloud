@@ -177,7 +177,7 @@ workers/agent/     Runs on a device host. Owns the device lifecycle, installs, r
                    captures evidence, heartbeats, and tunnels back to the control plane.
 packages/protocol/ The wire types shared by both sides.
 deploy/            Bring-up, deploy, and ~15 verify-*.mjs scripts that check the REAL farm.
-docs/adrs/         49 decisions, each with what was rejected and why (numbered to 0050;
+docs/adrs/         50 decisions, each with what was rejected and why (numbered to 0051;
                    there is no 0013).
 ```
 
@@ -253,7 +253,7 @@ measuring nothing, which is why the first line is first.
 
 ## 8. How this project finds bugs, and why that matters to a reader
 
-**Seventy-three defects are recorded. Almost none were found by the test suite.** They were found by
+**Seventy-four defects are recorded. Almost none were found by the test suite.** They were found by
 using the product. The suite is over sixteen hundred tests and it catches different things — it caught two security
 regressions this month — but the pattern is consistent enough to be worth stating plainly to anybody
 evaluating this code:
@@ -275,7 +275,7 @@ written by somebody who keeps being wrong about them, which is why this one name
 ## 9. Where to start reading
 
 1. `docs/STATUS.md` — where every part stands, with its honest caveat.
-2. `docs/adrs/` — 49 decisions (numbered to 0050; there is no 0013). Each says what was rejected
+2. `docs/adrs/` — 50 decisions (numbered to 0051; there is no 0013). Each says what was rejected
    and why, which is usually the useful half.
 3. `apps/api/src/allocator.ts` — the reconciliation loop the whole product turns on.
 4. `apps/api/src/http/webdriver/capabilities.ts` — the contract a customer's suite meets.

@@ -609,6 +609,81 @@ const RETIRE_SILENCE_MS = 10 * 60_000;
  * function that knows how to do that safely — RESERVED and SESSION_ACTIVE are left alone, so a
  * tenant mid-session is never interrupted, and each device records what it was.
  */
+/**
+ * RESTORE — put a retired machine back in the fleet, from the console.
+ *
+ * ---------------------------------------------------------------- why registration was not enough
+ *
+ * Retiring is undone by the machine registering again (056), and that is the right evidence for "it
+ * came back". It is no help to the person who retired the wrong row: until now the only way to undo
+ * a mis-click was to get to that machine and restart its agent, and until `retiredHosts` the console
+ * could not even show which machine it had been.
+ *
+ * ---------------------------------------------------------------- what it does, and does not
+ *
+ * It clears the three `retired_*` columns and lifts the quarantine RETIRING put there — the same
+ * release registration performs for a returning host (D59), through the same function, so each
+ * device goes back to what it was doing rather than to a guessed READY.
+ *
+ * IT DOES NOT MAKE A SILENT MACHINE ANSWER. A restored host that is not running reads as exactly
+ * that on the next sweep: the reaper quarantines it for silence, as it would any host, and the page
+ * says it is not answering. That is the truth about it, and it is why the message below says when
+ * it was last heard from.
+ */
+export async function restoreHost(req: FastifyRequest, hostId: string): Promise<OperationOutcome> {
+  const host = await loadHost(hostId);
+
+  return audited(req, {
+    action: 'restore-host',
+    targetKind: 'host',
+    targetId: host.id,
+    targetLabel: host.hostname,
+  }, async (): Promise<Step> => {
+    if (!host.retiredAt) {
+      return {
+        result: 'noop',
+        detail: 'Not retired.',
+        value: { result: 'noop', message: `${host.hostname} is not retired. Nothing changed.` },
+      };
+    }
+
+    const restored = await withSystem(async (c) => {
+      await c.query(
+        'UPDATE hosts SET retired_at = NULL, retired_by = NULL, retired_reason = NULL WHERE id = $1',
+        [host.id]);
+      // Only the quarantine retiring applied. Nothing else quarantines a retired host — the reaper
+      // skips it — so an operator's quarantine on one IS the retire's, which is the test
+      // registration uses for the same release.
+      if (host.state === 'QUARANTINED' && host.quarantineSource === 'operator') {
+        const { rows } = await c.query<{ n: number }>(
+          'SELECT release_host_quarantine($1) AS n', [host.id]);
+        return Math.max(0, Number(rows[0]?.n ?? 0));
+      }
+      return 0;
+    });
+    infraChanged();
+
+    const silentFor = host.lastHeartbeatAt ? Date.now() - host.lastHeartbeatAt.getTime() : null;
+    const heard = silentFor === null ? 'It has never been heard from'
+      : silentFor < RETIRE_SILENCE_MS ? 'It is reporting'
+        : `It was last heard from ${Math.round(silentFor / 3_600_000)} hour(s) ago`;
+    return {
+      result: 'succeeded',
+      detail: `Restored; ${restored} device(s) returned.`,
+      value: {
+        result: 'succeeded',
+        message: `${host.hostname} is back in the fleet`
+          + (restored ? `, and ${restored} device${restored === 1 ? '' : 's'} returned to the state `
+            + `${restored === 1 ? 'it was' : 'they were'} in` : '')
+          + `. ${heard}`
+          + (silentFor !== null && silentFor < RETIRE_SILENCE_MS ? '.'
+            : ', so it will read as not answering until its agent runs.'),
+        changed: { devicesRestored: restored },
+      },
+    };
+  });
+}
+
 export async function retireHost(
   req: FastifyRequest, hostId: string, reasonRaw: unknown,
 ): Promise<OperationOutcome> {

@@ -189,7 +189,8 @@ export async function workerRoutes(app: FastifyInstance) {
            -- DOWN is kept here too, and lifted below by the same function the heartbeat calls
            -- (migration 058) -- flipping it to UP in this CASE would skip giving the devices back.
            state = CASE WHEN hosts.state IN ('QUARANTINED', 'DOWN') THEN hosts.state ELSE 'UP' END,
-           -- REGISTRATION UN-RETIRES (056), and only registration does.
+           -- REGISTRATION UN-RETIRES (056). It was the only thing that did until ADR-0051 gave an
+           -- operator a Restore; a beat alone still does not.
            --
            -- Retiring says "this machine is not part of the fleet any more". Running the agent on it
            -- again is a deliberate act by somebody holding the enrollment credential, which is

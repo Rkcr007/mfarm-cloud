@@ -4,11 +4,12 @@ import { withSystem } from '../../db.ts';
 import { badRequest } from '../errors.ts';
 import {
   costSnapshot, fleetSnapshot, healthComponents, hostSnapshots, overallHealth, probeDatabase,
+  retiredHosts,
 } from '../../infra/snapshot.ts';
 import { recentEvents } from '../../infra/events.ts';
 import { history, historyFacets, type TargetKind } from '../../infra/audit.ts';
 import {
-  drainHost, resumeHost, startHost, stopHost, restartHost, retireHost,
+  drainHost, resumeHost, startHost, stopHost, restartHost, retireHost, restoreHost,
 } from '../../infra/operations.ts';
 import { waitForChange, sseFrame, SSE_KEEPALIVE, streamListeners } from '../../infra/stream.ts';
 import { powerConfigured, instanceFor } from '../../infra/cloud.ts';
@@ -182,10 +183,11 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
      */
     const hosts = every.filter((h) => h.kind === 'fleet');
     const enrolled = every.filter((h) => h.kind === 'enrolled');
-    const [cost, components, events] = await Promise.all([
+    const [cost, components, events, retired] = await Promise.all([
       costSnapshot(hosts),
       healthComponents(hosts, fleet, dbLatencyMs),
       recentEvents({ limit: 20 }),
+      retiredHosts(),
     ]);
 
     return {
@@ -214,6 +216,12 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
       // Never powerable: the allow-list is about the farm's cloud instances, and a machine somebody
       // enrolled is not one whatever name it registered under.
       enrolled: enrolled.map((h) => ({ ...h, powerable: false })),
+      /**
+       * What was taken out of the fleet, so that it can be seen and put back. In none of the counts,
+       * the health or the cost above — that is what retiring means — and listed here because a
+       * machine that vanished from every screen could not be un-retired by the person who clicked.
+       */
+      retired,
       cost,
       events,
       /**
@@ -449,6 +457,25 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /**
+   * POST /v1/infra/hosts/:id/restore — put a retired machine back in the fleet.
+   *
+   * No body: there is nothing to say about undoing a retire that the audit row does not already
+   * carry. Behind the same `retire` capability, because it is the other half of the same decision.
+   */
+  app.post<{ Params: { id: string } }>(
+    '/infra/hosts/:id/restore',
+    {
+      schema: {
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+      },
+    },
+    async (req) => {
+      requireOperator(req);
+      return restoreHost(req, req.params.id);
+    },
+  );
+
   /* ------------------------------------------------------------------ the live stream */
 
   /**
@@ -511,6 +538,7 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
           // Connected or away, and what it carries. Not its heartbeat age, which moves every tick.
           payload.enrolled.map((h) => [h.id, h.power, h.maintenance.drained, h.devices,
             h.sessions.active, h.alerts.map((a) => a.code)]),
+          payload.retired.map((h) => h.id),
           payload.fleet,
           payload.capabilities,
         ]);

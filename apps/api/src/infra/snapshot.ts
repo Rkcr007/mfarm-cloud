@@ -630,6 +630,63 @@ export async function hostSnapshots(
   });
 }
 
+/* ------------------------------------------------------------------------------ retired hosts */
+
+/** A machine somebody took out of the fleet (056), as the page lists it. */
+export interface RetiredHost {
+  id: string;
+  hostname: string;
+  kind: HostKind;
+  owner: { orgId: string; name: string | null } | null;
+  retiredAt: string;
+  /** Who retired it. Null when that account has since been deleted. */
+  retiredBy: string | null;
+  reason: string | null;
+  lastHeartbeatAt: string | null;
+  /** Devices that went with it. They stay quarantined, for the record, and are counted nowhere. */
+  devices: number;
+}
+
+/**
+ * Every retired host, newest first.
+ *
+ * WHY THIS EXISTS. Retiring removed a machine from every answer the product gives about what the
+ * fleet is — which is the point — and from every place a person could see that it had been retired.
+ * The only trace was a line in the operations log. So a host retired by mistake could not be found,
+ * let alone brought back, without running its agent again; and nobody could answer "what happened to
+ * that laptop" without knowing to filter a log by an action name.
+ *
+ * FIFTY, newest first. This is a list a person scans, and a farm that has retired more than fifty
+ * machines has the operations log for the rest.
+ */
+export async function retiredHosts(): Promise<RetiredHost[]> {
+  const rows = await withSystem(async (c) => (await c.query<{
+    id: string; hostname: string; org_id: string | null; org_name: string | null;
+    retired_at: Date; retired_reason: string | null; retired_by: string | null;
+    last_heartbeat_at: Date | null; devices: string;
+  }>(
+    `SELECT h.id, h.hostname, h.org_id, o.name AS org_name, h.retired_at, h.retired_reason,
+            u.email AS retired_by, h.last_heartbeat_at,
+            (SELECT count(*) FROM devices d WHERE d.host_id = h.id) AS devices
+       FROM hosts h
+       LEFT JOIN orgs o ON o.id = h.org_id
+       LEFT JOIN users u ON u.id = h.retired_by
+      WHERE h.retired_at IS NOT NULL
+      ORDER BY h.retired_at DESC
+      LIMIT 50`)).rows);
+  return rows.map((h) => ({
+    id: h.id,
+    hostname: h.hostname,
+    kind: hostKind(h.org_id),
+    owner: h.org_id === null ? null : { orgId: h.org_id, name: h.org_name },
+    retiredAt: h.retired_at.toISOString(),
+    retiredBy: h.retired_by,
+    reason: h.retired_reason,
+    lastHeartbeatAt: h.last_heartbeat_at ? h.last_heartbeat_at.toISOString() : null,
+    devices: Number(h.devices ?? 0),
+  }));
+}
+
 /* ------------------------------------------------------------------------------ the fleet */
 
 export interface FleetSnapshot {

@@ -354,6 +354,122 @@ describe('retiring a host', () => {
     assert.match(res.json().message, /already retired/);
   });
 });
+describe('a retired host can be seen, and put back', () => {
+  /**
+   * WHAT WAS MISSING. Retiring took a machine off every screen — including any that could have
+   * shown it had been retired. The one trace was a line in the operations log, and the one way back
+   * was to reach the machine and run its agent. So the wrong click could not be found, let alone
+   * undone, from the place it was made.
+   */
+  const overview = async () =>
+    (await app.inject({ method: 'GET', url: '/v1/infra/overview', headers: { cookie: operatorCookie } })).json();
+  const retire = (host: string, reason?: string) =>
+    post(`/v1/infra/hosts/${host}/retire`, reason ? { reason } : {});
+  const deviceState = async (id: string) =>
+    (await q<{ state: string }>('SELECT state::text AS state FROM devices WHERE id = $1', [id]))[0].state;
+
+  test('it is listed with who retired it, when and why', async () => {
+    const host = await seedHost('listed', { beatSecondsAgo: 3600 });
+    await seedDevice(host, 'READY');
+    await seedDevice(host, 'OFFLINE');
+    await retire(host, 'sold the laptop');
+
+    const body = await overview();
+    const row = body.retired.find((h: { id: string }) => h.id === host);
+    assert.ok(row, 'a retired host is on no list at all');
+    assert.equal(row.reason, 'sold the laptop');
+    assert.equal(row.retiredBy, OPERATOR);
+    assert.equal(row.devices, 2);
+    assert.equal(row.kind, 'fleet');
+    assert.ok(Date.now() - Date.parse(row.retiredAt) < 60_000);
+    assert.ok(!body.hosts.some((h: { id: string }) => h.id === host), 'and it is still in the fleet');
+  });
+
+  test('restoring puts it back in the fleet, and each device back to what it was', async () => {
+    const host = await seedHost('restored', { beatSecondsAgo: 3600 });
+    const ready = await seedDevice(host, 'READY');
+    const offline = await seedDevice(host, 'OFFLINE');
+    await retire(host);
+    assert.equal(await deviceState(ready), 'QUARANTINED');
+
+    const res = await post(`/v1/infra/hosts/${host}/restore`);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().result, 'succeeded');
+    assert.deepEqual(res.json().changed, { devicesRestored: 2 });
+    // It has been silent for an hour. The message has to say so, or "restored" reads as "working".
+    assert.match(res.json().message, /will read as not answering until its agent runs/);
+
+    const [row] = await q<{ retired_at: Date | null; retired_reason: string | null; state: string;
+                            quarantine_source: string | null }>(
+      'SELECT retired_at, retired_reason, state::text AS state, quarantine_source FROM hosts WHERE id = $1', [host]);
+    assert.equal(row.retired_at, null);
+    assert.equal(row.retired_reason, null);
+    assert.equal(row.state, 'UP', 'the quarantine retiring applied was left on it — D59, from the other door');
+    assert.equal(row.quarantine_source, null);
+    // NOT a guessed READY for both: the one that was offline is offline again.
+    assert.equal(await deviceState(ready), 'READY');
+    assert.equal(await deviceState(offline), 'OFFLINE');
+
+    const body = await overview();
+    assert.ok(body.hosts.some((h: { id: string }) => h.id === host), 'restored, and still not in the fleet');
+    assert.ok(!body.retired.some((h: { id: string }) => h.id === host), 'restored, and still listed as retired');
+
+    const ops = await opsFor(host);
+    assert.deepEqual(ops.map((o) => [o.action, o.result]),
+      [['retire-host', 'succeeded'], ['restore-host', 'succeeded']]);
+    assert.equal(ops[1].actor_email, OPERATOR);
+  });
+
+  test('restoring a host that was never retired changes nothing, and says so', async () => {
+    const host = await seedHost('never-retired');
+    const res = await post(`/v1/infra/hosts/${host}/restore`);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().result, 'noop');
+    assert.match(res.json().message, /is not retired/);
+    assert.equal((await hostRow(host)).state, 'UP');
+  });
+
+  test('a host an operator DRAINED is not released by a restore it does not need', async () => {
+    // Drained and not retired: restore is a no-op and must not lift a person's drain on the way.
+    const host = await seedHost('drained-not-retired');
+    await post(`/v1/infra/hosts/${host}/drain`, { reason: 'kernel upgrade' });
+    await post(`/v1/infra/hosts/${host}/restore`);
+    const row = await hostRow(host);
+    assert.equal(row.state, 'QUARANTINED');
+    assert.equal(row.quarantine_reason, 'kernel upgrade');
+  });
+
+  test('an org admin who is not a fleet operator cannot restore', async () => {
+    const host = await seedHost('not-theirs', { beatSecondsAgo: 3600 });
+    await retire(host);
+    const res = await post(`/v1/infra/hosts/${host}/restore`, {}, 'admin');
+    assert.equal(res.statusCode, 403, res.body);
+    const [row] = await q<{ retired_at: Date | null }>('SELECT retired_at FROM hosts WHERE id = $1', [host]);
+    assert.ok(row.retired_at, 'a 403 that restored it anyway');
+  });
+
+  test('its devices leave the tenant\'s fleet list with it, and come back with it', async () => {
+    const host = await seedHost('fleet-list', { beatSecondsAgo: 3600 });
+    const device = await seedDevice(host, 'READY');
+    const listed = async () => {
+      const res = await app.inject({ method: 'GET', url: '/v1/devices', headers: { cookie: adminCookie } });
+      assert.equal(res.statusCode, 200, res.body);
+      return (res.json().devices as Array<{ id: string }>).some((d) => d.id === device);
+    };
+    assert.equal(await listed(), true, 'the fixture device is not visible to this org, so nothing below means anything');
+
+    await retire(host, 'gone');
+    assert.equal(await listed(), false,
+      'a retired host\'s device is still in the Fleet, quarantined for good with a Recover button nobody can honour');
+
+    // Not deleted: the row a session's history points at still answers.
+    const detail = await app.inject({ method: 'GET', url: `/v1/devices/${device}`, headers: { cookie: adminCookie } });
+    assert.equal(detail.statusCode, 200, detail.body);
+
+    await post(`/v1/infra/hosts/${host}/restore`);
+    assert.equal(await listed(), true);
+  });
+});
 
 describe('every operation is written down', () => {
   test('who, what, against what, and how it went', async () => {
