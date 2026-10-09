@@ -1,10 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { withSystem, withTenant } from '../../db.ts';
-import { requireTenant, requireUser } from '../server.ts';
+import { requireOperator, requireTenant, requireUser } from '../server.ts';
 import { forbidden, notFound } from '../errors.ts';
 import {
   clearResetEscalation, quarantineDevice, quarantineLog, releaseDeviceQuarantine, resetAttempts,
 } from '../../allocator.ts';
+import { forgetDevice, forgotten, inFleet, restoreDevice } from '../../forgotten.ts';
 
 export async function deviceRoutes(app: FastifyInstance) {
   /**
@@ -39,15 +40,33 @@ export async function deviceRoutes(app: FastifyInstance) {
                   quarantined_at, quarantine_reason, quarantine_source,
                   recovery_started_at, recovery_from_reason, away_since, away_reason,
                   (org_id IS NOT NULL) AS dedicated
-             FROM devices
+             FROM devices d
             WHERE ($1::text IS NULL OR region = $1)
               AND ($2::text IS NULL OR platform = $2)
               AND ($3::text IS NULL OR state::text = $3)
+              -- A device somebody forgot is not part of the fleet (069). Never retired_at alone:
+              -- see forgotten.ts for why a hidden device cannot be an allocatable one.
+              AND ${inFleet('d')}
             ORDER BY platform, model`,
           [region ?? null, platform ?? null, state ?? null],
         );
         return rows;
       });
+
+      /**
+       * WHAT WAS FORGOTTEN, so that it can be found and put back (069). The same RLS read as the
+       * list above, so a tenant sees the forgotten devices it could have seen in the fleet and no
+       * others. Unfiltered by region or platform on purpose: this is a short list of exceptions,
+       * and one hidden by a filter is one nobody can restore.
+       */
+      const gone = await withTenant(orgId, async (c) => (await c.query(
+        `SELECT d.id, d.platform, d.tier, d.model, d.os_version, d.profile,
+                d.retired_at, d.retired_reason,
+                (d.org_id IS NOT NULL) AS dedicated
+           FROM devices d
+          WHERE ${forgotten('d')}
+          ORDER BY d.retired_at DESC
+          LIMIT 100`)).rows);
 
       /**
        * THE HOSTS' BEATS, ON THE SYSTEM POOL AND KEYED TO WHAT RLS ALREADY ALLOWED — D2.
@@ -74,13 +93,13 @@ export async function deviceRoutes(app: FastifyInstance) {
        * tenant cannot join `hosts`.
        */
       const onRetiredHost = new Set<string>();
-      if (rows.length) {
+      if (rows.length || gone.length) {
         await withSystem(async (c) => {
           const { rows: hostFacts } = await c.query(
             `SELECT d.id, h.last_heartbeat_at, (h.retired_at IS NOT NULL) AS retired
                FROM devices d JOIN hosts h ON h.id = d.host_id
               WHERE d.id = ANY($1::uuid[])`,
-            [rows.map((r) => r.id)],
+            [[...rows, ...gone].map((r) => r.id)],
           );
           for (const b of hostFacts) {
             if (b.last_heartbeat_at) heartbeats.set(b.id as string, b.last_heartbeat_at as string);
@@ -199,6 +218,15 @@ export async function deviceRoutes(app: FastifyInstance) {
         // Availability is what callers actually decide on, so it is computed here rather than
         // leaving every client to derive it from the state enum.
         available: rows.filter((r) => r.state === 'READY').length,
+        // A forgotten device on a RETIRED host is left out of this too: restoring it would put a
+        // device back in a fleet its machine is not part of. Restore the host and it returns here.
+        forgotten: gone.filter((r) => !onRetiredHost.has(r.id)).map((r) => ({
+          // `tier` and `profile` are what the console names a device from. Without them every
+          // forgotten device is "Unprofiled device", and a list of those identifies nothing.
+          id: r.id, platform: r.platform, tier: r.tier, model: r.model, osVersion: r.os_version,
+          ...(r.profile ? { profile: r.profile } : {}),
+          dedicated: r.dedicated, forgottenAt: r.retired_at, reason: r.retired_reason,
+        })),
       };
     },
   );
@@ -214,6 +242,7 @@ export async function deviceRoutes(app: FastifyInstance) {
                 d.quarantined_at, d.quarantine_reason, d.quarantine_source,
                 d.recovery_started_at, d.recovery_from_reason, d.recovery_released_by,
                 d.away_since, d.away_reason,
+                d.retired_at, d.retired_reason, (d.org_id IS NOT NULL) AS dedicated,
                 -- Joined here rather than exposed as a bare uuid the console would have to resolve
                 -- against an endpoint it cannot reach: the users table is RLS-scoped to the
                 -- caller's org, and an operator releasing a SHARED device need not be in it. It
@@ -267,6 +296,9 @@ export async function deviceRoutes(app: FastifyInstance) {
         id: row.id, region: row.region, platform: row.platform, tier: row.tier,
         model: row.model, osVersion: row.os_version, state: row.state,
         capabilities: row.capabilities, lastResetAt: row.last_reset_at,
+        // Whose it is decides who may forget or restore it, and a forgotten device is not in the
+        // list this page otherwise reads that from.
+        dedicated: row.dedicated,
         ...(row.profile ? { profile: row.profile } : {}),
         ...(row.screen ? { screen: row.screen } : {}),
         ...(row.abis ? { abis: row.abis } : {}),
@@ -303,6 +335,14 @@ export async function deviceRoutes(app: FastifyInstance) {
           }
           : {}),
         ...(row.away_since ? { away: { since: row.away_since, reason: row.away_reason } } : {}),
+        /**
+         * FORGOTTEN (069) — the same test the list uses, so this page and the Fleet cannot disagree
+         * about whether a device is in it. The page still answers for a forgotten device: a session
+         * that ran on it links here, and this is where it is restored from.
+         */
+        ...(row.retired_at && (row.state === 'OFFLINE' || row.state === 'QUARANTINED')
+          ? { forgotten: { at: row.retired_at, reason: row.retired_reason } }
+          : {}),
       },
     };
   });
@@ -456,6 +496,21 @@ export async function deviceRoutes(app: FastifyInstance) {
    */
   app.post<{ Params: { id: string } }>('/devices/:id/release-quarantine', async (req) => {
     const userId = await operatorOn(req, req.params.id);
+    /**
+     * NOT A FORGOTTEN DEVICE (069). A recovery moves it to PREPARING, which makes it visible again
+     * by the rule in `forgotten.ts` — and if the recovery then fails it is quarantined and hidden
+     * once more, with a reset attempted on a device somebody had said was gone. Restore it first:
+     * that is one click, and it puts the Recover button back where a person can see what it does.
+     */
+    const isForgotten = await withSystem(async (c) => (await c.query(
+      `SELECT 1 FROM devices d WHERE d.id = $1 AND ${forgotten('d')}`, [req.params.id])).rowCount);
+    if (isForgotten) {
+      return {
+        released: false,
+        state: null,
+        detail: 'This device was forgotten, so nothing was attempted. Restore it first, then recover it.',
+      };
+    }
     const released = await releaseDeviceQuarantine(req.params.id, userId);
     return {
       released,
@@ -478,6 +533,103 @@ export async function deviceRoutes(app: FastifyInstance) {
    * RLS policy, so reading it on the system pool without that check would hand any tenant the
    * recovery history — and the operator email — of any device in the fleet.
    */
+  /**
+   * Who may forget, or restore, this device — and it is not the same answer for every device.
+   *
+   * A DEDICATED device belongs to one org: its owners and admins decide. A SHARED device is the
+   * fleet's, and every tenant can see it, so removing it from the fleet is a FLEET decision — the
+   * operator capability from migration 053, not an org role. `operatorOn` above lets any org admin
+   * quarantine a shared device, which its own comment calls a known limit of a one-org farm; a
+   * removal should not be built on the same gap.
+   *
+   * Visibility first, through RLS, exactly as `operatorOn` does it: a device this caller cannot see
+   * is a 404, whoever they are.
+   */
+  async function removerOf(req: Parameters<typeof requireUser>[0], deviceId: string): Promise<string> {
+    const { orgId, role, userId } = requireUser(req);
+    const visible = await withTenant(orgId, async (c) => (await c.query<{ dedicated: boolean }>(
+      'SELECT (org_id IS NOT NULL) AS dedicated FROM devices WHERE id = $1', [deviceId])).rows[0]);
+    if (!visible) throw notFound('Device');
+    if (visible.dedicated) {
+      if (role !== 'owner' && role !== 'admin') {
+        throw forbidden('Only an owner or admin can forget or restore one of your organisation’s devices.');
+      }
+    } else {
+      // Throws the same refusal every Infrastructure route does, naming the fleet capability.
+      requireOperator(req);
+    }
+    return userId;
+  }
+
+  /**
+   * POST /v1/devices/:id/forget — this device is gone; stop listing it (migration 069).
+   *
+   * NOT A DELETE: the row, its sessions and its history stay, and `GET /devices/:id` still answers.
+   * It leaves the fleet list and every count. See `forgotten.ts` for what may be forgotten and why
+   * each refusal is its own sentence.
+   */
+  app.post<{ Params: { id: string }; Body: { reason?: string } }>(
+    '/devices/:id/forget',
+    {
+      schema: {
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { reason: { type: 'string', maxLength: 200 } },
+        },
+      },
+    },
+    async (req) => {
+      const userId = await removerOf(req, req.params.id);
+      const reason = (req.body?.reason ?? '').replace(/\s+/g, ' ').trim() || null;
+      const out = await forgetDevice(req.params.id, userId, reason);
+      if (out.forgotten) {
+        return {
+          forgotten: true,
+          detail: 'The device is off the fleet list and out of every count. Its history is kept, '
+            + 'and it comes back by itself if its agent ever sees it again.',
+        };
+      }
+      const WHY: Record<typeof out.why, string> = {
+        already: 'This device was already forgotten. Nothing changed.',
+        present: 'Its agent can see this device right now, so it would only come straight back. '
+          + 'Unplug it, or stop sharing it, and then forget it.',
+        'in-use': 'Somebody is using this device. Forgetting is for a device that is gone, not a '
+          + 'way to take one from under a session.',
+        'host-held': 'This device is out because its host is away, and it returns when the host '
+          + 'does. If the machine itself is not coming back, retire the host instead.',
+        busy: 'The farm is in the middle of resetting or recovering this device. Try again when '
+          + 'that has finished.',
+        missing: 'That device no longer exists.',
+      };
+      return { forgotten: false, detail: WHY[out.why] };
+    },
+  );
+
+  /** POST /v1/devices/:id/restore — put a forgotten device back on the list. */
+  app.post<{ Params: { id: string } }>(
+    '/devices/:id/restore',
+    {
+      schema: {
+        params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+      },
+    },
+    async (req) => {
+      await removerOf(req, req.params.id);
+      const restored = await restoreDevice(req.params.id);
+      return {
+        restored,
+        detail: restored
+          // It returns in the state it was in. Saying "available" would be a promise about a phone
+          // that may still be in a drawer.
+          ? 'The device is back on the fleet list, in the state it was in. Restoring does not make '
+            + 'it available: that takes its agent seeing it, or a recovery if it was quarantined.'
+          : 'This device was not forgotten, so nothing changed.',
+      };
+    },
+  );
+
   app.get<{ Params: { id: string } }>('/devices/:id/quarantine-log', async (req) => {
     const { orgId } = requireTenant(req);
     const visible = await withTenant(orgId, async (c) => {

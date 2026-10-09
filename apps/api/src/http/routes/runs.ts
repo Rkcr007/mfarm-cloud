@@ -6,6 +6,7 @@ import {
   type DeviceHold, type HistoryRow, type HostShare, type TestHistory,
 } from '../../runs.ts';
 import { hostHourlyRate, hostKind } from '../../infra/rates.ts';
+import { inFleet } from '../../forgotten.ts';
 import { requireTenant } from '../server.ts';
 import { badRequest, notFound } from '../errors.ts';
 import { timeline, recordRunEvent, subscribe, type PublishedEvent } from '../../executionEvents.ts';
@@ -530,7 +531,9 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       ? new Map<string, HostShare>()
       : await withSystem(async (c) => {
           const { rows } = await c.query<{ host_id: string; devices: string; hostname: string; org_id: string | null }>(
-            `SELECT d.host_id, count(*) AS devices, h.hostname, h.org_id
+            // FILTER, not WHERE: a host whose devices have all been forgotten must still come back
+            // as a row with zero devices, so its hold is reported as unpriced rather than vanishing.
+            `SELECT d.host_id, count(*) FILTER (WHERE ${inFleet('d')}) AS devices, h.hostname, h.org_id
                FROM devices d JOIN hosts h ON h.id = d.host_id
               WHERE d.host_id = ANY($1::uuid[])
               GROUP BY d.host_id, h.hostname, h.org_id`,

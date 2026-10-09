@@ -4,6 +4,7 @@ import { backupState, volumeState } from './storage.ts';
 import { giveUpMs } from './reconcile.ts';
 import { stopGraceMs } from './stopGrace.ts';
 import { hostHourlyRate, hostKind, type HostKind } from './rates.ts';
+import { inFleet } from '../forgotten.ts';
 
 /**
  * Everything the Infrastructure page reads, assembled once.
@@ -284,7 +285,8 @@ export async function hostSnapshots(
                      JOIN devices d2 ON d2.id = s.device_id
                     WHERE d2.host_id = h.id AND s.state IN ('ACTIVE', 'ALLOCATING'))
                                                                         AS active_sessions
-             FROM devices dv WHERE dv.host_id = h.id
+             -- Devices somebody forgot are not this host's devices any more (069).
+             FROM devices dv WHERE dv.host_id = h.id AND ${inFleet('dv')}
          ) d ON true
          -- POWERED TIME, clipped to each window rather than summed whole (054). An interval that
          -- started yesterday and is still open contributes only the part that falls inside today,
@@ -718,6 +720,8 @@ export async function fleetSnapshot(): Promise<FleetSnapshot> {
       `SELECT d.state::text AS state, (h.org_id IS NOT NULL) AS enrolled, count(*)::text AS n
          FROM devices d JOIN hosts h ON h.id = d.host_id
         WHERE h.retired_at IS NULL
+          -- ...and a third: a device somebody forgot is gone, and is not capacity (069).
+          AND ${inFleet('d')}
         GROUP BY 1, 2`);
     const s = await c.query<{ state: string; n: string }>(
       `SELECT state::text AS state, count(*)::text AS n FROM sessions GROUP BY 1`);

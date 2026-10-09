@@ -18,6 +18,7 @@
  */
 import { appPool, systemPool, withSystem } from './db.ts';
 import { backupState } from './infra/storage.ts';
+import { inFleet } from './forgotten.ts';
 
 // ---------------------------------------------------------------- registry primitives
 
@@ -743,6 +744,8 @@ export async function collectFleet(): Promise<void> {
       `SELECT d.state::text AS state, d.region, d.platform, d.tier, count(*)::text AS n
          FROM devices d JOIN hosts h ON h.id = d.host_id
         WHERE h.retired_at IS NULL
+          -- A forgotten device is gone (069). The same predicate every other count uses.
+          AND ${inFleet('d')}
         GROUP BY 1,2,3,4`,
     );
     const s = await client.query<SessionRow>(

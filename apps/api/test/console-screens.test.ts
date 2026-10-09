@@ -285,6 +285,9 @@ function seed(route: { name: string; id?: string | null; lens?: string }) {
     ai: aiState(),
     me: { user: { id: 'u1', email: 'someone@mfarm.local' }, org: { id: 'o1', name: 'Farm', slug: 'farm', maxConcurrent: 5 }, role: 'admin', operator: true },
     devices: [device],
+    // Reset on every seed: this is module state, and a forgotten device left by one test would be
+    // drawn under the next one's fleet.
+    forgotten: [],
     available: 1,
     sessions: [session],
     apps: [{ id: 'app-1', packageName: 'com.acme.app', versionName: '1.0', sizeBytes: 1024, createdAt: new Date().toISOString(), label: 'Acme' }],
@@ -1786,6 +1789,118 @@ describe('the fleet', () => {
    * THE 2026-09-15 WALKTHROUGH, with the lab off. Fleet offered Recover on every device whose host
    * was off — a recovery asks the host that is not answering — and nothing anywhere offered Start.
    */
+  /**
+   * FORGETTING A DEVICE (migration 069). The server decides who may and what may; these are about
+   * the console drawing its controls from the same two rules, so that a button is never a refusal
+   * in waiting — and about a forgotten device being findable by the person who has to put it back.
+   */
+  describe('forgetting a device', () => {
+    const gone = (over: Record<string, unknown> = {}) => ({
+      id: 'gone-1', platform: 'android', tier: 'physical', model: 'Old Phone', osVersion: '13', dedicated: true,
+      forgottenAt: new Date(Date.now() - 3 * 86_400_000).toISOString(), reason: 'sold it', ...over,
+    });
+    /** The device page for one device, as the poll and the detail read would leave it. */
+    const page = (over: Record<string, unknown>) => {
+      seed({ name: 'device', id: 'dev-1' });
+      const device = { ...mod.state.devices[0], ...over };
+      mod.state.devices = over.forgotten ? [] : [device];
+      mod.state.deviceDetail = { id: 'dev-1', device, loaded: true };
+      return mod.SCREENS.device('dev-1');
+    };
+    const dialogText = () => textOf((globalThis as unknown as {
+      document: { getElementById(id: string): unknown };
+    }).document.getElementById('dialog'));
+
+    test('the fleet lists what was forgotten, with why, and a way back', () => {
+      seed({ name: 'fleet' });
+      mod.state.forgotten = [gone()];
+      const tree = mod.SCREENS.fleet();
+      const text = textOf(tree);
+      assert.match(text, /Forgotten/);
+      assert.match(text, /Old Phone/);
+      assert.match(text, /sold it/);
+      assert.ok(findByText(tree, 'Restore'), 'a forgotten device can be seen and still not put back');
+    });
+
+    test('a fleet with nothing forgotten has no Forgotten section at all', () => {
+      seed({ name: 'fleet' });
+      assert.ok(!/Forgotten/.test(textOf(mod.SCREENS.fleet())));
+    });
+
+    test('Restore is drawn only for somebody the server will let restore it', () => {
+      seed({ name: 'fleet' });
+      // A SHARED device is the fleet's: an org admin who is not an operator may not.
+      mod.state.me.operator = false;
+      mod.state.forgotten = [gone({ dedicated: false })];
+      assert.ok(!findByText(mod.SCREENS.fleet(), 'Restore'), 'an org admin was offered a fleet decision');
+      mod.state.me.operator = true;
+      assert.ok(findByText(mod.SCREENS.fleet(), 'Restore'));
+
+      // A DEDICATED device is its org's: an admin may, a member may not.
+      mod.state.me.operator = false;
+      mod.state.forgotten = [gone({ dedicated: true })];
+      assert.ok(findByText(mod.SCREENS.fleet(), 'Restore'));
+      mod.state.me.role = 'member';
+      assert.ok(!findByText(mod.SCREENS.fleet(), 'Restore'));
+    });
+
+    test('a device that is gone can be forgotten from its page, and the dialog says what survives', () => {
+      const tree = page({ state: 'OFFLINE', dedicated: true });
+      const button = findByText(tree, 'Forget device');
+      assert.ok(button, 'an offline device of the org\'s own has no way to be removed');
+      assert.equal(button.click(), 1, 'exactly one handler — a button wired to nothing fires zero');
+      assert.match(dialogText(), /Forget /);
+      assert.match(dialogText(), /Nothing is deleted/);
+      assert.match(dialogText(), /comes back by itself/);
+    });
+
+    test('a device that is NOT gone is not offered Forget', () => {
+      // Its agent can see it; somebody holds it; its host is away. The server refuses all three.
+      for (const over of [
+        { state: 'READY' },
+        { state: 'SESSION_ACTIVE' },
+        { state: 'QUARANTINED', quarantine: { at: new Date().toISOString(), reason: 'its host stopped beating', source: 'host' } },
+      ]) {
+        const tree = page({ ...over, dedicated: true });
+        assert.ok(!findByText(tree, 'Forget device'), `Forget was offered on a ${over.state} device`);
+      }
+    });
+
+    test('Forget follows the same rule about whose device it is', () => {
+      /** The page for an offline device, as somebody in particular. `me` is reset by every seed. */
+      const pageAs = (dedicated: boolean, me: Record<string, unknown>) => {
+        seed({ name: 'device', id: 'dev-1' });
+        Object.assign(mod.state.me, me);
+        const device = { ...mod.state.devices[0], state: 'OFFLINE', dedicated };
+        mod.state.devices = [device];
+        mod.state.deviceDetail = { id: 'dev-1', device, loaded: true };
+        return mod.SCREENS.device('dev-1');
+      };
+
+      // The org's own device: an admin may, a member may not.
+      assert.ok(findByText(pageAs(true, { role: 'admin', operator: false }), 'Forget device'));
+      assert.ok(!findByText(pageAs(true, { role: 'member', operator: false }), 'Forget device'),
+        'a member was offered Forget');
+
+      // A shared device is the fleet's: it takes the operator, whatever the org role.
+      assert.ok(!findByText(pageAs(false, { role: 'admin', operator: false }), 'Forget device'),
+        'an org admin was offered a fleet decision');
+      assert.ok(findByText(pageAs(false, { role: 'admin', operator: true }), 'Forget device'));
+    });
+
+    test('a forgotten device\'s page says so first, and carries the way back', () => {
+      const tree = page({
+        state: 'OFFLINE', dedicated: true,
+        forgotten: { at: new Date(Date.now() - 86_400_000).toISOString(), reason: 'sold it' },
+      });
+      const text = textOf(tree);
+      assert.match(text, /Somebody forgot this device/);
+      assert.match(text, /sold it/);
+      assert.ok(findByText(tree, 'Restore device'));
+      assert.ok(!findByText(tree, 'Forget device'), 'Forget offered on a device that is already forgotten');
+    });
+  });
+
   describe('a farm whose host is off', () => {
     const hostOff = (reason = 'its host was stopped: stopped from the console') => {
       seed({ name: 'fleet' });
