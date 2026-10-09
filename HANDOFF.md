@@ -5175,3 +5175,27 @@ when the feature is broken. See issues 37 and 38.
       - The agent was relaunched from recovered settings (`REGION=lab`, read from earlier launches;
         `PHYSICAL_KEEP_PACKAGES` could not be recovered and is unset).
       - A database read for the region was refused by the permission check.
+
+117. **D77, D78 AND D79 FIXED, AND THE NARROW LINK HELD — VERIFIED IN CHROME ON THE ONEPLUS.**
+    2026-10-09, ADR-0048 amended.
+    - **Measured before building.** `createCapture` alone, with the screen scrolling, at nine bitrate ×
+      frame-rate settings. Frame rate barely moved the default rate control (about 2.0 Mbit/s at
+      60 fps, 1.7 at 30). A constant bitrate held every target down to a floor per frame rate: 1.37 at
+      60, 0.80 at 30, 0.44 at 15.
+    - **D77.** A constant bitrate, with the two lowest tiers at 30 and 15 fps (`frameRateFor`). An
+      encoder that refuses a constant bitrate falls back once to its own rate control.
+    - **D78.** The agent logs every sender-report time it hands werift and computes the round trip
+      from LSR and DLSR.
+    - **D79.** That round trip goes onto the ICE pair, so werift's consent wait grows with the queue.
+    - **Three governor faults, found running the fix and fixed with it.** A failed probe went down
+      two tiers. A draining queue was answered twice. The doubled wait never reset.
+    - **On the phone, over the same 2 Mbit/s relayed link:**
+      - One step, 4 → 1.5 Mbit/s, then 1.5 Mbit/s at 60 fps, 60–100 ms, 0 loss and 0 freezes in
+        Chrome. Probes to 2.5 fall back to 1.5.
+      - Cleared, it was back to 4 Mbit/s in about 25 s.
+      - With adaptation off, a 1.7 s queue held for 80 s did not close the view, and the view
+        recovered by itself.
+    - **Tests.** Eight mutations, each caught by its own test. One injects a real werift receiver
+      report echoing an older sender report.
+    - **Still open:** D80, D81. Five- and six-day-old hung `node --test` phone-stream runs (pids 33544, 94351)
+      are still holding UDP sockets on the Mac.

@@ -24,6 +24,7 @@
 import {
   RTCPeerConnection, MediaStreamTrack, MediaStream, RTCRtpCodecParameters, RtpPacket, RtpHeader,
 } from 'werift';
+import type { RTCRtpSender } from 'werift';
 import type { SignalChannel, SignalOptions } from '../device.ts';
 import type { ScreenCapture, FrameMark, LiveControl } from './capture.ts';
 
@@ -234,8 +235,12 @@ export function ntpNow(epochMs = performance.timeOrigin + performance.now()): bi
  * builds a report, and werift's write after each packet is ignored. The report and the
  * `lastSRtimestamp` matched against it are read in the same synchronous block, and the value is held
  * for exactly that long, so the two are identical. Video only, so the report's NTP and RTP times need not describe the same instant.
+ *
+ * Every value handed out is also written to the returned log, which is what the round trip is
+ * computed from (D78; see `SenderReportLog`).
  */
-export function fixSenderClock(sender: object): void {
+export function fixSenderClock(sender: object): SenderReportLog {
+  const log = new SenderReportLog();
   let cached: bigint | undefined;
   Object.defineProperty(sender, 'ntpTimestamp', {
     configurable: true,
@@ -244,13 +249,69 @@ export function fixSenderClock(sender: object): void {
     // millisecond boundary between the two reads would make the report and its LSR disagree.
     get: () => {
       if (cached === undefined) {
-        cached = ntpNow();
+        const at = performance.timeOrigin + performance.now();
+        cached = ntpNow(at);
+        log.record(cached, at);
         queueMicrotask(() => { cached = undefined; });
       }
       return cached;
     },
     set: () => { /* werift's own value is the defect; see above */ },
   });
+  return log;
+}
+
+/**
+ * THE ROUND TRIP, FROM ANY SENDER REPORT A RECEIVER ECHOES (D78).
+ *
+ * A receiver report carries LSR, the middle 32 bits of the NTP time of the last sender report it
+ * received, and DLSR, how long it held that report before answering. The round trip is now − when that
+ * report was sent − DLSR (RFC 3550 §6.4.1).
+ *
+ * werift computes it only when LSR matches its MOST RECENT sender report (`rtpSender.js`:
+ * `this.lastSRtimestamp === report.lsr`). Behind a queue deeper than the gap between sender reports,
+ * every receiver report echoes an older one, so werift's `rtt` froze at whatever it last matched. On
+ * the OnePlus over a 2 Mbit/s link it read 266 ms while Chrome measured 600–945, and 70 ms against
+ * Chrome's 730. That is the queue the governor exists to see, hidden at exactly the moment it is
+ * there. So the agent keeps the last few reports it sent and matches any of them.
+ */
+export class SenderReportLog {
+  /** Compact NTP time (the LSR a receiver echoes) → when that report was built, in epoch ms. */
+  private readonly sent = new Map<number, number>();
+
+  record(ntp: bigint, epochMs: number): void {
+    this.sent.set(Number((ntp >> 16n) & 0xffff_ffffn), epochMs);
+    // About a minute of reports at werift's pace; a receiver echoing anything older is not a queue.
+    if (this.sent.size > 64) this.sent.delete(this.sent.keys().next().value as number);
+  }
+
+  /** Round trip in ms for a report echoing `lsr` after holding it `dlsr` (1/65536 s), if it is ours. */
+  rttMs(lsr: number, dlsr: number, now = performance.timeOrigin + performance.now()): number | undefined {
+    // LSR 0 means the receiver has not had a sender report yet.
+    if (!lsr) return undefined;
+    const sentAt = this.sent.get(lsr);
+    if (sentAt === undefined) return undefined;
+    const rtt = now - sentAt - (dlsr / 65_536) * 1_000;
+    return rtt > 0 ? rtt : undefined;
+  }
+}
+
+/**
+ * LET werift'S CONSENT CHECKS WAIT FOR THE QUEUE THEY ARE STUCK IN (D79).
+ *
+ * werift waits for each consent answer max(500 ms, 2 × the pair's round trip + 200 ms), using the
+ * pair's `rtt`, which it updates only when an answer arrives in time. That `rtt` is the one measured
+ * at connection, about 70 ms here. Behind a queue of more than half a second every answer came too
+ * late and was thrown away, `rtt` never moved, and 30 s later consent expired and the view closed.
+ * Seen on the OnePlus, with adaptation on and with it off.
+ *
+ * The receiver reports measure the same queue, since they ride the same path, so the pair is given
+ * that round trip and werift's own formula stretches the wait to fit. werift overwrites it with its
+ * own measurement whenever an answer does arrive, which is the same quantity.
+ */
+export function stretchConsentWait(sender: RTCRtpSender, rttMs: number): void {
+  const pair = sender.dtlsTransport?.iceTransport?.connection?.nominated;
+  if (pair && rttMs > 0) pair.rtt = rttMs / 1_000;
 }
 
 /** What a viewer's receiver reports said, most recently. */
@@ -264,8 +325,43 @@ export interface LinkReport {
 
 /** The rates the stream can step between, highest first. 576x1280 stays readable at the bottom. */
 export const BITRATE_TIERS = [4_000_000, 2_500_000, 1_500_000, 800_000, 400_000];
+
+/**
+ * THE FRAME RATE A RATE IS ENCODED AT (D77): the highest one at which the encoder will actually
+ * hold that rate.
+ *
+ * Asking an encoder for fewer bits is not the same as getting them. On the OnePlus 8T's Qualcomm
+ * encoder, at 576×1280 with the screen scrolling, measured on 2026-10-09:
+ * - At its default rate control (VBR), it produced about 2 Mbit/s for any target under that, at 60 fps
+ *   and still about 1.7 at 30. That is the D77 stall: the governor reached the bottom tier and the link
+ *   stayed full.
+ * - At a constant bitrate (`H264Fanout`'s `cbr`), the floors were: 60 fps, 1.37 Mbit/s; 30 fps, 0.80;
+ *   20 fps, 0.58; 15 fps, 0.44; 10 fps, 0.40.
+ *
+ * So a rate under a frame rate's floor runs at the next lower frame rate. The ladder's tiers came out
+ * at 4.13, 2.66, 1.49, 0.81 and 0.44 Mbit/s against 4, 2.5, 1.5, 0.8 and 0.4. A phone with a better
+ * encoder pays only in smoothness at the bottom two tiers, where the link could not carry 60 fps
+ * anyway.
+ */
+const FRAME_RATE_FLOORS: Array<{ fps: number; from: number }> = [
+  { fps: 60, from: 1_400_000 },
+  { fps: 30, from: 800_000 },
+  { fps: 20, from: 600_000 },
+  { fps: 15, from: 0 },
+];
+export function frameRateFor(bitRate: number): number {
+  return FRAME_RATE_FLOORS.find((f) => bitRate >= f.from)!.fps;
+}
 /** The fewest milliseconds between two steps down: long enough for a step to show in the reports. */
 const DOWN_GAP_MS = 4_000;
+/**
+ * How long a step down is given when the queue is visibly draining: its round trip under
+ * `DRAINING` of what it was at the step. Found on the OnePlus over a 2 Mbit/s link: the step to
+ * 1.5 Mbit/s was working, 1,567 ms falling to 859 four seconds later, and a second step took the
+ * stream to 0.4 Mbit/s and 15 fps for half a minute it did not need to.
+ */
+const DRAIN_GAP_MS = 8_000;
+const DRAINING = 0.8;
 /** How long the link must look healthy before a step up is tried, at first. */
 const UP_HOLD_MS = Number(process.env.PHYSICAL_BITRATE_UP_HOLD_MS ?? 15_000);
 /** The longest that wait grows to after steps up that did not hold. */
@@ -314,6 +410,8 @@ export class BitrateGovernor {
   /** Steps down are spaced from each other only: a step up that did not hold is undone at once. */
   private lastDownAt = -Infinity;
   private lastUpAt?: number;
+  /** The worst viewer's round trip when the stream last stepped down: what draining is measured from. */
+  private rttAtDown?: number;
   private upHold = UP_HOLD_MS;
   /** Why the last change was made, for the log line. */
   reason = '';
@@ -393,15 +491,28 @@ export class BitrateGovernor {
       else this.healthySince = undefined;
     }
 
-    if (this.congestedTicks >= 2 && now - this.lastDownAt >= DOWN_GAP_MS && this.index < this.tiers.length - 1) {
-      // The deeper the queue, the further down: one tier per doubling of the pressure, at most two at
-      // once — a queue of seconds wants relief now, and a further step is four seconds away if not.
-      const steps = Math.min(2, Math.max(1, Math.floor(Math.log2(worst)) + 1));
+    // A step up that has held as long as a failing one would have taken to fail: the link has room
+    // again, so the wait for the next goes back to where it started. Without this it stayed doubled
+    // for good, and on the OnePlus a link that had cleared took a minute per tier to climb back.
+    if (this.lastUpAt !== undefined && this.lastDownAt < this.lastUpAt && now - this.lastUpAt >= UP_FAILED_WITHIN_MS) {
+      this.upHold = UP_HOLD_MS;
+    }
+    const worstRtt = worstViewer !== undefined ? this.reports.get(worstViewer)?.rttMs : undefined;
+    const draining = this.rttAtDown !== undefined && worstRtt !== undefined && worstRtt < this.rttAtDown * DRAINING;
+    if (this.congestedTicks >= 2 && now - this.lastDownAt >= (draining ? DRAIN_GAP_MS : DOWN_GAP_MS)
+      && this.index < this.tiers.length - 1) {
+      // A step up that did not hold goes back to the tier it came from, which carried this link a
+      // moment ago. Going by the queue's depth instead took the OnePlus from 2.5 to 0.8 Mbit/s on a
+      // link that 1.5 fills well.
+      const failedProbe = this.lastUpAt !== undefined && this.lastDownAt < this.lastUpAt
+        && now - this.lastUpAt < UP_FAILED_WITHIN_MS;
+      // Otherwise, the deeper the queue, the further down: one tier per doubling of the pressure, at
+      // most two at once — a queue of seconds wants relief now, and a further step is seconds away if not.
+      const steps = failedProbe ? 1 : Math.min(2, Math.max(1, Math.floor(Math.log2(worst)) + 1));
       const from = this.bitRate;
       this.index = Math.min(this.tiers.length - 1, this.index + steps);
-      if (this.lastUpAt !== undefined && now - this.lastUpAt < UP_FAILED_WITHIN_MS) {
-        this.upHold = Math.min(this.upHold * 2, UP_HOLD_MAX_MS);
-      }
+      if (failedProbe) this.upHold = Math.min(this.upHold * 2, UP_HOLD_MAX_MS);
+      this.rttAtDown = worstRtt;
       const r = this.reports.get(worstViewer!)!;
       const floor = this.floors.get(worstViewer!);
       this.reason = `${fmtRate(from)} → ${fmtRate(this.bitRate)}: `
@@ -422,6 +533,7 @@ export class BitrateGovernor {
       && now - this.healthySince >= this.upHold && now - this.lastSwitchAt >= this.upHold) {
       const from = this.bitRate;
       this.index -= 1;
+      this.rttAtDown = undefined;
       this.reason = `${fmtRate(from)} → ${fmtRate(this.bitRate)}: ${Math.round(this.upHold / 1000)} s without congestion`;
       this.lastSwitchAt = now;
       this.lastUpAt = now;
@@ -440,17 +552,22 @@ const fmtRate = (bps: number): string => `${(bps / 1_000_000).toFixed(1)} Mbit/s
  * viewer, stopped with the last, and the parameter sets are kept so a viewer that joins mid-stream
  * can be given them before the keyframe it starts on.
  */
+/** What a capture is built with: the rate, the frame rate that rate is held at, and the rate control. */
+export interface CaptureRate { bitRate: number; maxFps: number; cbr: boolean }
+
 export class H264Fanout {
-  private readonly make: (o: { bitRate: number }) => ScreenCapture;
+  private readonly make: (o: CaptureRate) => ScreenCapture;
   private capture?: ScreenCapture;
   private starting?: Promise<void>;
   /** Decides the encoder's rate from the viewers' reports; absent when adaptation is off. */
   readonly governor?: BitrateGovernor;
   private bitRate: number;
+  /** A constant bitrate, until an encoder refuses one; see `startCapture`. */
+  private cbr: boolean;
   private adaptTimer?: ReturnType<typeof setInterval>;
   private restarting = false;
   /** Every rate change made, in order — for the log, and for tests. */
-  readonly changes: Array<{ at: number; bitRate: number; reason: string }> = [];
+  readonly changes: Array<{ at: number; bitRate: number; maxFps: number; reason: string }> = [];
   /** Bytes the encoder produced, per second, for the last few seconds — what the stream is sending. */
   private readonly sent: Array<{ at: number; bytes: number }> = [];
   private readonly subs = new Set<(nal: Buffer, at: number, frame?: FrameMark) => void>();
@@ -465,35 +582,59 @@ export class H264Fanout {
   lastFrameAt = 0;
 
   /**
-   * `make` builds a capture at the rate given. `adapt` lets the viewers' reports move that rate
-   * (BitrateGovernor); without it the stream stays at `bitRate`, as it always did.
+   * `make` builds a capture at the rate given, at the frame rate that rate is held at
+   * (`frameRateFor`). `adapt` lets the viewers' reports move that rate (BitrateGovernor); without it
+   * the stream stays at `bitRate`, as it always did. `cbr` asks the encoder for a constant bitrate,
+   * which is what makes it honour a low one (D77).
    */
-  constructor(make: (o: { bitRate: number }) => ScreenCapture, o: { bitRate?: number; adapt?: boolean } = {}) {
+  constructor(make: (o: CaptureRate) => ScreenCapture, o: { bitRate?: number; adapt?: boolean; cbr?: boolean } = {}) {
     this.make = make;
     this.bitRate = o.bitRate ?? BITRATE_TIERS[0];
+    this.cbr = o.cbr ?? false;
     if (o.adapt) this.governor = new BitrateGovernor(this.bitRate);
   }
 
   /** The rate the encoder is running at now. */
   get currentBitRate(): number { return this.bitRate; }
+  /** The frame rate it is running at now. */
+  get currentFps(): number { return frameRateFor(this.bitRate); }
 
   /** A viewer's receiver report, for the governor. */
   report(viewer: string, r: LinkReport): void { this.governor?.report(viewer, r); }
   forget(viewer: string): void { this.governor?.forget(viewer); }
 
+  private readonly onNal = (nal: Buffer, at: number, frame?: FrameMark): void => {
+    const t = nalType(nal);
+    if (t === NAL_IDR || t === NAL_NON_IDR) this.lastFrameAt = at;
+    if (this.governor) this.sent.push({ at, bytes: nal.length });
+    if (t === NAL_SPS) { this.sps = Buffer.from(nal); this.size = spsSize(nal) ?? this.size; }
+    else if (t === NAL_PPS) this.pps = Buffer.from(nal);
+    for (const s of this.subs) s(nal, at, frame);
+  };
+
   private startCapture(): ScreenCapture {
-    const capture = this.make({ bitRate: this.bitRate });
+    const cbr = this.cbr;
+    const capture = this.make({ bitRate: this.bitRate, maxFps: frameRateFor(this.bitRate), cbr });
     this.capture = capture;
-    this.starting = capture.start((nal, at, frame) => {
-      const t = nalType(nal);
-      if (t === NAL_IDR || t === NAL_NON_IDR) this.lastFrameAt = at;
-      if (this.governor) this.sent.push({ at, bytes: nal.length });
-      if (t === NAL_SPS) { this.sps = Buffer.from(nal); this.size = spsSize(nal) ?? this.size; }
-      else if (t === NAL_PPS) this.pps = Buffer.from(nal);
-      for (const s of this.subs) s(nal, at, frame);
-    }).catch((e) => {
+    this.starting = capture.start(this.onNal).catch((e) => {
+      if (this.capture !== capture) throw e;
+      /**
+       * AN ENCODER THAT REFUSES A CONSTANT BITRATE GETS ITS OWN RATE CONTROL, ONCE, AND KEEPS IT.
+       * `bitrate-mode` is a request MediaCodec may decline, and only the OnePlus has been run with it.
+       * Without this a phone whose encoder declines would have no live view at all: worse than the
+       * soft floor D77 is about.
+       */
+      if (cbr) {
+        this.cbr = false;
+        console.warn(`[video] the encoder would not start at a constant bitrate (${(e as Error).message}); `
+          + 'using its own rate control from now on');
+        void capture.stop().catch(() => {});
+        this.startCapture();
+        return this.starting;
+      }
       // A capture that could not start leaves nobody holding it, so the next viewer tries afresh.
-      if (this.capture === capture) { this.capture = undefined; this.starting = undefined; }
+      this.capture = undefined;
+      this.starting = undefined;
       throw e;
     });
     if (this.governor && !this.adaptTimer) {
@@ -515,7 +656,7 @@ export class H264Fanout {
   async setBitRate(bitRate: number, reason = ''): Promise<void> {
     if (bitRate === this.bitRate || this.restarting) return;
     this.bitRate = bitRate;
-    this.changes.push({ at: Date.now(), bitRate, reason });
+    this.changes.push({ at: Date.now(), bitRate, maxFps: frameRateFor(bitRate), reason });
     const old = this.capture;
     if (!old || this.subs.size === 0) return;
     this.restarting = true;
@@ -542,7 +683,8 @@ export class H264Fanout {
     const now = Date.now();
     const next = this.governor.tick(now, this.sendingBps(now));
     if (next !== undefined) {
-      console.log(`[video] the stream ${next < this.bitRate ? 'drops' : 'rises'} to ${fmtRate(next)} — ${this.governor.reason}`);
+      console.log(`[video] the stream ${next < this.bitRate ? 'drops' : 'rises'} to ${fmtRate(next)} at ${frameRateFor(next)} fps`
+        + ` — ${this.governor.reason}`);
       void this.setBitRate(next, this.governor.reason);
     }
   }
@@ -925,7 +1067,7 @@ export class PhoneVideoPeer implements SignalChannel {
     this.pc = pc;
     const track = new MediaStreamTrack({ kind: 'video' });
     const video = pc.addTransceiver(track, { direction: 'sendonly', streams: [new MediaStream({ id: `display_${this.o.label}` })] });
-    fixSenderClock(video.sender);
+    const sentReports = fixSenderClock(video.sender);
     /**
      * A PLI IS ANSWERED. The browser sends one when it cannot decode what it has — a lost packet in a
      * keyframe, a decoder reset — and until it gets a keyframe the picture is frozen or smeared. Left
@@ -933,21 +1075,26 @@ export class PhoneVideoPeer implements SignalChannel {
      * that is not moving there is no next one. See `H264Fanout.requestKeyframe` for the rate limit.
      */
     /**
-     * THE VIEWER'S RECEIVER REPORTS, FOR THE GOVERNOR. werift has read each report by the time this
-     * runs: its smoothed round trip (from the report's echo of our last sender report — the SR rides
-     * with the media, so the round trip carries the forward queue) and the fraction lost since the
-     * previous report. Private fields, read once per report; the werift version is pinned.
+     * THE VIEWER'S RECEIVER REPORTS, FOR THE GOVERNOR, AND FOR werift'S CONSENT CHECKS.
+     * - The round trip comes from the report's echo of one of our sender reports. The SR rides with the
+     *   media, so the round trip carries the forward queue. It is computed here, from our own record of
+     *   those reports, and not read from werift, whose value freezes behind a queue (D78).
+     * - That round trip also sets how long werift waits for a consent answer (D79).
+     * - Loss is from the report's cumulative counters.
      */
     video.sender.onRtcp.subscribe((packet) => {
       if (packet.type !== RTCP_SR && packet.type !== RTCP_RR) return;
-      const s = video.sender as unknown as { rtt?: number; ssrc: number };
+      const s = video.sender as unknown as { ssrc: number };
       /**
        * LOSS OVER ENOUGH PACKETS TO MEAN SOMETHING. The report's own fraction is over whatever arrived
        * since the last one, and on a still screen that is a packet or two: one lost read as "50% lost"
        * and counted as congestion. The cumulative counters give the span; under 30 packets, no verdict.
        */
-      const rep = (packet as unknown as { reports?: Array<{ ssrc: number; packetsLost: number; highestSequence: number }> })
-        .reports?.find((r) => r.ssrc === s.ssrc);
+      const rep = (packet as unknown as {
+        reports?: Array<{ ssrc: number; packetsLost: number; highestSequence: number; lsr: number; dlsr: number }>;
+      }).reports?.find((r) => r.ssrc === s.ssrc);
+      const rttMs = rep ? sentReports.rttMs(rep.lsr, rep.dlsr) : undefined;
+      if (rttMs !== undefined) stretchConsentWait(video.sender, rttMs);
       let fractionLost: number | undefined;
       if (rep) {
         const prev = this.lastReport;
@@ -956,12 +1103,13 @@ export class PhoneVideoPeer implements SignalChannel {
         if (prev && expected >= 30) fractionLost = Math.max(0, rep.packetsLost - prev.lost) / expected;
       }
       if (TRACE && ++this.reports % 5 === 0) {
-        log(`link: round trip ${s.rtt !== undefined ? Math.round(s.rtt * 1000) : '?'} ms, `
+        log(`link: round trip ${rttMs !== undefined ? Math.round(rttMs) : '?'} ms, `
           + `${fractionLost === undefined ? 'loss n/a' : `${Math.round(fractionLost * 100)}% lost`}, `
-          + `sending ${(this.o.fanout.sendingBps() / 1e6).toFixed(2)} of ${(this.o.fanout.currentBitRate / 1e6).toFixed(1)} Mbit/s`);
+          + `sending ${(this.o.fanout.sendingBps() / 1e6).toFixed(2)} of ${(this.o.fanout.currentBitRate / 1e6).toFixed(1)} Mbit/s`
+          + ` at ${this.o.fanout.currentFps} fps`);
       }
       this.o.fanout.report(this.viewer, {
-        ...(s.rtt !== undefined ? { rttMs: s.rtt * 1000 } : {}),
+        ...(rttMs !== undefined ? { rttMs } : {}),
         ...(fractionLost !== undefined ? { fractionLost } : {}),
         at: Date.now(),
       });

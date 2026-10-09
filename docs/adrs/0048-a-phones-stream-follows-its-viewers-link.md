@@ -1,8 +1,9 @@
 # ADR-0048 — a phone's stream follows its viewer's link
 
-**Status:** Accepted · 2026-10-09 · extends M6 (ADR-0047's "next gap") · **run in Chrome on a narrow
-link the same day: the loop works, and it does NOT yet relieve the stall on the OnePlus** — D77, D78
-and D79; see the last section
+**Status:** Accepted · 2026-10-09 · extends M6 (ADR-0047's "next gap") · **amended the same day
+(D77–D79): a constant bitrate, a frame-rate ladder, the agent's own round trip and a consent wait
+that allows for the queue. Verified in Chrome on the OnePlus over a 2 Mbit/s link**; see the last two
+sections
 
 ## Context
 
@@ -54,6 +55,7 @@ ones most likely to be on such a link.
 - `PHYSICAL_VIDEO_BIT_RATE` sets the starting rate (default 4,000,000).
 - `PHYSICAL_ADAPT_BITRATE=0` pins the stream at that rate, as before this ADR.
 - `PHYSICAL_BITRATE_UP_HOLD_MS` sets the first wait before a step up.
+- `PHYSICAL_VIDEO_CBR=0` leaves the encoder its own rate control (see the amendment).
 
 ## Rejected
 
@@ -115,3 +117,53 @@ loss and multi-second freezes with a smooth but delayed picture. That lasted unt
 - **D79:** a consent wait that allows for the queue.
 
 None of these needs a new decision: each one completes this one.
+
+## Amendment, 2026-10-09 — what it took, and the run that shows it works
+
+**D77: the encoder is asked for a constant bitrate, and the bottom tiers drop the frame rate.**
+Measured on the OnePlus first, with `createCapture` alone and the screen scrolling:
+
+| | 60 fps | 30 fps | 20 fps | 15 fps | 10 fps |
+|---|---|---|---|---|---|
+| default rate control, floor | ~2.0 Mbit/s | ~1.7 | ~1.4 | 1.22 | 0.93 |
+| constant bitrate, floor | 1.37 | 0.80 | 0.58 | 0.44 | 0.40 |
+
+- Frame rate alone is a weak lever: halving it cut the output by about 15%. The encoder clamps its
+  rate rather than spending a budget per frame.
+- A constant bitrate (MediaFormat `bitrate-mode` 2, passed through scrcpy's `video_codec_options`)
+  holds every target down to its frame rate's floor.
+- So each rate runs at the highest frame rate whose floor is under it (`frameRateFor`): 4, 2.5 and
+  1.5 Mbit/s at 60 fps, 0.8 at 30, and 0.4 at 15. The tiers produced 4.13, 2.66, 1.49, 0.81 and
+  0.44 Mbit/s.
+- On a still screen a constant bitrate costs 0.03–0.18 Mbit/s against 0.02–0.05: it does not pad.
+- **An encoder that refuses a constant bitrate falls back to its own rate control**, once, and keeps
+  it. Only the OnePlus has been run, and without the fallback, a refusal would mean no live view at all.
+- The size does not change.
+
+**D78: the round trip is the agent's own.** `fixSenderClock` now logs every NTP time it hands werift.
+A receiver report's LSR is looked up in that log, so an echo of an older sender report still gives
+the round trip, queue and all. werift's `rtt` is no longer read.
+
+**D79: the ICE pair is given that round trip** (`stretchConsentWait`). werift's consent wait,
+2 × the pair's `rtt` + 200 ms, then grows with the queue.
+
+**Three changes to the governor, all found running the above:**
+- **A step up that fails goes back to the tier it came from.** By the queue's depth, a failed probe
+  from 1.5 to 2.5 had gone on down to 0.8.
+- **A queue that is visibly draining is given 8 s, not 4,** before a second step down. Draining means
+  the round trip is under four fifths of what it was at the step. Without this, a working step to 1.5
+  was followed by a second one, to 0.4 Mbit/s and 15 fps.
+- **The doubled wait goes back to 15 s once a step up holds for 20 s.** It had stayed doubled for
+  good, so a link that cleared took a minute per tier to climb back.
+
+**Verified in Chrome on the OnePlus,** under the same conditions as the verdict above:
+
+| | Before | After |
+|---|---|---|
+| Clear link | 4.8 Mbit/s (bursts to 6.9), 60 fps, 73–75 ms | 4.17 Mbit/s, 59.8 fps, 64 ms; the agent's round trip matches Chrome's |
+| 2 Mbit/s link | steps to 0.4 Mbit/s, the queue never drains (600–945 ms), the view closes | one step, 4 → 1.5 Mbit/s (citing 1,187 ms). Then 1.5 Mbit/s at 60 fps, 60–100 ms, 0 loss, 0 freezes in Chrome. Probes to 2.5 fail back to 1.5, waiting 15, 30, then 60 s |
+| Link cleared | a minute per tier | 1.5 → 2.5 → 4.0, the second step 15 s after the first; full rate about 25 s after the link cleared |
+| 2 Mbit/s, adaptation off | 16.8 fps, then 0; the view closed (D79) | a 1.7 s queue held for 80 s (the agent read 1,560–1,698 ms against Chrome's 1,698), no `viewer failed`; back to 60 fps and 4 Mbit/s by itself when the link cleared |
+
+Tests: each fix's tests fail with that fix removed, eight mutations in all. That includes a real werift
+receiver report echoing an older sender report, which werift ignores and the agent measures.

@@ -523,13 +523,16 @@ scrcpy server, because scrcpy 4.1 has no control message for it. Running it foun
 werift's sender clock, which made the round trip read 4 ms or −56 ms on a 90 ms path, and the agent
 now replaces that clock.
 
-**Run in Chrome on a 2 Mbit/s relayed link (2026-10-09), it does not yet do its job on the
-OnePlus.** The loop works. It steps down within seconds, back up one tier per 15 s once the link
-clears, and the viewer survives every restart. But the encoder produces about 2 Mbit/s whatever rate
-it is asked for (D77), so the queue never drains. werift's round trip freezes under a queue (D78).
-And a queue over half a second for 30 s expires consent and closes the view, with or without
-adaptation (D79). Next: a frame-rate lever, an agent-computed round trip, and a consent wait that
-allows for the queue. The phases are in ADR-0048.
+**Run in Chrome on a 2 Mbit/s relayed link (2026-10-09), it first failed, and then was fixed the
+same day** (ADR-0048's amendment). The OnePlus's encoder ignored low targets at its default rate
+control (D77), werift's round trip froze behind a queue (D78), and consent expired under one (D79).
+Now:
+- the encoder runs at a constant bitrate, with 30 and 15 fps at the two lowest rates;
+- the agent computes the round trip itself;
+- werift's consent wait follows that round trip.
+
+Over the same link, the stream held 1.5 Mbit/s at 60 fps with 0 loss. A held 1.7 s queue no longer
+closes the view.
 
 Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
 grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above

@@ -419,12 +419,13 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   lost. Each step is a new scrcpy server, so it shows as a brief hitch and a keyframe. One encoder
   serves every viewer of a phone, so one viewer on a slow link softens the picture for all of them.
   `PHYSICAL_ADAPT_BITRATE=0` pins the starting rate.
-- **On the OnePlus, a link narrower than about 2 Mbit/s still stalls, and after 30 s the view
-  closes.** Run in Chrome on 2026-10-09 (ADR-0048, last section). The rate steps down, and the
-  view is smoother than it was at the fixed rate. But the encoder produces about 2 Mbit/s whatever
-  rate it is asked for (D77), so the queue never drains. A queue over half a second held for 30 s
-  expires werift's consent and closes the view (D79). Try again brings it back, on the second
-  press (D80).
+- **A narrow link costs smoothness before it costs the picture.** The encoder runs at a constant
+  bitrate, and the two lowest rates drop the frame rate: 0.8 Mbit/s runs at 30 fps, 0.4 at 15.
+  Verified in Chrome on the OnePlus over a 2 Mbit/s relayed link (ADR-0048's amendment): the
+  stream settled at 1.5 Mbit/s and 60 fps with 0 loss, and it was back at 4 Mbit/s about 25 s after
+  the link cleared. A link under 0.4 Mbit/s still queues. The view now survives a queue, which used
+  to close it after 30 s (D79), and recovers without Try again. `PHYSICAL_VIDEO_CBR=0` leaves the
+  encoder its own rate control.
 - **Rotation is followed by live input only.** A touch states the size the stream is encoded at,
   read from the stream itself, so it lands right after the phone turns; the adb fallback still maps
   from the portrait panel.
