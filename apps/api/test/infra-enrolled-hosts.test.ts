@@ -239,16 +239,42 @@ describe('what the farm is spending', () => {
     assert.deepEqual(cost.idle, [], 'an idle laptop is not a host left on');
   });
 
+  /**
+   * THE FARM-WIDE TOTAL MOVES BY ITSELF, and the first version of this test did not allow for it.
+   *
+   * `monthToDate` sums every fleet host in the shared database, including intervals that are still
+   * OPEN — and an open interval is `now() - started_at`, so the figure grows by the second whenever
+   * any other test's host is "powered on". Asserting it was EQUAL before and after adding a laptop's
+   * hours passed on the pull request and failed on `main` with 13252.75 against 13252.74: a paisa of
+   * somebody else's fixture, landing on a rounding boundary between two reads.
+   *
+   * So this compares against the size of the thing being tested. Five hours of a laptop at the
+   * device host's rate is ₹325; a few milliseconds of drift is a paisa. Anything under a rupee is
+   * drift, and anything over three hundred is the defect.
+   */
   test('an enrolled host\'s hours add nothing to the bill; a fleet host\'s do', async () => {
     const spent = async () => (await costSnapshot([])).monthToDate!;
+    const DRIFT = 1;
+
     const start = await spent();
-
     await seedInterval(asleep, 300, 1, 'silence');
-    assert.equal(await spent(), start, 'five hours of a customer\'s laptop were added to the month');
+    const withLaptop = await spent();
+    assert.ok(Math.abs(withLaptop - start) < DRIFT,
+      `five hours of a customer's laptop moved the month by ${(withLaptop - start).toFixed(2)}`);
 
-    // Thirty minutes, ended a minute ago. Compared loosely: the first half hour of a month clips it.
+    /**
+     * The control: the same stretch on the farm's own host does cost. Thirty minutes at ₹65 an hour
+     * is ₹32.50. Skipped in the first half hour of a month, where the interval is clipped at the
+     * month's start and its cost is whatever part of it falls after midnight.
+     */
+    const [{ minutes }] = await q<{ minutes: number }>(
+      `SELECT EXTRACT(EPOCH FROM (now() - date_trunc('month', now()))) / 60 AS minutes`);
     await seedInterval(lab, 30, 1, 'stopped');
-    assert.ok(await spent() > start, 'the farm\'s own host costs nothing either — the filter is too wide');
+    if (Number(minutes) > 32) {
+      const withLab = await spent();
+      assert.ok(withLab - withLaptop > 30,
+        `the farm's own host added only ${(withLab - withLaptop).toFixed(2)} — the filter is too wide`);
+    }
   });
 
   test('a fleet host is priced at its own instance\'s rate, and at the default without one', () => {
