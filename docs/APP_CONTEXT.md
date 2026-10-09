@@ -211,17 +211,20 @@ docs/adrs/         47 decisions, each with what was rejected and why (numbered t
 
 This section is as important as section 4. Read it before promising anything.
 
+*Corrected 2026-10-09 from the repo and `git`, not by using the farm. Four rows had described as
+missing things built on 2026-09-12 and 2026-10-03.*
+
 | | |
 |---|---|
 | **iOS** | Not built, deliberately. Android only. |
 | **Non-WebDriver frameworks** | Espresso, native UIAutomator and Maestro do **not** work. They run through `adb shell am instrument` or their own agent, and `/wd/hub` is the only automation entrance in this system. That is a new execution path, not a new capability. |
 | **One device host** | A host outage is a farm outage. Nothing in the code blocks a second host; it costs a VM, not a rewrite. |
 | **One API instance** | `TunnelRegistry` is per-process and carries automation traffic, so a second instance behind a naive round-robin would fail about half of tunnel-transport sessions. Tunnel affinity first, rate-limit store second. Nothing needs it yet. |
-| **The physical handset** | `SM-S918B` is quarantined behind a machine that has not beaten since 2026-08-29. The code is fine; it needs `npx @mfarm/agent` run on that machine. |
-| **Test rows for multi-test sessions** | A session running several tests shows one row and a count. One test per session — the LambdaTest shape — already renders every test by name. |
-| **Share links** | No public URL for a single failure. A viewer needs a console login. |
-| **Customer tunnel** | No equivalent of LambdaTest's tunnel binary for reaching a private staging host. |
-| **Idle-host alerting** | The console now *shows* a powered-on host and what it costs. Nothing pages about it. |
+| **Physical handsets** | A OnePlus 8T works end to end (2026-10-03): WebDriver sessions, live video at 60 fps with live input, and operating it without video. It is served only while the laptop it is plugged into runs the agent. No recording, and no customer tunnel. The `SM-S918B` is still quarantined behind a machine that has not beaten since 2026-08-29. |
+| **A test that never reported** | Test rows for multi-test sessions were built on 2026-09-12. What the farm still cannot show is a test that ran and never reported a result: it cannot observe an assertion. |
+| **Share links** | Built 2026-09-12 (ADR-0036, ADR-0040). One failure can be shared at `/s/<token>` with its screenshot, steps, logcat and recording. Carrying the log is an accepted risk: apps print tokens into logcat. |
+| **Customer tunnel** | Built 2026-09-12 (ADR-0037): `npx @mfarm/cli tunnel`. It does not carry `https://` yet, and handsets do not offer it. |
+| **Idle-host alerting** | The rule `MfarmHostIdleAndBilling` exists (2026-09-13) and routes to Slack. Whether the farm's Slack webhook is installed was not checked, so whether it reaches anybody is unknown. |
 
 ### Two things that are true but need one command
 
