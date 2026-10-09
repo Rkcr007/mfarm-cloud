@@ -8,6 +8,15 @@ numbers on the last version had decayed and are corrected here; see §5.
 **Updated 2026-09-11** at `975693f` / migration 048: the hub contract is now verified on real
 devices, and one claim this page made about test rows was too strong and is corrected in §4.6.
 
+**Updated 2026-10-09** at #260 / migration 068 / ADR-0048. Re-read against the repo, `git`, `gh`,
+npm and the farm on that day:
+- §2's power state;
+- §3's Video, Physical devices and Observability rows, which had decayed;
+- the open-work list at the top of §4;
+- every number in §5.
+
+Rows not named here carry their own dates and were not re-checked.
+
 Two other documents complete the picture and nothing else is required reading:
 
 | | |
@@ -54,7 +63,8 @@ while the expensive half is off.
 Stopped VMs still bill for disks. Only deleting the disks stops that, and that throws away the farm.
 
 **Current state: `mfarm-lab` STOPPED, `mfarm-cp` RUNNING.** That is the resting state, not a
-half-finished one.
+half-finished one. Read from `gcloud` on 2026-10-09: `mfarm-lab` TERMINATED since its last start on
+2026-09-27, `mfarm-cp` RUNNING.
 
 **This sentence was WRONG for three and a half hours on 2026-09-12, and the correction is the
 point.** It used to end "…and returned to rest afterwards", written on 2026-09-11 about the
@@ -65,8 +75,13 @@ asserted it was off.
 That is ADR-0035's incident at one-sixth the size and with the same cause: the only signal that the
 farm is on is knowing you switched it on. The difference is that the console now SAYS so — the
 header read `host up 3h 1m · ~₹196` the whole time — so the instrument worked and nobody was looking
-at it. **`MfarmHostIdleCost` does not exist yet**; §4 records that gap rather than this page
-pretending it is closed.
+at it.
+
+**Corrected 2026-10-09:** this paragraph said the idle-host alert did not exist. It has existed since
+#186 (2026-09-13), as `MfarmHostIdleAndBilling` in `deploy/observability/alerts.yml`. It fires
+after a host has been powered on for two hours with no device allocated, and routes to Slack
+through `/run/secrets/slack_webhook_url`. **Whether that webhook is installed on `mfarm-cp` was not
+checked.** Without it, the rule fires into nothing.
 
 **Do not trust this line. Ask the machine:**
 
@@ -85,13 +100,13 @@ gcloud compute instances list --project mfarm-lab --format='table(name,status)'
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host **today**, not by design: the control plane has been audited per-host and the tooling now takes a list, so adding a second is a VM and a runbook rather than code — [`SECOND_HOST.md`](SECOND_HOST.md). Until somebody pays for one, a host outage is still a farm outage. |
 | **AI runs (ADR-0043, 0044)** | **Built, on, and run against real devices** (2026-09-26, Groq's free `qwen/qwen3.8-27b`). `POST /v1/ai/runs` queues an English-described test; the runner drives a device through the hub (Flash / Pro), bills each step from `ai/pricing.ts`, and reports the verdict on the session. Console: Farm › AI testing. Since ADR-0044 nothing is started that cannot finish: `GET /v1/ai/readiness` is the go / no-go (model, devices, budget) the console and every door apply, with an optional fallback provider. `mfarm mcp` lets a customer's own agent drive a device. Tracker: `docs/AI_PRODUCT_LINE.md`. | On a free model tier: ~one step every 35s and ~45 steps a day. `@mfarm/cli` 0.2.0 (with `mfarm mcp`) not yet on npm. Diagnosis (C8) not yet seen answering on the farm. |
-| **Physical devices** | **Working, on a OnePlus 8T** (2026-10-03). Agent, pairing (ADR-0014), org-pinning, the outbound tunnel and the reset story (ADR-0012) are built; a phone streams live (M6, 60 fps; touches go to it live over scrcpy's control socket, ~74 ms to the first frame that answers them) or is operated from its picture and elements without video (M4). | Served only while the laptop it is plugged into runs the agent. A viewer off the phone's network goes through the relay on the control plane (ADR-0047), about 175 ms a touch. The `SM-S918B` is quarantined behind a machine that has not beaten since 2026-08-29. |
+| **Physical devices** | **Working, on a OnePlus 8T** (2026-10-03). Agent, pairing (ADR-0014), org-pinning, the outbound tunnel and the reset story (ADR-0012) are built; a phone streams live (M6, 60 fps; touches go to it live over scrcpy's control socket, ~74 ms to the first frame that answers them) or is operated from its picture and elements without video (M4). | Served only while the laptop it is plugged into runs the agent. A viewer off the phone's network goes through the relay on the control plane (ADR-0047), about 175 ms a touch. Since ADR-0048 (2026-10-09) the stream steps between 4 and 0.4 Mbit/s with the slowest viewer's link; **that is not yet verified in Chrome on a narrow link**. The `SM-S918B` is quarantined behind a machine that has not beaten since 2026-08-29. |
 | **Agent** | **Working.** One binary, loopback window, no admin rights (ADR-0009). | A device ARRIVING still re-registers the agent — the heartbeat reconciles devices it knows and cannot create one. Deliberate (ADR-0027). |
 | **Deploy / ops** | **Working.** `check-deployed.sh` answers "is this farm running `main`?" for the serving image and for **each** device host's checkout (it takes `MFARM_LABS`); `verify-live.sh` asks it too. Deploy is **automatic** — `mfarm-autodeploy.timer` pulls every five minutes, health-gates on five consecutive `/ready` answers and refuses to retry a commit that failed (ADR-0030). | The **device host** is deliberately excluded from auto-deploy: fast-forwarding its tree restarts the agent under running sessions, so it is brought forward by hand. |
-| **Observability** | **Working** — Prometheus, Grafana, alert rules, host heartbeat and tunnel metrics. Host disk/load/memory and what a powered-on host is costing are readable in the console (ADR-0035, migration 050), and since ADR-0038 they live on a page that can act on them. | No worker-side metrics: the agent reports incidents, not gauges. There is no ALERT on an idle host yet — the Infrastructure page shows it and names what it is wasting, nothing pages about it, and on **2026-09-12 that cost ₹230**. The instrument works; the absence of a pager is the gap. |
+| **Observability** | **Working** — Prometheus, Grafana, alert rules, host heartbeat and tunnel metrics. Host disk/load/memory and what a powered-on host is costing are readable in the console (ADR-0035, migration 050), and since ADR-0038 they live on a page that can act on them. | No worker-side metrics: the agent reports incidents, not gauges. On **2026-09-12** an idle host cost ₹230 while nothing paged. The alert rule `MfarmHostIdleAndBilling` has existed since 2026-09-13 (#186), and routes to Slack. **Not checked:** whether the Slack webhook is installed on the farm, so whether that alert reaches anybody. |
 | **Infrastructure ops** | **Working, deployed 2026-09-13** (ADR-0038, migrations 053–056). `#/infra` — seven sections, a health rollup with the evidence under every light, per-host gauges that age separately from the heartbeat, cost from a power ledger rather than from `up_since`, an append-only operations log with five filters, and an SSE stream. **Start, stop, restart, drain, resume and retire are all live**, idempotent and audited, on the real farm. Gated on `users.operator`, a **farm-wide** capability no API key can hold. | **Per-service restart** (Caddy, coturn, Appium, cvd) is not built: it needs the agent to learn a job kind, so those still need SSH. |
 | **Cloud estate** | **Working** (ADR-0038). `#/infra/cloud` lists every instance, disk, snapshot and reserved address in the project — including the **control plane**, which had never appeared anywhere in the product — and prices whatever has a configured rate. The headline is the **floor**: what the estate costs with every machine switched off, which is the number that makes "we stopped it, so it costs nothing" checkable. It was never true: 180 GB of disk, ~21 GB of snapshots and a reserved address on a stopped instance all bill. | Rates are configuration (`CLOUD_*`), unset by default — a self-hosted farm has not told the product what it pays, so an unpriced resource is shown with its size and no money rather than with an invented number. |
-| **Video / recording** | **Not built. The gate is now measured (2026-09-07) and it decided the design.** `screenrecord` costs the Flutter canvas a third of its frame rate and doubles ordinary UI's dropped frames, so guest-side encode — which is both `screenrecord` and scrcpy — is not available here. | S5 must encode on the HOST, reusing `cvd`'s WebRTC encoder; that path does not exist yet. The immediate alternative is video for physical devices only. `RENDER_BASELINE.md`. |
+| **Video / recording** | **Built and deployed 2026-09-07 (ADR-0032, migration 045).** Cuttlefish's own host-side recorder (`record_cvd`) records each session at 29.8 fps against 29.9 unrecorded. The farm keeps only what a suite reported as failed (`VIDEO_RECORDING=failures`). Verified by `deploy/verify-video.mjs`, 17/17, and played back by eye on the deployed console. *(Corrected 2026-10-09: this row said "Not built" for a month after §4.5 closed it.)* | Four BUSY recorded devices at once have not been measured; see §4.5. Physical handsets have no recording. |
 | **Test rows** | **Built 2026-09-12; moved into the row 2026-09-14 (ADR-0041).** A run's session row names its failed tests straight away and unfolds the passed ones in place, and the session screen lists everything it reported — passing tests named, not only counted. No new endpoint: `/v1/sessions/:id/results` already answered it. | A test that ran and never reported is not here and is not counted as passing — the farm cannot see an assertion. |
 | **Execution timeline UI** | **Built (2026-09-07).** A *What happened* card on the run screen, and a *Steps* card on the session screen with the failing WebDriver commands in red (ADR-0029). | Red is reserved for a test failing; an incident is amber. The distinction the run screen already kept, kept here too. |
 | **Failure evidence** | **Built (2026-09-07).** A failed result requests its own screenshot and logcat, each naming the test (migration 040). | Up to one beat — ten seconds — after the assertion. The step trace is what makes a late screenshot readable. |
@@ -103,6 +118,21 @@ gcloud compute instances list --project mfarm-lab --format='table(name,status)'
 ---
 
 ## 4. What is pending, in priority order
+
+**Open work as of 2026-10-09, shortest list first.** The numbered sections below are the history.
+Several of them are closed, and their numbers are referenced elsewhere, so they stay as they are.
+
+| | What | Needs |
+|---|---|---|
+| 1 | A second team uses the farm for a day (§4.1) | A decision, not code |
+| 2 | Verify ADR-0048 in **Chrome** on the OnePlus over a narrow, relayed link: the stream steps down until the round trip returns to its floor, then back up | The phone plugged in and charged (it was at 10% on 2026-10-09), the agent running, and a throttled link |
+| 3 | Publish `@mfarm/cli` 0.2.0, which adds `mfarm mcp`. npm still serves 0.1.0 (checked 2026-10-09) | The owner's npm 2FA code |
+| 4 | Confirm the Slack webhook for alerts is installed on `mfarm-cp`, so `MfarmHostIdleAndBilling` reaches a person | One SSH check and a test alert |
+| 5 | Stop the lab's old coturn the next time `mfarm-lab` is up (the relay moved to `mfarm-cp` in ADR-0047) | The lab running |
+| 6 | `SM-S918B` back in the fleet (§4.3) | `npx @mfarm/agent` on its machine |
+| 7 | Reboot `mfarm-cp` for the kernel it reported waiting on 2026-10-03 | The owner's call: it is a short control-plane outage |
+| 8 | Per-service restart from the console (Caddy, coturn, Appium, cvd) | A new agent job kind; SSH until then |
+| 9 | `https://` through the customer tunnel; tunnel and proxy on handsets (§4.7) | Building, when a customer needs it |
 
 ### 1. Decide whether a four-device farm goes in front of a second team
 
@@ -251,14 +281,14 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **1719**, green, across three workspaces plus `deploy` — measured 2026-09-12 |
-| Migrations | 52; 051 is deployed, **052 is not on the farm yet** |
+| Tests | **2430**, green — api 1704, cli 95, agent 510, `deploy` 121 — measured 2026-10-09 |
+| Migrations | 68, numbered to 068. The farm serves `main` (`check-deployed.sh`, 2026-10-09) |
 | Decisions | 47 ADRs, numbered to 0048 (there is no 0013) |
-| Merged PRs | 173 |
-| Defects | 72 recorded, **70 closed** |
-| Fleet | 4 Cuttlefish + 1 physical handset |
+| Merged PRs | 260, as of #260 (2026-10-09) |
+| Defects | 72 recorded, **70 closed** — the closed count is carried from the last update and not re-counted |
+| Fleet | 4 Cuttlefish + 2 physical handsets: the OnePlus 8T (working), the `SM-S918B` (quarantined) |
 | Cold boot | ~30s per device |
-| Live view | 49–53 fps, ~39ms round trip, direct path; a phone 60 fps, ~74 ms input to first frame |
+| Live view | 49–53 fps, ~39ms round trip, direct path; a phone 60 fps, ~74 ms input to first frame direct, ~175 ms relayed |
 | Install → confirmed | ~8–12s, worker-reported |
 
 **Two numbers moved down, and neither is a regression.** The suite was 1441 across five workspaces

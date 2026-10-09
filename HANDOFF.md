@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-09-09**, at migration 048 / ADR-0027. (Entry 77 is the newest; the header
+Last updated **2026-10-09**, at migration 068 / ADR-0048. (Entry 115 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5066,3 +5066,88 @@ when the feature is broken. See issues 37 and 38.
     Groq's daily allowance again — and with the model's readiness red, `POST /v1/ai/tests/:id/run` on a
     routed test answered 201 and passed by replay (6 steps, ₹0): #238 on hardware, not only in tests.
     Scroll-search and the repair diff need an app that changed and were not exercised here.
+
+108. **A ONEPLUS JOINED THE FLEET, AND USING IT FOUND NINE DEFECTS.** 2026-10-03, #241–#250,
+    migrations 067–068. The handset is a OnePlus 8T (`3e541fc0`) on the MacBook. Each defect is
+    verified on the farm in the console:
+    - **D57:** an unshared phone drained the agent on every start.
+    - **D58:** ticking Share was answered with a dropped connection.
+    - **D59:** a retired laptop could not come back.
+    - **D60:** OxygenOS's permission monitoring refuses adb's `settings put`, `pm grant` and
+      `pm clear` while every surface said ready. The agent now detects it by attempting them, and
+      withholds `webdriver`.
+    - **D61:** a phone's reboot restarted the agent.
+    - **D62:** an absent phone read AVAILABLE (fixed by 067, `away`).
+    - **D63:** a device back in service kept its quarantine reason (fixed by 068).
+    - **D64:** the release dialog promised a snapshot restore that a phone does not have.
+    - **D65:** the readiness probe wrote two errors a minute into the phone's logcat.
+
+109. **M4 — A PHONE OPERATED WITHOUT VIDEO.** 2026-10-03, #251–#253. A device with no
+    `screen-stream` is shown as its latest picture. The picture is read on open, then 0.7 s and 2.6 s
+    after each input, never on a poll. Tap, swipe and type go over the data plane, and the Inspector
+    works without a stream.
+    - **D66:** on this OnePlus a FLAG_SECURE screen gives `screencap` zero bytes, not a blank image,
+      and the cockpit kept showing the previous screen. It now shows the labelled element tree.
+      Verified by operating Android's own PIN-entry screen from its elements.
+
+110. **M6 — A PHONE STREAMS LIVE, AND ITS INPUT GOES LIVE.** 2026-10-03, #254–#256. The agent is
+    the phone's WebRTC peer (werift 0.24.4). It turns scrcpy's H.264 into RTP and speaks
+    Cuttlefish's signalling. The stream runs at 60 fps. Input goes over scrcpy's control socket
+    (#255), and in Chrome a touch reaches its first frame in 57–121 ms, median about 76.
+    - **D68 (#256):** Chrome probes a still screen with a PLI every 3 s, and answering it restarted
+      the encoder about every 4 s. A PLI after 2 s of stillness, to a viewer that already has a
+      keyframe, is now left alone. Only Chrome could find this: the headless werift viewer never
+      sends that probe.
+
+111. **D69 — A RELEASED SESSION KEPT STREAMING, WITH INPUT OPEN.** 2026-10-03, #257. Found releasing a
+    session in the console: two minutes later the tab still received frames, and scrcpy still ran on
+    the phone. The previous holder could have touched the phone under the next one. Cuttlefish had
+    hidden this, because its restore kills the WebRTC it served. The fix uses the reset request,
+    which is the one end-of-lease signal on every path. It now closes every live connection to the
+    device and retires the ended allocation's fence, so its grants are refused.
+
+112. **THE RELAY MOVED TO THE CONTROL PLANE (ADR-0047), AND D70.** 2026-10-03, #258. coturn ran on
+    `mfarm-lab`, which is stopped most of the time, so a viewer off the phone's network had no relay
+    (D67). It now runs on `mfarm-cp` as `turn.mfarm.dev`, using the API's own secret.
+    - **D70, found by the move:** once the relay answered, the agent's werift relayed through it
+      itself and nominated its own pair, and Chrome's picture froze on every path. The agent now
+      keeps STUN only, and the browser holds the relay.
+    - Relayed, a touch reaches its frame in about 175 ms, against about 75 ms direct.
+
+113. **D71 AND D72 — THE RELAYED VIEW IN CHROME.** 2026-10-04, #259.
+    - **D71:** a 3.7 s stall over the relay was treated as fatal. On recovery the view showed
+      "connected, but no display" over a playing picture, and swallowed touches. `disconnected` now
+      gets 8 s to recover.
+    - **D72:** werift nominated Chrome's relay over TCP, which queued to a 6.2 s round trip. The agent
+      now holds TCP relay candidates for 1.5 s, so a UDP relay is nominated first.
+    - The same night measured the next gap. On a 3 Mbit/s downlink, the fixed 4 Mbit/s stream queued
+      the relayed view to a 1.7 s round trip.
+
+114. **BANDWIDTH ADAPTATION (ADR-0048).** 2026-10-09, #260. The encoder steps between 4, 2.5, 1.5,
+    0.8 and 0.4 Mbit/s based on the viewers' RTCP reports: a round trip rising above its floor, or
+    loss over 30 or more packets. It steps down fast and up slowly, and the slowest viewer sets the
+    rate. A new rate is a new scrcpy server, because scrcpy 4.1 has no bitrate message.
+    - Running it on the OnePlus found two defects in werift's sender clock: the round trip read 4 ms
+      or −56 ms on a 90 ms path. It also found a step-down at 4 a.m. for a queue the stream was not
+      causing.
+    - Writing the ADR found that the starting rate was not a ceiling: a stream capped at 2.5 Mbit/s
+      climbed to 4. That is fixed, with a test that fails without the fix.
+    - **Not verified in Chrome on a narrow link.** The phone was off USB with its battery at 10%. The
+      agent's last log (04:03–13:43 IST) shows the Mac sleeping, with DNS failures, adb not
+      answering and missed pongs. That is not a farm fault. No rate change appears in that log.
+
+115. **THE RECORD REALIGNED.** 2026-10-09.
+    - **Branches.** Every branch was checked against `main`. The 61 local and 15 remote leftovers
+      are all merged, by squash or fast-forward; nothing is unmerged. They were left in place,
+      because deleting them is the owner's call.
+    - **STATUS.md.**
+      - The Video row said "Not built" a month after §4.5 closed it.
+      - The idle-host alert it said did not exist has existed since #186, as
+        `MfarmHostIdleAndBilling`.
+      - §5 is re-measured: 2430 tests, 68 migrations, 260 PRs.
+      - §4 now opens with a table of open work.
+    - **APP_CONTEXT §6.** Four rows described built things as missing.
+    - **DIRECTION.md.** Its decision table stopped at ADR-0027 and now runs to 0048.
+    - **INDEX.md.** It counted 44 ADRs; there are 47.
+    - **This log.** It had stopped at 107. Entries 108–114 fill the gap from the PR titles,
+      `DEFECTS.md` and `AGENT_BUILD_PLAN.md`.
