@@ -521,8 +521,15 @@ bitrate. A round trip rising above its floor, or loss over 30 or more packets, s
 through five tiers (4 → 0.4 Mbit/s), and a clear link steps it back up slowly. A new rate is a new
 scrcpy server, because scrcpy 4.1 has no control message for it. Running it found two defects in
 werift's sender clock, which made the round trip read 4 ms or −56 ms on a 90 ms path, and the agent
-now replaces that clock. **Still to verify:** Chrome on a narrow, relayed link, with the stream
-stepping down until the 1.7 s queue clears.
+now replaces that clock.
+
+**Run in Chrome on a 2 Mbit/s relayed link (2026-10-09), it does not yet do its job on the
+OnePlus.** The loop works. It steps down within seconds, back up one tier per 15 s once the link
+clears, and the viewer survives every restart. But the encoder produces about 2 Mbit/s whatever rate
+it is asked for (D77), so the queue never drains. werift's round trip freezes under a queue (D78).
+And a queue over half a second for 30 s expires consent and closes the view, with or without
+adaptation (D79). Next: a frame-rate lever, an agent-computed round trip, and a consent wait that
+allows for the queue. The phases are in ADR-0048.
 
 Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
 grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above

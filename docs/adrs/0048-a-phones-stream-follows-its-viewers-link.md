@@ -1,7 +1,8 @@
 # ADR-0048 — a phone's stream follows its viewer's link
 
-**Status:** Accepted · 2026-10-09 · extends M6 (ADR-0047's "next gap") · the narrow-link case that
-motivated it is **not yet verified end to end in Chrome**; see the last section
+**Status:** Accepted · 2026-10-09 · extends M6 (ADR-0047's "next gap") · **run in Chrome on a narrow
+link the same day: the loop works, and it does NOT yet relieve the stall on the OnePlus** — D77, D78
+and D79; see the last section
 
 ## Context
 
@@ -86,7 +87,31 @@ ones most likely to be on such a link.
 - On the OnePlus, the werift clock defects and the still-screen false step-down were each found by
   running it. That is what points 4 and 7 answer.
 
-**Not yet done:** the case that motivated it. That is Chrome on a link narrower than 4 Mbit/s,
-relayed, with the stream stepping down until the round trip comes back to its floor, then stepping
-up again once the link clears. Until that run, this ADR says what the code does, not that it fixes
-the 1.7 s stall.
+### In Chrome on a narrow link, 2026-10-09 — the verdict
+
+**The control loop works; on this phone it cannot do its job.** The setup:
+- the OnePlus 8T streams to Chrome, which is forced onto the relay over UDP;
+- the screen is kept scrolling over adb;
+- the agent's UDP to the relay is shaped on the Mac with dummynet to 2 Mbit/s, with 400 KB of
+  buffer, which is about the 1.7 s queue of the original measurement;
+- the agent runs `main` at `4e271dc`.
+
+| Phase | What happened | Verdict |
+|---|---|---|
+| **A** — clear link, adaptation on | 4.8 Mbit/s received at 60 fps; round trip 73–75 ms; 0 lost, 0 NACKs, 0 freezes; no rate change. The agent's round trip matched Chrome's (69–72 ms), where werift had read 4 ms or −56 ms before `fixSenderClock`. | **Pass**: no false step-down. |
+| **B** — 2 Mbit/s link, adaptation on | Steps 4 → 2.5 → 1.5 → 0.8 → 0.4 Mbit/s in about 16 s, each a scrcpy restart, and the viewer stayed connected through them. At 20 s: 57 fps, 0 lost, 0 freezes. But the round trip held at 600–945 ms, because the encoder kept producing about 2 Mbit/s at the 0.4 tier (**D77**). All four decisions cited the same frozen 266 ms (**D78**). Within the 2 min 17 s the link stayed narrow, werift's consent expired and the view closed (**D79**). | **Fail**: the queue never drained. |
+| **C** — link cleared | Back up one tier per 15 s, 0.4 → 0.8 → 1.5 → 2.5 → 4.0, with the round trip at 62–72 ms throughout. | **Pass**. |
+| **D1** — 2 Mbit/s link, adaptation OFF | Within 14 s: 16.8 fps, two freezes totalling 9.4 s, 3,371 packets lost, 1,101 NACKs. At 30 s: 1.2 fps and a 730 ms round trip. Then 0 fps, consent expired (**D79**), and the view closed. | The stall it was built for, reproduced. |
+| **D2** — clear link, pinned at 0.4 Mbit/s | 2.1–2.5 Mbit/s received at 60 fps, with scrcpy confirmed at `video_bit_rate=400000`. | Settles **D77**: the floor is the encoder, not the link. |
+
+**What it bought.** Against the same link with adaptation off, the adaptive stream replaced heavy
+loss and multi-second freezes with a smooth but delayed picture. That lasted until D79 closed it.
+
+**What it did not.** The round trip never came back to its floor, so it did not fix the 1.7 s stall.
+
+**Before this ADR's claim holds:**
+- **D77:** a lever the encoder obeys, most likely frame rate.
+- **D78:** a round trip the agent computes itself, from LSR and DLSR.
+- **D79:** a consent wait that allows for the queue.
+
+None of these needs a new decision: each one completes this one.
