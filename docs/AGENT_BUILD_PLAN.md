@@ -514,7 +514,15 @@ Checking the relay in the console the next night found two more:
 - **D71:** a 3.7 s stall over the relay showed "no display" over a playing picture.
 - **D72:** werift nominated Chrome's relay-over-TCP, which queued to a 6.2 s round trip. The agent now holds TCP relays back for 1.5 s.
 
-It also found the next gap. The stream is a fixed 4 Mbit/s, and on a 3 Mbit/s downlink nothing slows it down. **Bandwidth adaptation is the next step for M6**: Chrome's receiver reports could drive scrcpy's bitrate.
+It also found the next gap. The stream was a fixed 4 Mbit/s, and on a 3 Mbit/s downlink nothing slowed it down.
+
+**Bandwidth adaptation — built 2026-10-09 (ADR-0048).** The viewers' RTCP reports now drive scrcpy's
+bitrate. A round trip rising above its floor, or loss over 30 or more packets, steps the rate down
+through five tiers (4 → 0.4 Mbit/s), and a clear link steps it back up slowly. A new rate is a new
+scrcpy server, because scrcpy 4.1 has no control message for it. Running it found two defects in
+werift's sender clock, which made the round trip read 4 ms or −56 ms on a 90 ms path, and the agent
+now replaces that clock. **Still to verify:** Chrome on a narrow, relayed link, with the stream
+stepping down until the 1.7 s queue clears.
 
 Measured with a headless werift viewer doing exactly what `live.js` does — the same session API,
 grant, data-plane socket and offer — timing frames at RTP delivery, as the browser numbers above

@@ -14,7 +14,7 @@ import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import {
   packetizeNal, videoSizeFor, charFor, InputMapper, H264Fanout, PhoneVideoPeer, nalType,
-  parseIceUrl, agentIceServers, relayOverTcp, spsSize,
+  parseIceUrl, agentIceServers, relayOverTcp, spsSize, BitrateGovernor, ntpNow, fixSenderClock,
 } from '../src/devices/phone-stream.ts';
 import type { ScreenCapture, FrameMark, LiveControl } from '../src/devices/capture.ts';
 
@@ -593,5 +593,252 @@ describe('the agent offers without a relay of its own', () => {
       peer.close();
       silent.close();
     }
+  });
+});
+
+/**
+ * BANDWIDTH ADAPTATION. The governor is driven with a clock of its own: what it is asked is "at this
+ * moment, with these reports, should the rate change" — and the reports are shaped like the ones the
+ * OnePlus's relayed view produced on a 3 Mbit/s downlink: a 90 ms floor, then a queue of 1.7 s.
+ */
+describe('the stream\'s rate follows the viewer\'s link', () => {
+  const T = 1_000_000;
+  /** Report `rtt` (and loss) once a second for `secs` seconds from `from`, ticking after each. */
+  const run = (g: BitrateGovernor, from: number, secs: number, rttMs: number, fractionLost = 0, viewer = 'v1', sending = Infinity) => {
+    const out: Array<number | undefined> = [];
+    for (let i = 0; i < secs; i++) {
+      const now = from + i * 1000;
+      g.report(viewer, { rttMs, fractionLost, at: now });
+      out.push(g.tick(now, sending));
+    }
+    return out.filter((x) => x !== undefined);
+  };
+
+  test('a clear link keeps the rate it has', () => {
+    const g = new BitrateGovernor(4_000_000);
+    assert.deepEqual(run(g, T, 60, 95), []);
+    assert.equal(g.bitRate, 4_000_000);
+  });
+
+  test('a queue that builds steps down at once, two tiers, and again if it does not clear', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);                                  // the floor
+    const first = run(g, T + 3_000, 2, 1_700);         // the second congested report decides
+    assert.deepEqual(first, [1_500_000], 'a 1.7 s queue must not wait for more than two reports');
+    assert.match(g.reason, /4\.0 Mbit\/s → 1\.5 Mbit\/s: round trip 1700 ms against 90 ms at best/);
+    assert.deepEqual(run(g, T + 5_000, 2, 1_700), [], 'a second step inside four seconds is too soon to judge');
+    assert.deepEqual(run(g, T + 7_000, 3, 1_700), [400_000]);
+  });
+
+  test('one bad report is not congestion', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);
+    assert.deepEqual([...run(g, T + 3_000, 1, 2_000), ...run(g, T + 4_000, 10, 95)], []);
+  });
+
+  test('loss alone steps it down', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);
+    assert.deepEqual(run(g, T + 3_000, 2, 95, 0.12), [1_500_000]);
+  });
+
+  test('a link that stays clear is tried one tier higher, after a while', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);
+    run(g, T + 3_000, 2, 1_700);                       // down to 1.5
+    const up = run(g, T + 5_000, 30, 95);
+    assert.deepEqual(up, [2_500_000], 'one tier at a time, once in 30 clear seconds');
+    assert.match(g.reason, /1\.5 Mbit\/s → 2\.5 Mbit\/s: 15 s without congestion/);
+  });
+
+  test('a step up that does not hold makes the next one wait twice as long', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);
+    run(g, T + 3_000, 2, 1_700);                       // 1.5
+    let t = T + 5_000;
+    const up: number[] = [];
+    for (; up.length === 0; t += 1000) { const r = run(g, t, 1, 95); up.push(...r as number[]); }
+    assert.equal(g.bitRate, 2_500_000);
+    assert.deepEqual(run(g, t, 2, 900), [800_000], 'the step up did not hold');
+    t += 2_000;
+    // The hold is 30 s now: nothing at 20 s of clear link, one step by 35 s.
+    assert.deepEqual(run(g, t, 20, 95), []);
+    assert.deepEqual(run(g, t + 20_000, 15, 95), [1_500_000]);
+  });
+
+  test('the slowest viewer sets the rate, and leaving takes its vote with it', () => {
+    const g = new BitrateGovernor(4_000_000);
+    for (let i = 0; i < 3; i++) { g.report('fast', { rttMs: 10, at: T + i * 1000 }); g.report('slow', { rttMs: 90, at: T + i * 1000 }); g.tick(T + i * 1000); }
+    const decided: Array<number | undefined> = [];
+    for (let i = 3; i < 5; i++) {
+      g.report('fast', { rttMs: 11, at: T + i * 1000 });
+      g.report('slow', { rttMs: 1_500, at: T + i * 1000 });
+      decided.push(g.tick(T + i * 1000));
+    }
+    assert.deepEqual(decided.filter(Boolean), [1_500_000], 'one encoder serves both, so the slow link decides');
+    g.forget('slow');
+    assert.deepEqual(run(g, T + 5_000, 20, 11, 0, 'fast'), [2_500_000]);
+  });
+
+  /**
+   * Found live, at 4 a.m. on a home link: the screen was still, the round trip drifted from 115 to
+   * 300 ms on its own, and the stream was stepped down twice — for a queue it was not filling.
+   */
+  test('a queue the stream is not filling is not the stream\'s to answer', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 111, 0, 'v1', 50_000);
+    assert.deepEqual(run(g, T + 3_000, 10, 300, 0, 'v1', 50_000), [], 'a still screen sends 50 kbit/s');
+    assert.equal(g.bitRate, 4_000_000);
+    // The same queue while the stream IS sending its rate is the stream's.
+    assert.deepEqual(run(g, T + 13_000, 2, 300, 0, 'v1', 3_500_000), [2_500_000]);
+  });
+
+  test('nothing fresh to go on, nothing decided', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);
+    g.report('v1', { rttMs: 3_000, at: T + 3_000 });
+    assert.equal(g.tick(T + 30_000), undefined, 'a report from a link half a minute ago is not this link');
+  });
+
+  test('never below the bottom tier, never above the start', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);
+    for (let i = 0; i < 10; i++) run(g, T + 3_000 + i * 5_000, 5, 5_000);
+    assert.equal(g.bitRate, 400_000);
+    const h = new BitrateGovernor(4_000_000);
+    assert.deepEqual(run(h, T, 120, 20), []);
+    assert.equal(h.bitRate, 4_000_000);
+  });
+
+  // The start is a ceiling an operator chose (`PHYSICAL_VIDEO_BIT_RATE`), not only where the top tier
+  // happens to be: a stream capped at 2.5 Mbit/s for a metered uplink must not climb to 4 on a clear
+  // link, and a start between two tiers is itself the top rate rather than being rounded away.
+  test('a start below the top tier is the ceiling, and a start between tiers is kept', () => {
+    const capped = new BitrateGovernor(2_500_000);
+    assert.equal(capped.bitRate, 2_500_000);
+    assert.deepEqual(run(capped, T, 600, 20), []);
+    assert.equal(capped.bitRate, 2_500_000);
+
+    const between = new BitrateGovernor(3_000_000);
+    assert.equal(between.bitRate, 3_000_000);
+    run(between, T, 3, 90);
+    assert.deepEqual(run(between, T + 3_000, 2, 1_700), [1_500_000]);
+    run(between, T + 5_000, 600, 90);
+    assert.equal(between.bitRate, 3_000_000);
+  });
+});
+
+describe('a new rate is a new encoder, and the viewers stay', () => {
+  test('the capture restarts at the rate, the stream and the control socket carry on', async () => {
+    const caps: Array<ReturnType<typeof scriptedCapture> & { bitRate?: number }> = [];
+    const fan = new H264Fanout(({ bitRate }) => {
+      const c = Object.assign(scriptedCapture(fakeControl()), { bitRate });
+      caps.push(c);
+      return c;
+    }, { bitRate: 4_000_000, adapt: true });
+    const got: number[] = [];
+    const off = await fan.subscribe((n) => got.push(nalType(n)));
+    try {
+      assert.equal(caps[0].bitRate, 4_000_000);
+      caps[0].push(nal(5, 10));
+      await fan.setBitRate(1_500_000, 'test');
+      assert.equal(caps.length, 2);
+      assert.equal(caps[0].stops(), 1, 'two encoders on one phone fight over one forwarded port');
+      assert.equal(caps[1].bitRate, 1_500_000);
+      assert.equal(fan.currentBitRate, 1_500_000);
+      caps[1].push(SPS_ONEPLUS_576x1280); caps[1].push(nal(8, 6)); caps[1].push(nal(5, 20));
+      assert.deepEqual(got, [5, 7, 8, 5], 'the viewer was dropped across the restart');
+      assert.equal(fan.control, caps[1].control, 'live input must follow the new server');
+      assert.deepEqual(fan.changes.map((c) => c.bitRate), [1_500_000]);
+    } finally { off(); }
+  });
+
+  test('the viewers\' reports move it on their own', { timeout: 15_000 }, async () => {
+    const caps: Array<ReturnType<typeof scriptedCapture> & { bitRate?: number }> = [];
+    const fan = new H264Fanout(({ bitRate }) => {
+      const c = Object.assign(scriptedCapture(), { bitRate });
+      caps.push(c);
+      return c;
+    }, { bitRate: 4_000_000, adapt: true });
+    const off = await fan.subscribe(() => {});
+    try {
+      fan.report('v', { rttMs: 90, at: Date.now() });
+      const end = Date.now() + 8_000;
+      while (caps.length < 2 && Date.now() < end) {
+        // The stream is busy — 60 KB every 250 ms is ~1.9 Mbit/s — so the queue is the stream's.
+        caps[0].push(nal(1, 60_000));
+        fan.report('v', { rttMs: 1_700, at: Date.now() });
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      assert.equal(caps.length, 2, 'a 1.7 s queue went unanswered');
+      assert.equal(caps[1].bitRate, 1_500_000);
+    } finally { off(); }
+  });
+
+  test('a still screen under the same queue is left alone', { timeout: 15_000 }, async () => {
+    const caps: Array<ReturnType<typeof scriptedCapture> & { bitRate?: number }> = [];
+    const fan = new H264Fanout(({ bitRate }) => {
+      const c = Object.assign(scriptedCapture(), { bitRate });
+      caps.push(c);
+      return c;
+    }, { bitRate: 4_000_000, adapt: true });
+    const off = await fan.subscribe(() => {});
+    try {
+      fan.report('v', { rttMs: 90, at: Date.now() });
+      for (let i = 0; i < 16; i++) {
+        caps[0].push(nal(1, 200));                    // a status-bar tick, not a stream
+        fan.report('v', { rttMs: 1_700, at: Date.now() });
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      assert.equal(caps.length, 1, 'a queue the stream was not filling restarted the encoder');
+    } finally { off(); }
+  });
+
+  test('without adaptation, the rate never moves', async () => {
+    const fan = new H264Fanout(() => scriptedCapture(), { bitRate: 4_000_000 });
+    assert.equal(fan.governor, undefined);
+    fan.report('v', { rttMs: 5_000, at: Date.now() });
+    assert.equal(fan.currentBitRate, 4_000_000);
+  });
+});
+
+describe('a sender clock the receiver reports can be matched against', () => {
+  test('NTP time is seconds since 1900 and a binary fraction, not decimal digits', () => {
+    const at = Date.UTC(2026, 9, 4, 3, 30, 0, 567);
+    const ntp = ntpNow(at);
+    const sec = Number(ntp >> 32n);
+    const frac = Number(ntp & 0xffffffffn);
+    assert.equal(sec, Math.floor((at + 2_208_988_800_000) / 1000));
+    assert.ok(Math.abs(frac / 2 ** 32 - 0.567) < 1e-6, `fraction ${frac} is not 0.567 of a second`);
+    // werift's own wrote 567 here: these two moments 1 ms apart must not share a compact value.
+    const compact = (x: bigint) => Number((x >> 16n) & 0xffffffffn);
+    assert.notEqual(compact(ntpNow(at)), compact(ntpNow(at + 1)));
+  });
+
+  test('a sender reads the time now; werift\'s writes after each packet are ignored', async () => {
+    const sender: Record<string, unknown> = { ntpTimestamp: 0n };
+    fixSenderClock(sender);
+    sender.ntpTimestamp = 123n;                       // what werift does on every packet
+    const a = sender.ntpTimestamp as bigint;
+    assert.notEqual(a, 123n);
+    assert.equal(sender.ntpTimestamp, a, 'the report and the LSR it is matched by must read the same value');
+    await new Promise((r) => setTimeout(r, 20));
+    const b = sender.ntpTimestamp as bigint;
+    assert.ok(b > a, 'a still screen must not repeat the last packet\'s timestamp');
+    const ms = Number(b >> 32n) * 1000 + (Number(b & 0xffffffffn) / 2 ** 32) * 1000 - 2_208_988_800_000;
+    assert.ok(Math.abs(ms - Date.now()) < 50, `${ms} is not now`);
+  });
+
+  test('the governor does not take an impossible round trip for a fast link', () => {
+    const g = new BitrateGovernor(4_000_000);
+    const T = 2_000_000;
+    for (let i = 0; i < 3; i++) { g.report('v', { rttMs: 90, at: T + i * 1000 }); g.tick(T + i * 1000); }
+    g.report('v', { rttMs: -56, at: T + 3_000 }); g.tick(T + 3_000);
+    g.report('v', { rttMs: 0, at: T + 4_000 }); g.tick(T + 4_000);
+    // With a floor of -56 ms or 0 ms, an ordinary 160 ms would read as a queue.
+    const out: Array<number | undefined> = [];
+    for (let i = 5; i < 12; i++) { g.report('v', { rttMs: 160, at: T + i * 1000 }); out.push(g.tick(T + i * 1000)); }
+    assert.deepEqual(out.filter(Boolean), []);
+    assert.equal(g.bitRate, 4_000_000);
   });
 });

@@ -195,7 +195,13 @@ export interface PhysicalOptions {
    * means no live view — and then the device does not declare `screen-stream`, because a capability
    * claimed without the machinery behind it sends a viewer to negotiate with nothing.
    */
-  liveVideo?: { makeCapture: () => ScreenCapture; maxSize?: number };
+  liveVideo?: {
+    /** A capture at the given rate — the rate moves when `adapt` is on (BitrateGovernor). */
+    makeCapture: (o: { bitRate: number }) => ScreenCapture;
+    maxSize?: number;
+    bitRate?: number;
+    adapt?: boolean;
+  };
   localId: string;
   /** Populated by discovery from `getprop`; a device that answers none of it still enrolls. */
   model?: string;
@@ -1059,7 +1065,7 @@ export class PhysicalMedia implements MediaSource {
     const screen = o.control.info.screen ?? { width: 1080, height: 2400, density: 420 };
     const video = videoSizeFor(screen, o.liveVideo.maxSize);
     // One capture for every viewer of this phone; see `H264Fanout`.
-    const fanout = new H264Fanout(o.liveVideo.makeCapture);
+    const fanout = new H264Fanout(o.liveVideo.makeCapture, { bitRate: o.liveVideo.bitRate, adapt: o.liveVideo.adapt });
     this.signal = async (opts) => new PhoneVideoPeer({
       signal: opts, fanout, video, label: o.control.info.localId,
       // Live through the fanout's control socket when it has one; through `o.control` (adb) when not.

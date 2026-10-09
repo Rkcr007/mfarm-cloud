@@ -413,11 +413,14 @@ Omitting `failureReason` is fine and means *unclassified* — never "the app's f
   adds a round trip through Mumbai: about 175 ms from a touch to its frame, against ~75 ms direct.
   The agent itself never uses the relay (D70): a relayed browser reaches it at its public address.
   So an agent on a network that blocks outbound UDP cannot be watched from anywhere else.
-- **The stream does not adapt to the viewer's bandwidth.** It is encoded at a fixed 4 Mbit/s and
-  nothing slows it down. A viewer on a link with less than that, relayed or not, sees it stall:
-  measured 2026-10-04 on a 3 Mbit/s downlink, the relayed view queued to a 1.7 s round trip and
-  Chrome's retransmission requests made it worse. `bitRate` in `index.ts` is the knob until
-  something adapts it.
+- **The stream follows the slowest viewer's link by restarting its encoder** (ADR-0048). It starts
+  at `PHYSICAL_VIDEO_BIT_RATE` (4 Mbit/s by default), which is also its ceiling. It steps down
+  through 2.5, 1.5, 0.8 and 0.4 Mbit/s when the viewers' reports show a queue building or packets
+  lost. Each step is a new scrcpy server, so it shows as a brief hitch and a keyframe. One encoder
+  serves every viewer of a phone, so one viewer on a slow link softens the picture for all of them.
+  `PHYSICAL_ADAPT_BITRATE=0` pins the starting rate. **Not yet verified in Chrome on the narrow link
+  that motivated it.** On 2026-10-04, a 3 Mbit/s downlink at the fixed rate queued the relayed view
+  to a 1.7 s round trip.
 - **Rotation is followed by live input only.** A touch states the size the stream is encoded at,
   read from the stream itself, so it lands right after the phone turns; the adb fallback still maps
   from the portrait panel.
