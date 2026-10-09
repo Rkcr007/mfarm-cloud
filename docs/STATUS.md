@@ -281,9 +281,9 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **2430**, green — api 1704, cli 95, agent 510, `deploy` 121 — measured 2026-10-09 |
+| Tests | **2431**, green — api 1704, cli 95, agent 510, `deploy` 122 — measured 2026-10-09 |
 | Migrations | 68, numbered to 068. The farm serves `main` (`check-deployed.sh`, 2026-10-09) |
-| Decisions | 47 ADRs, numbered to 0048 (there is no 0013) |
+| Decisions | 48 ADRs, numbered to 0049 (there is no 0013) |
 | Merged PRs | 260, as of #260 (2026-10-09) |
 | Defects | 72 recorded, **70 closed** — the closed count is carried from the last update and not re-counted |
 | Fleet | 4 Cuttlefish + 2 physical handsets: the OnePlus 8T (working), the `SM-S918B` (quarantined) |

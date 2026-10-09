@@ -131,7 +131,7 @@ understanding, because they are the ones that catch real breakage:
 
 ```bash
 # if you need to look the password up again
-gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'cat ~/mfarm/deploy/.state/console_password'
 ```
 
@@ -190,7 +190,7 @@ needed: the disks, the snapshots and the console's reserved IP all survive.
 
 ```bash
 git push origin main                      # CI + Release build ghcr.io/rkcr007/mfarm-api:<sha>
-gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'cd ~/mfarm && git pull && bash deploy/mfarm-deploy.sh HEAD'
 ```
 

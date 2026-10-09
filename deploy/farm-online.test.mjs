@@ -50,7 +50,10 @@ function farm({ publicHost, turnHost, addresses, dns }) {
   writeFileSync(join(bin, 'gcloud'), `#!/bin/sh
 [ "$1" = compute ] || exit 1
 case "$2" in
-  ssh) exit 0 ;;
+  # Every ssh is recorded WITH its arguments, so a test can assert HOW the script reached a machine
+  # and not only that it did. It still succeeds whatever it was given: the real failure for a call
+  # that skips the tunnel is a hang, and a test must not reproduce that by hanging.
+  ssh) echo "$*" >> "${root}/ssh"; exit 0 ;;
   instances)
     case "$3" in
       # Every name handed to \`start\` is recorded, so a test can assert WHICH machines were
@@ -93,7 +96,12 @@ exit 0
     try { return readFileSync(join(root, 'started'), 'utf8').trim().split('\n').filter(Boolean); }
     catch { return []; }
   };
-  return { root, run, started, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  /** Every `gcloud compute ssh` the script made, one line of arguments each. */
+  const sshCalls = () => {
+    try { return readFileSync(join(root, 'ssh'), 'utf8').trim().split('\n').filter(Boolean); }
+    catch { return []; }
+  };
+  return { root, run, started, sshCalls, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 /** The remediation block, printed only when something actually drifted. */
@@ -114,6 +122,34 @@ test('both addresses matching their names is reported as a match, with no drift'
     assert.doesNotMatch(out, new RegExp(REMEDIATION));
     assert.match(out, /relay host \(mfarm-cp\) is 34\.100\.138\.213, matching turn\.mfarm\.dev/);
     assert.match(out, /control plane is 34\.100\.138\.213, matching farm\.mfarm\.dev/);
+  } finally { f.cleanup(); }
+});
+
+/**
+ * EVERY SSH GOES THROUGH THE IAP TUNNEL (ADR-0049). Without the flag gcloud dials the machine's
+ * public address on port 22, which works only while the project's firewall opens SSH to the whole
+ * internet. Once that rule is narrowed to Google's IAP range, a call that forgot the flag does not
+ * fail with a message — it hangs, and this script reports a healthy host as one that "never
+ * answered SSH". Asserted on every call rather than on one, because the wait loop and the final
+ * check are separate invocations and either could be the one that is missed.
+ */
+test('every ssh goes through the IAP tunnel, so port 22 need not be open to the internet', () => {
+  const f = farm({
+    publicHost: 'farm.mfarm.dev',
+    turnHost: 'turn.mfarm.dev',
+    addresses: { 'mfarm-cp': '34.100.138.213', 'mfarm-lab': '34.100.159.34' },
+    dns: { 'farm.mfarm.dev': '34.100.138.213', 'turn.mfarm.dev': '34.100.138.213' },
+  });
+  try {
+    f.run();
+    const calls = f.sshCalls();
+    // Both machines, at least once each: a list that came back empty would pass the loop below
+    // while proving nothing.
+    assert.ok(calls.some((c) => c.includes('@mfarm-cp')), `the control plane was never reached: ${calls}`);
+    assert.ok(calls.some((c) => c.includes('@mfarm-lab')), `the device host was never reached: ${calls}`);
+    for (const call of calls) {
+      assert.match(call, /--tunnel-through-iap/, `an ssh that dials the public address: ${call}`);
+    }
   } finally { f.cleanup(); }
 });
 

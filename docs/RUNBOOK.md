@@ -41,12 +41,12 @@ Watch it arrive, either in the console's Devices tab or from a terminal:
 
 ```bash
 # the fleet, as the control plane sees it
-gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'curl -s -H "Authorization: Bearer $(cat ~/mfarm/deploy/.state/api_key)" \
               http://127.0.0.1:3000/v1/devices'
 
 # what the worker is doing, live
-gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'journalctl -u mfarm-worker -f'
 ```
 
@@ -307,6 +307,90 @@ one. The Cloud section says `BILLED — not on a running instance` against exact
 Remove `MFARM_POWER_INSTANCES` and restart. The buttons disappear and the page goes back to saying
 power is a laptop operation. The IAM binding can stay or go; with no allow-list nothing uses it.
 
+## Close what the cloud leaves open (one-time, ADR-0049)
+
+Four changes to the GCP project, none of them to this repository. Each is followed by the command
+that shows whether it has been done, so this section never has to be believed.
+
+```bash
+PROJECT=mfarm-lab; ZONE=asia-south1-c
+```
+
+### 1. The device host stops being the project's Editor
+
+`mfarm-lab` was created with the Compute Engine default service account, which can read the backup
+bucket. `set-service-account` **only works on a stopped instance**, so do this while it is off.
+
+```bash
+gcloud iam service-accounts create mfarm-lab --project "$PROJECT" \
+  --display-name "MFARM device host"
+SA="mfarm-lab@$PROJECT.iam.gserviceaccount.com"
+for role in roles/logging.logWriter roles/monitoring.metricWriter; do
+  gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member "serviceAccount:$SA" --role "$role" --condition=None
+done
+gcloud compute instances set-service-account mfarm-lab --project "$PROJECT" --zone "$ZONE" \
+  --service-account "$SA" --scopes logging-write,monitoring-write
+
+# check: the account is mfarm-lab@…, and no scope mentions devstorage
+gcloud compute instances describe mfarm-lab --project "$PROJECT" --zone "$ZONE" \
+  --format='yaml(serviceAccounts)'
+```
+
+To undo it, run `set-service-account` again with the default account
+(`<project-number>-compute@developer.gserviceaccount.com`) on the stopped instance.
+
+### 2. Ports 22 and 3389 close to the internet
+
+**Do this from a checkout that has ADR-0049's tooling**, or `farm-online.sh` will hang at "Waiting
+for SSH": without `--tunnel-through-iap`, gcloud dials the public address.
+
+```bash
+# nothing listens on 3389; both machines are Ubuntu
+gcloud compute firewall-rules delete default-allow-rdp --project "$PROJECT"
+# SSH from Google's IAP range only
+gcloud compute firewall-rules update default-allow-ssh --project "$PROJECT" \
+  --source-ranges 35.235.240.0/20
+
+# check: no rule opens 22 or 3389 to 0.0.0.0/0 …
+gcloud compute firewall-rules list --project "$PROJECT" \
+  --format='table(name,sourceRanges.list(),allowed[].map().firewall_rule().list(),disabled)'
+# … port 22 no longer answers from outside (this should time out) …
+nc -z -G 5 farm.mfarm.dev 22 && echo "STILL OPEN" || echo "closed"
+# … and the tunnel still works
+./deploy/farm-check.sh
+```
+
+To undo the SSH half: the same `update` with `--source-ranges 0.0.0.0/0`.
+
+### 3. The control plane's disk gets a snapshot
+
+The six-hourly dump covers the database. This covers what is only on the disk: `deploy/.env`,
+`deploy/secrets`, Caddy's certificates and the app store. It is taken from a running machine, so it
+is crash-consistent: Postgres recovers from it the way it recovers from a power cut. It costs about
+₹2.2 per stored GB per month.
+
+```bash
+gcloud compute snapshots create "mfarm-cp-$(date +%Y%m%d)" --project "$PROJECT" \
+  --source-disk mfarm-cp --source-disk-zone "$ZONE" --storage-location asia
+
+# check
+gcloud compute snapshots list --project "$PROJECT" --filter='sourceDisk~mfarm-cp$' \
+  --format='table(name,creationTimestamp.date(),storageBytes,status)'
+```
+
+It also appears under **Infrastructure → Cloud** in the console within a minute.
+
+### 4. The control plane cannot be deleted by accident
+
+```bash
+gcloud compute instances update mfarm-cp --project "$PROJECT" --zone "$ZONE" --deletion-protection
+
+# check: True
+gcloud compute instances describe mfarm-cp --project "$PROJECT" --zone "$ZONE" \
+  --format='value(deletionProtection)'
+```
+
 ## Turn on AI runs (any model provider)
 
 MFARM pays the provider and bills per step, so this is the farm's own key. It is not tied to a
@@ -465,7 +549,7 @@ typing anything.
 Watch it decide, or make it decide now:
 
 ```bash
-CP="gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --command"
+CP="gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --tunnel-through-iap --command"
 
 $CP 'tail -20 ~/autodeploy.log'                        # what each tick concluded
 $CP 'cd ~/mfarm && ./deploy/auto-deploy.sh --dry-run'  # decide, change nothing
@@ -520,7 +604,7 @@ Still correct, and what you want on the device host (the timer is control-plane 
 timer is paused:
 
 ```bash
-gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'cd ~/mfarm && git pull -q && ./deploy/mfarm-deploy.sh <sha>'
 ```
 
@@ -561,7 +645,7 @@ Worker-side changes are their own step, and cheap — the agent adopts running c
 this does not reboot a device:
 
 ```bash
-gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'cd ~/mfarm && git pull -q && sudo systemctl restart mfarm-worker'
 ```
 
@@ -576,15 +660,15 @@ a command.
 curl -s https://34-100-138-213.sslip.io/health
 
 # the control plane's logs
-gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'docker logs --tail 50 mfarm-api-1'
 
 # the worker's logs (device host must be running)
-gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'journalctl -u mfarm-worker -n 100 --no-pager'
 
 # a full WebDriver session against a real device, end to end
-gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c \
+gcloud compute ssh rkcr070707@mfarm-cp --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
   --command 'cd ~/mfarm && MFARM_API_KEY=$(cat deploy/.state/api_key) REGION=lab \
              node deploy/verify-webdriver.mjs'
 ```

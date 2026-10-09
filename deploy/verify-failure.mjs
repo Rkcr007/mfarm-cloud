@@ -45,10 +45,16 @@ const note = (m) => console.log(`    ${m}`);
 const say  = (m) => console.log(`\n\x1b[1m${m}\x1b[0m`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** A shell on one of the two boxes. stderr is swallowed because gcloud narrates onto it. */
+/**
+ * A shell on one of the two boxes. stderr is swallowed because gcloud narrates onto it.
+ *
+ * Through the IAP tunnel (ADR-0049): port 22 is not meant to be open to the internet, and without
+ * the flag gcloud dials the public address and hangs instead of failing with a message.
+ */
 const onBox = async (host, cmd) => {
   const { stdout } = await exec('gcloud', [
-    'compute', 'ssh', `${SSH_USER}@${host}`, '--project', PROJECT, '--zone', ZONE, '--command', cmd,
+    'compute', 'ssh', `${SSH_USER}@${host}`, '--project', PROJECT, '--zone', ZONE,
+    '--tunnel-through-iap', '--command', cmd,
   ], { maxBuffer: 8 << 20 });
   return stdout.trim();
 };
