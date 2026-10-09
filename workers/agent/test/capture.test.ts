@@ -17,7 +17,7 @@ import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import {
   NalSplitter, ScrcpyFramer, splitAnnexB, startsAnnexB, connectWhenServing,
-  encodeTouch, encodeKey, encodeText, ScrcpyControl,
+  encodeTouch, encodeKey, encodeText, ScrcpyControl, scrcpyCodecOptions,
 } from '../src/devices/capture.ts';
 import type { ScrcpyPacket } from '../src/devices/capture.ts';
 
@@ -385,5 +385,16 @@ describe('scrcpy control messages', () => {
       assert.equal(c.touch('up', 1, 0, 0, video), false, 'a dead socket must send the caller to adb, not swallow the input');
       assert.equal(c.resetVideo(), false);
     } finally { sock.destroy(); server.close(); }
+  });
+});
+
+describe('the encoder\'s rate control, as scrcpy is told it', () => {
+  test('a keyframe every two seconds, and the encoder\'s own rate control, unless asked', () => {
+    assert.equal(scrcpyCodecOptions({}), 'i-frame-interval:int=2');
+  });
+  test('a constant bitrate is MediaFormat\'s bitrate-mode 2, beside the keyframe interval', () => {
+    // On the OnePlus the default rate control produced ~2 Mbit/s for a 0.4 Mbit/s target; this one held it (D77).
+    assert.equal(scrcpyCodecOptions({ bitrateMode: 'cbr' }), 'i-frame-interval:int=2,bitrate-mode:int=2');
+    assert.equal(scrcpyCodecOptions({ bitrateMode: 'cbr', keyFrameIntervalSeconds: 5 }), 'i-frame-interval:int=5,bitrate-mode:int=2');
   });
 });

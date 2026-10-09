@@ -8,14 +8,17 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { RTCPeerConnection, RTCRtpCodecParameters } from 'werift';
+import { RTCPeerConnection, RTCRtpCodecParameters, consentResponseTimeoutMs, RtcpRrPacket, RtcpReceiverInfo } from 'werift';
+import type { RTCRtpSender } from 'werift';
 import { createSocket } from 'node:dgram';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import {
   packetizeNal, videoSizeFor, charFor, InputMapper, H264Fanout, PhoneVideoPeer, nalType,
   parseIceUrl, agentIceServers, relayOverTcp, spsSize, BitrateGovernor, ntpNow, fixSenderClock,
+  SenderReportLog, stretchConsentWait, frameRateFor, BITRATE_TIERS,
 } from '../src/devices/phone-stream.ts';
+import type { CaptureRate, LinkReport } from '../src/devices/phone-stream.ts';
 import type { ScreenCapture, FrameMark, LiveControl } from '../src/devices/capture.ts';
 
 /** A NAL of `type` and `size` bytes — the header byte carries NRI 3. */
@@ -659,11 +662,69 @@ describe('the stream\'s rate follows the viewer\'s link', () => {
     const up: number[] = [];
     for (; up.length === 0; t += 1000) { const r = run(g, t, 1, 95); up.push(...r as number[]); }
     assert.equal(g.bitRate, 2_500_000);
-    assert.deepEqual(run(g, t, 2, 900), [800_000], 'the step up did not hold');
+    // Back to the tier it came from, not by the queue's depth to 0.8 (the OnePlus, 2026-10-09).
+    assert.deepEqual(run(g, t, 2, 900), [1_500_000], 'the step up did not hold');
     t += 2_000;
     // The hold is 30 s now: nothing at 20 s of clear link, one step by 35 s.
     assert.deepEqual(run(g, t, 20, 95), []);
-    assert.deepEqual(run(g, t + 20_000, 15, 95), [1_500_000]);
+    assert.deepEqual(run(g, t + 20_000, 15, 95), [2_500_000]);
+  });
+
+  /** Report a round trip per second from `from`, ticking after each; the decisions, with when. */
+  const walk = (g: BitrateGovernor, from: number, rtts: number[]) => {
+    const out: Array<[number, number]> = [];
+    rtts.forEach((rttMs, i) => {
+      const now = from + i * 1000;
+      g.report('v1', { rttMs, fractionLost: 0, at: now });
+      const d = g.tick(now);
+      if (d !== undefined) out.push([now - from, d]);
+    });
+    return out;
+  };
+
+  test('a queue that is draining is waited out, not answered again', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 60);
+    assert.deepEqual(run(g, T + 3_000, 2, 1_567), [1_500_000]);   // the step, at T + 4000
+    // The OnePlus's numbers: the queue the step left behind, draining. It used to take a second step
+    // here, four seconds on at 859 ms, to 0.4 Mbit/s and 15 fps.
+    const after = walk(g, T + 5_000, [1_400, 1_250, 1_050, 859, 700, 500, 300, 150, 70, 65, 65, 65]);
+    assert.deepEqual(after, [], 'a step that was working was answered again');
+    assert.equal(g.bitRate, 1_500_000);
+  });
+
+  test('a queue that stops draining is answered after all — later, not never', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 60);
+    run(g, T + 3_000, 2, 1_567);                                   // 1.5, at T + 4000
+    // It fell below four fifths and stopped there: still a queue, so it is answered at eight seconds.
+    const stalled = walk(g, T + 5_000, Array(12).fill(1_000));
+    assert.deepEqual(stalled, [[7_000, 400_000]]);                 // T + 12000: eight seconds on
+    // One that never fell is answered at the usual four.
+    const h = new BitrateGovernor(4_000_000);
+    run(h, T, 3, 60);
+    run(h, T + 3_000, 2, 1_567);
+    assert.deepEqual(walk(h, T + 5_000, Array(6).fill(1_500)), [[3_000, 400_000]]);
+  });
+
+  test('a step up that holds brings the wait back to where it started', () => {
+    const g = new BitrateGovernor(4_000_000);
+    run(g, T, 3, 90);
+    run(g, T + 3_000, 2, 1_700);                                   // 1.5
+    let t = T + 5_000;
+    const clear = (n: number) => { const d = walk(g, t, Array(n).fill(95)); t += n * 1000; return d; };
+    assert.deepEqual(clear(16).map(([, r]) => r), [2_500_000]);    // a probe, after 15 s
+    assert.deepEqual(walk(g, t, [900, 900]).map(([, r]) => r), [1_500_000]);  // it fails: the wait is 30 s
+    t += 2_000;
+    const probeAt = t;
+    const up = clear(31);
+    assert.deepEqual(up.map(([, r]) => r), [2_500_000]);           // probed again at 30 s, and it holds
+    const upAt = probeAt + up[0][0];
+    // Held 20 s, so the wait is 15 s again: 4.0 comes 20 s after, where a wait left doubled makes it 30.
+    const nextFrom = t;
+    const next = clear(25);
+    assert.deepEqual(next.map(([, r]) => r), [4_000_000], 'the wait stayed doubled after a step up held');
+    assert.ok(nextFrom + next[0][0] - upAt <= 21_000, `took ${nextFrom + next[0][0] - upAt} ms`);
   });
 
   test('the slowest viewer sets the rate, and leaving takes its vote with it', () => {
@@ -840,5 +901,174 @@ describe('a sender clock the receiver reports can be matched against', () => {
     for (let i = 5; i < 12; i++) { g.report('v', { rttMs: 160, at: T + i * 1000 }); out.push(g.tick(T + i * 1000)); }
     assert.deepEqual(out.filter(Boolean), []);
     assert.equal(g.bitRate, 4_000_000);
+  });
+});
+
+/** The compact NTP time a receiver echoes as LSR: the middle 32 bits. */
+const lsrOf = (ntp: bigint) => Number((ntp >> 16n) & 0xffff_ffffn);
+
+describe('the round trip, from whichever sender report a receiver echoes (D78)', () => {
+  test('a report echoing an OLDER sender report still gives the round trip, queue and all', () => {
+    const log = new SenderReportLog();
+    const t0 = 1_760_000_000_000;
+    const srs = [0, 1_000, 2_000].map((dt) => { const ntp = ntpNow(t0 + dt); log.record(ntp, t0 + dt); return ntp; });
+    // Behind a queue the receiver answers the FIRST report 2.7 s after it went, having held it 100 ms.
+    // werift matches only its latest report (sent at t0 + 2000), so it learns nothing from this one:
+    // its round trip stays wherever it last matched, which is how it read 70 ms against Chrome's 730.
+    const rtt = log.rttMs(lsrOf(srs[0]), 6_554, t0 + 2_700);
+    assert.ok(rtt !== undefined && Math.abs(rtt - 2_600) < 1, `round trip ${rtt}`);
+    const fresh = log.rttMs(lsrOf(srs[2]), 0, t0 + 2_090);
+    assert.ok(fresh !== undefined && Math.abs(fresh - 90) < 1, `round trip ${fresh}`);
+  });
+
+  test('an LSR that is not one of ours, or none at all, gives nothing rather than a guess', () => {
+    const log = new SenderReportLog();
+    log.record(ntpNow(1_760_000_000_000), 1_760_000_000_000);
+    assert.equal(log.rttMs(0, 0), undefined);
+    assert.equal(log.rttMs(12_345, 0), undefined);
+  });
+
+  test('the clock records every time it hands werift', () => {
+    const sender: { ntpTimestamp?: bigint } = {};
+    const log = fixSenderClock(sender);
+    const ntp = sender.ntpTimestamp!;
+    const at = performance.timeOrigin + performance.now();
+    const rtt = log.rttMs(lsrOf(ntp), 0, at + 50);
+    assert.ok(rtt !== undefined && rtt >= 49 && rtt < 60, `round trip ${rtt}`);
+  });
+});
+
+describe('consent waits for the queue it is stuck in (D79)', () => {
+  test('the pair is given the round trip the reports measured, and werift\'s own wait grows to fit', () => {
+    const pair = { rtt: 0.07 };
+    const sender = { dtlsTransport: { iceTransport: { connection: { nominated: pair } } } } as unknown as RTCRtpSender;
+    // At connection the pair measured 70 ms, so werift waits 500 ms: a 0.9 s queue outlasts every wait,
+    // and 30 s of that expires consent and closes the view.
+    assert.equal(consentResponseTimeoutMs(pair.rtt), 500);
+    stretchConsentWait(sender, 900);
+    assert.equal(pair.rtt, 0.9);
+    assert.equal(consentResponseTimeoutMs(pair.rtt), 2_000);
+  });
+
+  test('a sender with no connection yet is left alone', () => {
+    stretchConsentWait({} as RTCRtpSender, 900);
+    stretchConsentWait({ dtlsTransport: { iceTransport: { connection: {} } } } as unknown as RTCRtpSender, 900);
+  });
+});
+
+describe('a rate the encoder will actually hold (D77)', () => {
+  test('each tier runs at the highest frame rate the OnePlus\'s encoder holds it at', () => {
+    assert.deepEqual(BITRATE_TIERS.map(frameRateFor), [60, 60, 60, 30, 15]);
+    assert.equal(frameRateFor(1_000_000), 30, 'under 1.37 Mbit/s, 60 fps does not hold');
+    assert.equal(frameRateFor(600_000), 20);
+  });
+
+  test('a restart passes the rate, its frame rate and a constant bitrate', async () => {
+    const made: CaptureRate[] = [];
+    const fan = new H264Fanout((o) => { made.push(o); return scriptedCapture(); },
+      { bitRate: 4_000_000, adapt: true, cbr: true });
+    const off = await fan.subscribe(() => {});
+    try {
+      await fan.setBitRate(800_000, 'test');
+      assert.deepEqual(made, [
+        { bitRate: 4_000_000, maxFps: 60, cbr: true },
+        { bitRate: 800_000, maxFps: 30, cbr: true },
+      ]);
+      assert.equal(fan.currentFps, 30);
+      assert.deepEqual(fan.changes.map((c) => [c.bitRate, c.maxFps]), [[800_000, 30]]);
+    } finally { off(); }
+  });
+
+  test('an encoder that refuses a constant bitrate gets its own rate control, once and for good', async () => {
+    const made: CaptureRate[] = [];
+    const fan = new H264Fanout((o) => {
+      made.push(o);
+      const c = scriptedCapture();
+      if (o.cbr) c.start = async () => { throw new Error('bitrate-mode not supported'); };
+      return c;
+    }, { bitRate: 4_000_000, adapt: true, cbr: true });
+    const got: number[] = [];
+    const off = await fan.subscribe((n) => got.push(nalType(n)));   // a viewer, not an error
+    try {
+      await fan.setBitRate(1_500_000, 'test');
+      assert.deepEqual(made.map((m) => m.cbr), [true, false, false]);
+      assert.equal(fan.viewers, 1);
+    } finally { off(); }
+  });
+});
+
+describe('the round trip and the consent wait, from a real receiver\'s reports', () => {
+  test('a werift viewer\'s reports reach the governor as a round trip, and the pair\'s wait follows it', { timeout: 30_000 }, async (t) => {
+    const cap = scriptedCapture(fakeControl());
+    const fanout = new H264Fanout(() => cap, { adapt: true });
+    // Each report, beside what the agent's ICE pair carried at that instant. The handler stretches the
+    // consent wait BEFORE it reports, synchronously, so werift has had no chance to overwrite it.
+    const reports: Array<LinkReport & { pairRtt?: number }> = [];
+    const pairOf = () => (peer as unknown as { pc?: RTCPeerConnection }).pc?.getTransceivers()[0]
+      ?.sender.dtlsTransport?.iceTransport?.connection?.nominated;
+    const report = fanout.report.bind(fanout);
+    fanout.report = (viewer, r) => { reports.push({ ...r, pairRtt: pairOf()?.rtt }); report(viewer, r); };
+    const toBrowser: Array<Record<string, unknown>> = [];
+    const peer = new PhoneVideoPeer({
+      signal: { onPayload: (p) => toBrowser.push(p as Record<string, unknown>), onClose: () => {} },
+      fanout,
+      input: new InputMapper({ tap: async () => {}, swipe: async () => {}, key: async () => {}, text: async () => {} },
+        { width: 1080, height: 2400 }, { w: 576, h: 1280 }, fanout),
+      label: 'phone-rtt', video: { w: 576, h: 1280 },
+    });
+    const browser = new RTCPeerConnection({
+      codecs: { audio: [], video: [new RTCRtpCodecParameters({ mimeType: 'video/H264', clockRate: 90000,
+        parameters: 'profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1' })] },
+    });
+    let drain: ReturnType<typeof setInterval> | undefined;
+    let feed: ReturnType<typeof setInterval> | undefined;
+    t.after(() => { clearInterval(drain); clearInterval(feed); peer.close(); void browser.close(); });
+    browser.onicecandidate = (ev) => { if (ev.candidate) peer.send({ type: 'ice-candidate', candidate: ev.candidate.toJSON() }); };
+    const waitFor = async (ok: () => boolean, what: string, ms = 20_000) => {
+      const end = Date.now() + ms;
+      while (!ok()) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 25)); }
+    };
+    peer.send({ type: 'request-offer', ice_servers: [] });
+    await waitFor(() => toBrowser.some((p) => p.type === 'offer'), 'the offer');
+    await browser.setRemoteDescription({ type: 'offer', sdp: String(toBrowser.find((p) => p.type === 'offer')!.sdp) });
+    await browser.setLocalDescription(await browser.createAnswer());
+    peer.send({ type: 'answer', sdp: browser.localDescription!.sdp });
+    let sent = 0;
+    drain = setInterval(() => {
+      for (const p of toBrowser.slice(sent)) {
+        if (p.type === 'ice-candidate') void browser.addIceCandidate({ sdpMid: p.mid, sdpMLineIndex: p.mLineIndex, candidate: p.candidate } as never);
+      }
+      sent = toBrowser.length;
+    }, 20);
+    await waitFor(() => browser.connectionState === 'connected', 'the connection');
+    await waitFor(() => cap.starts() === 1, 'the capture to start');
+    cap.push(SPS_ONEPLUS_576x1280); cap.push(nal(8, 6)); cap.push(nal(5, 3000));
+    // Frames keep the sender reporting, and the receiver answering.
+    feed = setInterval(() => cap.push(nal(1, 300)), 33);
+    await waitFor(() => reports.some((r) => r.rttMs !== undefined), 'a round trip from a receiver report');
+    const r = reports.findLast((x) => x.rttMs !== undefined)!;
+    assert.ok(r.rttMs! > 0 && r.rttMs! < 200, `a loopback round trip of ${r.rttMs} ms`);
+    assert.ok(pairOf(), 'no nominated pair on a connected peer: the path stretchConsentWait walks has moved');
+    // werift's consent wait is computed from this field; it must be the round trip the report gave.
+    assert.equal(r.pairRtt, r.rttMs! / 1_000, 'the consent wait does not follow the reports');
+
+    /**
+     * BEHIND A QUEUE: A REPORT ECHOING AN OLDER SENDER REPORT. Loopback has no queue, so werift and the
+     * agent agree on every real report above, and this is what tells them apart. The sender's clock
+     * is read now, which is a time the agent logs exactly as it logs a sender report's. 400 ms later a
+     * receiver report echoes it. werift matches only its latest report, so it learns nothing from
+     * this; the agent must report about 400 ms.
+     */
+    const sender = (peer as unknown as { pc: RTCPeerConnection }).pc.getTransceivers()[0].sender;
+    const old = lsrOf((sender as unknown as { ntpTimestamp: bigint }).ntpTimestamp);
+    await new Promise((res) => setTimeout(res, 400));
+    const before = reports.length;
+    sender.handleRtcpPacket(new RtcpRrPacket({
+      ssrc: 1, reports: [new RtcpReceiverInfo({ ssrc: sender.ssrc, lsr: old, dlsr: 0, highestSequence: 0, packetsLost: 0 })],
+    }));
+    const queued = reports.slice(before).find((x) => x.rttMs !== undefined);
+    assert.ok(queued && queued.rttMs! >= 390 && queued.rttMs! < 700,
+      `a report echoing a 400 ms old sender report read as ${queued?.rttMs} ms`);
+    assert.equal(queued!.pairRtt, queued!.rttMs! / 1_000);
   });
 });

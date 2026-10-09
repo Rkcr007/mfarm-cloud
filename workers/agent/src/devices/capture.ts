@@ -35,6 +35,12 @@ export interface CaptureOptions {
   bitRate?: number;
   maxFps?: number;
   /**
+   * The encoder's rate control. `cbr` asks MediaCodec for a constant bitrate (`bitrate-mode` 2).
+   * Left unset, the encoder keeps its default, usually VBR, and on the OnePlus's Qualcomm encoder VBR
+   * ignores any target under about 2 Mbit/s on a moving screen (D77). scrcpy only.
+   */
+  bitrateMode?: 'cbr';
+  /**
    * How often the encoder is asked for a keyframe, in seconds. scrcpy only.
    *
    * THIS IS THE NUMBER A LATE VIEWER WAITS. Everything between keyframes is undecodable to somebody
@@ -335,6 +341,15 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const CONNECT_RETRY_MS = 150;
 /** See `CaptureOptions.keyFrameIntervalSeconds`. scrcpy's own default is 10s. */
 const DEFAULT_KEYFRAME_SECONDS = 2;
+
+/**
+ * scrcpy's `video_codec_options`, handed straight to MediaFormat as `key:type=value` pairs.
+ * `bitrate-mode` 2 is MediaFormat's constant bitrate (D77).
+ */
+export function scrcpyCodecOptions(o: { keyFrameIntervalSeconds?: number; bitrateMode?: 'cbr' }): string {
+  return `i-frame-interval:int=${o.keyFrameIntervalSeconds ?? DEFAULT_KEYFRAME_SECONDS}`
+    + (o.bitrateMode === 'cbr' ? ',bitrate-mode:int=2' : '');
+}
 /** How long video may take to begin once the control socket is open, before control is given up. */
 const CONTROL_TIMEOUT_MS = 5_000;
 
@@ -440,7 +455,7 @@ export class ScrcpyCapture implements ScreenCapture {
       // Passed straight to MediaFormat. The syntax is `key:type=value` and scrcpy rejects anything
       // else with `'=' expected` — which is only visible at all because the server's log is now
       // surfaced. See `keyFrameIntervalSeconds` for why the default is not scrcpy's.
-      `video_codec_options=i-frame-interval:int=${this.opts.keyFrameIntervalSeconds ?? DEFAULT_KEYFRAME_SECONDS}`,
+      `video_codec_options=${scrcpyCodecOptions(this.opts)}`,
       ...(this.opts.maxSize ? [`max_size=${this.opts.maxSize}`] : []),
       ...(this.opts.maxFps ? [`max_fps=${this.opts.maxFps}`] : []),
     ];

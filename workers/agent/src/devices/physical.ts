@@ -9,6 +9,7 @@ import type {
 } from '../device.ts';
 import type { ScreenCapture } from './capture.ts';
 import { H264Fanout, InputMapper, PhoneVideoPeer, videoSizeFor } from './phone-stream.ts';
+import type { CaptureRate } from './phone-stream.ts';
 
 /**
  * A physical Android handset on the end of a USB cable (ADR-0008, spec §9 "USB first").
@@ -196,11 +197,16 @@ export interface PhysicalOptions {
    * claimed without the machinery behind it sends a viewer to negotiate with nothing.
    */
   liveVideo?: {
-    /** A capture at the given rate — the rate moves when `adapt` is on (BitrateGovernor). */
-    makeCapture: (o: { bitRate: number }) => ScreenCapture;
+    /**
+     * A capture at the given rate, frame rate and rate control. The rate moves when `adapt` is on
+     * (BitrateGovernor), and the frame rate moves with it (`frameRateFor`).
+     */
+    makeCapture: (o: CaptureRate) => ScreenCapture;
     maxSize?: number;
     bitRate?: number;
     adapt?: boolean;
+    /** Ask the encoder for a constant bitrate (D77). */
+    cbr?: boolean;
   };
   localId: string;
   /** Populated by discovery from `getprop`; a device that answers none of it still enrolls. */
@@ -1065,7 +1071,7 @@ export class PhysicalMedia implements MediaSource {
     const screen = o.control.info.screen ?? { width: 1080, height: 2400, density: 420 };
     const video = videoSizeFor(screen, o.liveVideo.maxSize);
     // One capture for every viewer of this phone; see `H264Fanout`.
-    const fanout = new H264Fanout(o.liveVideo.makeCapture, { bitRate: o.liveVideo.bitRate, adapt: o.liveVideo.adapt });
+    const fanout = new H264Fanout(o.liveVideo.makeCapture, { bitRate: o.liveVideo.bitRate, adapt: o.liveVideo.adapt, cbr: o.liveVideo.cbr });
     this.signal = async (opts) => new PhoneVideoPeer({
       signal: opts, fanout, video, label: o.control.info.localId,
       // Live through the fanout's control socket when it has one; through `o.control` (adb) when not.
