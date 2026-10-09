@@ -1854,6 +1854,49 @@ describe('the fleet', () => {
       assert.match(dialogText(), /comes back by itself/);
     });
 
+    /**
+     * WHAT THE BUTTON ACTUALLY SENDS. The test above proves the dialog opens; it could not see that
+     * confirming it sent the body as a JSON *string* — `api()` serialises, and the call serialised
+     * first — which the route refuses with "body must be object". The control shipped doing nothing
+     * but raise an error toast. So this presses Confirm and reads the request.
+     */
+    test('confirming sends the server an object it will accept, with the reason when one is given', async () => {
+      const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+      const dialog = () => (globalThis as unknown as {
+        document: { getElementById(id: string): unknown };
+      }).document.getElementById('dialog');
+      const sent: Array<{ url: string; raw: unknown; body: unknown }> = [];
+      const real = (globalThis as any).fetch;
+      (globalThis as any).fetch = async (url: string, init: any = {}) => {
+        if (init.method === 'POST') sent.push({ url: String(url), raw: init.body, body: JSON.parse(init.body) });
+        const payload = init.method === 'POST'
+          ? { forgotten: true, detail: 'The device is off the fleet list.' }
+          : { devices: [], forgotten: [], available: 0, device: null };
+        return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+      };
+      try {
+        // No reason typed.
+        findByText(page({ state: 'OFFLINE', dedicated: true }), 'Forget device').click();
+        findByText(dialog(), 'Forget device').click();
+        await settle();
+        assert.equal(sent.length, 1, 'confirming sent nothing');
+        assert.match(sent[0].url, /\/v1\/devices\/dev-1\/forget$/);
+        assert.deepEqual(sent[0].body, {}, `the body is ${JSON.stringify(sent[0].raw)} — a string, not an object`);
+
+        // With one.
+        findByText(page({ state: 'OFFLINE', dedicated: true }), 'Forget device').click();
+        const field = findByClass(dialog(), 'field');
+        assert.ok(field, 'the dialog has no reason field');
+        field.value = '  sold it  ';
+        findByText(dialog(), 'Forget device').click();
+        await settle();
+        assert.deepEqual(sent[1].body, { reason: 'sold it' });
+      } finally {
+        (globalThis as any).fetch = real;
+        mod.closeOverlays();
+      }
+    });
+
     test('a device that is NOT gone is not offered Forget', () => {
       // Its agent can see it; somebody holds it; its host is away. The server refuses all three.
       for (const over of [
