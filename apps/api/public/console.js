@@ -98,6 +98,8 @@ export const state = {
   csrf: null,
   me: null,
   devices: [],
+  // Devices somebody forgot (migration 069). Not part of `devices`, and never counted with them.
+  forgotten: [],
   available: 0,
   sessions: [],
   apps: [],
@@ -1184,6 +1186,8 @@ async function refreshDevices() {
   const out = await api('/v1/devices');
   state.devices = out.devices || [];
   state.available = out.available ?? 0;
+  // Devices somebody forgot (migration 069): not in the fleet, and listed so they can be restored.
+  state.forgotten = out.forgotten || [];
 }
 
 async function refreshSessions() {
@@ -3560,8 +3564,136 @@ function screenFleet() {
           // available / Nobody is waiting" — which the headline four lines above already said, in
           // the same words. Two panels stating one fact is exactly the duplication this surface was
           // built to remove, and the queue has its own lens.
-          : [fleetCapacity(), substitutionNotice()],
+          : [fleetCapacity(), forgottenCard(), substitutionNotice()],
   ];
+}
+
+/* ---------------------------------------------------------------- forgetting a device (migration 069) */
+
+/**
+ * Who may forget or restore this device. Its own org's admins if it is DEDICATED to them; a fleet
+ * operator if it is SHARED — removing a device every tenant can see is a decision about the fleet,
+ * not about one org. The server enforces exactly this; drawing the control from the same rule is
+ * what keeps the button from being a 403 in waiting.
+ */
+const mayRemove = (d) => (d?.dedicated ? isOrgAdmin() : isOperator());
+
+/**
+ * What the server will accept: a device its agent cannot drive (`OFFLINE`), or one a person or a
+ * health check has already withdrawn. Not one its agent can see, not one in use, and not one that is
+ * out only because its HOST is away — that one comes back when the host does.
+ */
+const canForget = (d) => !d?.forgotten && (d?.state === 'OFFLINE'
+  || (d?.state === 'QUARANTINED'
+    && (d.quarantine?.source === 'operator' || d.quarantine?.source === 'health')));
+
+function askForget(d) {
+  const reason = h('input', {
+    class: 'field', type: 'text', maxlength: '200', autocomplete: 'off',
+    placeholder: 'Why, for the record — sold, returned, replaced…',
+  });
+  confirmDialog({
+    title: `Forget ${deviceName(d)}?`,
+    lead: 'It leaves the fleet list and every count. This is for a device that is gone.',
+    removesLabel: 'What happens',
+    removes: [
+      'it is no longer listed, counted or offered to anybody',
+      'if its agent ever sees it again, it comes back by itself',
+    ],
+    keeps: 'Nothing is deleted. Every session that ran on it still names it, and this page still opens.',
+    fields: [h('label', { class: 'stack tight' },
+      h('span', { class: 'micro', text: 'Reason (optional)' }), reason)],
+    confirm: 'Forget device',
+    onConfirm: () => forgetDevice(d.id, reason.value.trim()),
+  });
+}
+
+async function forgetDevice(id, reason) {
+  try {
+    const out = await api(`/v1/devices/${encodeURIComponent(id)}/forget`, {
+      method: 'POST', body: JSON.stringify(reason ? { reason } : {}),
+    });
+    // The API's own sentence. A refusal is one of five different reasons and each has a different
+    // next step, so none of them is reworded here.
+    toast(out.forgotten ? 'Device forgotten' : 'Nothing changed', out.detail, out.forgotten ? '' : 'warn');
+    await refreshDevices();
+    if (state.deviceDetail?.id === id) await loadDevice(id);
+    render();
+  } catch (e) {
+    toast('Could not forget the device', e.message, 'bad');
+  }
+}
+
+async function restoreDevice(id) {
+  try {
+    const out = await api(`/v1/devices/${encodeURIComponent(id)}/restore`, { method: 'POST' });
+    toast(out.restored ? 'Device restored' : 'Nothing changed', out.detail, out.restored ? '' : 'warn');
+    await refreshDevices();
+    if (state.deviceDetail?.id === id) await loadDevice(id);
+    render();
+  } catch (e) {
+    toast('Could not restore the device', e.message, 'bad');
+  }
+}
+
+/**
+ * The forgotten devices, under the fleet they are no longer part of.
+ *
+ * LISTED, because a thing that vanishes from every screen cannot be put back by the person who made
+ * it vanish — the same gap retiring a host had until it got a list of its own. Nothing here when
+ * nothing was forgotten: an empty "Forgotten" heading on every fleet would be a control with no
+ * subject.
+ */
+function forgottenCard() {
+  const rows = state.forgotten || [];
+  if (!rows.length) return null;
+  return card('Forgotten', { class: 'flush' },
+    h('p', { class: 'caption', text:
+      'Devices somebody said were gone. They are in none of the counts above and their history is '
+      + 'kept. One comes back by itself if its agent sees it again.' }),
+    h('div', null, rows.map((d) => h('div', { class: 'buildrow' },
+      h('span', { class: 'row tight idc' },
+        h('span', { class: 'dot' }),
+        h('button', { class: 'link', type: 'button', text: deviceName(d),
+          onclick: () => go(`#/devices/${d.id}`) })),
+      h('span', { class: 'caption', text: [
+        `forgotten ${ago(d.forgottenAt)}`,
+        d.reason || null,
+      ].filter(Boolean).join(' · ') }),
+      h('span', { class: 'spacer' }),
+      mayRemove(d) ? btn('Restore', 'tiny ghost', () => restoreDevice(d.id)) : null,
+    ))),
+  );
+}
+
+/**
+ * The device page's half: say that it was forgotten, or offer to forget it.
+ *
+ * Two cards and never both. A forgotten device says so FIRST — somebody arrived here from an old
+ * session and the device is not in the Fleet they just came from — and carries the way back. A
+ * device that could be forgotten carries the offer, and only for somebody the server will let do
+ * it; everybody else is told nothing, because there is nothing for them to do.
+ */
+function forgetCard(d) {
+  if (d.forgotten) {
+    return card('Forgotten', { aside: pill('Not in the fleet', '', { at: d.forgotten.at }) },
+      h('p', { class: 'help', text:
+        `Somebody forgot this device ${ago(d.forgotten.at)}${d.forgotten.reason ? ` — ${d.forgotten.reason}` : ''}. `
+        + 'It is not listed, counted or offered to anybody. Its history is kept, and it comes back '
+        + 'by itself if its agent sees it again.' }),
+      mayRemove(d)
+        ? h('div', { class: 'row tight mt-lg' }, btn('Restore device', 'primary', () => restoreDevice(d.id)))
+        : null,
+    );
+  }
+  if (!canForget(d) || !mayRemove(d)) return null;
+  return card('Gone for good?', {},
+    h('p', { class: 'help', text:
+      'Forgetting takes this device off the fleet list and out of every count. Use it for a '
+      + 'device that has been sold, returned or replaced. Nothing is deleted, and it comes back by '
+      + 'itself if its agent ever sees it again.' }),
+    h('div', { class: 'row tight mt-lg' }, btn('Forget device', 'ghost', () => askForget(d))),
+  );
 }
 
 function screenDevices() {
@@ -4268,7 +4400,10 @@ function screenDevice(id) {
         // Above the quarantine card: a device can only be in one of the two states, and this is the
         // one nothing else in the console has ever been able to show.
         resetEscalationCard(d),
+        // A forgotten device says so before anything else it has to say; see `forgetCard`.
+        d.forgotten ? forgetCard(d) : null,
         quarantineCard(d),
+        d.forgotten ? null : forgetCard(d),
         card('Metadata', {},
           kv([
             ['Platform', `${d.platform} ${d.osVersion}`],
@@ -14492,6 +14627,7 @@ function pollSignature() {
   };
   return JSON.stringify({
     devices: state.devices,
+    forgotten: (state.forgotten || []).map((f) => f.id).join(','),
     available: state.available,
     sessions: state.sessions,
     apps: state.apps,

@@ -544,6 +544,23 @@ describe('fleet collectors', () => {
     assert.equal(await quarantined(), before + 1);
   });
 
+  /** Migration 069. A device somebody forgot is gone, and a gauge that still counts it says it is not. */
+  test('a forgotten device is not exported as part of the fleet', async () => {
+    const offline = async () => {
+      await collectFleet();
+      return sample(registry.render(), 'mfarm_devices', `state="OFFLINE",region="${REGION}"`) ?? 0;
+    };
+    const id = await seedDevice('OFFLINE');
+    const before = await offline();
+    await withSystem((c) => c.query('UPDATE devices SET retired_at = now() WHERE id = $1', [id]));
+    assert.equal(await offline(), before - 1, 'a forgotten device is still counted');
+
+    // Hidden is never allocatable: the moment it could be handed out, it is counted again.
+    await withSystem((c) => c.query(`UPDATE devices SET state = 'READY' WHERE id = $1`, [id]));
+    await collectFleet();
+    assert.ok((sample(registry.render(), 'mfarm_devices', `state="READY",region="${REGION}"`) ?? 0) >= 1);
+  });
+
   test('runtime metrics need no database', () => {
     collectRuntime();
     const out = registry.render();

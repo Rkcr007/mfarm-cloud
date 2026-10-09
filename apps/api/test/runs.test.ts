@@ -1818,6 +1818,23 @@ describe('run detail: flake history and device minutes (ADR-0039)', () => {
     assert.equal(d.run.cost.note, '≈ share of ₹65/hr across 4 devices');
   });
 
+  /**
+   * Migration 069. The divisor is the devices a host CARRIES, and a device somebody forgot is not
+   * one of them: a four-device host with one phone sold is a three-device host, and pricing a
+   * session at a quarter of its hour understates what the hour stands for.
+   */
+  test('a forgotten device is not one of the devices a host\'s hour is shared across', async () => {
+    await clearFleet();
+    const devices = await seedDevices(4);
+    await seedRun(orgA, 'three-left', { heldMinutes: 60, deviceId: devices[0], results: [['x', 'failed']] });
+    await withSystem((c) => c.query(
+      `UPDATE devices SET state = 'OFFLINE', retired_at = now() WHERE id = $1`, [devices[3]]));
+
+    const d = await detail(keyA, 'three-left');
+    assert.equal(d.run.cost.note, '≈ share of ₹65/hr across 3 devices');
+    assert.equal(d.run.cost.inr, 21.67);
+  });
+
   test('a live session counts up to now', async () => {
     await clearFleet();
     const [dev] = await seedDevices(1);

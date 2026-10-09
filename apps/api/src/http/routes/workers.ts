@@ -73,7 +73,11 @@ async function applyAway(
     [hostId, JSON.stringify(away)]);
   await c.query(
     `UPDATE devices
-        SET state = 'READY', away_since = NULL, away_reason = NULL, updated_at = now()
+        SET state = 'READY', away_since = NULL, away_reason = NULL,
+            -- A device its agent can see again is not gone (069). Cleared with the mark that made
+            -- it invisible, so that going away again later does not quietly re-hide it.
+            retired_at = NULL, retired_by = NULL, retired_reason = NULL,
+            updated_at = now()
       WHERE host_id = $1 AND away_since IS NOT NULL AND state = 'OFFLINE'
         AND NOT (local_id = ANY($2::text[]))`,
     [hostId, Object.keys(away)]);
@@ -373,6 +377,14 @@ export async function workerRoutes(app: FastifyInstance) {
                  THEN devices.away_reason
                ELSE $18::text
              END,
+             -- A REGISTRATION THAT LISTS A DEVICE AS PRESENT UN-FORGETS IT (069), the way a
+             -- registration un-retires a host (056): the agent seeing the device is the evidence
+             -- that "gone" was wrong. One it names but cannot see -- an away device -- stays
+             -- forgotten, because nothing about that has changed. This does not lift a quarantine:
+             -- a broken phone that is plugged back in returns to the list still quarantined.
+             retired_at     = CASE WHEN $18::text IS NULL THEN NULL ELSE devices.retired_at END,
+             retired_by     = CASE WHEN $18::text IS NULL THEN NULL ELSE devices.retired_by END,
+             retired_reason = CASE WHEN $18::text IS NULL THEN NULL ELSE devices.retired_reason END,
              updated_at = now()
            RETURNING id`,
           [hostId, reg.region, d.platform, d.tier, d.model, d.osVersion,

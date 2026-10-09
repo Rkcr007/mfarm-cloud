@@ -36,7 +36,7 @@ The filename stays because a lot of things link to it.
   [../examples/java-testng/README.md](../examples/java-testng/README.md) for a Java/TestNG/Cucumber
   suite moving off LambdaTest.
 - **Building on it** — [AGENT_BUILD_PLAN.md](AGENT_BUILD_PLAN.md),
-  [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md), [adrs/](adrs/) (50 decisions; there is no 0013 —
+  [PHYSICAL_DEVICES.md](PHYSICAL_DEVICES.md), [adrs/](adrs/) (51 decisions; there is no 0013 —
   [0039](adrs/0039-a-failure-is-read-against-its-own-history.md) is a failing test's run history and
   what a run cost; a phone's live view relays through the control plane —
   [0047](adrs/0047-the-media-relay-lives-on-the-control-plane.md) — and its stream follows the
@@ -45,7 +45,8 @@ The filename stays because a lot of things link to it.
   [0049](adrs/0049-ssh-reaches-the-farm-through-iap.md); a machine an org enrolled is not the
   farm's, so it has no rate, no alarm and no place in the rollup —
   [0050](adrs/0050-an-enrolled-host-is-not-the-farms.md); a retired host can be seen and put
-  back — [0051](adrs/0051-a-retired-host-can-be-seen-and-put-back.md)), and [AI_PRODUCT_LINE.md](AI_PRODUCT_LINE.md) — MFARM AI: the MCP server, AI runs,
+  back — [0051](adrs/0051-a-retired-host-can-be-seen-and-put-back.md); a device that is gone can
+  be forgotten — [0052](adrs/0052-a-device-can-be-forgotten.md)), and [AI_PRODUCT_LINE.md](AI_PRODUCT_LINE.md) — MFARM AI: the MCP server, AI runs,
   pricing, and the tracker of every AI capability
   ([0043](adrs/0043-mfarm-ai-is-an-agent-on-our-own-hub.md); nothing is started that cannot finish —
   [0044](adrs/0044-nothing-is-started-that-cannot-finish.md); a secret is named in a task, never written into

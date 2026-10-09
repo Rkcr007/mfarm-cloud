@@ -4,6 +4,7 @@ import { requireUser } from '../server.ts';
 import { forbidden } from '../errors.ts';
 import { loadConfig } from '../../config.ts';
 import { hostHourlyRate, hostKind } from '../../infra/rates.ts';
+import { inFleet } from '../../forgotten.ts';
 
 /**
  * The MACHINES, as an operator sees them — and what leaving them on is costing.
@@ -102,7 +103,7 @@ export async function hostRoutes(app: FastifyInstance): Promise<void> {
            LEFT JOIN LATERAL (
              SELECT count(*)                                    AS device_count,
                     count(*) FILTER (WHERE dv.state = 'READY')  AS ready_count
-               FROM devices dv WHERE dv.host_id = h.id
+               FROM devices dv WHERE dv.host_id = h.id AND ${inFleet('dv')}
            ) d ON true
           -- THE AUTHORIZATION, since this runs on the system pool. A shared host (org_id IS NULL)
           -- serves every tenant; a dedicated one serves exactly its own.
