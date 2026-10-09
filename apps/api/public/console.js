@@ -10578,6 +10578,77 @@ async function refreshInfraCloud(force = false) {
   }
 }
 
+/**
+ * Run a snapshot operation and then RE-READ THE PROJECT.
+ *
+ * `runInfraOperation` refreshes the overview; the list this page draws is the cloud inventory, which
+ * is a different request with a minute's cache. Forced, so the snapshot somebody just took is on the
+ * page when the toast says it is, rather than fifty seconds later.
+ */
+async function runSnapshotOperation(path, body, pending) {
+  await runInfraOperation(path, body, { pending });
+  await refreshInfraCloud(true);
+  render();
+}
+
+function askSnapshot(disk) {
+  const reason = h('input', {
+    class: 'field', type: 'text', maxlength: '200', autocomplete: 'off',
+    placeholder: 'Why, for the log — before the upgrade, weekly…',
+  });
+  confirmDialog({
+    title: `Take a snapshot of ${disk.name}?`,
+    lead: 'A restore point for this disk, kept in the project until somebody deletes it.',
+    removesLabel: 'What happens',
+    removes: [
+      'the provider copies the disk as it is right now; the machine keeps running',
+      'a busy disk takes a few minutes, and this page follows it',
+      // Billed on bytes STORED, which is the number nobody guesses right. Said before the click.
+      `it is billed on the bytes it stores, not on the ${disk.sizeGb} GB the disk could hold`,
+    ],
+    keeps: disk.attachedTo
+      ? `Taken from a running machine it is crash-consistent: restoring it is like ${disk.attachedTo} coming back from a power cut.`
+      : 'Nothing is stopped or changed.',
+    fields: [h('label', { class: 'stack tight' },
+      h('span', { class: 'micro', text: 'Reason (optional)' }), reason)],
+    confirm: 'Take snapshot',
+    confirmClass: 'primary',
+    onConfirm: () => runSnapshotOperation(
+      `/v1/infra/cloud/disks/${encodeURIComponent(disk.name)}/snapshot`,
+      { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
+      `Asking the cloud provider to snapshot ${disk.name}…`,
+    ),
+  });
+}
+
+/**
+ * DELETING A SNAPSHOT IS THE ONE THING ON THIS PAGE THAT CANNOT BE UNDONE, and the dialog says so in
+ * its first line rather than in a consequence somebody skims.
+ */
+function askDeleteSnapshot(snapshot) {
+  const reason = h('input', {
+    class: 'field', type: 'text', maxlength: '200', autocomplete: 'off',
+    placeholder: 'Why, for the log — superseded, taken by mistake…',
+  });
+  confirmDialog({
+    title: `Delete ${snapshot.name}?`,
+    lead: 'This cannot be undone. The restore point is gone the moment the provider confirms it.',
+    removes: [
+      `${snapshot.name}${snapshot.createdAt ? `, taken ${ago(snapshot.createdAt)}` : ''}`,
+      `the ability to restore ${snapshot.sourceDisk || 'its disk'} to that moment`,
+    ],
+    keeps: `${snapshot.sourceDisk || 'Its disk'} keeps its newer restore point: this page will not delete the newest one.`,
+    fields: [h('label', { class: 'stack tight' },
+      h('span', { class: 'micro', text: 'Reason (optional)' }), reason)],
+    confirm: 'Delete snapshot',
+    onConfirm: () => runSnapshotOperation(
+      `/v1/infra/cloud/snapshots/${encodeURIComponent(snapshot.name)}/delete`,
+      { ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
+      `Asking the cloud provider to delete ${snapshot.name}…`,
+    ),
+  });
+}
+
 /** Bytes, at the resolution a person reads them. */
 function gb(bytes) {
   if (bytes === null || bytes === undefined) return '—';
@@ -10616,7 +10687,7 @@ function infraCloud(data) {
 
   const running = (inv.instances || []).filter((i) => i.status === 'RUNNING').length;
 
-  const row = (dot, name, code, detail, right, rightTitle) => h('div', { class: 'buildrow' },
+  const row = (dot, name, code, detail, right, rightTitle, action = null) => h('div', { class: 'buildrow' },
     h('span', { class: 'row tight idc' },
       h('span', { class: `dot ${dot || ''}`.trim() }),
       h('span', { class: 'secondary', text: name }),
@@ -10624,7 +10695,18 @@ function infraCloud(data) {
     h('span', { class: 'caption', text: detail }),
     h('span', { class: 'spacer' }),
     h('span', { class: 'val', text: right, title: rightTitle || null }),
+    action,
   );
+
+  /**
+   * SNAPSHOT CONTROLS, drawn from what the SERVER says about each row (ADR-0053).
+   *
+   * Two gates, the way power has two: `capabilities.snapshots` says this deployment may change
+   * snapshots at all, and each disk's `snapshottable` / each snapshot's `deletable` says whether
+   * THIS one may be. A page that drew from the first alone would offer Delete on the newest restore
+   * point of every disk and be refused on each.
+   */
+  const canSnapshot = Boolean(data?.capabilities?.snapshots);
 
   return [
     h('p', { class: 'page-sub mb-gap', text:
@@ -10690,6 +10772,9 @@ function infraCloud(data) {
           d.attachedTo ? `attached to ${d.attachedTo}` : 'NOT ATTACHED — billed for nothing',
         ].join(' · '),
         amount(d.costPerMonth), 'per month',
+        canSnapshot && d.snapshottable
+          ? btn('Snapshot', 'tiny ghost', () => askSnapshot(d))
+          : null,
       )))),
 
     card('Reserved addresses', { class: 'flush' },
@@ -10719,8 +10804,20 @@ function infraCloud(data) {
               `${gb(s.storageBytes)} stored`,
               `restores ${s.diskSizeGb} GB`,
               s.createdAt ? `taken ${ago(s.createdAt)}` : null,
+              // Still being written, or on its way out. Said, because a row that is not READY is
+              // not a restore point yet and looks exactly like one that is.
+              s.status && s.status !== 'READY' ? s.status.toLowerCase() : null,
+              /**
+               * WHY IT CANNOT BE DELETED, in words, on the row. The newest restore point of a disk
+               * is kept on purpose, and a Delete button that is simply missing from one row out of
+               * four reads as a bug rather than as a decision.
+               */
+              canSnapshot && !s.deletable && s.keptBecause ? `kept: ${s.keptBecause}` : null,
             ].filter(Boolean).join(' · '),
             amount(s.costPerMonth), 'per month',
+            canSnapshot && s.deletable
+              ? btn('Delete', 'tiny ghost danger', () => askDeleteSnapshot(s))
+              : null,
           )))
         : empty('No snapshots.', 'Nothing is being kept against a catastrophe.')),
 

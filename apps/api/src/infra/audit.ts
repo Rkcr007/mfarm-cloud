@@ -44,7 +44,7 @@ export type OperationResult = 'succeeded' | 'failed' | 'noop' | 'unknown';
  */
 export type StepResult = OperationResult | 'accepted';
 
-export type TargetKind = 'host' | 'service' | 'fleet';
+export type TargetKind = 'host' | 'service' | 'fleet' | 'cloud';
 
 export interface OperationRequest {
   action: string;

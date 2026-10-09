@@ -302,6 +302,33 @@ CLOUD_INSTANCE_RATES=mfarm-lab=65,mfarm-cp=2.7
 not attached to a running instance, so stopping the device host *starts* a charge rather than ending
 one. The Cloud section says `BILLED — not on a running instance` against exactly those.
 
+### 6. Take and delete snapshots from the console (ADR-0053)
+
+The Cloud page is read-only until both halves below are done. It then offers **Snapshot** on each
+disk you list and **Delete** on their older snapshots. It never deletes the newest restore point of
+a disk, and never a snapshot of a disk that is not on the list.
+
+```bash
+PROJECT=mfarm-lab; SA="mfarm-cp@$PROJECT.iam.gserviceaccount.com"
+gcloud iam roles create mfarmSnapshots --project "$PROJECT" --title "MFARM snapshots" --description "Take and delete disk snapshots from the console." --permissions compute.disks.createSnapshot,compute.snapshots.create,compute.snapshots.get,compute.snapshots.delete,compute.snapshots.setLabels --stage GA
+gcloud projects add-iam-policy-binding "$PROJECT" --member "serviceAccount:$SA" --role "projects/$PROJECT/roles/mfarmSnapshots" --condition=None
+```
+
+The role is project-wide because a snapshot is a project-level resource. The list below is what
+narrows it: nothing outside it can be snapshotted, and no snapshot of anything outside it can be
+deleted.
+
+```bash
+# deploy/.env on mfarm-cp — the DISK names, not the host names
+MFARM_SNAPSHOT_DISKS=mfarm-cp:asia-south1-c,mfarm-lab:asia-south1-c
+```
+
+Restart the API. The startup log prints `snapshotDisks: mfarm-cp@asia-south1-c, …`, and
+`capabilities.snapshots` in `/v1/infra/overview` turns true.
+
+**The first snapshot you take from the console is the first time this meets the real cloud.** It is
+tested against a fake provider only. If the provider refuses, the toast says which permission.
+
 ### Turning it off again
 
 Remove `MFARM_POWER_INSTANCES` and restart. The buttons disappear and the page goes back to saying

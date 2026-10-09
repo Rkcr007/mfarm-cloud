@@ -129,6 +129,19 @@ export interface Config {
   /** The cloud project the instances above live in. Required when the list is not empty. */
   gcpProject: string | null;
   /**
+   * The disks this console may take a snapshot of, and whose snapshots it may delete (ADR-0053).
+   *
+   * AN ALLOW-LIST, for `powerInstances`' reason and one more. A snapshot is named by a string a
+   * BROWSER sends, and "delete the snapshot called X" is a request this product should be unable to
+   * carry out for any X somebody happens to type — the project also holds restore points nobody
+   * made from here. Nothing is snapshottable, and no snapshot is deletable, unless its disk is
+   * named in this list.
+   *
+   * `MFARM_SNAPSHOT_DISKS=mfarm-cp:asia-south1-c,mfarm-lab:asia-south1-c`. Empty means the Cloud
+   * page stays read-only, which is the default and what the console reports as `snapshots: false`.
+   */
+  snapshotDisks: Map<string, { zone: string }>;
+  /**
    * WHAT EACH PIECE OF THE CLOUD ESTATE COSTS — configuration, never a default, for exactly the
    * reason `hostHourlyCost` is: MFARM is self-hosted, a rate is a fact about somebody else's bill,
    * and a number invented here would be rendered as though the farm had measured it.
@@ -772,6 +785,29 @@ export function parseConfig(env: Env): Config {
   }
   const gcpProject = (env.GCP_PROJECT ?? '').trim() || null;
 
+  const snapshotDisks = new Map<string, { zone: string }>();
+  for (const entry of (env.MFARM_SNAPSHOT_DISKS ?? '').split(',').map((e) => e.trim()).filter(Boolean)) {
+    const [disk, zone, ...rest] = entry.split(':');
+    if (!disk || !zone || rest.length) {
+      problems.push(`MFARM_SNAPSHOT_DISKS entry ${JSON.stringify(entry)} is not "<disk>:<zone>"`);
+      continue;
+    }
+    // The provider's own rule for a resource name, refused here where the message can say which
+    // entry — and where a bad one cannot reach a URL.
+    if (!/^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$/.test(disk)) {
+      problems.push(`MFARM_SNAPSHOT_DISKS: ${JSON.stringify(disk)} is not a valid disk name`);
+      continue;
+    }
+    if (!/^[a-z0-9-]+$/.test(zone)) {
+      problems.push(`MFARM_SNAPSHOT_DISKS: ${JSON.stringify(zone)} is not a valid zone`);
+      continue;
+    }
+    snapshotDisks.set(disk, { zone });
+  }
+  if (snapshotDisks.size > 0 && !gcpProject) {
+    problems.push('MFARM_SNAPSHOT_DISKS is set but GCP_PROJECT is not — there is no project to act in');
+  }
+
   /** A non-negative rate, or null, refusing garbage loudly rather than silently dropping it. */
   const rate = (raw: string | undefined, name: string): number | null => {
     const text = (raw ?? '').trim();
@@ -901,6 +937,7 @@ export function parseConfig(env: Env): Config {
     costCurrency,
     powerInstances,
     gcpProject,
+    snapshotDisks,
     cloudInstanceRates,
     cloudDiskRatePerGbMonth,
     cloudSnapshotRatePerGbMonth,
@@ -984,6 +1021,10 @@ export function describeConfig(c: Config): Record<string, string | number | bool
       ? [...c.powerInstances].map(([h, i]) => `${h}->${i.instance}@${i.zone}`).join(', ')
       : 'none (power control disabled)',
     gcpProject: c.gcpProject ?? 'unset',
+    // Named at startup for the same reason: this list decides what a browser may delete.
+    snapshotDisks: c.snapshotDisks.size
+      ? [...c.snapshotDisks].map(([d, v]) => `${d}@${v.zone}`).join(', ')
+      : 'none (the Cloud page is read-only)',
     // Named at startup, like the allow-list, so an operator can see what the money on the page is
     // computed from rather than guessing which rate is missing.
     cloudRates: [

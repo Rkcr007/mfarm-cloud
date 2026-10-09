@@ -96,7 +96,7 @@ gcloud compute instances list --project mfarm-lab --format='table(name,status)'
 | Area | State | The honest caveat |
 |---|---|---|
 | **Console (UI)** | **Working, and now the only one.** The full design package at `/`: sign-in, Fleet, catalogue, cockpit, bring-up, apps, runs, health, agents, team, settings. Both themes. **Console v2 (ADR-0041, 2026-09-14)** re-laid the shell, the cockpit (a non-scrolling workspace: device panel beside a tabbed dock), Apps and Run detail from `design_handoff_mfarm_console 2/`. Zero console exceptions across every surface. The React console at `/app` is deleted — it never reached parity, and while both were served the new sign-in screen landed on its two-screen preview instead of on the product. | Twenty-five defects have been found in it, all by USING it and **none by the test suite**. All are closed. |
-| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 69 migrations. API keys are labelled, scoped, expiring and attributed (ADR-0034). | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
+| **API / control plane** | **Working** — allocation, leases, fencing, reset, quarantine and gated recovery, runs, outcomes, artifacts, RLS tenancy, metrics. 70 migrations. API keys are labelled, scoped, expiring and attributed (ADR-0034). | **Single instance only.** Rate limiting is in-memory, so a second API process silently multiplies every limit. |
 | **WebDriver hub** | **Working**, hardware-verified. An existing Appium suite migrates with one URL and two capabilities. | — |
 | **Virtual devices** | **Working** — four Cuttlefish on one host, ~30s cold boot, live view 49–53 fps. | One device host **today**, not by design: the control plane has been audited per-host and the tooling now takes a list, so adding a second is a VM and a runbook rather than code — [`SECOND_HOST.md`](SECOND_HOST.md). Until somebody pays for one, a host outage is still a farm outage. |
 | **AI runs (ADR-0043, 0044)** | **Built, on, and run against real devices** (2026-09-26, Groq's free `qwen/qwen3.8-27b`). `POST /v1/ai/runs` queues an English-described test; the runner drives a device through the hub (Flash / Pro), bills each step from `ai/pricing.ts`, and reports the verdict on the session. Console: Farm › AI testing. Since ADR-0044 nothing is started that cannot finish: `GET /v1/ai/readiness` is the go / no-go (model, devices, budget) the console and every door apply, with an optional fallback provider. `mfarm mcp` lets a customer's own agent drive a device. Tracker: `docs/AI_PRODUCT_LINE.md`. | On a free model tier: ~one step every 35s and ~45 steps a day. `@mfarm/cli` 0.2.0 (with `mfarm mcp`) not yet on npm. Diagnosis (C8) not yet seen answering on the farm. |
@@ -281,9 +281,9 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **2486**, green — api 1759, cli 95, agent 510, `deploy` 122 — measured 2026-10-09 |
-| Migrations | 69, numbered to 069. The farm serves `main` (`check-deployed.sh`, 2026-10-09) |
-| Decisions | 51 ADRs, numbered to 0052 (there is no 0013) |
+| Tests | **2508**, green — api 1781, cli 95, agent 510, `deploy` 122 — measured 2026-10-09 |
+| Migrations | 70, numbered to 070. The farm serves `main` (`check-deployed.sh`, 2026-10-09) |
+| Decisions | 52 ADRs, numbered to 0053 (there is no 0013) |
 | Merged PRs | 260, as of #260 (2026-10-09) |
 | Defects | 75 recorded, **70 closed** — the closed count is carried from the last update and not re-counted |
 | Fleet | 4 Cuttlefish + 2 physical handsets: the OnePlus 8T (working), the `SM-S918B` (quarantined) |

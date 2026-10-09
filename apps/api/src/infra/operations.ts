@@ -114,7 +114,7 @@ interface Step {
  */
 const MAX_REASON = 200;
 
-function cleanReason(raw: unknown, fallback: string): string {
+export function cleanReason(raw: unknown, fallback: string): string {
   if (typeof raw !== 'string') return fallback;
   // Newlines out, because this is rendered inline in a log table and in a device's quarantine
   // reason, and a reason with a line break in it breaks both. Not an escaping concern — nothing in
