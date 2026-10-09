@@ -85,6 +85,12 @@ export async function recentEvents(opts: { limit?: number; sinceHours?: number }
          JOIN devices d ON d.id = q.device_id
          LEFT JOIN hosts h ON h.id = d.host_id, win
         WHERE q.occurred_at >= win.since
+          -- NOT the churn of an enrolled host coming and going (D73). A laptop that sleeps takes
+          -- its devices out of the pool and gives them back on every wake; that is two rows per
+          -- device per nap, 834 of them in a week on this farm against 39 for the device host.
+          -- Anything else that happens to such a device -- a person quarantining it, a failed
+          -- recovery -- is still an event and still shown.
+          AND NOT (h.org_id IS NOT NULL AND q.source = 'host')
 
        UNION ALL
 
@@ -95,6 +101,9 @@ export async function recentEvents(opts: { limit?: number; sinceHours?: number }
               'host', h.id::text, h.hostname
          FROM host_power_intervals i JOIN hosts h ON h.id = i.host_id, win
         WHERE i.started_at >= win.since
+          -- The farm's own machines only. An enrolled laptop "powering on" costs the farm nothing
+          -- and happened 422 times in a week (D73).
+          AND h.org_id IS NULL
 
        UNION ALL
 
@@ -116,6 +125,7 @@ export async function recentEvents(opts: { limit?: number; sinceHours?: number }
               'host', h.id::text, h.hostname
          FROM host_power_intervals i JOIN hosts h ON h.id = i.host_id, win
         WHERE i.ended_at IS NOT NULL AND i.ended_at >= win.since
+          AND h.org_id IS NULL
 
        ORDER BY at DESC
        LIMIT $1`,

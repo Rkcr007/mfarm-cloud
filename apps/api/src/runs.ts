@@ -153,19 +153,30 @@ export interface DeviceHold {
 
 export interface RunCost {
   inr: number;
+  /** The rate the priced minutes were charged at; the highest of them when hosts differ. */
   hostHourlyCost: number;
   note: string;
+}
+
+/** What a run's cost needs to know about one host it held a device on. */
+export interface HostShare {
+  /** Devices the host carries now — the divisor. */
+  devices: number;
+  /** Per hour, from `infra/rates.ts`. Null when this deployment has not priced it. */
+  rate: number | null;
+  /** A machine the org enrolled itself. The farm pays nothing for its time (D73). */
+  enrolled: boolean;
 }
 
 /**
  * Device-minutes for a run, and the share of the host rate those minutes stand for (ADR-0039).
  *
  * THE RATE IS PER HOST AND A HOST CARRIES SEVERAL DEVICES. Multiplying device-minutes by the whole
- * `HOST_HOURLY_COST` would bill a four-device host four times over for one hour of four parallel
+ * hourly rate would bill a four-device host four times over for one hour of four parallel
  * sessions — a number wrong by exactly the factor nobody checks, on the screen somebody quotes in a
- * budget. So each session is priced at the rate DIVIDED BY THE DEVICES ITS HOST CARRIES, which is
- * what the hour would cost if every device on that host were busy: the fair share, and an upper
- * bound on nothing else.
+ * budget. So each session is priced at ITS HOST'S rate DIVIDED BY THE DEVICES THAT HOST CARRIES,
+ * which is what the hour would cost if every device on that host were busy: the fair share, and an
+ * upper bound on nothing else.
  *
  * The divisor is the host's devices NOW, not at the time. Nothing records how many devices a host
  * had last Tuesday, and a farm whose device count changes is rare enough that inventing a history
@@ -175,49 +186,76 @@ export interface RunCost {
  * `deviceMinutes` and is NOT priced — and the note says how much was left out, because a cost
  * silently lower than the minutes imply is the same lie pointed the other way.
  *
- * `cost` is null when no rate is configured, never zero: ADR-0035's rule that a number invented in
- * config would be rendered as though the farm had measured it.
+ * A SESSION ON A MACHINE THE ORG ENROLLED ITSELF IS NOT CHARGED, and the note says that too (D73).
+ * It used to be priced at the device host's rate, so a team testing on their own phone, plugged
+ * into their own laptop, was shown a bill for it.
+ *
+ * `cost` is null when nothing is priced and no rate is configured, never zero: ADR-0035's rule that
+ * a number invented in config would be rendered as though the farm had measured it.
  */
 export function attributeRunCost(
   holds: DeviceHold[],
-  devicesPerHost: Map<string, number>,
-  rate: number | null,
+  hosts: Map<string, HostShare>,
+  defaultRate: number | null,
   currency: string,
 ): { deviceMinutes: number; cost: RunCost | null } {
   const totalSeconds = holds.reduce((n, h) => n + Math.max(0, h.seconds), 0);
   const deviceMinutes = Math.round(totalSeconds / 60);
-  if (rate === null) return { deviceMinutes, cost: null };
 
   let inr = 0;
-  let unpricedSeconds = 0;
+  let removedSeconds = 0;
+  let unratedSeconds = 0;
+  let ownSeconds = 0;
   const divisors = new Set<number>();
+  const rates = new Set<number>();
   for (const h of holds) {
     const seconds = Math.max(0, h.seconds);
-    const devices = h.hostId ? devicesPerHost.get(h.hostId) ?? 0 : 0;
-    if (devices <= 0) { unpricedSeconds += seconds; continue; }
-    divisors.add(devices);
-    inr += (seconds / 3600) * (rate / devices);
+    const host = h.hostId ? hosts.get(h.hostId) : undefined;
+    if (host?.enrolled) { ownSeconds += seconds; continue; }
+    if (!host || host.devices <= 0) { removedSeconds += seconds; continue; }
+    // A host this deployment has not priced: its minutes count, and no money is made up for them.
+    if (host.rate === null) { unratedSeconds += seconds; continue; }
+    divisors.add(host.devices);
+    rates.add(host.rate);
+    inr += (seconds / 3600) * (host.rate / host.devices);
   }
 
-  const rateText = `${currency}${rate}/hr`;
+  if (rates.size === 0 && defaultRate === null) return { deviceMinutes, cost: null };
+
+  const shown = rates.size > 0 ? Math.max(...rates) : defaultRate!;
+  const rateText = rates.size > 1 ? "each host's hourly rate" : `${currency}${shown}/hr`;
   const plural = (n: number) => `${n} device${n === 1 ? '' : 's'}`;
+  const minutes = (seconds: number) => Math.round(seconds / 60);
+  const removed = `${minutes(removedSeconds)} min on a since-removed device is not priced`;
+  const unrated = `${minutes(unratedSeconds)} min on a host with no rate configured is not priced`;
+  const own = `${minutes(ownSeconds)} min on a machine your organisation enrolled is not charged`;
+  /** The parts left out, each said once. A part that rounds to no minutes is not worth a clause. */
+  const leftOut = (...parts: Array<[number, string]>) =>
+    parts.filter(([seconds]) => minutes(seconds) > 0).map(([, text]) => `; ${text}`).join('');
+
   let note: string;
   if (holds.length === 0 || totalSeconds === 0) {
     note = `No device was held, so no share of ${rateText} is attributed`;
-  } else if (divisors.size === 0) {
-    note = `≈ share of ${rateText}, but the devices this run held have since been removed, so none of it is priced`;
-  } else {
+  } else if (divisors.size > 0) {
     const sorted = [...divisors].sort((a, b) => a - b);
-    note = sorted.length === 1
+    note = (sorted.length === 1
       ? `≈ share of ${rateText} across ${plural(sorted[0])}`
-      : `≈ share of ${rateText}, split across each host's ${sorted[0]}–${sorted[sorted.length - 1]} devices`;
-    const unpricedMinutes = Math.round(unpricedSeconds / 60);
-    if (unpricedMinutes > 0) note += `; ${unpricedMinutes} min on a since-removed device is not priced`;
+      : `≈ share of ${rateText}, split across each host's ${sorted[0]}–${sorted[sorted.length - 1]} devices`)
+      + leftOut([removedSeconds, removed], [unratedSeconds, unrated], [ownSeconds, own]);
+  } else if (removedSeconds > 0) {
+    note = `≈ share of ${rateText}, but the devices this run held have since been removed, so none of it is priced`
+      + leftOut([unratedSeconds, unrated], [ownSeconds, own]);
+  } else if (unratedSeconds > 0) {
+    note = 'No rate is configured for the host this run used, so none of it is priced'
+      + leftOut([ownSeconds, own]);
+  } else {
+    // Everything ran on the org's own machine. Said without a rate, because none applies.
+    note = 'Ran on a machine your organisation enrolled, which the farm does not charge for';
   }
 
   return {
     deviceMinutes,
-    cost: { inr: Math.round(inr * 100) / 100, hostHourlyCost: rate, note },
+    cost: { inr: Math.round(inr * 100) / 100, hostHourlyCost: shown, note },
   };
 }
 

@@ -752,7 +752,11 @@ export async function collectFleet(): Promise<void> {
          -- The CURRENT fleet (056). A retired machine has no gauges worth alerting on, and leaving
          -- it here would keep mfarm_host_last_heartbeat_timestamp_seconds ageing forever on a
          -- laptop somebody unplugged — an alert that can only ever fire.
-         FROM hosts WHERE retired_at IS NULL`,
+         --
+         -- AND THE FARM'S OWN MACHINES ONLY (D73). An enrolled laptop is not infrastructure: with it
+         -- in here MfarmHostSilent fired every time its owner closed the lid, and
+         -- MfarmHostIdleAndBilling called an idle laptop "a device host powered on and unused".
+         FROM hosts WHERE retired_at IS NULL AND org_id IS NULL`,
     );
     const a = await client.query<AgeRow>(
       `SELECT

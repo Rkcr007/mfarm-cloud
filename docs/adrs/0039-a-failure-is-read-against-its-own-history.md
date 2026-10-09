@@ -1,6 +1,6 @@
 # ADR-0039 — a failure is read against its own history, and a run against what it held
 
-**Status:** Accepted · 2026-09-14 · no migration
+**Status:** Accepted · 2026-09-14 · no migration · **amended by ADR-0050**: a run is priced at each host's own rate, and minutes on a machine the org enrolled are not charged
 
 ## Context
 

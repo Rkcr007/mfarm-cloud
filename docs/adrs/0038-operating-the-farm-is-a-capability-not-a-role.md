@@ -2,7 +2,8 @@
 
 **Status:** Accepted · 2026-09-12 · migrations 053, 054 · **amended by
 [ADR-0041](0041-the-console-is-a-workspace-not-a-page.md) on 2026-09-14**: one host fact
-(`Host on · ₹/hr`) returns to the top bar for fleet operators only.
+(`Host on · ₹/hr`) returns to the top bar for fleet operators only. **And by ADR-0050 on 2026-10-09**: the page's
+hosts are the farm's own; a machine an org enrolled is listed apart, out of every count.
 
 ## Context
 

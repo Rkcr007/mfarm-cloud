@@ -1540,13 +1540,21 @@ async function refreshHosts() {
  */
 export function hostSegment() {
   if (!isOperator() || !state.hosts.loaded || state.hosts.failed) return null;
-  const on = state.hosts.list.filter((x) => x.uptimeSeconds !== null && x.uptimeSeconds !== undefined);
+  /**
+   * THE FARM'S OWN MACHINES ONLY (D73). A laptop somebody enrolled to share a phone is not a host
+   * that is "on" in the sense this segment means — nobody is paying for it by the hour — and with
+   * it counted the bar read "Host on · ₹65/hr" over a farm that was switched off.
+   */
+  const on = state.hosts.list.filter((x) => x.kind !== 'enrolled'
+    && x.uptimeSeconds !== null && x.uptimeSeconds !== undefined);
   if (!on.length) return { text: 'Hosts off', tone: '' };
-  const rate = state.hosts.rate;
   const who = on.length === 1 ? 'Host on' : `${on.length} hosts on`;
-  // No rate configured is not a zero — say the fact that is known and stop.
+  // Each host at ITS OWN rate, summed. A host with none adds nothing; no rate at all is not a
+  // zero — say the fact that is known and stop.
+  const rates = on.map((x) => x.ratePerHour).filter((r) => r !== null && r !== undefined);
+  const currency = state.hosts.rate?.currency || '';
   return {
-    text: rate ? `${who} · ${rate.currency}${Math.round(rate.hourly * on.length)}/hr` : who,
+    text: rates.length ? `${who} · ${currency}${Math.round(rates.reduce((a, b) => a + b, 0))}/hr` : who,
     tone: 'warn',
   };
 }
@@ -3265,7 +3273,7 @@ function fleetCapacity() {
                * answering; the way forward is starting the host (2026-09-15 walkthrough).
                */
               : hostIsOffFor(d)
-                ? hostOffAction()
+                ? (farmHostIsOffFor(d) ? hostOffAction() : null)
                 : d.state === 'QUARANTINED'
                   ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
                   : null,
@@ -3623,6 +3631,19 @@ const hostWasStopped = (d) => d?.quarantine?.source === 'host'
 const hostIsOffFor = (d) => d?.state === 'QUARANTINED' && d.quarantine?.source === 'host';
 
 /**
+ * ...and that host is THE FARM'S, so starting it is something this console can offer (D73).
+ *
+ * A `dedicated` device sits on a machine its own org enrolled. That machine being away is a closed
+ * laptop, not a farm that is off, and there is nothing here to start. Without this the "Start
+ * host…" beside a phone on a sleeping laptop offered to start the device host — a different
+ * machine, at ₹65 an hour, which would not have brought the phone back.
+ *
+ * Kept apart from `hostIsOffFor` on purpose: that one also withholds Recover, and Recover is just
+ * as wrong on a laptop that is not answering as on a farm host that is not.
+ */
+const farmHostIsOffFor = (d) => hostIsOffFor(d) && !d.dedicated;
+
+/**
  * START THE HOST, FROM WHEREVER SOMEBODY DISCOVERED IT WAS OFF.
  *
  * Found by walking the console with the lab stopped (2026-09-15): Fleet said "Nothing can be
@@ -3669,7 +3690,7 @@ function hostOffAction(cls = 'tiny ghost') {
  */
 function hostOffBanner() {
   const cap = capacityState();
-  const off = state.devices.filter(hostIsOffFor).length;
+  const off = state.devices.filter(farmHostIsOffFor).length;
   if (cap.ready > 0 || off === 0) return null;
   /**
    * "OFF" IS THE ONE THING THIS CANNOT SAY. These screens do not load the infrastructure snapshot —
@@ -3833,7 +3854,7 @@ function recoveryConsequences() {
  * destructive variant and the copy says what pressing it costs. The deciding fact, when the farm
  * last heard from that host, is put beside it.
  */
-function hostQuarantineConsequences(hostLastSeenAt) {
+function hostQuarantineConsequences(hostLastSeenAt, dedicated = false) {
   return h('div', { class: 'consequence' },
     h('p', { class: 'csq-head', text: 'This one comes back on its own' }),
     h('ul', { class: 'csq-list' },
@@ -3856,7 +3877,9 @@ function hostQuarantineConsequences(hostLastSeenAt) {
      */
     isOperator()
       ? h('div', { class: 'row tight mt-sm' },
-        hostOffAction('primary'),
+        // Start is for the farm's own host. A dedicated device's host is a machine its org
+        // enrolled, and the only thing that brings it back is that machine reconnecting (D73).
+        dedicated ? null : hostOffAction('primary'),
         btn('View host', 'ghost', () => go('#/infra/hosts')))
       : null,
   );
@@ -3945,7 +3968,7 @@ function quarantineCard(d) {
         'The allocator will not hand this device to anybody while it is quarantined.'),
       admin
         ? [
-          derivedNote ? hostQuarantineConsequences(d.hostLastSeenAt) : recoveryConsequences(),
+          derivedNote ? hostQuarantineConsequences(d.hostLastSeenAt, d.dedicated) : recoveryConsequences(),
           h('div', { class: 'row tight mt-lg' },
             /**
              * "Release quarantine" describes a state change the operator cannot actually make.
@@ -10247,8 +10270,51 @@ function infraHostCard(host, rate) {
   );
 }
 
+/**
+ * A machine an org enrolled itself — a laptop sharing its phones (D73, ADR-0050).
+ *
+ * NOT A HOST CARD WITH THE COST GREYED OUT. Every part of that card is about a machine the farm
+ * rents: its power, what it has cost, how much of it was used, how full its disk is. None of those
+ * is a question anybody here is asking of somebody else's computer, and drawing them as dashes
+ * would still say "this is one of our hosts, with data missing". So this says the four things an
+ * operator does want: whose it is, whether it is connected, what it carries, and what is on it.
+ *
+ * It keeps Drain and Retire, through the same control the host card uses and therefore behind the
+ * same gates. It never has Start or Stop: the server sends `powerable: false` for every one.
+ */
+function infraEnrolledCard(host) {
+  const connected = host.power === 'running';
+  return card(null, { class: 'inhost' },
+    h('div', { class: 'row tight' },
+      h('span', { class: `dot ${connected ? 'ok live' : ''}`.trim() }),
+      h('h2', { class: 'card-title', text: host.hostname }),
+      pill(connected ? 'connected' : 'away', connected ? 'ok' : '', { dot: false }),
+      host.maintenance?.drained ? pill('drained', 'warn', { dot: false }) : null,
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'caption', text: host.owner?.name ? `enrolled by ${host.owner.name}` : 'enrolled by an org' }),
+      infraHostControls(host, state.infra.data?.capabilities),
+    ),
+    h('p', { class: 'caption' }, [
+      // "Away" is not an alarm. It carries WHEN, because that is the whole of what there is to know.
+      connected ? null
+        : host.heartbeatAgeSeconds === null ? 'never connected'
+          : `last seen ${compactDuration(host.heartbeatAgeSeconds)} ago`,
+      connected ? (host.tunnelConnected ? 'tunnel connected' : 'no tunnel') : null,
+      `${host.devices.total} device${host.devices.total === 1 ? '' : 's'}`,
+      host.devices.ready ? `${host.devices.ready} ready` : null,
+      host.sessions?.active ? `${host.sessions.active} session${host.sessions.active === 1 ? '' : 's'} running` : null,
+      `protocol v${host.protocolVersion}`,
+    ].filter(Boolean).join(' · ')),
+    (host.alerts || []).length
+      ? h('div', { class: 'stack tight mt-md' }, host.alerts.map((a) =>
+          h('p', { class: `caption ${a.severity === 'critical' ? 'bad-text' : 'warn-text'}`, text: a.message })))
+      : null,
+  );
+}
+
 function infraHosts(data) {
-  if (!(data.hosts || []).length) {
+  const enrolled = data.enrolled || [];
+  if (!(data.hosts || []).length && !enrolled.length) {
     return [empty('No host has ever registered with this control plane.',
       'Start a worker agent and it appears within a heartbeat.')];
   }
@@ -10256,7 +10322,20 @@ function infraHosts(data) {
     h('p', { class: 'page-sub mb-gap', text:
       'Every machine this farm runs on. A host is billed while it is POWERED ON, whether or not '
       + 'anything is allocated on it — which is a different question from what a tenant consumed.' }),
-    h('div', { class: 'stack' }, data.hosts.map((host) => infraHostCard(host, data.cost?.rate))),
+    (data.hosts || []).length
+      ? h('div', { class: 'stack' }, data.hosts.map((host) => infraHostCard(host, data.cost?.rate)))
+      : empty('The farm has no host of its own.',
+        'Every machine connected right now is one an org enrolled itself.'),
+    enrolled.length
+      ? [
+          h('h2', { class: 'card-title mt-md', text: 'Enrolled agents' }),
+          h('p', { class: 'page-sub mb-gap', text:
+            'Machines an org connected itself to share its own devices. They are not the farm’s: '
+            + 'they cost it nothing, they are in none of the counts or the health above, and one '
+            + 'that is away is a closed laptop rather than an outage.' }),
+          h('div', { class: 'stack' }, enrolled.map((host) => infraEnrolledCard(host))),
+        ]
+      : null,
   ];
 }
 
@@ -10554,6 +10633,13 @@ function infraDevices(data) {
             stateRow('Quarantined', d.quarantined, d.quarantined ? 'bad' : '', 'Withdrawn from the pool'),
             stateRow('Offline', d.offline, d.offline ? 'warn' : '', 'Known, not answering'),
           )),
+        // Said in words, so the totals above are not read as "everything connected to this farm".
+        f.enrolledDevices?.total
+          ? h('p', { class: 'caption mt-md', text:
+              `Not counted above: ${f.enrolledDevices.total} device${f.enrolledDevices.total === 1 ? '' : 's'} `
+              + 'on machines orgs enrolled themselves. Those belong to their org alone and are not '
+              + 'capacity this farm offers.' })
+          : null,
       ),
       h('div', { class: 'rail' },
         card('Demand', {},
@@ -10627,7 +10713,9 @@ function infraUsage(data) {
   return [
     h('div', { class: 'statgrid mb-gap' },
       stat('Running now', c.runningPerHour === null ? '—' : `${cost(c.runningPerHour, c.rate)}/h`,
-        `at ${cost(c.rate.hourly, c.rate)}/hour per host`, c.runningPerHour ? 'warn' : ''),
+        // The default, and it says so: a host can carry its own rate.
+        `${cost(c.rate.hourly, c.rate)}/hour per host unless it has its own rate`,
+        c.runningPerHour ? 'warn' : ''),
       stat('Today', cost(c.today, c.rate), 'Since midnight'),
       stat('This month', cost(c.monthToDate, c.rate), 'Month to date'),
       /**
@@ -10983,7 +11071,7 @@ function screenHealth() {
                   d.state === 'QUARANTINED' && d.quarantine?.source !== 'host' && isOrgAdmin()
                     ? btn('Recover', 'tiny ghost', () => askReleaseQuarantine(d))
                     // What it offers instead: the thing that actually brings the device back.
-                    : hostIsOffFor(d) ? hostOffAction() : null,
+                    : farmHostIsOffFor(d) ? hostOffAction() : null,
                   pill(st.label, st.tone, { dot: false }),
                 );
               }))
@@ -11029,8 +11117,9 @@ function screenHealth() {
         state.hosts.list.length
           ? card('Machines', {},
               h('p', { class: 'caption' },
-                'The hosts your devices run on. A host is billed while it is POWERED ON, whether or '
-                + 'not anything is allocated on it — which is not the same question as the usage below.'),
+                'The hosts your devices run on. A farm host is billed while it is POWERED ON, whether or '
+                + 'not anything is allocated on it — which is not the same question as the usage below. '
+                + 'A machine you enrolled yourself costs nothing here.'),
               h('div', { class: 'stack mt-md' }, state.hosts.list.map((hst) => {
                 const st = { UP: 'ok', QUARANTINED: 'bad', DOWN: '' }[hst.state] ?? '';
                 const disk = hst.machine?.diskTotalBytes
@@ -11045,8 +11134,11 @@ function screenHealth() {
                       : null,
                     // Money only where a rate is configured. See `config.ts`: an invented figure
                     // would be rendered as though the farm had measured it.
-                    hst.costSinceUp !== null
-                      ? h('span', { class: 'caption', text: `~${state.hosts.rate.currency}${Math.round(hst.costSinceUp).toLocaleString()} so far` })
+                    // An enrolled machine is the org's own. It has no cost here, and it says so
+                    // rather than leaving a gap where the farm host shows money.
+                    hst.kind === 'enrolled' ? pill('your machine', '', { dot: false }) : null,
+                    hst.costSinceUp !== null && hst.costSinceUp !== undefined
+                      ? h('span', { class: 'caption', text: `~${state.hosts.rate?.currency || ''}${Math.round(hst.costSinceUp).toLocaleString()} so far` })
                       : null),
                   h('p', { class: 'caption', text: [
                     `${hst.devices.ready}/${hst.devices.total} devices ready`,
@@ -14357,6 +14449,9 @@ function pollSignature() {
       ...(state.infra.data.hosts || []).map((h) => `${h.id}:${h.power}:${h.reachability}:`
         + `${h.machine?.status}:${h.uptimeSeconds === null ? '-' : Math.floor(h.uptimeSeconds / 60)}:`
         + `${(h.alerts || []).map((a) => a.code).join('|')}`),
+      // Connected or away, and what it carries. Not its heartbeat age, which moves on every poll.
+      ...(state.infra.data.enrolled || []).map((h) => `e:${h.id}:${h.power}:${h.devices?.total}:`
+        + `${h.devices?.ready}:${h.maintenance?.drained ? 'd' : ''}`),
     ].join(',') : '',
   });
 }

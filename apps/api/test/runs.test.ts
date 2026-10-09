@@ -29,7 +29,7 @@ import { withSystem, closePools } from '../src/db.ts';
 import { createApiKey, generateWorkerToken } from '../src/auth.ts';
 import { parseCapabilities } from '../src/http/webdriver/capabilities.ts';
 import { watchedRuns } from '../src/executionEvents.ts';
-import { attributeRunCost, HISTORY_RUNS } from '../src/runs.ts';
+import { attributeRunCost, HISTORY_RUNS, type HostShare } from '../src/runs.ts';
 
 let app: FastifyInstance;
 let orgA: string, orgB: string, hostId: string;
@@ -1831,21 +1831,67 @@ describe('run detail: flake history and device minutes (ADR-0039)', () => {
 
   test('cost is null when no rate is configured, and minutes on a removed device are named, not priced', () => {
     const holds = [{ seconds: 3600, hostId: 'h1' }, { seconds: 1200, hostId: null }];
-    const hosts = new Map([['h1', 2]]);
+    /** A fleet host carrying `devices`, at `rate` an hour. */
+    const fleet = (devices: number, rate: number | null): HostShare => ({ devices, rate, enrolled: false });
 
-    const unset = attributeRunCost(holds, hosts, null, '₹');
+    const unset = attributeRunCost(holds, new Map([['h1', fleet(2, null)]]), null, '₹');
     assert.equal(unset.deviceMinutes, 80);
     assert.equal(unset.cost, null, 'no rate is no money, never zero money');
 
-    const priced = attributeRunCost(holds, hosts, 65, '₹');
+    const priced = attributeRunCost(holds, new Map([['h1', fleet(2, 65)]]), 65, '₹');
     assert.equal(priced.cost?.inr, 32.5);
     assert.equal(priced.cost?.note, '≈ share of ₹65/hr across 2 devices; 20 min on a since-removed device is not priced');
 
     const mixed = attributeRunCost(
-      [{ seconds: 3600, hostId: 'a' }, { seconds: 3600, hostId: 'b' }], new Map([['a', 1], ['b', 4]]), 40, '$');
+      [{ seconds: 3600, hostId: 'a' }, { seconds: 3600, hostId: 'b' }],
+      new Map([['a', fleet(1, 40)], ['b', fleet(4, 40)]]), 40, '$');
     assert.equal(mixed.cost?.inr, 50);
     assert.match(mixed.cost!.note, /each host's 1–4 devices/);
 
     assert.equal(attributeRunCost([], new Map(), 65, '₹').cost?.inr, 0);
+  });
+
+  /**
+   * D73. A team's own phone, plugged into their own laptop, was priced at the DEVICE HOST'S rate:
+   * every host was `HOST_HOURLY_COST`, whoever owned it. An hour on it showed ₹32.50 of somebody
+   * else's machine.
+   */
+  test('minutes on a machine the org enrolled itself are not charged, and the note says so', () => {
+    const own: HostShare = { devices: 2, rate: null, enrolled: true };
+    const lab: HostShare = { devices: 4, rate: 65, enrolled: false };
+
+    const onlyOwn = attributeRunCost([{ seconds: 3600, hostId: 'mac' }], new Map([['mac', own]]), 65, '₹');
+    assert.equal(onlyOwn.deviceMinutes, 60, 'the minutes were held and are still reported');
+    assert.equal(onlyOwn.cost?.inr, 0, 'an hour on their own laptop was billed');
+    assert.equal(onlyOwn.cost?.note, 'Ran on a machine your organisation enrolled, which the farm does not charge for');
+
+    const both = attributeRunCost(
+      [{ seconds: 3600, hostId: 'lab' }, { seconds: 1800, hostId: 'mac' }],
+      new Map([['lab', lab], ['mac', own]]), 65, '₹');
+    assert.equal(both.deviceMinutes, 90);
+    assert.equal(both.cost?.inr, 16.25, 'only the hour on the farm host is priced, at a quarter of its rate');
+    assert.equal(both.cost?.note,
+      '≈ share of ₹65/hr across 4 devices; 30 min on a machine your organisation enrolled is not charged');
+
+    // With no rate anywhere there is still no money to show, own machine or not.
+    assert.equal(attributeRunCost([{ seconds: 3600, hostId: 'mac' }], new Map([['mac', own]]), null, '₹').cost, null);
+  });
+
+  test('each host is priced at its own rate, and an unpriced one is named rather than guessed', () => {
+    const holds = [{ seconds: 3600, hostId: 'big' }, { seconds: 3600, hostId: 'small' }];
+    const two = attributeRunCost(holds, new Map<string, HostShare>([
+      ['big', { devices: 4, rate: 80, enrolled: false }],
+      ['small', { devices: 1, rate: 10, enrolled: false }],
+    ]), 65, '₹');
+    assert.equal(two.cost?.inr, 30, '80/4 + 10/1 — the default rate must not be applied to either');
+    assert.equal(two.cost?.hostHourlyCost, 80, 'the highest rate, when hosts differ');
+    assert.match(two.cost!.note, /each host's hourly rate/);
+
+    const half = attributeRunCost(holds, new Map<string, HostShare>([
+      ['big', { devices: 4, rate: 80, enrolled: false }],
+      ['small', { devices: 1, rate: null, enrolled: false }],
+    ]), null, '₹');
+    assert.equal(half.cost?.inr, 20);
+    assert.match(half.cost!.note, /60 min on a host with no rate configured is not priced/);
   });
 });
