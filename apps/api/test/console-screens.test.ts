@@ -6074,6 +6074,104 @@ describe('the cloud estate', () => {
     mod.state.infraCloud = { data: estate(over), loaded: true, loading: false, error: null };
   };
 
+  /* ---------------------------------------------------------------- snapshots (ADR-0053) */
+
+  /** The estate as a control plane with `MFARM_SNAPSHOT_DISKS=mfarm-cp,mfarm-lab` would send it. */
+  const withSnapshots = (caps: Record<string, unknown> = { snapshots: true }) => {
+    seedCloud({
+      disks: [
+        { name: 'mfarm-lab', zone: 'asia-south1-c', sizeGb: 150, type: 'pd-balanced',
+          attachedTo: 'mfarm-lab', costPerMonth: 1275, snapshottable: true },
+        { name: 'scratch', zone: 'asia-south1-c', sizeGb: 10, type: 'pd-balanced',
+          attachedTo: null, costPerMonth: 85, snapshottable: false },
+      ],
+      snapshots: [
+        { name: 'lab-old', diskSizeGb: 150, storageBytes: 10 * 1024 ** 3, sourceDisk: 'mfarm-lab',
+          createdAt: '2026-08-01T00:00:00Z', costPerMonth: 22, status: 'READY', deletable: true, keptBecause: null },
+        { name: 'lab-new', diskSizeGb: 150, storageBytes: 6 * 1024 ** 3, sourceDisk: 'mfarm-lab',
+          createdAt: '2026-10-01T00:00:00Z', costPerMonth: 13, status: 'READY', deletable: false,
+          keptBecause: 'the newest restore point for mfarm-lab' },
+      ],
+    });
+    mod.state.infra.data = infraPayload({ capabilities: { drain: false, power: false, services: false, retire: true, ...caps } });
+    return mod.SCREENS.infra();
+  };
+  const dialogNode = () => (globalThis as unknown as {
+    document: { getElementById(id: string): unknown };
+  }).document.getElementById('dialog');
+  /** Press a row's button, then the dialog's confirm, and return every POST that went out. */
+  const pressAndConfirm = async (rowButton: string, confirm: string, reason?: string) => {
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const real = (globalThis as any).fetch;
+    /**
+     * EVERY READ THE PAGE MAKES AFTERWARDS IS ANSWERED IN ITS OWN SHAPE. An operation is followed by
+     * a re-read of the overview and of the project; a fake that answered those with the operation's
+     * result left `state.infra.data` holding `{ result, message }`, and the next render — in this
+     * test and in the one after it — read `.hosts` off that.
+     */
+    const overview = infraPayload({ capabilities: { drain: false, power: false, services: false, retire: true, snapshots: true } });
+    (globalThis as any).fetch = async (url: string, init: any = {}) => {
+      const path = String(url);
+      if (init.method === 'POST') sent.push({ url: path, body: JSON.parse(init.body) });
+      const payload = init.method === 'POST' ? { result: 'succeeded', message: 'done' }
+        : path.includes('/v1/infra/cloud') ? estate()
+          : path.includes('/v1/infra/overview') ? overview
+            : path.includes('/facets') ? { actors: [], actions: [], targets: [] }
+              : path.includes('/v1/infra/operations') ? { operations: [] }
+                : {};
+      return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+    };
+    try {
+      findByText(withSnapshots(), rowButton).click();
+      if (reason !== undefined) findByClass(dialogNode(), 'field').value = reason;
+      findByText(dialogNode(), confirm).click();
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    } finally {
+      (globalThis as any).fetch = real;
+      mod.closeOverlays();
+    }
+    return sent;
+  };
+
+  test('nothing about snapshots is drawn until the server says they may be changed', () => {
+    const tree = withSnapshots({ snapshots: false });
+    assert.ok(!findByText(tree, 'Snapshot'), 'a Snapshot button on a read-only deployment');
+    assert.ok(!findByText(tree, 'Delete'), 'a Delete button on a read-only deployment');
+    assert.ok(!/kept:/.test(textOf(tree)), 'a reason for withholding a control that is not offered');
+  });
+
+  test('Snapshot is offered on a disk the server names, and on no other', () => {
+    const tree = withSnapshots();
+    assert.equal(findAllByText(tree, 'Snapshot').length, 1, 'the unlisted disk was offered a snapshot too');
+  });
+
+  test('the newest restore point has no Delete, and the row says why', () => {
+    const tree = withSnapshots();
+    assert.equal(findAllByText(tree, 'Delete').length, 1, 'Delete was offered on the newest restore point');
+    assert.match(textOf(tree), /kept: the newest restore point for mfarm-lab/);
+  });
+
+  test('confirming a snapshot posts to that disk, with the reason, as an object', async () => {
+    const sent = await pressAndConfirm('Snapshot', 'Take snapshot', '  before the upgrade ');
+    assert.equal(sent.length, 1, 'confirming sent nothing');
+    assert.match(sent[0].url, /\/v1\/infra\/cloud\/disks\/mfarm-lab\/snapshot$/);
+    assert.deepEqual(sent[0].body, { reason: 'before the upgrade' });
+  });
+
+  test('confirming a delete posts to that snapshot, and the dialog says it cannot be undone', async () => {
+    findByText(withSnapshots(), 'Delete').click();
+    const said = textOf(dialogNode());
+    assert.match(said, /Delete lab-old\?/);
+    assert.match(said, /cannot be undone/);
+    assert.match(said, /will not delete the newest one/);
+    mod.closeOverlays();
+
+    const sent = await pressAndConfirm('Delete', 'Delete snapshot');
+    assert.equal(sent.length, 1, 'confirming sent nothing');
+    assert.match(sent[0].url, /\/v1\/infra\/cloud\/snapshots\/lab-old\/delete$/);
+    assert.deepEqual(sent[0].body, {}, 'no reason typed is an empty object, never a string');
+  });
+
   test('THE CONTROL PLANE IS ON THE PAGE — it never appeared anywhere in the product', () => {
     seedCloud();
     const text = textOf(mod.SCREENS.infra());

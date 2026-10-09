@@ -20,6 +20,7 @@ import { runRoutes } from './routes/runs.ts';
 import { hostRoutes } from './routes/hosts.ts';
 import { infraRoutes } from './routes/infra.ts';
 import { reconcileOperations } from '../infra/reconcile.ts';
+import { reconcileSnapshots } from '../infra/snapshots.ts';
 import { resultRoutes } from './routes/results.ts';
 import { shareRoutes, sharePageRoutes } from './routes/shares.ts';
 import { tunnelRoutes } from './routes/tunnels.ts';
@@ -751,6 +752,16 @@ export async function buildServer(opts: ServerOptions = {}): Promise<FastifyInst
           }
         })
         .catch((err: Error) => app.log.warn({ err }, 'could not reconcile infrastructure operations'));
+      // Snapshots too (ADR-0053): one that was still being written when its request returned is
+      // finished here, from the snapshot's own state. Its own promise, so a provider that will not
+      // answer about a snapshot cannot stop a power operation being settled.
+      void reconcileSnapshots()
+        .then((r) => {
+          if (r.settled || r.gaveUp) {
+            app.log.info({ ...r }, 'settled snapshot operations that outlived their request');
+          }
+        })
+        .catch((err: Error) => app.log.warn({ err }, 'could not reconcile snapshot operations'));
     }, opts.reaperIntervalMs);
     reconciler.unref?.();
     app.addHook('onClose', async () => clearInterval(reconciler));

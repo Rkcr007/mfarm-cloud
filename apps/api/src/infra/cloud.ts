@@ -70,10 +70,13 @@ const GCE_STATUS: Record<string, PowerState> = {
 export class CloudError extends Error {
   /** True when the provider answered and said no; false when we could not reach it at all. */
   readonly answered: boolean;
-  constructor(message: string, answered: boolean) {
+  /** The provider's HTTP status when it answered. Lets a caller tell "no such thing" from "no". */
+  readonly status: number | null;
+  constructor(message: string, answered: boolean, status: number | null = null) {
     super(message);
     this.name = 'CloudError';
     this.answered = answered;
+    this.status = status;
   }
 }
 
@@ -172,11 +175,21 @@ export function powerConfigured(): boolean {
 
 type Target = { instance: string; zone: string; project: string };
 
-async function call(method: 'GET' | 'POST', path: string): Promise<Record<string, unknown>> {
+/** What a 403 is told to go and check, by what was being attempted. */
+const POWER_NEEDS = 'compute.instances.get/start/stop/reset on this instance';
+
+async function call(
+  method: 'GET' | 'POST' | 'DELETE', path: string,
+  opts: { body?: Record<string, unknown>; needs?: string; what?: string } = {},
+): Promise<Record<string, unknown>> {
   const token = await accessToken();
   const res = await fetch(`${COMPUTE_BASE}${path}`, {
     method,
-    headers: { authorization: `Bearer ${token}` },
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(opts.body ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
     signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
   }).catch((e: Error) => {
     /**
@@ -190,14 +203,16 @@ async function call(method: 'GET' | 'POST', path: string): Promise<Record<string
   if (res.status === 403) {
     throw new CloudError(
       'The cloud API refused this operation. The control plane\'s service account needs '
-      + 'compute.instances.get/start/stop/reset on this instance, AND the instance\'s own OAuth '
+      + `${opts.needs ?? POWER_NEEDS}, AND the instance\'s own OAuth `
       + 'scopes must permit compute — scopes cap IAM, and changing them requires the VM to be '
-      + 'stopped. See docs/RUNBOOK.md.', true);
+      + 'stopped. See docs/RUNBOOK.md.', true, 403);
   }
-  if (res.status === 404) throw new CloudError('The cloud provider has no such instance.', true);
+  if (res.status === 404) {
+    throw new CloudError(`The cloud provider has no such ${opts.what ?? 'instance'}.`, true, 404);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new CloudError(`The cloud API answered ${res.status}. ${text.slice(0, 200)}`, true);
+    throw new CloudError(`The cloud API answered ${res.status}. ${text.slice(0, 200)}`, true, res.status);
   }
   return await res.json() as Record<string, unknown>;
 }
@@ -211,6 +226,94 @@ async function call(method: 'GET' | 'POST', path: string): Promise<Record<string
  * `answered` mean the same thing everywhere.
  */
 export const cloudGet = (path: string): Promise<Record<string, unknown>> => call('GET', path);
+
+/* ------------------------------------------------------------------ snapshots (ADR-0053) */
+
+const SNAPSHOT_NEEDS = 'compute.disks.createSnapshot on the disk and compute.snapshots.create, '
+  + '.get and .delete in the project';
+
+/** Resolve a disk NAME to the disk this console may snapshot, or null if it is not on the list. */
+export function snapshotDisk(name: string): { disk: string; zone: string; project: string } | null {
+  const cfg = loadConfig();
+  const entry = cfg.snapshotDisks.get(name);
+  if (!entry || !cfg.gcpProject) return null;
+  return { disk: name, zone: entry.zone, project: cfg.gcpProject };
+}
+
+/** Whether this deployment may snapshot anything at all. Read by the console's `capabilities`. */
+export function snapshotsConfigured(): boolean {
+  const cfg = loadConfig();
+  return cfg.snapshotDisks.size > 0 && cfg.gcpProject !== null;
+}
+
+export type SnapshotState = 'ready' | 'creating' | 'deleting' | 'failed' | 'missing' | 'unknown';
+
+const SNAPSHOT_STATUS: Record<string, SnapshotState> = {
+  READY: 'ready', CREATING: 'creating', UPLOADING: 'creating', DELETING: 'deleting', FAILED: 'failed',
+};
+
+export interface SnapshotInfo {
+  state: SnapshotState;
+  raw: string;
+  /** The disk it was taken from, by name. Null when it does not exist or the provider did not say. */
+  sourceDisk: string | null;
+  createdAt: string | null;
+}
+
+/**
+ * One snapshot, by name. `missing` is an ANSWER here, not an error: "is it gone yet" is the question
+ * a delete is waiting on, and "does it already exist" is the one a create asks first.
+ */
+export async function snapshotInfo(project: string, name: string): Promise<SnapshotInfo> {
+  try {
+    const body = await call('GET',
+      `/projects/${encodeURIComponent(project)}/global/snapshots/${encodeURIComponent(name)}`,
+      { needs: SNAPSHOT_NEEDS, what: 'snapshot' });
+    const raw = String(body.status ?? '');
+    const source = typeof body.sourceDisk === 'string' ? body.sourceDisk : '';
+    return {
+      state: SNAPSHOT_STATUS[raw] ?? 'unknown',
+      raw,
+      sourceDisk: source ? source.slice(source.lastIndexOf('/') + 1) : null,
+      createdAt: typeof body.creationTimestamp === 'string' ? body.creationTimestamp : null,
+    };
+  } catch (e) {
+    if (e instanceof CloudError && e.status === 404) {
+      return { state: 'missing', raw: 'NOT_FOUND', sourceDisk: null, createdAt: null };
+    }
+    throw e;
+  }
+}
+
+/**
+ * Ask the provider to snapshot a disk. Returns when the request is ACCEPTED: a snapshot of a busy
+ * disk takes minutes, and the caller watches it the way a power operation watches a machine.
+ *
+ * `description` is stored by the provider and never interpreted. `labels` mark the snapshot as one
+ * this console took, so that a person reading the project later can tell.
+ */
+export async function createSnapshot(
+  t: { disk: string; zone: string; project: string }, name: string, description: string,
+): Promise<void> {
+  await call('POST',
+    `/projects/${encodeURIComponent(t.project)}/zones/${encodeURIComponent(t.zone)}`
+    + `/disks/${encodeURIComponent(t.disk)}/createSnapshot`,
+    { body: { name, description, labels: { 'created-by': 'mfarm-console' } }, needs: SNAPSHOT_NEEDS, what: 'disk' });
+}
+
+/** Ask the provider to delete a snapshot. Returns when the request is accepted. */
+export async function deleteSnapshot(project: string, name: string): Promise<void> {
+  await call('DELETE',
+    `/projects/${encodeURIComponent(project)}/global/snapshots/${encodeURIComponent(name)}`,
+    { needs: SNAPSHOT_NEEDS, what: 'snapshot' });
+}
+
+/** Every snapshot in the project, as the provider lists them. Used to find the newest of a disk. */
+export async function listSnapshots(project: string): Promise<Array<Record<string, unknown>>> {
+  const body = await call('GET', `/projects/${encodeURIComponent(project)}/global/snapshots`,
+    { needs: SNAPSHOT_NEEDS });
+  return (body.items as Array<Record<string, unknown>> | undefined) ?? [];
+}
 
 const url = (t: Target, suffix = '') =>
   `/projects/${encodeURIComponent(t.project)}/zones/${encodeURIComponent(t.zone)}`

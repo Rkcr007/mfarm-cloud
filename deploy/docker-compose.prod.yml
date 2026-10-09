@@ -301,6 +301,14 @@ services:
       # requires the control plane to be stopped. `docs/RUNBOOK.md` has the commands and says why.
       MFARM_POWER_INSTANCES: ${MFARM_POWER_INSTANCES:-}
       GCP_PROJECT: ${GCP_PROJECT:-}
+      # The disks the console may snapshot, and whose snapshots it may delete (ADR-0053). Unset
+      # leaves the Cloud page read-only. An allow-list for the reason the one above is: the name of
+      # a snapshot to delete arrives from a browser, and nothing outside this list is reachable.
+      #
+      #   MFARM_SNAPSHOT_DISKS=mfarm-cp:asia-south1-c,mfarm-lab:asia-south1-c
+      #
+      # It also needs four more permissions on the control plane's role. `docs/RUNBOOK.md` has them.
+      MFARM_SNAPSHOT_DISKS: ${MFARM_SNAPSHOT_DISKS:-}
       # How long a power operation watches the machine before answering. Past this it reports
       # `accepted` with what it last saw, rather than claiming an outcome nobody has.
       INFRA_POWER_SETTLE_MS: ${INFRA_POWER_SETTLE_MS:-25000}

@@ -12,7 +12,8 @@ import {
   drainHost, resumeHost, startHost, stopHost, restartHost, retireHost, restoreHost,
 } from '../../infra/operations.ts';
 import { waitForChange, sseFrame, SSE_KEEPALIVE, streamListeners } from '../../infra/stream.ts';
-import { powerConfigured, instanceFor } from '../../infra/cloud.ts';
+import { powerConfigured, instanceFor, snapshotsConfigured } from '../../infra/cloud.ts';
+import { removeSnapshot, takeSnapshot } from '../../infra/snapshots.ts';
 import { cloudInventory, resetInventoryCache } from '../../infra/inventory.ts';
 import { GIT_SHA, BUILT_AT, shortSha } from '../../version.ts';
 
@@ -250,6 +251,12 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
         services: false,
         /** Always available: it is a timestamp, not a machine operation. */
         retire: true,
+        /**
+         * TRUE ONLY WHEN `MFARM_SNAPSHOT_DISKS` NAMES SOMETHING (ADR-0053). Which disks, and which
+         * snapshots, is per row in `/v1/infra/cloud` — this says whether the page has any business
+         * drawing those controls at all.
+         */
+        snapshots: snapshotsConfigured(),
       },
     };
   }
@@ -298,8 +305,8 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
       throw badRequest('`outcome` must be `ok` (succeeded or already in that state) or `bad` (failed or unknown).');
     }
     const targetKind = q.targetKind as TargetKind | undefined;
-    if (targetKind && !['host', 'service', 'fleet'].includes(targetKind)) {
-      throw badRequest('`targetKind` must be host, service or fleet.');
+    if (targetKind && !['host', 'service', 'fleet', 'cloud'].includes(targetKind)) {
+      throw badRequest('`targetKind` must be host, service, fleet or cloud.');
     }
 
     return {
@@ -473,6 +480,47 @@ export async function infraRoutes(app: FastifyInstance): Promise<void> {
     async (req) => {
       requireOperator(req);
       return restoreHost(req, req.params.id);
+    },
+  );
+
+  /* ------------------------------------------------------------------ snapshots (ADR-0053) */
+
+  /** The provider's own rule for a resource name. Anything else never reaches a URL. */
+  const cloudName = { type: 'string', pattern: '^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$' } as const;
+  const reasonBody = {
+    type: 'object',
+    additionalProperties: false,
+    properties: { reason: { type: 'string', maxLength: 200 } },
+  } as const;
+
+  /**
+   * POST /v1/infra/cloud/disks/:name/snapshot — take a restore point of one disk.
+   *
+   * THE NAME OF THE SNAPSHOT IS NOT AN INPUT. The server chooses it from the disk and the minute.
+   * The disk must be on `MFARM_SNAPSHOT_DISKS`; anything else is a 403 that says so.
+   */
+  app.post<{ Params: { name: string }; Body: { reason?: string } }>(
+    '/infra/cloud/disks/:name/snapshot',
+    { schema: { params: { type: 'object', required: ['name'], properties: { name: cloudName } }, body: reasonBody } },
+    async (req) => {
+      requireOperator(req);
+      return takeSnapshot(req, req.params.name, req.body?.reason);
+    },
+  );
+
+  /**
+   * POST /v1/infra/cloud/snapshots/:name/delete — remove an old restore point.
+   *
+   * A VERB IN THE URL, like every operation in this file, so that the audit log's `action` is the
+   * route's own name. Refused for a snapshot the provider does not attribute to an allow-listed
+   * disk, and for the newest one of any disk — see `removeSnapshot`.
+   */
+  app.post<{ Params: { name: string }; Body: { reason?: string } }>(
+    '/infra/cloud/snapshots/:name/delete',
+    { schema: { params: { type: 'object', required: ['name'], properties: { name: cloudName } }, body: reasonBody } },
+    async (req) => {
+      requireOperator(req);
+      return removeSnapshot(req, req.params.name, req.body?.reason);
     },
   );
 

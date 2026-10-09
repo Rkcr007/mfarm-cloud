@@ -1,4 +1,4 @@
-import { cloudGet, instanceFor, CloudError, powerConfigured } from './cloud.ts';
+import { cloudGet, instanceFor, CloudError, powerConfigured, snapshotsConfigured } from './cloud.ts';
 import { loadConfig } from '../config.ts';
 
 /**
@@ -64,6 +64,8 @@ export interface CloudDisk {
   /** The instance it is attached to, or null — an unattached disk is pure waste. */
   attachedTo: string | null;
   costPerMonth: number | null;
+  /** On the control plane's snapshot list (ADR-0053). The console draws its button from this. */
+  snapshottable: boolean;
 }
 
 export interface CloudAddress {
@@ -91,6 +93,15 @@ export interface CloudSnapshot {
   sourceDisk: string | null;
   createdAt: string | null;
   costPerMonth: number | null;
+  /** The provider's word: READY, CREATING, DELETING, FAILED. */
+  status: string;
+  /**
+   * Whether the console may delete it, and when it may not, WHY — sent rather than left to the
+   * button's absence, because "this is the newest restore point" is something an operator should be
+   * told, not something they should infer from a control that is missing.
+   */
+  deletable: boolean;
+  keptBecause: string | null;
 }
 
 export interface CloudInventory {
@@ -172,7 +183,9 @@ export async function cloudInventory(fleetHostnames: Set<string>): Promise<Cloud
   const cfg = loadConfig();
   const project = cfg.gcpProject;
 
-  if (!project || !powerConfigured()) {
+  // Either list says this deployment has a cloud credential and has been told to use it. A control
+  // plane set up only to take snapshots still needs to read the project to show what it may snapshot.
+  if (!project || !(powerConfigured() || snapshotsConfigured())) {
     return EMPTY(project, null);
   }
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.value;
@@ -231,6 +244,7 @@ export async function cloudInventory(fleetHostnames: Set<string>): Promise<Cloud
       type: leaf(d.type),
       attachedTo: users[0] ?? null,
       costPerMonth: diskRate === null ? null : money(sizeGb * diskRate),
+      snapshottable: cfg.snapshotDisks.has(String(d.name ?? '')),
     };
   });
 
@@ -262,7 +276,21 @@ export async function cloudInventory(fleetHostnames: Set<string>): Promise<Cloud
   /* ---------------------------------------------------------------- snapshots */
 
   const snapshotRate = cfg.cloudSnapshotRatePerGbMonth;
-  const snapshots: CloudSnapshot[] = ((snapshotsBody.items as Array<Record<string, unknown>>) ?? [])
+  const rawSnapshots = (snapshotsBody.items as Array<Record<string, unknown>>) ?? [];
+  /**
+   * The newest READY snapshot of each disk — the one the console will not delete. The same rule
+   * `removeSnapshot` enforces, computed from the same fields, so the page and the operation cannot
+   * disagree about which one it is.
+   */
+  const newest = new Map<string, { name: string; at: string }>();
+  for (const s of rawSnapshots) {
+    if (s.status !== 'READY') continue;
+    const disk = leaf(s.sourceDisk);
+    const at = String(s.creationTimestamp ?? '');
+    const seen = newest.get(disk);
+    if (!seen || at.localeCompare(seen.at) > 0) newest.set(disk, { name: String(s.name ?? ''), at });
+  }
+  const snapshots: CloudSnapshot[] = rawSnapshots
     .map((s) => {
       /**
        * BILLED ON BYTES STORED, not on the size of the disk it came from. A 150 GB disk that is
@@ -279,6 +307,17 @@ export async function cloudInventory(fleetHostnames: Set<string>): Promise<Cloud
         createdAt: typeof s.creationTimestamp === 'string' ? s.creationTimestamp : null,
         costPerMonth: snapshotRate === null || storedGb === null
           ? null : money(storedGb * snapshotRate),
+        status: String(s.status ?? 'UNKNOWN'),
+        ...(() => {
+          const disk = leaf(s.sourceDisk);
+          const name = String(s.name ?? '');
+          const keptBecause = !cfg.snapshotDisks.has(disk)
+            ? 'not a snapshot of a disk this console may snapshot'
+            : s.status !== 'READY' ? `it is ${String(s.status ?? 'unknown').toLowerCase()}`
+              : newest.get(disk)?.name === name ? `the newest restore point for ${disk}`
+                : null;
+          return { deletable: keptBecause === null, keptBecause };
+        })(),
       };
     });
 
