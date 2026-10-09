@@ -174,8 +174,11 @@ address and certificate survive, and the reaper's boot-time quarantine now clear
 worker's first heartbeat (migration 016).
 
 **Do not** delete the device host's disk to save the ₹1,260/month. It carries the Cuttlefish build,
-the Android image and hours of setup; rebuilding is most of a day. The two GCP snapshots
-(`mfarm-cf-ready`, `mfarm-farm-ready`) exist for a catastrophe, not for routine thrift.
+the Android image and hours of setup; rebuilding is most of a day. The snapshots of that disk
+exist for a catastrophe, not for routine thrift. They are listed under **Infrastructure → Cloud**,
+which is the only place to read which ones exist: this page used to name them, and since ADR-0053
+they can be deleted from the console, so a name written here goes stale the day one is pruned
+(`mfarm-cf-ready` was, on 2026-10-09).
 
 ## Turn on Stop and Start from the console (one-time, costs a control-plane restart)
 
