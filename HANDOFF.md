@@ -5151,3 +5151,27 @@ when the feature is broken. See issues 37 and 38.
     - **INDEX.md.** It counted 44 ADRs; there are 47.
     - **This log.** It had stopped at 107. Entries 108–114 fill the gap from the PR titles,
       `DEFECTS.md` and `AGENT_BUILD_PLAN.md`.
+
+116. **BANDWIDTH ADAPTATION, RUN IN CHROME ON A NARROW LINK: THE LOOP WORKS, AND IT DOES NOT YET HELP.**
+    2026-10-09, `4e271dc` on the OnePlus.
+    - **Setup.** Chrome was forced onto the relay (UDP), the screen was kept scrolling over adb, and
+      dummynet on the Mac shaped only the agent's UDP to the relay, to 2 Mbit/s with 400 KB of buffer.
+    - **Passed.** On a clear link it held 4 Mbit/s with no false step-down. It stepped down within
+      seconds of the link narrowing, and back up one tier per 15 s once it cleared. The viewer
+      survived every encoder restart. The agent's round trip now matches Chrome's.
+    - **Failed.** The OnePlus's encoder produces about 2 Mbit/s whatever rate it is asked for
+      (D77), so the queue never drained: 600–945 ms against a 75 ms floor. werift's round trip
+      freezes under a queue (D78): 70 ms reported against Chrome's 730 ms. A queue over half a second
+      for 30 s expires werift's consent and closes the view, with or without adaptation (D79).
+    - **Against the fixed rate on the same link,** adaptation traded heavy loss and multi-second
+      freezes for a smooth, delayed picture, until D79 closed it.
+    - **Seen along the way:**
+      - D80: the first Try again after a failure says "Session token rejected"; the second works.
+      - D81: Fleet stayed RESTORING after the API said READY.
+      - An auto-deploy of #271 at about 20:05 answered 502 and dropped the agent's tunnel. The tunnel
+        reconnected as designed, but the live view did not.
+    - **What it took.**
+      - The throttle needed the owner's sudo once.
+      - The agent was relaunched from recovered settings (`REGION=lab`, read from earlier launches;
+        `PHYSICAL_KEEP_PACKAGES` could not be recovered and is unset).
+      - A database read for the region was refused by the permission check.
