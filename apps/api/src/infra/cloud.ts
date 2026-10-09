@@ -308,6 +308,23 @@ export async function deleteSnapshot(project: string, name: string): Promise<voi
     { needs: SNAPSHOT_NEEDS, what: 'snapshot' });
 }
 
+/**
+ * When a snapshot was taken, as a number that can be compared.
+ *
+ * THE PROVIDER'S TIMESTAMPS CARRY AN OFFSET — `2026-08-18T07:02:20.154-07:00` — and that offset
+ * changes twice a year. Comparing them as TEXT is right until two snapshots straddle the hour the
+ * clocks go back, where `01:30-07:00` sorts after `01:10-08:00` and is forty minutes EARLIER. The
+ * thing decided by this comparison is which restore point may not be deleted, so it compares
+ * instants. Found by reading the real project: the fake provider in the tests wrote `…Z`.
+ *
+ * An unparseable or missing timestamp is the oldest thing there is, so it can never be mistaken for
+ * the newest restore point of a disk.
+ */
+export function snapshotTakenAt(raw: unknown): number {
+  const t = Date.parse(String(raw ?? ''));
+  return Number.isNaN(t) ? 0 : t;
+}
+
 /** Every snapshot in the project, as the provider lists them. Used to find the newest of a disk. */
 export async function listSnapshots(project: string): Promise<Array<Record<string, unknown>>> {
   const body = await call('GET', `/projects/${encodeURIComponent(project)}/global/snapshots`,
