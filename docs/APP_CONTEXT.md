@@ -253,7 +253,7 @@ measuring nothing, which is why the first line is first.
 
 ## 8. How this project finds bugs, and why that matters to a reader
 
-**Seventy-four defects are recorded. Almost none were found by the test suite.** They were found by
+**Seventy-five defects are recorded. Almost none were found by the test suite.** They were found by
 using the product. The suite is over sixteen hundred tests and it catches different things — it caught two security
 regressions this month — but the pattern is consistent enough to be worth stating plainly to anybody
 evaluating this code:

@@ -3610,8 +3610,11 @@ function askForget(d) {
 
 async function forgetDevice(id, reason) {
   try {
+    // AN OBJECT, NOT A STRING. `api` serialises the body itself; handing it JSON text sends a JSON
+    // *string*, which the route's schema refuses — so this button answered "body must be object"
+    // on every press from the day it shipped until its request was looked at.
     const out = await api(`/v1/devices/${encodeURIComponent(id)}/forget`, {
-      method: 'POST', body: JSON.stringify(reason ? { reason } : {}),
+      method: 'POST', body: reason ? { reason } : {},
     });
     // The API's own sentence. A refusal is one of five different reasons and each has a different
     // next step, so none of them is reworded here.

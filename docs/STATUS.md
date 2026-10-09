@@ -285,7 +285,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 | Migrations | 69, numbered to 069. The farm serves `main` (`check-deployed.sh`, 2026-10-09) |
 | Decisions | 51 ADRs, numbered to 0052 (there is no 0013) |
 | Merged PRs | 260, as of #260 (2026-10-09) |
-| Defects | 74 recorded, **70 closed** — the closed count is carried from the last update and not re-counted |
+| Defects | 75 recorded, **70 closed** — the closed count is carried from the last update and not re-counted |
 | Fleet | 4 Cuttlefish + 2 physical handsets: the OnePlus 8T (working), the `SM-S918B` (quarantined) |
 | Cold boot | ~30s per device |
 | Live view | 49–53 fps, ~39ms round trip, direct path; a phone 60 fps, ~74 ms input to first frame direct, ~175 ms relayed |
