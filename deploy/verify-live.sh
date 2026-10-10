@@ -120,9 +120,28 @@ DP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$HOST_PUBLIC/dp/prob
 # somewhere without the secret; an unreadable gauge downgrades the verdict rather than failing it.
 METRICS_PORT="${METRICS_PORT:-9464}"
 METRICS_TOKEN_FILE="${METRICS_TOKEN_FILE:-$REPO_ROOT/deploy/secrets/metrics_token}"
+
+# THE FILE EXISTING IS NOT THE FILE BEING READABLE, and on the real farm it is not. `farm-up.sh`
+# gives the token to the API's uid and Prometheus's gid, mode 640, because those two containers are
+# who it is for — so the person running this script can see it and cannot read it. The check used to
+# ask `-f` and then `cat`: the cat failed, an empty bearer got a 401, and the gauge came back blank
+# on every poll. This script then printed "Permission denied" a dozen times, waited out the whole
+# tunnel wait, and reported agent reachability "unverified" — on every run, so nobody read it, and
+# the one line here that is about the live view never ran. A stopped device host also stopped
+# reading as stopped, since that verdict needs the gauge to say 0 (D83).
+#
+# Read ONCE, here: as this user if it can, otherwise through `sudo -n`, which answers at once and
+# never prompts. Whoever deploys this farm already has that right, so nothing is widened. Empty
+# means "could not", and everything below treats it as that rather than as a token.
+METRICS_TOKEN=""
+if [ -r "$METRICS_TOKEN_FILE" ]; then
+  METRICS_TOKEN="$(cat "$METRICS_TOKEN_FILE" 2>/dev/null)"
+elif [ -f "$METRICS_TOKEN_FILE" ]; then
+  METRICS_TOKEN="$(sudo -n cat "$METRICS_TOKEN_FILE" 2>/dev/null)"
+fi
 read_tunnels() {
-  [ -f "$METRICS_TOKEN_FILE" ] || { printf ''; return; }
-  curl -s --max-time 5 -H "Authorization: Bearer $(cat "$METRICS_TOKEN_FILE")" \
+  [ -n "$METRICS_TOKEN" ] || { printf ''; return; }
+  curl -s --max-time 5 -H "Authorization: Bearer $METRICS_TOKEN" \
     "http://127.0.0.1:${METRICS_PORT}/metrics" 2>/dev/null \
     | sed -n 's/^mfarm_tunnel_hosts_connected \([0-9][0-9]*\).*/\1/p' | head -1
 }
@@ -164,7 +183,7 @@ else
   # device host is off between sessions and is 95% of the bill — and that case is detected by
   # `AVAIL = 0` together with no agent. Waiting a minute for a tunnel that nobody is bringing up
   # would add a minute to the most common invocation of this script to learn nothing.
-  if [ "$AVAIL" -ge 1 ] && [ -f "$METRICS_TOKEN_FILE" ]; then
+  if [ "$AVAIL" -ge 1 ] && [ -n "$METRICS_TOKEN" ]; then
     TUNNEL_DEADLINE=$(( $(date +%s) + TUNNEL_WAIT_SECONDS ))
     while [ "$(date +%s)" -lt "$TUNNEL_DEADLINE" ]; do
       TUNNELS="$(read_tunnels)"
@@ -200,7 +219,11 @@ else
     # about whether a person can see a screen.
     if [ -z "$TUNNELS" ]; then
       warn "could not read mfarm_tunnel_hosts_connected — agent reachability unverified"
-      warn "(needs deploy/secrets/metrics_token; the metrics listener is loopback-only by design)"
+      if [ -f "$METRICS_TOKEN_FILE" ] && [ -z "$METRICS_TOKEN" ]; then
+        warn "(deploy/secrets/metrics_token is there and $(id -un) cannot read it, with or without sudo -n)"
+      else
+        warn "(needs deploy/secrets/metrics_token; the metrics listener is loopback-only by design)"
+      fi
     elif [ "$TUNNELS" -ge 1 ]; then
       ok "$TUNNELS agent tunnel(s) connected — the live view has somewhere to go"
     else
