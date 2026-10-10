@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 119 is the newest; the header
+Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 120 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5261,3 +5261,27 @@ when the feature is broken. See issues 37 and 38.
     - **Still open:** D80, D81. Restoring a host, forgetting a device and a snapshot from the
       console have not been watched on the live farm (`STATUS.md` §4, row 10). The two hung
       `node --test` phone-stream runs from 2026-10-03 (pids 33544, 94351) are still alive.
+
+120. **THE DEVICE HOST WAS THIRTEEN DAYS BEHIND, AND ITS DEPLOY STEP WOULD HAVE STOPPED IT (D82).**
+    2026-10-10. Asked to deploy `main` everywhere and verify it.
+    - **Control plane.** Already on `2523721` by auto-deploy. `verify-console.sh` with
+      `BUILD=2523721`: 64 passed, 0 failed. Read from outside: `/health` and `/ready` answer 200,
+      every protected route answers 401, `/dp` answers 426, HTTP redirects to HTTPS, HSTS and the
+      CSP are sent, and the certificate runs to 2026-11-17.
+    - **Device host.** Started at 14:17 UTC. `farm-check.sh`: four devices READY, the data plane
+      and the relay answering. `check-deployed.sh`: its checkout is `cd1a251`, from 2026-09-27,
+      sixteen worker commits behind.
+    - **D82.** The documented deploy for that host was `git pull` and a restart, in five places.
+      The agent runs out of the checkout's `node_modules`, #254 added `werift`, `index.ts` reaches
+      it on its first import, and the host does not have it. The restart would have stopped the
+      worker. Derived, not seen: nobody ran it.
+    - **Fixed in the repo.** `deploy/worker-deploy.sh` fast-forwards, installs, refuses to restart
+      while a dependency the agent declares does not resolve, and checks the worker kept one pid.
+      Twelve tests; three injected faults each fail one. The five places name it.
+    - **Not done.** The host is still on `cd1a251`. A remote command on it was refused by the
+      permission check as a remote write, and `verify-live.sh` on the control plane as a production
+      read. Both were handed to the owner. No WebDriver session, no console sign-in and no on-box
+      verify script ran, so nothing device-side is verified against `main`.
+    - **Seen on the device host:** its old coturn is still active and enabled (`STATUS.md` §4,
+      row 5). `farm-check.sh` cannot read the tunnel metric, so it reports agent reachability as
+      unverified on every run.

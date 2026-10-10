@@ -720,7 +720,8 @@ The order is the whole procedure, and getting it backwards is not obvious from t
 
 ```sh
 # 1. The AGENT first. It dials out, so it has to be running new code before anything routes to it.
-ssh mfarm-lab 'cd ~/mfarm && git pull && sudo systemctl restart mfarm-worker'
+#    `worker-deploy.sh` installs what the new code imports BEFORE it restarts (D82).
+ssh mfarm-lab 'cd ~/mfarm && git pull && ./deploy/worker-deploy.sh'
 
 # 2. Confirm the tunnel is actually up. BOTH ends, because either one alone can lie:
 ssh mfarm-lab 'journalctl -u mfarm-worker -n50 | grep "tunnel connected"'

@@ -55,8 +55,10 @@ unit both ExecStart out of that tree — so a tick would move the agent's code u
 are running. That is a different decision with a different blast radius, and it is not this tool's.
 
 Bring a device host forward by hand instead:
-  git -C "$REPO_ROOT" fetch origin main && git -C "$REPO_ROOT" merge --ff-only origin/main
-  sudo systemctl restart mfarm-worker
+  git -C "$REPO_ROOT" pull -q && "$REPO_ROOT/deploy/worker-deploy.sh"
+
+Not a fetch, a merge and a restart: the worker runs out of this checkout's node_modules, and a
+restart onto code whose dependencies were never installed stops it for good (D82).
 
 Pass --force only if you have decided you want a timer doing that unattended.
 MSG

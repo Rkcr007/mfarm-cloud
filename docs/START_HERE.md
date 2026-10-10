@@ -199,8 +199,9 @@ the running process which commit it is** — every deployment mechanism that has
 bit it by succeeding quietly while changing nothing. The console header shows the same sha, so
 "is my fix live?" is a browser refresh.
 
-Worker changes need `sudo systemctl restart mfarm-worker` on `mfarm-lab` instead; the agent is not
-containerised.
+Worker changes need `./deploy/worker-deploy.sh` on `mfarm-lab` instead; the agent is not
+containerised, so its dependencies have to be installed on the box before it is restarted
+(`RUNBOOK.md`, "Deploying by hand").
 
 Deeper detail lives in `HANDOFF.md` (state of play and every known issue), `docs/adrs/` (why things
 are the way they are), and `deploy/README.md` (what the scripts do the long way).

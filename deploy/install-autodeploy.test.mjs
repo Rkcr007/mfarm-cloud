@@ -131,7 +131,9 @@ describe('install-autodeploy-service.sh', () => {
 
   test('and names the by-hand path instead of just saying no', () => {
     const r = run(labTree());
-    assert.match(r.out, /merge --ff-only/);
-    assert.match(r.out, /systemctl restart mfarm-worker/);
+    assert.match(r.out, /worker-deploy\.sh/);
+    // Naming the bare restart as the thing to do is D82: nothing in it installs what the new code
+    // imports. The message may explain that, and must not offer it as a command.
+    assert.doesNotMatch(r.out, /^\s*sudo systemctl restart mfarm-worker/m);
   });
 });
