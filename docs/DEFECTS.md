@@ -39,9 +39,9 @@ One row per thing that is wrong or missing.
 ## Open
 
 **As of 2026-10-10 two numbered defects are open: D80 and D81**, both in *Found verifying bandwidth
-adaptation in Chrome*, near the end of this file. Eighty-one are recorded. D74, D75 and D76 are fixed
-and deployed and are not recorded as watched on the farm, so by the rule above they are not closed
-yet. The paragraph below is the 2026-09-12 count, kept as it was written. Every numbered entry under
+adaptation in Chrome*, near the end of this file. Eighty-two are recorded. D74, D75 and D76 are fixed
+and deployed and are not recorded as watched on the farm, and D82's fix has not run on the device
+host, so by the rule above those four are not closed yet. The paragraph below is the 2026-09-12 count, kept as it was written. Every numbered entry under
 this heading, D34 down to D26, is closed.
 
 **Two, as of 2026-09-12** — forty-eight recorded, forty-six closed. The two left are the CSP
@@ -830,6 +830,16 @@ The run: the OnePlus streaming to Chrome forced onto the relay, the screen kept 
 | D79 | **A queue of over half a second, held for 30 s, closes a phone's live view, and the view does not come back by itself.** werift waits for each consent check's answer for 2 × the pair's round trip + 200 ms, at least 500 ms (`iceBase.js`, `consentResponseTimeoutMs`). The round trip it uses is the one measured when the connection was set up. Behind a queue every answer arrives too late and is discarded. After 30 s without a valid one, consent expires (RFC 7675): the agent's peer goes `failed`, the agent logs `viewer failed`, and the console says "The media connection to the phone failed." Seen twice over a 2 Mbit/s relayed link: once with adaptation on (the queue held at about 0.7 s because of D77), and once with it off. After the link cleared, Chrome's side still read `connected` and the picture stayed at 0 fps until Try again. This predates ADR-0048: the 1.7 s stall that motivated it would always have ended this way. | Fixed 2026-10-09: each receiver report's round trip (D78) is given to the agent's ICE pair (`stretchConsentWait`), so werift's own formula stretches the wait to 2 × the queue + 200 ms. Verified on the OnePlus with adaptation off, so nothing drained the queue: a 1.7 s queue held for 80 s, with no `viewer failed`. When the link cleared, the same connection was back at 60 fps and 4 Mbit/s with no Try again. Before, it closed within about 40 s. A test with a real werift peer asserts that the pair carries each report's round trip at the moment it is reported. |
 | D80 | **The first "Try again" after a failed live view is refused with "Session token rejected"; the second press works.** Seen twice in a row on 2026-10-09: after a deploy dropped the agent's tunnel, and after D79. Each time the overlay changed from the original failure to "Session token rejected" on the first press, and a second press connected. | Open, not investigated. |
 | D81 | **After a release, the Fleet row stayed RESTORING with no Start button while the API already answered READY.** `GET /v1/devices` said READY within seconds. The page, re-rendered by switching routes and then waited on, still offered no Start for the phone about ten seconds later. The session was started through the API instead. | Open. Seen once, not investigated. |
+
+## Found deploying to the device host, 2026-10-10
+
+Asked before deploying, not after. `check-deployed.sh` said the device host's checkout was
+`cd1a251`: thirteen days and sixteen worker commits behind `main`. The host itself said
+`node_modules/werift` was absent.
+
+| id | what | status |
+|---|---|---|
+| D82 | **The documented way to deploy to the device host would have stopped its worker.** Five places gave it as `git pull` and `systemctl restart mfarm-worker`: `RUNBOOK.md`, `START_HERE.md`, `deploy/README.md`, the advice `check-deployed.sh` prints, and the auto-deploy installer's refusal. The agent is not containerised. It runs out of the checkout and the checkout's `node_modules`, and none of the five installs anything. #254 (2026-10-03) added `werift`, which `index.ts` reaches through `physical.ts` and `phone-stream.ts` on its first import. A restart after a pull would fail on that import; the unit allows five starts in five minutes and then stays down, and every device on the host leaves the fleet. It had not happened only because nobody had deployed there since 2026-09-27. **Not seen happening:** derived from the missing package on the host and the static import chain. | Fixed 2026-10-10: `deploy/worker-deploy.sh` fast-forwards, runs `npm install`, refuses to restart while anything the agent declares cannot be resolved by Node from the agent's directory, and checks the worker kept one pid for 20 s. All five places name it. Twelve tests against a fake git, npm and systemd and a real Node; three injected faults (no gate, restart before install, no pid check) each fail a test. `npm ls` was tried as the gate and dropped: it exits 0 on a tree with nothing installed. **The script has not run on the device host**, which was still on `cd1a251` when this was written: a remote command there is refused by the permission check, so it is the owner's to run. |
 
 ## Suite health
 

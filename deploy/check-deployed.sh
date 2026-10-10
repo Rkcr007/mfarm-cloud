@@ -79,6 +79,7 @@ if [ "$bad" = 0 ]; then
 else
   printf '\n\033[1;31mThe farm is NOT running main.\033[0m Deploy with:\n'
   printf '  ./deploy/mfarm-deploy.sh %s\n' "$WANT"
-  printf '  …and bring each checkout forward with git -C ~/mfarm merge --ff-only origin/main\n'
+  printf '  …on the control plane, bring the checkout forward: git -C ~/mfarm pull -q\n'
+  printf '  …on each device host: cd ~/mfarm && git pull -q && ./deploy/worker-deploy.sh\n'
 fi
 exit "$bad"

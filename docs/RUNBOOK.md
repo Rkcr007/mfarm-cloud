@@ -684,8 +684,22 @@ this does not reboot a device:
 
 ```bash
 gcloud compute ssh rkcr070707@mfarm-lab --project mfarm-lab --zone asia-south1-c --tunnel-through-iap \
-  --command 'cd ~/mfarm && git pull -q && sudo systemctl restart mfarm-worker'
+  --command 'cd ~/mfarm && git pull -q && ./deploy/worker-deploy.sh'
 ```
+
+**Not `git pull && sudo systemctl restart mfarm-worker`**, which is what this page said until
+2026-10-10. The agent is not containerised: it runs out of the checkout and out of the checkout's
+`node_modules`, and nothing in those two commands installs anything. #254 gave the agent a
+dependency its first import reaches (`werift`), so from that commit on they would have stopped the
+worker on start-up, five times, and left the host with no devices (D82). `worker-deploy.sh`
+fast-forwards, runs `npm install`, **refuses to restart while anything the agent declares cannot be
+resolved**, and then watches the worker long enough to know it stayed up.
+
+```bash
+./deploy/worker-deploy.sh --check    # on the device host: what is behind, what is missing; changes nothing
+```
+
+A restart ends any live session on that host. Look at the console first.
 
 Rollback is the same deploy command with an older sha, because images are immutable and tagged by
 commit. **Migrations do not roll back** — moving code back past one it depends on is a decision, not
