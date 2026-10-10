@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 121 is the newest; the header
+Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 122 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5302,3 +5302,21 @@ when the feature is broken. See issues 37 and 38.
     - **Not verified against the new worker.** The live view, video recording and an app install.
       `verify-hub-contract.mjs` was started and its result was not seen. `STATUS.md` §4, row 12.
     - **Cost.** The device host ran 14:17–14:41 and 14:57–15:06 UTC, about 34 minutes.
+
+122. **THE TUNNEL GAUGE WAS READ FOR THE FIRST TIME, AND IT WAS COUNTING A LAPTOP (D84).**
+    2026-10-10, after #276 reached the farm (`739be28`).
+    - **D83 closed.** `farm-check.sh` against the deployed farm printed no `Permission denied` and
+      read the gauge: "1 agent tunnel(s) connected".
+    - **D84, open.** The device host had been TERMINATED for 28 minutes. The one tunnel was an agent
+      on the owner's MacBook. `mfarm_tunnel_hosts_connected` is every host with a tunnel, enrolled
+      ones included, so with a laptop connected `verify-live.sh` cannot say whether the device
+      host's tunnel is up, reports the resting farm as "NOT fully live", and
+      `MfarmLiveViewHasNoAgent` cannot fire. Not built: a gauge of fleet tunnels only.
+    - **The agent on the Mac.** pid 20762, started 2026-10-09 15:44 UTC from the scratchpad worktree
+      of the session that wrote #273 (`…/5a8dd915…/scratchpad/fix`), with no phone attached and a
+      `caffeinate -dims -w 20762` (pid 20914) holding the display on since then. Left running:
+      stopping it is the owner's call. Removing that worktree would break it.
+    - **`farm-check.sh` on a stopped farm takes ten minutes.** It waits for devices before it will
+      say "looks STOPPED". `check-deployed.sh` is the one to ask about the resting farm.
+    - **State at the end.** Control plane on `739be28`. Device host stopped at 15:06 UTC, its
+      checkout on `c9c8d0a`; nothing the worker runs changed after that commit.
