@@ -38,6 +38,12 @@ One row per thing that is wrong or missing.
 
 ## Open
 
+**As of 2026-10-10 two numbered defects are open: D80 and D81**, both in *Found verifying bandwidth
+adaptation in Chrome*, near the end of this file. Eighty-one are recorded. D74, D75 and D76 are fixed
+and deployed and are not recorded as watched on the farm, so by the rule above they are not closed
+yet. The paragraph below is the 2026-09-12 count, kept as it was written. Every numbered entry under
+this heading, D34 down to D26, is closed.
+
 **Two, as of 2026-09-12** — forty-eight recorded, forty-six closed. The two left are the CSP
 `webrtc` warning, which is deliberate, and app network capture, which is an unbuilt feature needing
 its own privacy decision rather than a defect. The four below are named at the
