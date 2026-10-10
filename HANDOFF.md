@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 120 is the newest; the header
+Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 121 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5285,3 +5285,20 @@ when the feature is broken. See issues 37 and 38.
     - **Seen on the device host:** its old coturn is still active and enabled (`STATUS.md` §4,
       row 5). `farm-check.sh` cannot read the tunnel metric, so it reports agent reachability as
       unverified on every run.
+
+121. **THE DEVICE HOST IS ON `main`, AND THE CHECK THAT WATCHES ITS TUNNEL HAD NEVER RUN (D83).**
+    2026-10-10, the same afternoon as entry 120. The owner ran the on-box lines.
+    - **The deploy.** The device host was started at 14:57 UTC. `worker-deploy.sh` ran on it:
+      `cd1a251` → `c9c8d0a`, `werift` installed, the worker restarted at 15:01:12. Read from the
+      host at 15:05:50: the same pid, no restarts. D82 is closed.
+    - **Passed against the new worker.** `verify-live.sh`: control plane on `c9c8d0a`, four devices
+      READY, the relay answering. `verify-webdriver.mjs`: 5 of 5, a session end to end in 7.0 s.
+      `verify-execution.mjs`: 26 passed, 0 failed.
+    - **D83.** `verify-live.sh` printed `Permission denied` thirteen times and called agent
+      reachability unverified. The metrics token has belonged to the API's uid and Prometheus's gid
+      since 2026-09-03, the script only tested that the file existed, and every test wrote a
+      readable one. Fixed: read once, through `sudo -n` when the user cannot. Three new tests fail
+      against the old script. Not yet run on the farm.
+    - **Not verified against the new worker.** The live view, video recording and an app install.
+      `verify-hub-contract.mjs` was started and its result was not seen. `STATUS.md` §4, row 12.
+    - **Cost.** The device host ran 14:17–14:41 and 14:57–15:06 UTC, about 34 minutes.
