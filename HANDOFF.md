@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-10-09**, at migration 068 / ADR-0048. (Entry 115 is the newest; the header
+Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 119 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5199,3 +5199,65 @@ when the feature is broken. See issues 37 and 38.
       report echoing an older sender report.
     - **Still open:** D80, D81. Five- and six-day-old hung `node --test` phone-stream runs (pids 33544, 94351)
       are still holding UDP sockets on the Mac.
+
+118. **THE INFRASTRUCTURE AUDIT: ADR-0049 TO ADR-0053, D73 TO D76.** 2026-10-09, #262–#271,
+    migrations 069 and 070. Written on 2026-10-10: this log went from #261 (entry 115) to #272
+    (entry 116) and had no entry for these ten. In time they sit between those two.
+    - **ADR-0049, #262.** Every ssh in `deploy/` and in the docs goes through IAP. The cloud half
+      was the owner's to apply, and it is applied. Read from the project on 2026-10-10:
+      `default-allow-ssh` admits `35.235.240.0/20` only, `default-allow-rdp` is gone, `mfarm-cp` has
+      deletion protection and the snapshot `mfarm-cp-20261009`, and `mfarm-lab` runs as its own
+      service account. `mfarm-lab` still carries the `mfarm-turn` tag.
+    - **D73, ADR-0050, #263.** A laptop that enrolled an agent was priced and alarmed as a rented
+      cloud host: 34.4 laptop hours were shown as about ₹2,236 of October spend. `hosts.org_id` is
+      now the kind. An enrolled host has no rate and no silence alarm, and is listed apart. No
+      migration. Checked the same day by running the deployed rollup against the live rows; the
+      page itself was not looked at.
+    - **D74, ADR-0051, #264.** A retired host is listed with who retired it, when and why, and an
+      operator can restore it. A retired host's devices had stayed in every tenant's Fleet; the
+      device list and the gauges now leave them out. Not watched on the live farm.
+    - **ADR-0052, migration 069, #265.** A device that is gone can be forgotten and restored. It is
+      hidden only while it is OFFLINE or QUARANTINED, and it comes back when its agent sees it.
+    - **#266.** A test from #263 compared a farm-wide spend total before and after, and that total
+      grows by the second. It turned `main` red after #265, so no image was built for #265.
+    - **D75, #267.** The Forget button sent its body as a JSON string and was refused on every
+      press. No test had pressed Confirm and read the request. One does now.
+    - **ADR-0053, migration 070, #268.** A fleet operator can take a snapshot of a disk named in
+      `MFARM_SNAPSHOT_DISKS` and delete an older one, never the newest READY one. Off until that
+      variable and the `mfarmSnapshots` role are set. Tested against a fake provider.
+    - **D76, #270.** "The newest snapshot" was decided by sorting timestamps as text, and the
+      provider answers with a local offset that changes twice a year. `snapshotTakenAt` parses the
+      instant, and the page and the delete both use it.
+    - **#269, #271.** The runbook said to restart the API to switch snapshots on; it has to be
+      recreated. Its catastrophe plan named `mfarm-cf-ready`, which was deleted on 2026-10-09; it
+      now points at Infrastructure → Cloud.
+    - **Not built, deliberately:** an editable host rate, releasing an address, a snapshot schedule,
+      restoring from a snapshot.
+
+119. **THE RECORD REALIGNED AGAIN, ONE DAY AFTER ENTRY 115.** 2026-10-10, at `75bf6cd`.
+    - **Commits.** 273 pull requests, all merged; none open, none closed unmerged, and every merge
+      commit is reachable from `main`. 28 branches still look ahead of `main`. Each one's tip is the
+      head its pull request merged: 26 match by patch id, and the two multi-commit squashes (#173,
+      #214) match file for file. They were left in place; deleting them is the owner's call.
+    - **The farm.** `check-deployed.sh`: the control plane serves `75bf6cd`, the device host is
+      stopped. `verify-console.sh`: 64 passed, 0 failed.
+    - **What had drifted.**
+      - This log had no entry for #262–#271, and its header named entry 115 as the newest.
+      - `STATUS.md`: §2 said the lab had not started since 2026-09-27 (it ran for six minutes on
+        2026-10-09) and put coturn on the lab. Four rows of §3 did not carry ADR-0049 to ADR-0053.
+        §5 said 2508 tests (CI on `75bf6cd`: 2523), 260 pull requests (273), and a closed-defect
+        count it said it had not re-counted (now counted: 79 fixed, 2 open).
+      - `DIRECTION.md`: the decision table stopped at ADR-0048, and its row for 0048 still said
+        "not yet verified end to end in Chrome".
+      - `DEFECTS.md`: the Open section's count was the one from 2026-09-12.
+      - `APP_CONTEXT.md`: coturn on the lab, and no mention of AI runs, the operations centre or a
+        phone's live video.
+      - The two top documents disagreed on `verify-console.sh`: 62 checks and 64.
+    - **Why CI did not see it.** `doc-numbers.test.mjs` checks counts, and each of the five pull
+      requests that added an ADR moved the count. It now also requires a `DIRECTION.md` row for
+      every ADR file, and that this log names the newest ADR. Both fail against yesterday's files.
+    - **Not checked.** Whether snapshots are switched on on the farm: reading the farm's database
+      was refused by the permission check.
+    - **Still open:** D80, D81. Restoring a host, forgetting a device and a snapshot from the
+      console have not been watched on the live farm (`STATUS.md` §4, row 10). The two hung
+      `node --test` phone-stream runs from 2026-10-03 (pids 33544, 94351) are still alive.

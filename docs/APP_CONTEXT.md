@@ -148,6 +148,19 @@ Everything in this section was done by hand or by script against the live farm o
 | **Team** | members and roles | working |
 | **Settings** | API keys (labelled, scoped, expiring), evidence retention, hub instructions | working |
 
+### Built since 2026-09-11, and not verified for this page
+
+This section is the 2026-09-11 pass and was not repeated. Four things have been built since, and
+[`STATUS.md`](STATUS.md) §3 gives each one's state and caveat:
+
+- **AI runs** — describe a test in English and a device does it; `mfarm mcp` lets a customer's own
+  agent drive one (ADR-0043 to ADR-0046, tracker in [`AI_PRODUCT_LINE.md`](AI_PRODUCT_LINE.md)).
+- **The operations centre** at `#/infra` — hosts, power, cost, the cloud estate, snapshots and an
+  operations log, for a fleet operator (ADR-0038, ADR-0050 to ADR-0053).
+- **A physical phone, live** — video at 60 fps with live input, relayed through the control plane
+  for a viewer off its network, at a rate that follows the viewer's link (ADR-0047, ADR-0048).
+- **Sharing a failure, and a tunnel into a customer's network** — both in §6 below.
+
 ---
 
 ## 5. How it is built
@@ -156,8 +169,8 @@ Everything in this section was done by hand or by script against the live farm o
 
 | | machine | runs | cost running | cost stopped |
 |---|---|---|---|---|
-| `mfarm-cp` | e2-medium | Postgres, API, console, Caddy/TLS, backups | ~₹3/hour | ~₹250/mo |
-| `mfarm-lab` | n2-standard-16 | Cuttlefish devices, Appium, worker agent, coturn | **~₹65/hour** | ~₹1,260/mo |
+| `mfarm-cp` | e2-medium | Postgres, API, console, Caddy/TLS, backups, coturn (the media relay, since ADR-0047) | ~₹3/hour | ~₹250/mo |
+| `mfarm-lab` | n2-standard-16 | Cuttlefish devices, Appium, worker agent | **~₹65/hour** | ~₹1,260/mo |
 
 **The device host is ~95% of the bill, so it is stopped between sessions and the control plane is
 not.** That split is the single most important operational fact about this system: the thing you
@@ -254,7 +267,7 @@ measuring nothing, which is why the first line is first.
 ## 8. How this project finds bugs, and why that matters to a reader
 
 **Eighty-one defects are recorded. Almost none were found by the test suite.** They were found by
-using the product. The suite is over sixteen hundred tests and it catches different things — it caught two security
+using the product. The suite was 2,523 tests on 2026-10-09 and it catches different things — it caught two security
 regressions this month — but the pattern is consistent enough to be worth stating plainly to anybody
 evaluating this code:
 

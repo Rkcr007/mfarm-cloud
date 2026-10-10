@@ -54,7 +54,7 @@ examples/          a worked suite: 8 tests, one build, one run, real outcomes
 Nothing here is trusted because a command exited zero.
 
 ```bash
-npm test                    # 652 tests against a real PostgreSQL 16, no mocks that matter
+npm test                    # the whole suite, against a real PostgreSQL 16, no mocks that matter
 ./deploy/farm-online.sh     # start both machines
 ./deploy/farm-check.sh      # API, fleet, data plane, media relay
 ```

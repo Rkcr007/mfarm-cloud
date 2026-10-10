@@ -27,17 +27,23 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 let status = '';
 let context = '';
+let direction = '';
+let handoff = '';
 let migrations = 0;
 let adrs = 0;
+let adrFiles = [];
 let highestDefect = 0;
 
 before(async () => {
   status = await readFile(join(ROOT, 'docs', 'STATUS.md'), 'utf8');
   context = await readFile(join(ROOT, 'docs', 'APP_CONTEXT.md'), 'utf8');
+  direction = await readFile(join(ROOT, 'docs', 'DIRECTION.md'), 'utf8');
+  handoff = await readFile(join(ROOT, 'HANDOFF.md'), 'utf8');
 
   migrations = (await readdir(join(ROOT, 'apps', 'api', 'migrations')))
     .filter((f) => f.endsWith('.sql')).length;
-  adrs = (await readdir(join(ROOT, 'docs', 'adrs'))).filter((f) => f.endsWith('.md')).length;
+  adrFiles = (await readdir(join(ROOT, 'docs', 'adrs'))).filter((f) => f.endsWith('.md'));
+  adrs = adrFiles.length;
 
   const defects = await readFile(join(ROOT, 'docs', 'DEFECTS.md'), 'utf8');
   highestDefect = Math.max(...[...defects.matchAll(/\bD(\d+)\b/g)].map((m) => Number(m[1])));
@@ -93,6 +99,29 @@ describe('APP_CONTEXT.md says true things about the repo', () => {
     assert.ok(claimed, `unrecognised number word "${m[1]}" — add it to WORDS above`);
     assert.equal(claimed, highestDefect,
       `APP_CONTEXT.md says ${m[1]} (${claimed}) defects; DEFECTS.md goes up to D${highestDefect}`);
+  });
+});
+
+describe('a decision is in every document that lists decisions', () => {
+  /**
+   * A COUNT SAYS HOW MANY, NOT WHICH. On 2026-10-09 five ADRs (0049 to 0053) merged in one day. Each
+   * pull request moved the ADR count checked above, so this file passed every time — while
+   * `DIRECTION.md`'s table still stopped at 0048 and `HANDOFF.md` had no entry for any of the ten
+   * pull requests. Both were found the next day by a person re-reading, which is the job this file
+   * exists to take off a person.
+   */
+  test('DIRECTION.md has a row for every ADR', () => {
+    const missing = adrFiles.filter((f) => !direction.includes(`(adrs/${f})`));
+    assert.deepEqual(missing, [],
+      `DIRECTION.md §3 has no row linking: ${missing.join(', ')}`);
+  });
+
+  test('the session log names the newest ADR', () => {
+    // The newest only: the log began after the first ADRs were written, and an entry that names a
+    // decision is what "this work has an entry" looks like from the filesystem.
+    const newest = adrFiles.map((f) => f.slice(0, 4)).sort().at(-1);
+    assert.ok(handoff.includes(`ADR-${newest}`),
+      `HANDOFF.md never names ADR-${newest}; the work that decided it has no entry in the log`);
   });
 });
 
