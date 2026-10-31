@@ -636,6 +636,11 @@ $CP 'sudo systemctl start mfarm-autodeploy.service'    # and the next tick deplo
 
 `MfarmDeployBlocked`, `MfarmDeployerNotRunning` and `MfarmFarmBehindMain` page on all of this.
 
+**Give the token a long life.** The 2026-09-24 login stopped working thirty days later to the minute,
+and a farm already on `main` did not say so: `verdict=current` outranks `denied`, so it surfaced only
+at the next merge (D85). To test the login at any time, read `released=` in `~/autodeploy.log`, not
+`verdict=`. `Login Succeeded` proves nothing about pulling, because any valid GitHub token gets it.
+
 ### Deploying by hand
 
 Still correct, and what you want on the device host (the timer is control-plane only) or when the

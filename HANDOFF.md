@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-10-30**, at migration 070 / ADR-0053. (Entry 123 is the newest; the header
+Last updated **2026-10-31**, at migration 070 / ADR-0053. (Entry 124 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5341,3 +5341,19 @@ when the feature is broken. See issues 37 and 38.
       `tsc` then says `TS2688: Cannot find type definition file for 'node'`. `npm ci` restores them.
     - **State read from `gcloud`.** `mfarm-cp` RUNNING, `mfarm-lab` TERMINATED since 2026-10-10 15:06
       UTC. The newest database backup in the bucket is from 09:42 UTC that day.
+
+124. **THE CONTROL PLANE CANNOT DEPLOY: ITS REGISTRY LOGIN EXPIRED, AND NOTHING SAID SO FOR SIX DAYS (D85).**
+    2026-10-31. #278 merged at 09:08 UTC, Release finished at 09:13:58, and the farm did not move.
+    - **What it runs.** `check-deployed.sh`: the image and the checkout are both on `3a6c870`, so #277
+      did deploy. `/health` and `/ready` answer 200, and `verify-console.sh` passes 63 of 63.
+    - **Why it stayed there.** `~/autodeploy.log` says `released=denied verdict=denied` on every tick
+      since the merge. The verdict is in that file, not in `journalctl`, which shows only systemd's
+      own lines.
+    - **D85, open.** The login was written on 2026-09-24 at 23:47 UTC and stopped working on 2026-10-24
+      at 23:47, thirty days to the minute. `current` outranks `denied`, so until the merge every tick
+      reported success, and the unit's `SuccessExitStatus=0 1` makes the same true of `systemctl`,
+      against what the comment in `auto-deploy.sh` says.
+    - **So neither machine has Fastify 5.12.7.** The control plane needs the login renewed; the device
+      host needs `worker-deploy.sh` (`STATUS.md` §4, rows 14 and 15).
+    - **The device host was not started.** The permission check refused `farm-online.sh` as "Modify
+      Shared Resources", so the checks in `STATUS.md` §4, row 12 are still not run.
