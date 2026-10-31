@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-10-10**, at migration 070 / ADR-0053. (Entry 122 is the newest; the header
+Last updated **2026-10-30**, at migration 070 / ADR-0053. (Entry 123 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5320,3 +5320,24 @@ when the feature is broken. See issues 37 and 38.
       say "looks STOPPED". `check-deployed.sh` is the one to ask about the resting farm.
     - **State at the end.** Control plane on `739be28`. Device host stopped at 15:06 UTC, its
       checkout on `c9c8d0a`; nothing the worker runs changed after that commit.
+
+123. **THE FASTIFY ADVISORIES ARE CLOSED IN THE REPO, AND THE DEVICE HOST STILL HAS THE OLD VERSION.**
+    2026-10-30, the first work after twenty days without a commit.
+    - **The finding.** `npm audit --omit=dev` listed Fastify 5.12.0 (four high advisories, one of them
+      an authentication bypass), fast-uri and ip-address, on an API that faces the internet.
+    - **The change.** Fastify `^5.12.7` in `apps/api` and `workers/agent`; the lockfile moves fast-uri
+      to 3.1.9 and 4.2.3 and ip-address to 10.7.5. No source changed. `npm audit --omit=dev` reports 0.
+    - **What the farm was exposed to, read from the code and not tested with an exploit.** The
+      high-severity Fastify four need something this code does not have: a not-found handler
+      registered inside a plugin (there is one, on the root, GHSA-p68q-wchp-6fh7), a `$async` schema
+      (GHSA-667r-xxjv-c9mm), a schema of `false` (GHSA-hwr6-493r-vm6h) or a header schema
+      (GHSA-9q9j-q6p8-xq58). No sign of exposure, and the moderate and low advisories were not read
+      the same way.
+    - **Tests.** `npm run typecheck` and the full `npm test` on a fresh Postgres: 2540 passed.
+    - **Not done.** The device host runs the agent out of its own checkout, so it keeps 5.12.0 until
+      `worker-deploy.sh` runs there (`STATUS.md` §4, row 14). Nothing was read from either machine:
+      the SSH key's passphrase is not in the keychain.
+    - **A trap.** `npm audit fix --omit=dev` removes the dev dependencies from `node_modules`, and
+      `tsc` then says `TS2688: Cannot find type definition file for 'node'`. `npm ci` restores them.
+    - **State read from `gcloud`.** `mfarm-cp` RUNNING, `mfarm-lab` TERMINATED since 2026-10-10 15:06
+      UTC. The newest database backup in the bucket is from 09:42 UTC that day.

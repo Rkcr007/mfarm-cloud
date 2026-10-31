@@ -27,6 +27,15 @@ Rows not named here carry their own dates and were not re-checked.
 
 The same holds for this update: a row it does not name was not re-checked.
 
+**Updated 2026-10-30**, the first work after twenty days without a commit. Read from `git`, `gh`, npm
+and `gcloud` on that day:
+- §2's power state;
+- one row added to the open-work list at the top of §4;
+- the tests in §5.
+
+**Not read on that day:** anything on either machine. The commit each one runs is still the last one
+recorded.
+
 Two other documents complete the picture and nothing else is required reading:
 
 | | |
@@ -73,9 +82,8 @@ while the expensive half is off.
 Stopped VMs still bill for disks. Only deleting the disks stops that, and that throws away the farm.
 
 **Current state: `mfarm-lab` STOPPED, `mfarm-cp` RUNNING.** That is the resting state, not a
-half-finished one. Read from `gcloud` on 2026-10-10: `mfarm-cp` RUNNING, and `mfarm-lab` TERMINATED
-since 2026-10-09 10:27 UTC. Its last start was six minutes before that, the boot that put it on its
-own service account (ADR-0049).
+half-finished one. Read from `gcloud` on 2026-10-30: `mfarm-cp` RUNNING, and `mfarm-lab` TERMINATED
+since 2026-10-10 15:06 UTC.
 
 **This sentence was WRONG for three and a half hours on 2026-09-12, and the correction is the
 point.** It used to end "…and returned to rest afterwards", written on 2026-09-11 about the
@@ -148,6 +156,7 @@ Several of them are closed, and their numbers are referenced elsewhere, so they 
 | 11 | ~~Bring `mfarm-lab`'s worker to `main`~~ **Done 2026-10-10**, `cd1a251` → `c9c8d0a` (D82). A WebDriver session and `verify-execution.mjs` (26 of 26) passed against it | — |
 | 12 | The device host's worker jumped sixteen commits on 2026-10-10, and three things have not been run against it: the **live view** (the tunnel gauge was unreadable at the time, D83, and nobody opened a device in the console), **video recording**, and an **app install**. `verify-hub-contract.mjs` was started and its result was not seen | The lab up: `farm-check.sh` now answers the tunnel, then `verify-video.mjs`, `verify-runs.mjs`, and one device opened in the console |
 | 13 | The tunnel gauge counts an enrolled laptop (D84). While one is connected, `farm-check.sh` cannot tell whether the device host's tunnel is up, reports the resting farm as not live, and `MfarmLiveViewHasNoAgent` cannot fire | A gauge of fleet tunnels only, read by `verify-live.sh` and the alert |
+| 14 | The device host still has Fastify 5.12.0. The agent runs out of that machine's checkout, so the update to 5.12.7 (2026-10-30) does not reach it by itself | The lab up: `cd ~/mfarm && git pull -q && ./deploy/worker-deploy.sh`, the same visit as row 12 |
 
 ### 1. Decide whether a four-device farm goes in front of a second team
 
@@ -296,7 +305,7 @@ Bounded and deliberate after ADR-0027. Worth revisiting only if hot-plug becomes
 
 | | |
 |---|---|
-| Tests | **2523**, green — api 1782, cli 95, agent 524, `deploy` 122 — measured 2026-10-09 by CI on `75bf6cd` |
+| Tests | **2540**, green — api 1782, cli 95, agent 524, `deploy` 139 — read 2026-10-30 from CI's log on `3a6c870` |
 | Migrations | 70, numbered to 070. The farm serves `main` at `75bf6cd` (`check-deployed.sh`, 2026-10-10) |
 | Decisions | 52 ADRs, numbered to 0053 (there is no 0013) |
 | Merged PRs | 273, as of #273 (2026-10-10). None open, none closed unmerged |
