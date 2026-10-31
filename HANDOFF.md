@@ -1,6 +1,6 @@
 # MFARM_CLOUD — state of play
 
-Last updated **2026-10-31**, at migration 070 / ADR-0053. (Entry 124 is the newest; the header
+Last updated **2026-10-31**, at migration 070 / ADR-0053. (Entry 125 is the newest; the header
 sections below it still describe 2026-09-06 and decay — read the numbered log.)
 
 **New here? There are three documents and this is not one of them.**
@@ -5357,3 +5357,17 @@ when the feature is broken. See issues 37 and 38.
       host needs `worker-deploy.sh` (`STATUS.md` §4, rows 14 and 15).
     - **The device host was not started.** The permission check refused `farm-online.sh` as "Modify
       Shared Resources", so the checks in `STATUS.md` §4, row 12 are still not run.
+
+125. **THE LOGIN IS RENEWED, AND THE CONTROL PLANE BROUGHT ITSELF TO `main`.** 2026-10-31, later the
+    same day.
+    - **The login.** The owner ran `docker login` on the box at 15:26:27 UTC. The first attempt was
+      refused with `denied: denied`, because the instructions said to copy the token and then a
+      command, and copying the command replaced the token on the clipboard.
+    - **Proof it can pull.** `docker manifest inspect` on the box read `7b42d21`. `Login Succeeded`
+      alone does not show that.
+    - **The deploy.** The next tick deployed it with nobody asking: five consecutive `/ready` answers,
+      then "deployed and healthy" at 15:29:13. `check-deployed.sh` passes for the image and the
+      checkout, and the running API reports Fastify 5.12.7. `verify-console.sh` passes 63 of 63.
+    - **Still open.** D85's missing signal, so another expired login would be just as silent. The
+      device host still has Fastify 5.12.0 and the checks in `STATUS.md` §4, rows 12 and 14, need its
+      visit.
